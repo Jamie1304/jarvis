@@ -1,5 +1,7 @@
 # JARVIS
 
+[![Windows quality](https://github.com/Jamie1304/jarvis/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/Jamie1304/jarvis/actions/workflows/ci.yml)
+
 JARVIS is a local-first Windows desktop AI assistant. Phase 3 adds versioned, schema-validated calculator and local-time tools behind a bounded orchestration core; no privileged OS capabilities are registered.
 
 ## Quick start
