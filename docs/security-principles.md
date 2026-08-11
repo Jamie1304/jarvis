@@ -39,3 +39,11 @@ executable and argument array with `shell=False`, while filesystem execution use
 the broker-normalized in-scope path only. Optional real desktop integration is not
 evidence of execution in CI; adapters must return structured evidence only after
 they actually perform an action.
+
+Phase 7 treats screenshots, accessibility snapshots, and vision-provider output as
+evidence rather than authority. The required visual loop re-observes before input,
+checks a trusted current-state fingerprint and DPI-aware geometry, and verifies with
+a new observation afterward. A visual target cannot bypass the permission broker:
+the mapped computer action still needs its own declared permission, policy decision,
+approval where applicable, audit record, and cancellation handling. Low confidence or
+missing semantic evidence is `UNCERTAIN`, never success.

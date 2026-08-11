@@ -62,3 +62,17 @@ the normal control path. Screenshot bytes stay in a trusted `ScreenshotStore`; t
 results expose only metadata and an opaque reference. Controlled terminal execution
 resolves a trusted command ID to a fixed executable and command family, uses an
 argument array with `shell=False`, and supports timeout and cancellation.
+
+Phase 7 adds a provider-neutral visual workflow above the computer tools:
+
+`OBSERVE -> UNDERSTAND -> GROUND -> ACT -> OBSERVE AGAIN -> VERIFY`
+
+`BrokeredDesktopObserver` obtains screenshots, windows, and optional accessibility
+trees only through registered screen-read tools. A `VisionProvider` receives a
+screenshot reference, objective, semantic tree, and prior observation and returns
+structured suggestions. Trusted fusion assigns target IDs, validates DPI-aware
+geometry, and fingerprints the current display. `VisualInteractionService`
+re-observes immediately before action, rejects stale or materially changed state,
+uses the existing brokered computer tool for the action, then obtains a new
+observation for explicit success/failure/uncertain verification. Vision code has no
+direct keyboard, mouse, window, or policy access.

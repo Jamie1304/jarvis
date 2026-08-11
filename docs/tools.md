@@ -67,3 +67,18 @@ authorized canonical scope path from the broker receipt. Screenshot implementati
 must persist bytes behind a trusted artifact reference and return metadata/evidence,
 not an image blob. Add deterministic mock-adapter tests for every adapter-facing
 action and keep actual Windows desktop tests explicitly opt-in.
+
+## Visual-understanding rules
+
+Vision providers and action planners are untrusted inputs. They may suggest visible
+elements and intended targets, but trusted fusion code creates target IDs and only
+the brokered computer tools may act. Do not call adapters, input libraries, or a
+tool's private authorized hook from visual code. Never translate a detected `Send`,
+delete, install, or other sensitive target into permission; the mapped computer tool
+must still obtain its normal policy decision and trusted-user approval when required.
+
+Visual actions must use an observation from the current screen state, re-observe
+before input, and verify from a fresh observation afterward. Coordinate actions must
+be based on normalized bounds and trusted current display/DPI geometry. A retry must
+run a new observe/diagnose/ground cycle and use a materially revised action; repeat
+clicks with stale state are prohibited.

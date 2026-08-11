@@ -21,3 +21,10 @@ filesystem scope denial, secure screenshot-reference lifecycle, command timeout,
 and cancellation. Real Windows desktop tests are marked `windows_integration` and
 are skipped unless `JARVIS_WINDOWS_INTEGRATION=true`; they are not part of ordinary
 CI and must never be reported as a successful UI interaction when skipped.
+
+Phase 7 uses static screenshot-reference and accessibility-tree fixtures with mock
+computer adapters and a provider stub. The deterministic suite covers target finding,
+semantic/vision agreement, dimensions and DPI conversion, screenshot-content stale
+state, verification success/failure/uncertainty, broker denial after identifying a
+sensitive Send target, and a capped revised retry loop. No test treats a successful
+tool result as visual success without a new observation and verification result.

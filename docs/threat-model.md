@@ -57,6 +57,12 @@ shell interpretation, unbounded child processes, screenshots or clipboard data
 leaking through results, and filesystem paths escaping approved roots after policy
 evaluation.
 
+Phase 7 adds adversarial visual content, provider hallucination, accessibility/vision
+disagreement, stale screenshots, race conditions between observation and input,
+window switching, coordinate/DPI confusion, and visual recognition of sensitive
+controls. A model or provider may describe a button but must not turn that description
+into authority or a verified outcome.
+
 ## Trust boundaries
 
 1. Model/planner output to strict plan and tool-input schemas: entirely untrusted.
@@ -73,6 +79,8 @@ evaluation.
 8. Platform-neutral adapter to Windows UI Automation/Win32/subprocess APIs: only
    the authorized private tool hook may call this boundary. Windows adapter output
    is evidence, not an authorization decision.
+9. Vision provider output to trusted semantic-first fusion: untrusted structured
+   suggestions; it cannot directly access input adapters, the broker, or approvals.
 
 Python does not provide an in-process security sandbox. The boundary assumes
 registered tool code and the application process are trusted and reviewed; a
@@ -105,3 +113,8 @@ entry point by convention and tests.
   directory and timeout, and kills the child process on timeout or cancellation.
 - Screenshot bytes remain in a trusted artifact store. The model receives an opaque
   reference and metadata, not an adapter-private binary payload.
+- Visual actions name a current trusted-fusion target ID. The interaction service
+  re-observes and rejects changed display/window/target/fingerprint state before it
+  invokes an action tool, then verifies with a new observation.
+- A visual finding never grants a permission. Sensitive input still receives the
+  original tool's policy, approval, audit, cancellation, and hard-safety controls.

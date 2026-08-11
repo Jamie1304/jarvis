@@ -60,6 +60,7 @@ class ScreenshotArtifact:
     height: int
     captured_at: datetime
     content_type: str = "image/png"
+    content_fingerprint: str = ""
 
 
 @dataclass(frozen=True, slots=True)

@@ -1,6 +1,7 @@
 """Secure references for screenshots; binary content stays below the tool boundary."""
 
 from abc import ABC, abstractmethod
+from hashlib import sha256
 from uuid import uuid4
 
 from jarvis.computer.models import CapturedScreen, ScreenshotArtifact
@@ -28,6 +29,7 @@ class InMemoryScreenshotStore(ScreenshotStore):
             width=capture.width,
             height=capture.height,
             captured_at=capture.captured_at,
+            content_fingerprint=sha256(capture.png_bytes).hexdigest(),
         )
 
     def metadata(self, reference: str) -> ScreenshotArtifact | None:
@@ -39,4 +41,5 @@ class InMemoryScreenshotStore(ScreenshotStore):
             width=capture.width,
             height=capture.height,
             captured_at=capture.captured_at,
+            content_fingerprint=sha256(capture.png_bytes).hexdigest(),
         )

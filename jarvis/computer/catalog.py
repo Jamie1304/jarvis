@@ -2,6 +2,7 @@
 
 from typing import Any
 
+from jarvis.computer.accessibility import AccessibilityAdapter
 from jarvis.computer.adapters import ComputerAdapter
 from jarvis.computer.artifacts import ScreenshotStore
 from jarvis.computer.filesystem import FilesystemAdapter
@@ -13,6 +14,7 @@ from jarvis.computer.tools import (
     FocusWindowTool,
     LaunchApplicationTool,
     MouseFallbackTool,
+    ReadAccessibilityTool,
     ReadClipboardTool,
     ReadTextFileTool,
     SetTextTool,
@@ -28,10 +30,11 @@ def create_computer_tools(
     filesystem: FilesystemAdapter,
     commands: ControlledCommandService,
     applications: frozenset[str],
+    accessibility: AccessibilityAdapter | None = None,
 ) -> tuple[Tool[Any, Any], ...]:
     """Return optional tools only when trusted composition supplies every adapter."""
 
-    return (
+    tools: tuple[Tool[Any, Any], ...] = (
         DiscoverWindowsTool(adapter),
         LaunchApplicationTool(adapter, applications),
         FocusWindowTool(adapter),
@@ -43,3 +46,6 @@ def create_computer_tools(
         ReadTextFileTool(filesystem),
         ControlledCommandTool(commands),
     )
+    if accessibility is not None:
+        return (*tools, ReadAccessibilityTool(accessibility))
+    return tools

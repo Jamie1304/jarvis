@@ -17,6 +17,7 @@ returns tools for explicit registry registration; it does not enable them by def
 | Semantic operation | Tool | Permission | Scope/evidence |
 | --- | --- | --- | --- |
 | Discover windows | `computer.discover_windows` | `screen.read` | query, matching window IDs/titles |
+| Read accessibility tree | `computer.read_accessibility` | `screen.read` | bounded UI Automation controls/value fingerprints |
 | Launch application | `computer.launch_application` | `application.launch` | trusted application ID, process ID |
 | Focus window / set text | `computer.focus_window`, `computer.set_text` | `computer.input` | window/control ID, focused/control state |
 | Mouse fallback | `computer.mouse_fallback` | `computer.input` | coordinates and explicit fallback reason |
@@ -29,6 +30,25 @@ Semantic UI Automation is the normal path. `mouse_fallback` exists only where no
 semantic control can be located and remains conspicuous in policy and audit data.
 Window IDs are observations, not reusable authority: focus and input still pass the
 broker independently.
+
+## Visual understanding protocol
+
+The Phase 7 visual layer uses the mandatory loop
+`OBSERVE -> UNDERSTAND -> GROUND -> ACT -> OBSERVE AGAIN -> VERIFY`. It invokes
+`computer.capture_screen`, `computer.discover_windows`, and the optional
+`computer.read_accessibility` tool through the existing `PermissionBroker` boundary.
+A vision provider receives a screenshot reference and structured semantic context;
+it cannot call an adapter or grant a permission. The trusted observation assembler
+prefers accessibility matches, augments them with visual candidates, assigns target
+IDs, and records dimensions, DPI/physical geometry, active window, timestamp,
+confidence, and a state fingerprint that includes a screenshot-content fingerprint.
+
+Every action proposal names a target ID from its observation. Just before input, the
+service obtains another observation and denies the action if the dimensions, active
+window, target set, or screenshot fingerprint changed. Coordinate fallback converts
+normalized target bounds through trusted current DPI/display metrics; it never assumes
+a fixed resolution. After any broker-authorized action it observes again and returns
+`SUCCESS`, `FAILURE`, or `UNCERTAIN` only from explicit verification evidence.
 
 ## Adapter requirements
 
