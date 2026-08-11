@@ -245,6 +245,7 @@ class PolicyEngine:
             SafetyClass.BULK_DELETION,
             SafetyClass.DESTRUCTIVE_SYSTEM_COMMAND,
             SafetyClass.SOFTWARE_INSTALLATION,
+            SafetyClass.SELF_MODIFICATION,
         }:
             return PolicyEvaluation(
                 Decision.REQUIRE_APPROVAL,

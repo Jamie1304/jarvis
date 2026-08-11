@@ -79,6 +79,7 @@ class SafetyClass(StrEnum):
     PRIVILEGE_ESCALATION = "privilege_escalation"
     DESTRUCTIVE_SYSTEM_COMMAND = "destructive_system_command"
     SOFTWARE_INSTALLATION = "software_installation"
+    SELF_MODIFICATION = "self_modification"
 
 
 class ApprovalStatus(StrEnum):

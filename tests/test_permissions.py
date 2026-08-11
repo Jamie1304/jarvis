@@ -977,10 +977,17 @@ def test_hard_safety_policy_overrides_allow(tmp_path: Path) -> None:
         action="write approved test file",
         safety_class=SafetyClass.DESTRUCTIVE_SYSTEM_COMMAND,
     )
+    self_modification = engine.evaluate(
+        request,
+        action="write approved test file",
+        safety_class=SafetyClass.SELF_MODIFICATION,
+    )
 
     assert bulk.decision is Decision.REQUIRE_APPROVAL
     assert bulk.reason is DecisionReason.HARD_SAFETY_APPROVAL_REQUIRED
     assert destructive.decision is Decision.REQUIRE_APPROVAL
+    assert self_modification.decision is Decision.REQUIRE_APPROVAL
+    assert self_modification.reason is DecisionReason.HARD_SAFETY_APPROVAL_REQUIRED
     assert escalation.decision is Decision.DENY
     assert escalation.reason is DecisionReason.HARD_SAFETY_DENY
 
