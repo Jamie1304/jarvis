@@ -155,3 +155,90 @@ entry point by convention and tests.
   alter policy, install a package/plugin, create credentials, call an API, or execute
   generated code. Any later implementation must independently pass normal tool,
   broker, policy, approval, provider, and test review.
+
+## Phase 11 autonomous-improvement extension
+
+### Privileged capability inventory
+
+Phase 11 implements trusted repository inspection and scoped source modification in
+an isolated worktree, but exposes neither operation as a model-selectable tool. Its
+initial proposal-only mode does not merge, install dependencies, push to a remote,
+restart a service, or deploy. If planner access is introduced later, repository
+inspection requires scoped `filesystem.read`; candidate writes require scoped
+`filesystem.write` and `code.modify`; trusted Git operations require a catalogued
+`terminal.execute` command family. Any future dependency installation, remote
+network operation, production write, merge, deployment, restart, or system mutation
+is a separate privileged capability and receives its own policy and trusted approval.
+
+### Additional adversaries and abuse cases
+
+Self-improvement adds self-authorization, generated code modifying the running
+checkout, forged or escaped worktree paths, symlink/junction races, Git hook/config
+side effects, baseline or gate tampering, generated tests concealing a regression,
+security-check evasion, proposal replay or mutation, dependency insertion,
+secret/network access from tests, resource exhaustion, and prompt injection in issue
+or telemetry evidence. A coding model may also attempt to alter workflows, quality
+gates, the broker, or the improvement engine itself so a later unsafe change appears
+valid.
+
+### Additional trust boundaries
+
+13. Observation sources to candidate generation: logs, issue text, web content,
+    package metadata, and tool output are evidence, never coding instructions. Raw
+    external text is reduced to a digest and fixed untrusted label before the coding
+    boundary.
+14. Improvement reasoning to coding agent: trusted application code supplies a
+    concrete bounded specification and structured safe evidence. The coding agent
+    returns untrusted typed file-change data and receives no filesystem, command,
+    Git, approval, or deployment capability.
+15. Coding output to isolated workspace: the trusted change applier validates
+    workspace ownership, specification/path boundaries, canonical containment, link
+    safety, and exact base digests before writing.
+16. Worktree/gate boundary to host: trusted Git creates a generated detached
+    worktree; independently confined gate processes must attest that production,
+    shared Git metadata, network, secrets, and source mutation are unavailable.
+17. Evaluation to proposal: independently protected baseline metrics and every
+    mandatory gate must pass before a fingerprinted, expiring proposal is stored.
+18. Proposal to future merge/deployment: outside Phase 11. Only a separately
+    authenticated trusted user and brokered execution service may cross it after
+    revalidating the exact proposal; model/tool approval claims are untrusted.
+
+### Additional fail-closed invariants
+
+- Improvement observation and prioritization do not authorize source modification.
+  The normal outcome may be `NO_WORTHWHILE_IMPROVEMENT`, and risk classification may
+  raise but never lower a candidate's declared risk.
+- The coding agent can return only bounded typed text changes. Trusted code generates
+  workspace paths and revisions, rejects changes outside the specification, forbids
+  `.git`, workflow, and quality-gate control paths, checks existing-file digests, and
+  never writes the production checkout.
+- Production and workspace roots must be disjoint canonical directories. Production
+  must be clean at a full immutable revision and remain unchanged throughout the run;
+  a forged handle, reparse escape, identity change, or integrity failure quarantines
+  the candidate.
+- Dependency manifest changes deny unless an exact path/base-digest/candidate-digest
+  transition has trusted risk and reversibility analysis. Eligibility never grants
+  installation, download, merge, or deployment authority.
+- A proposal contains every mandatory passing gate exactly once, an independently
+  improved protected baseline comparison, exact change/tree evidence, expiry, and
+  the previous known-good revision. The engine can create only
+  `AWAITING_TRUSTED_APPROVAL` and has no approval, merge, push, or deploy method.
+- Real process confinement is an external trusted boundary, not a Python type. A gate
+  without complete workspace-only/network-disabled/secrets-removed/process-tree
+  attestation fails. Fake CI adapters demonstrate control flow, not OS isolation.
+
+### Residual security assumptions
+
+Python does not isolate mutually untrusted in-process adapters. Application
+composition, the Git client, change applier, gate definitions, concrete OS sandbox,
+security scanners, metric provider, proposal store, and any future approval/merge
+service remain in the trusted computing base. A malicious imported Python module can
+bypass these interfaces; dynamic loading remains prohibited.
+
+Git worktrees share repository object metadata. Trusted worktree creation necessarily
+touches that metadata, while coding and gate processes must not receive access to it.
+The concrete sandbox must additionally enforce CPU, memory, disk, process, handle,
+network, and secret isolation; the Phase 11 interface and deterministic mocks cannot
+prove those Windows/container controls. The built-in static pattern checker is only
+a minimum preflight and does not replace deeper scanning or human review. See the
+explicit threat/control/residual-risk table in `docs/autonomous-improvement.md`.

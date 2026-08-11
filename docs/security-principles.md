@@ -73,3 +73,20 @@ preserves source reference, safe summary, and a digest for external content, but
 forwards raw external instructions as an action. Scoring is explainable and cannot
 grant permissions, register a tool, install software, create configuration, or execute
 a candidate. Recommendations always end at a user/policy decision.
+
+Phase 11 is proposal-and-test only. Improvement signals and external issue content
+are evidence, not coding instructions; raw external content is replaced by a digest
+and fixed label before the coding-agent boundary. Trusted code specifies path and
+behavior boundaries before generation. The coding agent returns typed text changes
+and receives no filesystem, Git, command, approval, merge, or deployment primitive.
+Only a generated detached worktree outside the clean production checkout may be
+modified, and production identity and cleanliness are rechecked throughout the run.
+
+Every candidate defaults to dependency-manifest denial and must pass formatting/lint,
+type, unit, integration, security, protected regression, and startup/health gates in
+an independently confined environment. A complete sandbox attestation, not a zero
+exit code alone, is required. Passing generated tests is insufficient: protected
+metrics must improve over a pre-change baseline bound to the candidate and immutable
+base revision. Success emits only an expiring fingerprinted proposal with rollback
+metadata and `AWAITING_TRUSTED_APPROVAL`; the engine cannot approve, merge, push,
+install, deploy, or modify the running copy.

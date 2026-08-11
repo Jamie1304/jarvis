@@ -99,3 +99,35 @@ class, so an otherwise matching `ALLOW` policy becomes `REQUIRE_APPROVAL`; remem
 grants are rejected. The approval request displays the trusted plan ID, package ID,
 source, publisher, and version. Plans expire and are consumed before execution, so a
 model cannot change a candidate after approval or replay a successful plan.
+
+## Autonomous improvement policy
+
+Phase 11 is not registered as a model-selectable tool and its proposal is not a
+permission grant. Trusted composition may inspect a configured repository and write
+only a generated isolated worktree. If planner access is added later, observation
+must declare scoped `filesystem.read`; source changes must declare both
+`filesystem.write` and `code.modify` scoped to the exact worktree, task, tool, and
+duration; and Git must be a fixed catalogued command family under
+`terminal.execute`. Model-provided paths, revisions, executable names, arguments,
+policy decisions, and approval claims are never authority.
+
+A successful `MergeDeploymentProposal` remains `AWAITING_TRUSTED_APPROVAL`. It does
+not authorize a production write, merge, checkout, dependency installation, network
+fetch/push, release, service restart, or deployment. A future trusted execution
+service must define those actions as separately brokered tools, render the trusted
+proposal record to an authenticated human, bind approval to the proposal fingerprint
+and expiry, and revalidate the base revision, tree/diff, dependency assessment,
+gates, and evaluation immediately before execution. Remembered or model-originated
+approval must not cover high-impact self-modification.
+
+Trusted tool code for any future self-modification action must declare the
+`self_modification` hard safety class. Even a matching `ALLOW` policy is elevated to
+`REQUIRE_APPROVAL`, and the broker's existing hard-safety rule prevents a remembered
+grant. This classification does not itself expose or authorize a Phase 11 tool.
+
+Developers must not add a convenience method that writes the production checkout,
+passes a filesystem/command object to the coding agent, treats a gate exit code as a
+sandbox attestation, approves a proposal from inside the engine, or maps proposal
+success directly to merge/deployment. New dependencies remain denied unless trusted
+configuration pre-analyzes and binds the exact manifest transition; that exception is
+not installation authority.

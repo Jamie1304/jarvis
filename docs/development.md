@@ -30,6 +30,44 @@ Phase 2 is a core service, not an enabled desktop workflow yet. `AgentOrchestrat
 
 The relevant safeguards are configured through `JARVIS_AGENT_MAX_STEPS`, `JARVIS_AGENT_TIMEOUT_SECONDS`, and `JARVIS_AGENT_MAX_REPLANS`. Cancellation persists to the task store and interrupts an active asynchronous tool call. Any future persistent store must implement `TaskStore` without moving lifecycle state transitions out of the orchestrator.
 
+## Phase 11 improvement adapters
+
+Phase 11 has no default autonomous runner. Compose it only in a trusted development
+or review process, with the production checkout and a dedicated worktree parent as
+disjoint canonical directories. The production checkout must be clean and pinned to
+the reviewed full revision. Never put the workspace parent under the repository,
+shared Git directory, a symlink, or a junction; never give that path, a revision, or
+Git arguments to model output.
+
+The coding adapter must implement `CodingAgent` as a data-only change proposer. It
+must not receive a path object for production, an open file, subprocess/shell API,
+Git client, network client, credentials, permission broker, approval service, or
+application container. All changes pass through `TrustedWorkspaceChangeApplier`.
+Do not extend the writable control-path set to include `.git`, workflows, or the
+quality script, and do not reinterpret generated prose as a path, command, policy,
+gate definition, dependency exception, or approval.
+
+Executable gates require host-owned absolute executables, fixed argument arrays,
+timeouts, full process-tree cancellation, and a concrete `SandboxedProcessAdapter`
+that enforces every attested property. The repository intentionally has no permissive
+in-process implementation. Fake adapters are appropriate for deterministic unit
+tests but must never be used to justify a real proposal. A production security gate
+should compose deeper static/dependency scanning in addition to the built-in minimum
+preflight.
+
+Dependency exceptions are operator-reviewed configuration bound to exact before and
+after manifest digests, package records, risk analysis, and reversibility. Do not
+allow names, version ranges, registries, or coding-model explanations as wildcard
+exceptions. Phase 11 does not install or download dependencies.
+
+To exercise the worktree and sandbox integration manually, use a disposable clone,
+an empty sibling workspace directory, no credentials or production secrets, disabled
+network, strict CPU/memory/disk/process limits, and a non-production account. Capture
+the initial full revision/status, run one bounded proposal cycle, and confirm the
+original revision and status are identical afterward. Report Git/worktree and
+sandbox evidence separately from fake-adapter CI evidence. Do not approve, merge,
+push, install, restart, or deploy as part of this procedure.
+
 ## Phase 1 manual smoke test
 
 1. Install [Ollama](https://ollama.com/) for Windows, then run `ollama pull llama3.2:3b`. Ollama normally starts its local server automatically; if it is not running, use `ollama serve` in a separate terminal.

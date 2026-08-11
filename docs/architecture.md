@@ -116,3 +116,26 @@ they never become instructions. Rankings score functional fit, source quality,
 privileges, maintenance, compatibility, reversibility, and testability with stable
 factor explanations. A future tool adapter can be proposed only as a data-only
 specification; generated source is neither written, imported, nor executed.
+
+Phase 11 adds a high-risk, proposal-and-test improvement boundary:
+
+`observe -> identify -> specify -> assess risk -> isolate -> modify -> gate -> evaluate -> propose`
+
+`ImprovementEngine` separates structured candidate reasoning, a data-only coding
+agent, trusted worktree creation and file application, dependency analysis,
+sandboxed test gates, independent security checking, protected regression
+evaluation, and proposal storage. The coding agent receives a bounded specification
+and safe evidence records, then returns typed text changes; it receives no filesystem,
+command, Git, permission, approval, merge, or deployment primitive. Trusted code
+applies those changes only to a generated detached worktree outside the clean
+production checkout and repeatedly verifies that production stayed at the same
+full revision.
+
+A run may normally select no worthwhile improvement. A selected change must pass
+format/lint, type, unit, integration, security, regression, and startup/health gates,
+plus the default-deny dependency guard. Protected evaluation compares the candidate
+with a baseline captured before modification; generated tests alone cannot establish
+improvement. Success produces only an expiring, fingerprinted
+`AWAITING_TRUSTED_APPROVAL` proposal with previous-known-good rollback metadata.
+Phase 11 has no autonomous approval, merge, push, installation, deployment, or
+production-write path. See `docs/autonomous-improvement.md`.

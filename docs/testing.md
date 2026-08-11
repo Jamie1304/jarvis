@@ -49,3 +49,25 @@ prompt-injection text isolated as a digest, excessive requested permissions,
 incompatible platform fit, provenance retention, a trusted internal manifest catalog,
 and data-only future-adapter scaffolding. No test performs a web fetch, registration,
 installation, setup, API call, or generated-code execution.
+
+Phase 11 deterministic tests use fake Git/worktree, coding-agent, sandbox-process,
+protected-metric, and proposal-store adapters. They cover structured candidate
+generation, the normal no-worthwhile-improvement outcome, explainable prioritization
+and trusted risk escalation, detached-worktree ownership, rejection of production or
+out-of-boundary writes, failed or missing gates, evaluation regression, default-deny
+dependency changes, external prompt-injection content isolation, and the mandatory
+awaiting-trusted-approval proposal state with known-good rollback metadata.
+Adversarial cases also cover ambiguous/traversing paths, forged handles, nested gate
+configuration and baseline-test mutation, malformed enum directions, unapproved
+setup/requirements manifests, no-op and oversized change sets, incomplete sandbox
+attestation, cancellation, and proposal task/workspace/expiry fingerprint tampering.
+
+These tests do not claim that a real coding model improved JARVIS, that a Windows Git
+worktree resisted an OS-level attack, that a concrete process sandbox enforced its
+attestation, or that merge/deployment occurred. Real integration testing must use a
+dedicated disposable clone and workspace parent, a reviewed Git executable, no
+credentials, no production secrets, network disabled, strict resource limits, and a
+platform sandbox capable of denying production/shared-Git access. Verify the
+production revision and status before and after; retain evidence digests, then remove
+the disposable environment through a trusted maintenance procedure. No real
+merge/deployment approval test belongs in Phase 11.
