@@ -84,3 +84,18 @@ store and return an opaque reference and metadata, never binary image payloads.
 Terminal catalogue entries are `destructive_system_command` by default, so even an
 allow policy produces a fresh approval request. Only trusted code may classify a
 narrowly reviewed, non-destructive command as ordinary.
+
+## Application manager policy
+
+`application.find`, `application.plan_install`, and `application.plan_update` only
+read trusted-provider evidence and do not launch, install, update, or configure an
+application. `application.launch` and `application.close` require
+`application.launch` scoped to the exact stable inventory ID. Close is limited to a
+process that the managed runtime previously launched.
+
+`application.install` and `application.update` require `application.install` scoped
+to the exact provider package ID. Both use the `software_installation` hard safety
+class, so an otherwise matching `ALLOW` policy becomes `REQUIRE_APPROVAL`; remembered
+grants are rejected. The approval request displays the trusted plan ID, package ID,
+source, publisher, and version. Plans expire and are consumed before execution, so a
+model cannot change a candidate after approval or replay a successful plan.

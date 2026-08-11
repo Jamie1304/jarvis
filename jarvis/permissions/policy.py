@@ -244,6 +244,7 @@ class PolicyEngine:
         if safety_class in {
             SafetyClass.BULK_DELETION,
             SafetyClass.DESTRUCTIVE_SYSTEM_COMMAND,
+            SafetyClass.SOFTWARE_INSTALLATION,
         }:
             return PolicyEvaluation(
                 Decision.REQUIRE_APPROVAL,

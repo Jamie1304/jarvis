@@ -9,7 +9,10 @@ capabilities and Phase 5's granular deny-by-default permission broker, trusted-u
 approvals, hard-safety rules, and secret-safe audit trail remain mandatory. No
 privileged OS tool is enabled by the default catalog. Phase 8 adds optional, brokered
 one-shot camera capture with expiring frame handoff to the vision provider; physical
-camera access remains disabled unless explicitly composed and authorized.
+camera access remains disabled unless explicitly composed and authorized. Phase 9 adds
+an opt-in application-manager boundary with inventory, immutable package plans, fresh
+approval-bound installation/update, independent verification, and no default package
+or process capability.
 
 ## Quick start
 
