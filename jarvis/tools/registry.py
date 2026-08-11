@@ -12,6 +12,9 @@ from jarvis.core.errors import (
     DuplicateToolError,
     ToolRegistrationError,
 )
+from jarvis.permissions.broker import PermissionBroker
+from jarvis.permissions.models import Permission
+from jarvis.permissions.policy import PolicyEngine
 from jarvis.tools.base import Tool
 from jarvis.tools.models import (
     ToolHealth,
@@ -66,11 +69,23 @@ ToolFactory = Callable[[], Tool[Any, Any]]
 class ToolRegistry:
     """Resolve only explicitly registered tools; never scan or import directories."""
 
-    def __init__(self, tools: tuple[Tool[Any, Any], ...] = ()) -> None:
+    def __init__(
+        self,
+        tools: tuple[Tool[Any, Any], ...] = (),
+        *,
+        permission_broker: PermissionBroker | None = None,
+    ) -> None:
         self._records: dict[str, ToolRecord] = {}
         self._initialization_failures: dict[str, InitializationFailure] = {}
+        self._permission_broker = permission_broker or PermissionBroker(PolicyEngine())
         for tool in tools:
             self.register(tool)
+
+    @property
+    def permission_broker(self) -> PermissionBroker:
+        """Return the broker bound to every tool instance in this registry."""
+
+        return self._permission_broker
 
     def register(self, tool: Tool[Any, Any]) -> ToolRecord:
         """Register a tool without replacing any existing implementation."""
@@ -104,6 +119,14 @@ class ToolRegistry:
                 detail,
             ),
         )
+        try:
+            self._permission_broker.register_tool(
+                tool_id,
+                tool,
+                manifest.declared_permissions,
+            )
+        except ValueError as error:
+            raise ToolRegistrationError(f"Permission registration failed: {error}") from error
         self._records[tool_id] = record
         return record
 
@@ -132,7 +155,11 @@ class ToolRegistry:
     def unregister(self, tool_id: str) -> bool:
         """Remove an explicitly registered tool and report whether it existed."""
 
-        return self._records.pop(tool_id, None) is not None
+        record = self._records.pop(tool_id, None)
+        if record is None:
+            return False
+        self._permission_broker.unregister_tool(tool_id, record.tool)
+        return True
 
     def get(self, tool_id: str) -> Tool[Any, Any]:
         """Return a registered tool, even when it is currently unusable."""
@@ -266,6 +293,10 @@ class ToolRegistry:
             raise ValueError("Tool must declare at least one capability")
         if manifest.timeout_seconds <= 0:
             raise ValueError("Tool timeout guidance must be positive")
+        if any(
+            not isinstance(permission, Permission) for permission in manifest.declared_permissions
+        ):
+            raise ValueError("Tool permissions must use the granular Permission enum")
 
     @staticmethod
     def _supports_current_platform(manifest: ToolManifest) -> bool:

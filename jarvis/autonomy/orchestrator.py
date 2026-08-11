@@ -40,7 +40,6 @@ from jarvis.core.errors import (
 )
 from jarvis.tools.base import Tool
 from jarvis.tools.models import (
-    PermissionContext,
     ToolCaller,
     ToolExecutionContext,
     ToolResult,
@@ -226,7 +225,6 @@ class AgentOrchestrator:
             correlation_id=task.correlation_id,
             caller=ToolCaller.AGENT,
             cancellation=cancellation,
-            permissions=PermissionContext(),
             logger=logging.getLogger(f"jarvis.tools.{tool.manifest.tool_id}"),
         )
         raw_input: dict[str, object] = {
