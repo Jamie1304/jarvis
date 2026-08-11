@@ -46,6 +46,7 @@ from jarvis.testing.smoke import (
     StartupSmokeDefinition,
     StartupSmokeTester,
     SubprocessStartupAdapter,
+    _health_payload_ready,
     create_local_startup_smoke_definition,
 )
 from jarvis.testing.workflows import DeterministicWorkflowEvaluator
@@ -388,3 +389,10 @@ def test_local_jarvis_smoke_definition_is_validated_and_localhost_only() -> None
     assert definition.suite.command.arguments[2] == "jarvis.api:app"
     with pytest.raises(ValueError):
         create_local_startup_smoke_definition(80)
+
+
+def test_health_payload_ready_accepts_jarvis_and_generic_contracts() -> None:
+    assert _health_payload_ready({"ready": True})
+    assert _health_payload_ready({"status": "ok", "startup_complete": True})
+    assert not _health_payload_ready({"status": "starting", "startup_complete": False})
+    assert not _health_payload_ready(["not", "an", "object"])

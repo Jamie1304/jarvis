@@ -105,11 +105,7 @@ class LocalHttpHealthProbe(HealthProbe):
             payload = response.json()
         except ValueError:
             return False
-        return (
-            response.status_code == 200
-            and isinstance(payload, dict)
-            and payload.get("ready") is True
-        )
+        return response.status_code == 200 and _health_payload_ready(payload)
 
 
 def create_local_startup_smoke_definition(port: int) -> StartupSmokeDefinition:
@@ -138,6 +134,16 @@ def create_local_startup_smoke_definition(port: int) -> StartupSmokeDefinition:
         description="Optional isolated localhost JARVIS API smoke test.",
     )
     return StartupSmokeDefinition(suite, f"http://127.0.0.1:{port}/health")
+
+
+def _health_payload_ready(payload: object) -> bool:
+    """Accept both the generic ready contract and JARVIS's health-status contract."""
+
+    if not isinstance(payload, dict):
+        return False
+    return payload.get("ready") is True or (
+        payload.get("status") == "ok" and payload.get("startup_complete") is True
+    )
 
 
 class StartupSmokeTester:
