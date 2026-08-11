@@ -2,12 +2,12 @@
 
 [![Windows quality](https://github.com/Jamie1304/jarvis/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/Jamie1304/jarvis/actions/workflows/ci.yml)
 
-JARVIS is a local-first Windows desktop AI assistant. Phase 6 adds controlled,
-brokered Windows computer capabilities: semantic UI operations, scoped filesystem
-access, catalogued application launch, secure screenshot references, and controlled
-argument-array terminal execution. Phase 5's granular deny-by-default permission
-broker, trusted-user approvals, hard-safety rules, and secret-safe audit trail
-remain mandatory. No privileged OS tool is enabled by the default catalog.
+JARVIS is a local-first Windows desktop AI assistant. Phase 7 adds provider-neutral
+desktop visual understanding with semantic UI fusion, grounded current-screen targets,
+and explicit post-action verification. Phase 6's controlled brokered Windows
+capabilities and Phase 5's granular deny-by-default permission broker, trusted-user
+approvals, hard-safety rules, and secret-safe audit trail remain mandatory. No
+privileged OS tool is enabled by the default catalog.
 
 ## Quick start
 

@@ -7,6 +7,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from jarvis.computer.accessibility import AccessibilityAdapter
 from jarvis.computer.adapters import ComputerAdapter, ComputerAdapterError
 from jarvis.computer.artifacts import ScreenshotStore
 from jarvis.computer.filesystem import FilesystemAdapter
@@ -54,6 +55,32 @@ class DiscoverWindowsOutput(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
     windows: tuple[WindowOutput, ...]
+
+
+class AccessibilityNodeOutput(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    window_id: int
+    automation_id: str | None
+    name: str
+    control_type: str
+    left: int
+    top: int
+    width: int
+    height: int
+    value_fingerprint: str | None
+
+
+class ReadAccessibilityInput(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    window_id: int | None = Field(default=None, gt=0)
+
+
+class ReadAccessibilityOutput(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    nodes: tuple[AccessibilityNodeOutput, ...]
 
 
 class LaunchApplicationInput(BaseModel):
@@ -125,6 +152,7 @@ class CaptureScreenOutput(BaseModel):
     width: int
     height: int
     captured_at: str
+    content_fingerprint: str
 
 
 class ClipboardReadInput(BaseModel):
@@ -280,6 +308,81 @@ class DiscoverWindowsTool(Tool[DiscoverWindowsInput, DiscoverWindowsOutput]):
         return ToolResult.success(
             output,
             evidence=(ToolEvidence("window_count", str(len(windows))),),
+        )
+
+
+class ReadAccessibilityTool(Tool[ReadAccessibilityInput, ReadAccessibilityOutput]):
+    """Expose semantic UI state only after the same screen-read authorization."""
+
+    def __init__(self, adapter: AccessibilityAdapter) -> None:
+        self._adapter = adapter
+
+    @property
+    def manifest(self) -> ToolManifest:
+        return ToolManifest(
+            tool_id="computer.read_accessibility",
+            name="Read accessibility tree",
+            description="Read bounded semantic UI Automation controls for visual grounding.",
+            version=SemanticVersion(1, 0, 0),
+            capability_tags=frozenset({"computer", "screen", "accessibility"}),
+            input_schema=ReadAccessibilityInput,
+            output_schema=ReadAccessibilityOutput,
+            declared_permissions=frozenset({Permission.SCREEN_READ}),
+            supported_platforms=_WINDOWS_ONLY,
+            timeout_seconds=10,
+        )
+
+    @property
+    def input_model(self) -> type[ReadAccessibilityInput]:
+        return ReadAccessibilityInput
+
+    def _describe_action(
+        self, context: ToolExecutionContext, validated_input: ReadAccessibilityInput
+    ) -> ActionDescriptor:
+        del context
+        return ActionDescriptor(
+            action="read accessibility tree",
+            arguments_summary=(
+                SafeArgument(
+                    "window",
+                    "desktop" if validated_input.window_id is None else "specified window",
+                ),
+            ),
+            risk=Risk.MEDIUM,
+            permissions=(PermissionRequest(Permission.SCREEN_READ, PermissionScope()),),
+        )
+
+    async def _execute_authorized(
+        self, context: ToolExecutionContext, validated_input: ReadAccessibilityInput
+    ) -> ToolResult:
+        del context
+        try:
+            nodes = await self._adapter.read_accessibility(validated_input.window_id)
+        except ComputerAdapterError:
+            return ToolResult.failure(
+                ToolResultStatus.UNAVAILABLE,
+                "accessibility_unavailable",
+                "Accessibility information is unavailable",
+            )
+        output = ReadAccessibilityOutput(
+            nodes=tuple(
+                AccessibilityNodeOutput(
+                    window_id=node.window_id,
+                    automation_id=node.automation_id,
+                    name=node.name,
+                    control_type=node.control_type,
+                    left=node.left,
+                    top=node.top,
+                    width=node.width,
+                    height=node.height,
+                    value_fingerprint=node.value_fingerprint,
+                )
+                for node in nodes
+            )
+        )
+        return ToolResult.success(
+            output,
+            evidence=(ToolEvidence("accessibility_node_count", str(len(nodes))),),
         )
 
 
@@ -593,6 +696,7 @@ class CaptureScreenTool(Tool[CaptureScreenInput, CaptureScreenOutput]):
             width=artifact.width,
             height=artifact.height,
             captured_at=artifact.captured_at.isoformat(),
+            content_fingerprint=artifact.content_fingerprint,
         )
         return ToolResult.success(
             output,

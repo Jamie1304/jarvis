@@ -1,5 +1,10 @@
 """Controlled Windows computer capability layer; no tools are auto-registered."""
 
+from jarvis.computer.accessibility import (
+    AccessibilityAdapter,
+    AccessibilityNode,
+    WindowsAccessibilityAdapter,
+)
 from jarvis.computer.adapters import (
     ComputerAdapter,
     ComputerAdapterError,
@@ -16,6 +21,8 @@ from jarvis.computer.terminal import (
 
 __all__ = [
     "CommandAdapter",
+    "AccessibilityAdapter",
+    "AccessibilityNode",
     "ComputerAdapter",
     "ComputerAdapterError",
     "ControlledCommandService",
@@ -25,5 +32,6 @@ __all__ = [
     "ScreenshotStore",
     "SubprocessCommandAdapter",
     "WindowsUiAutomationAdapter",
+    "WindowsAccessibilityAdapter",
     "create_computer_tools",
 ]
