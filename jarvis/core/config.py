@@ -40,6 +40,9 @@ class Settings(BaseSettings):
     agent_max_steps: int = Field(default=8, gt=0, le=32)
     agent_timeout_seconds: float = Field(default=30.0, gt=0, le=300)
     agent_max_replans: int = Field(default=2, ge=0, le=8)
+    multi_agent_enabled: bool = False
+    multi_agent_max_concurrency: int = Field(default=3, gt=0, le=16)
+    multi_agent_timeout_seconds: float = Field(default=120.0, gt=0, le=3_600)
 
     @field_validator("stt_device", mode="before")
     @classmethod
