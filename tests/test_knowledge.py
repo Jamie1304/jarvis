@@ -83,6 +83,19 @@ def test_secret_files_and_secret_bearing_documents_are_excluded(tmp_path: Path) 
     )
 
 
+def test_safe_sensitivity_enum_is_not_mistaken_for_a_credential(tmp_path: Path) -> None:
+    _fixture_project(tmp_path)
+    (tmp_path / "jarvis" / "sample" / "models.py").write_text(
+        'from enum import StrEnum\n\nclass Sensitivity(StrEnum):\n    SECRET = "secret"\n',
+        encoding="utf-8",
+    )
+
+    snapshot = ProjectKnowledgeBuilder(tmp_path).build()
+    sample = next(component for component in snapshot.components if component.name == "sample")
+
+    assert "jarvis/sample/models.py" in sample.relevant_files
+
+
 def test_search_prioritizes_title_and_supports_kind_filter(tmp_path: Path) -> None:
     _fixture_project(tmp_path)
     store = KnowledgeStore(ProjectKnowledgeBuilder(tmp_path).build())

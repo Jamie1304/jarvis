@@ -242,3 +242,21 @@ network, and secret isolation; the Phase 11 interface and deterministic mocks ca
 prove those Windows/container controls. The built-in static pattern checker is only
 a minimum preflight and does not replace deeper scanning or human review. See the
 explicit threat/control/residual-risk table in `docs/autonomous-improvement.md`.
+
+## Phase 14 memory extension
+
+Durable memory introduces private user facts, task evidence, SQLite files, migration
+integrity, and retention/deletion controls as protected assets. Model output,
+conversation text, web/tool output, remembered data, and source references are data
+only; they cannot grant a permission, become an approval, register a tool, or issue
+an instruction. A trusted long-term policy requires explicit user confirmation,
+user-source provenance, confidence, and non-secret/non-untrusted content. The store
+defensively rejects secret-like values even if a caller bypasses that policy.
+
+The persistence boundary is trusted application/UI code to `SQLiteMemoryStore`; a
+future multi-user API must add authenticated ownership checks before exposing the
+inspect/delete operations. The project-knowledge boundary remains read-only through
+`KnowledgeStore`, so generated repository documentation is not copied into personal
+memory. Local SQLite encryption, device-level access control, and a platform secret
+store are deployment responsibilities outside this Phase 14 library; the subsystem
+therefore rejects rather than stores credentials.

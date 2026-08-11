@@ -82,3 +82,10 @@ use fake planners/tools for calculator, approval pause, bounded retry, cancellat
 and verification failure. Optional startup smoke coverage uses fake process and health
 adapters in CI; real localhost startup and hardware/manual suites are not claimed as
 executed. See `docs/system-testing.md`.
+
+Phase 14 memory tests use temporary SQLite databases and fake clocks. They cover
+ordered migrations, write/read provenance, retention cleanup, individual/category
+deletion, explicit long-term eligibility, secret rejection, compact episodic records,
+bounded conversation summary/clear lifecycle, source-separated retrieval, stale-aware
+project knowledge handoff, untrusted remembered-content labels, and malformed
+migration rejection. They do not persist real user data or invoke a secret store.

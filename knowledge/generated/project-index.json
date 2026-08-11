@@ -17,8 +17,8 @@
       ],
       "name": "ai",
       "provenance": {
-        "generated_at": "2026-08-11T14:48:03.754693+00:00",
-        "revision": "c381f2e5a10054074afe127aac2af53a00533142",
+        "generated_at": "2026-08-11T15:13:03.257579+00:00",
+        "revision": null,
         "source_files": [
           "jarvis/ai/__init__.py",
           "jarvis/ai/models.py",
@@ -84,8 +84,8 @@
       ],
       "name": "applications",
       "provenance": {
-        "generated_at": "2026-08-11T14:48:03.754693+00:00",
-        "revision": "c381f2e5a10054074afe127aac2af53a00533142",
+        "generated_at": "2026-08-11T15:13:03.257579+00:00",
+        "revision": null,
         "source_files": [
           "jarvis/applications/__init__.py",
           "jarvis/applications/catalog.py",
@@ -209,8 +209,8 @@
       ],
       "name": "autonomy",
       "provenance": {
-        "generated_at": "2026-08-11T14:48:03.754693+00:00",
-        "revision": "c381f2e5a10054074afe127aac2af53a00533142",
+        "generated_at": "2026-08-11T15:13:03.257579+00:00",
+        "revision": null,
         "source_files": [
           "jarvis/autonomy/__init__.py",
           "jarvis/autonomy/execution.py",
@@ -312,8 +312,8 @@
       ],
       "name": "camera",
       "provenance": {
-        "generated_at": "2026-08-11T14:48:03.754693+00:00",
-        "revision": "c381f2e5a10054074afe127aac2af53a00533142",
+        "generated_at": "2026-08-11T15:13:03.257579+00:00",
+        "revision": null,
         "source_files": [
           "jarvis/camera/__init__.py",
           "jarvis/camera/catalog.py",
@@ -416,8 +416,8 @@
       ],
       "name": "computer",
       "provenance": {
-        "generated_at": "2026-08-11T14:48:03.754693+00:00",
-        "revision": "c381f2e5a10054074afe127aac2af53a00533142",
+        "generated_at": "2026-08-11T15:13:03.257579+00:00",
+        "revision": null,
         "source_files": [
           "jarvis/computer/__init__.py",
           "jarvis/computer/accessibility.py",
@@ -543,8 +543,8 @@
       ],
       "name": "conversation",
       "provenance": {
-        "generated_at": "2026-08-11T14:48:03.754693+00:00",
-        "revision": "c381f2e5a10054074afe127aac2af53a00533142",
+        "generated_at": "2026-08-11T15:13:03.257579+00:00",
+        "revision": null,
         "source_files": [
           "jarvis/conversation/__init__.py",
           "jarvis/conversation/service.py"
@@ -585,8 +585,8 @@
       ],
       "name": "core",
       "provenance": {
-        "generated_at": "2026-08-11T14:48:03.754693+00:00",
-        "revision": "c381f2e5a10054074afe127aac2af53a00533142",
+        "generated_at": "2026-08-11T15:13:03.257579+00:00",
+        "revision": null,
         "source_files": [
           "jarvis/core/__init__.py",
           "jarvis/core/config.py",
@@ -662,8 +662,8 @@
       ],
       "name": "discovery",
       "provenance": {
-        "generated_at": "2026-08-11T14:48:03.754693+00:00",
-        "revision": "c381f2e5a10054074afe127aac2af53a00533142",
+        "generated_at": "2026-08-11T15:13:03.257579+00:00",
+        "revision": null,
         "source_files": [
           "jarvis/discovery/__init__.py",
           "jarvis/discovery/models.py",
@@ -729,8 +729,8 @@
       ],
       "name": "frontend",
       "provenance": {
-        "generated_at": "2026-08-11T14:48:03.754693+00:00",
-        "revision": "c381f2e5a10054074afe127aac2af53a00533142",
+        "generated_at": "2026-08-11T15:13:03.257579+00:00",
+        "revision": null,
         "source_files": [
           "jarvis/frontend/__init__.py",
           "jarvis/frontend/desktop.py"
@@ -781,8 +781,8 @@
       ],
       "name": "improvement",
       "provenance": {
-        "generated_at": "2026-08-11T14:48:03.754693+00:00",
-        "revision": "c381f2e5a10054074afe127aac2af53a00533142",
+        "generated_at": "2026-08-11T15:13:03.257579+00:00",
+        "revision": null,
         "source_files": [
           "jarvis/improvement/__init__.py",
           "jarvis/improvement/adapters.py",
@@ -936,8 +936,8 @@
       ],
       "name": "knowledge",
       "provenance": {
-        "generated_at": "2026-08-11T14:48:03.754693+00:00",
-        "revision": "c381f2e5a10054074afe127aac2af53a00533142",
+        "generated_at": "2026-08-11T15:13:03.257579+00:00",
+        "revision": null,
         "source_files": [
           "jarvis/knowledge/__init__.py",
           "jarvis/knowledge/indexer.py",
@@ -946,7 +946,7 @@
         ],
         "source_hashes": {
           "jarvis/knowledge/__init__.py": "cf93b7e6885557dc13ccdea94ea0a3c9d8036515c436ce7b078d4b698363f9cf",
-          "jarvis/knowledge/indexer.py": "6bb9f19681ebd1b3e71408e56158f9baa1dcf44299a343b3313b548a107bbd62",
+          "jarvis/knowledge/indexer.py": "723e20881fd09eb6daf37e01b26b3c43e0de2dcdde652eed8c344e83bd809d96",
           "jarvis/knowledge/models.py": "d105e8a5343077df4aeb072c6b56c6254cd2216d6d7555516168674ba0c343b5",
           "jarvis/knowledge/store.py": "81e1ffd3f6ab6e15a5f5ec6b00fcaa4ca6465e3f3b67be20242a1f197e86f3cd"
         }
@@ -982,22 +982,97 @@
     },
     {
       "architectural_layer": "reserved-domain",
-      "dependencies": [],
+      "dependencies": [
+        "__future__",
+        "abc",
+        "collections",
+        "dataclasses",
+        "datetime",
+        "enum",
+        "jarvis",
+        "json",
+        "pathlib",
+        "re",
+        "sqlite3",
+        "threading",
+        "uuid"
+      ],
       "name": "memory",
       "provenance": {
-        "generated_at": "2026-08-11T14:48:03.754693+00:00",
-        "revision": "c381f2e5a10054074afe127aac2af53a00533142",
+        "generated_at": "2026-08-11T15:13:03.257579+00:00",
+        "revision": null,
         "source_files": [
-          "jarvis/memory/__init__.py"
+          "jarvis/memory/__init__.py",
+          "jarvis/memory/models.py",
+          "jarvis/memory/policy.py",
+          "jarvis/memory/services.py",
+          "jarvis/memory/store.py"
         ],
         "source_hashes": {
-          "jarvis/memory/__init__.py": "361ed566e1810607d62c825886992aedeaf9e3ac1926bc0bcf742c151890605d"
+          "jarvis/memory/__init__.py": "4d7e6dafb46f28027ecc3f1c4b2b0e1d8f5241da6fc53fe6abfdc530c89e853f",
+          "jarvis/memory/models.py": "241631bc5c7447b50b6deeb4019de6135358b998878142188167ac3d50298073",
+          "jarvis/memory/policy.py": "1a875b9279a288d4c2b62a46d4672e4f55e1e19df505aaaec51193e2764e5663",
+          "jarvis/memory/services.py": "f47821326ad313281bacc9f4d056b803322d0a632f49525a16f46fe91e66d3df",
+          "jarvis/memory/store.py": "aad58ae21afdf87813b9e17526b09522c438de7c965fdb785c0c5847c1cd975b"
         }
       },
-      "public_interfaces": [],
-      "purpose": "Memory boundary.",
+      "public_interfaces": [
+        "ContextSummarizer",
+        "ConversationContextService",
+        "ConversationEntry",
+        "DurableMemoryHit",
+        "EpisodicAction",
+        "EpisodicMemoryService",
+        "LongTermEligibility",
+        "LongTermMemoryCandidate",
+        "LongTermMemoryService",
+        "LongTermRetentionPolicy",
+        "MemoryMigration",
+        "MemoryMigrationError",
+        "MemoryProvenance",
+        "MemoryRecord",
+        "MemoryRetrieval",
+        "MemoryRetrievalService",
+        "MemorySource",
+        "MemoryType",
+        "ProjectSystemMemory",
+        "RetentionDecision",
+        "RetentionPolicy",
+        "SQLiteMemoryStore",
+        "Sensitivity",
+        "SystemMemoryHit",
+        "append",
+        "apply_migrations",
+        "cleanup_expired",
+        "clear",
+        "close",
+        "contains_secret",
+        "data_object",
+        "database_path",
+        "delete",
+        "delete_category",
+        "evaluate",
+        "expiry",
+        "get",
+        "inspect",
+        "is_expired",
+        "list",
+        "persist",
+        "put",
+        "record_completed_action",
+        "retrieve",
+        "schema_version",
+        "search",
+        "summarize",
+        "utc"
+      ],
+      "purpose": "Privacy-aware context, durable user/episode, and project-memory boundaries.",
       "relevant_files": [
-        "jarvis/memory/__init__.py"
+        "jarvis/memory/__init__.py",
+        "jarvis/memory/models.py",
+        "jarvis/memory/policy.py",
+        "jarvis/memory/services.py",
+        "jarvis/memory/store.py"
       ]
     },
     {
@@ -1019,8 +1094,8 @@
       ],
       "name": "permissions",
       "provenance": {
-        "generated_at": "2026-08-11T14:48:03.754693+00:00",
-        "revision": "c381f2e5a10054074afe127aac2af53a00533142",
+        "generated_at": "2026-08-11T15:13:03.257579+00:00",
+        "revision": null,
         "source_files": [
           "jarvis/permissions/__init__.py",
           "jarvis/permissions/audit.py",
@@ -1098,8 +1173,8 @@
       "dependencies": [],
       "name": "security",
       "provenance": {
-        "generated_at": "2026-08-11T14:48:03.754693+00:00",
-        "revision": "c381f2e5a10054074afe127aac2af53a00533142",
+        "generated_at": "2026-08-11T15:13:03.257579+00:00",
+        "revision": null,
         "source_files": [
           "jarvis/security/__init__.py"
         ],
@@ -1130,8 +1205,8 @@
       ],
       "name": "speech",
       "provenance": {
-        "generated_at": "2026-08-11T14:48:03.754693+00:00",
-        "revision": "c381f2e5a10054074afe127aac2af53a00533142",
+        "generated_at": "2026-08-11T15:13:03.257579+00:00",
+        "revision": null,
         "source_files": [
           "jarvis/speech/__init__.py",
           "jarvis/speech/stt.py",
@@ -1200,8 +1275,8 @@
       ],
       "name": "testing",
       "provenance": {
-        "generated_at": "2026-08-11T14:48:03.754693+00:00",
-        "revision": "c381f2e5a10054074afe127aac2af53a00533142",
+        "generated_at": "2026-08-11T15:13:03.257579+00:00",
+        "revision": null,
         "source_files": [
           "jarvis/testing/__init__.py",
           "jarvis/testing/catalog.py",
@@ -1309,8 +1384,8 @@
       ],
       "name": "tools",
       "provenance": {
-        "generated_at": "2026-08-11T14:48:03.754693+00:00",
-        "revision": "c381f2e5a10054074afe127aac2af53a00533142",
+        "generated_at": "2026-08-11T15:13:03.257579+00:00",
+        "revision": null,
         "source_files": [
           "jarvis/tools/__init__.py",
           "jarvis/tools/base.py",
@@ -1422,8 +1497,8 @@
       ],
       "name": "vision",
       "provenance": {
-        "generated_at": "2026-08-11T14:48:03.754693+00:00",
-        "revision": "c381f2e5a10054074afe127aac2af53a00533142",
+        "generated_at": "2026-08-11T15:13:03.257579+00:00",
+        "revision": null,
         "source_files": [
           "jarvis/vision/__init__.py",
           "jarvis/vision/fusion.py",
@@ -1497,7 +1572,7 @@
       ]
     }
   ],
-  "generated_at": "2026-08-11T14:48:03.754693+00:00",
+  "generated_at": "2026-08-11T15:13:03.257579+00:00",
   "items": [
     {
       "authority": "generated",
@@ -1508,8 +1583,8 @@
         "layer": "provider"
       },
       "provenance": {
-        "generated_at": "2026-08-11T14:48:03.754693+00:00",
-        "revision": "c381f2e5a10054074afe127aac2af53a00533142",
+        "generated_at": "2026-08-11T15:13:03.257579+00:00",
+        "revision": null,
         "source_files": [
           "jarvis/ai/__init__.py",
           "jarvis/ai/models.py",
@@ -1537,8 +1612,8 @@
         "layer": "controlled-capability"
       },
       "provenance": {
-        "generated_at": "2026-08-11T14:48:03.754693+00:00",
-        "revision": "c381f2e5a10054074afe127aac2af53a00533142",
+        "generated_at": "2026-08-11T15:13:03.257579+00:00",
+        "revision": null,
         "source_files": [
           "jarvis/applications/__init__.py",
           "jarvis/applications/catalog.py",
@@ -1574,8 +1649,8 @@
         "layer": "orchestration"
       },
       "provenance": {
-        "generated_at": "2026-08-11T14:48:03.754693+00:00",
-        "revision": "c381f2e5a10054074afe127aac2af53a00533142",
+        "generated_at": "2026-08-11T15:13:03.257579+00:00",
+        "revision": null,
         "source_files": [
           "jarvis/autonomy/__init__.py",
           "jarvis/autonomy/execution.py",
@@ -1607,8 +1682,8 @@
         "layer": "controlled-capability"
       },
       "provenance": {
-        "generated_at": "2026-08-11T14:48:03.754693+00:00",
-        "revision": "c381f2e5a10054074afe127aac2af53a00533142",
+        "generated_at": "2026-08-11T15:13:03.257579+00:00",
+        "revision": null,
         "source_files": [
           "jarvis/camera/__init__.py",
           "jarvis/camera/catalog.py",
@@ -1642,8 +1717,8 @@
         "layer": "controlled-capability"
       },
       "provenance": {
-        "generated_at": "2026-08-11T14:48:03.754693+00:00",
-        "revision": "c381f2e5a10054074afe127aac2af53a00533142",
+        "generated_at": "2026-08-11T15:13:03.257579+00:00",
+        "revision": null,
         "source_files": [
           "jarvis/computer/__init__.py",
           "jarvis/computer/accessibility.py",
@@ -1679,8 +1754,8 @@
         "layer": "application-service"
       },
       "provenance": {
-        "generated_at": "2026-08-11T14:48:03.754693+00:00",
-        "revision": "c381f2e5a10054074afe127aac2af53a00533142",
+        "generated_at": "2026-08-11T15:13:03.257579+00:00",
+        "revision": null,
         "source_files": [
           "jarvis/conversation/__init__.py",
           "jarvis/conversation/service.py"
@@ -1702,8 +1777,8 @@
         "layer": "cross-cutting"
       },
       "provenance": {
-        "generated_at": "2026-08-11T14:48:03.754693+00:00",
-        "revision": "c381f2e5a10054074afe127aac2af53a00533142",
+        "generated_at": "2026-08-11T15:13:03.257579+00:00",
+        "revision": null,
         "source_files": [
           "jarvis/core/__init__.py",
           "jarvis/core/config.py",
@@ -1731,8 +1806,8 @@
         "layer": "advisory-capability"
       },
       "provenance": {
-        "generated_at": "2026-08-11T14:48:03.754693+00:00",
-        "revision": "c381f2e5a10054074afe127aac2af53a00533142",
+        "generated_at": "2026-08-11T15:13:03.257579+00:00",
+        "revision": null,
         "source_files": [
           "jarvis/discovery/__init__.py",
           "jarvis/discovery/models.py",
@@ -1758,8 +1833,8 @@
         "layer": "presentation"
       },
       "provenance": {
-        "generated_at": "2026-08-11T14:48:03.754693+00:00",
-        "revision": "c381f2e5a10054074afe127aac2af53a00533142",
+        "generated_at": "2026-08-11T15:13:03.257579+00:00",
+        "revision": null,
         "source_files": [
           "jarvis/frontend/__init__.py",
           "jarvis/frontend/desktop.py"
@@ -1781,8 +1856,8 @@
         "layer": "proposal-only-improvement"
       },
       "provenance": {
-        "generated_at": "2026-08-11T14:48:03.754693+00:00",
-        "revision": "c381f2e5a10054074afe127aac2af53a00533142",
+        "generated_at": "2026-08-11T15:13:03.257579+00:00",
+        "revision": null,
         "source_files": [
           "jarvis/improvement/__init__.py",
           "jarvis/improvement/adapters.py",
@@ -1816,8 +1891,8 @@
         "layer": "domain"
       },
       "provenance": {
-        "generated_at": "2026-08-11T14:48:03.754693+00:00",
-        "revision": "c381f2e5a10054074afe127aac2af53a00533142",
+        "generated_at": "2026-08-11T15:13:03.257579+00:00",
+        "revision": null,
         "source_files": [
           "jarvis/knowledge/__init__.py",
           "jarvis/knowledge/indexer.py",
@@ -1826,7 +1901,7 @@
         ],
         "source_hashes": {
           "jarvis/knowledge/__init__.py": "cf93b7e6885557dc13ccdea94ea0a3c9d8036515c436ce7b078d4b698363f9cf",
-          "jarvis/knowledge/indexer.py": "6bb9f19681ebd1b3e71408e56158f9baa1dcf44299a343b3313b548a107bbd62",
+          "jarvis/knowledge/indexer.py": "723e20881fd09eb6daf37e01b26b3c43e0de2dcdde652eed8c344e83bd809d96",
           "jarvis/knowledge/models.py": "d105e8a5343077df4aeb072c6b56c6254cd2216d6d7555516168674ba0c343b5",
           "jarvis/knowledge/store.py": "81e1ffd3f6ab6e15a5f5ec6b00fcaa4ca6465e3f3b67be20242a1f197e86f3cd"
         }
@@ -1836,23 +1911,31 @@
     },
     {
       "authority": "generated",
-      "content": "Memory boundary. Layer: reserved-domain. Interfaces: . Dependencies: .",
+      "content": "Privacy-aware context, durable user/episode, and project-memory boundaries. Layer: reserved-domain. Interfaces: ContextSummarizer, ConversationContextService, ConversationEntry, DurableMemoryHit, EpisodicAction, EpisodicMemoryService, LongTermEligibility, LongTermMemoryCandidate, LongTermMemoryService, LongTermRetentionPolicy, MemoryMigration, MemoryMigrationError, MemoryProvenance, MemoryRecord, MemoryRetrieval, MemoryRetrievalService, MemorySource, MemoryType, ProjectSystemMemory, RetentionDecision, RetentionPolicy, SQLiteMemoryStore, Sensitivity, SystemMemoryHit, append, apply_migrations, cleanup_expired, clear, close, contains_secret, data_object, database_path, delete, delete_category, evaluate, expiry, get, inspect, is_expired, list, persist, put, record_completed_action, retrieve, schema_version, search, summarize, utc. Dependencies: __future__, abc, collections, dataclasses, datetime, enum, jarvis, json, pathlib, re, sqlite3, threading, uuid.",
       "id": "component:memory",
       "kind": "component",
       "metadata": {
         "layer": "reserved-domain"
       },
       "provenance": {
-        "generated_at": "2026-08-11T14:48:03.754693+00:00",
-        "revision": "c381f2e5a10054074afe127aac2af53a00533142",
+        "generated_at": "2026-08-11T15:13:03.257579+00:00",
+        "revision": null,
         "source_files": [
-          "jarvis/memory/__init__.py"
+          "jarvis/memory/__init__.py",
+          "jarvis/memory/models.py",
+          "jarvis/memory/policy.py",
+          "jarvis/memory/services.py",
+          "jarvis/memory/store.py"
         ],
         "source_hashes": {
-          "jarvis/memory/__init__.py": "361ed566e1810607d62c825886992aedeaf9e3ac1926bc0bcf742c151890605d"
+          "jarvis/memory/__init__.py": "4d7e6dafb46f28027ecc3f1c4b2b0e1d8f5241da6fc53fe6abfdc530c89e853f",
+          "jarvis/memory/models.py": "241631bc5c7447b50b6deeb4019de6135358b998878142188167ac3d50298073",
+          "jarvis/memory/policy.py": "1a875b9279a288d4c2b62a46d4672e4f55e1e19df505aaaec51193e2764e5663",
+          "jarvis/memory/services.py": "f47821326ad313281bacc9f4d056b803322d0a632f49525a16f46fe91e66d3df",
+          "jarvis/memory/store.py": "aad58ae21afdf87813b9e17526b09522c438de7c965fdb785c0c5847c1cd975b"
         }
       },
-      "summary": "Memory boundary.",
+      "summary": "Privacy-aware context, durable user/episode, and project-memory boundaries.",
       "title": "memory"
     },
     {
@@ -1864,8 +1947,8 @@
         "layer": "security-boundary"
       },
       "provenance": {
-        "generated_at": "2026-08-11T14:48:03.754693+00:00",
-        "revision": "c381f2e5a10054074afe127aac2af53a00533142",
+        "generated_at": "2026-08-11T15:13:03.257579+00:00",
+        "revision": null,
         "source_files": [
           "jarvis/permissions/__init__.py",
           "jarvis/permissions/audit.py",
@@ -1893,8 +1976,8 @@
         "layer": "security-boundary"
       },
       "provenance": {
-        "generated_at": "2026-08-11T14:48:03.754693+00:00",
-        "revision": "c381f2e5a10054074afe127aac2af53a00533142",
+        "generated_at": "2026-08-11T15:13:03.257579+00:00",
+        "revision": null,
         "source_files": [
           "jarvis/security/__init__.py"
         ],
@@ -1914,8 +1997,8 @@
         "layer": "provider"
       },
       "provenance": {
-        "generated_at": "2026-08-11T14:48:03.754693+00:00",
-        "revision": "c381f2e5a10054074afe127aac2af53a00533142",
+        "generated_at": "2026-08-11T15:13:03.257579+00:00",
+        "revision": null,
         "source_files": [
           "jarvis/speech/__init__.py",
           "jarvis/speech/stt.py",
@@ -1939,8 +2022,8 @@
         "layer": "domain"
       },
       "provenance": {
-        "generated_at": "2026-08-11T14:48:03.754693+00:00",
-        "revision": "c381f2e5a10054074afe127aac2af53a00533142",
+        "generated_at": "2026-08-11T15:13:03.257579+00:00",
+        "revision": null,
         "source_files": [
           "jarvis/testing/__init__.py",
           "jarvis/testing/catalog.py",
@@ -1974,8 +2057,8 @@
         "layer": "capability-boundary"
       },
       "provenance": {
-        "generated_at": "2026-08-11T14:48:03.754693+00:00",
-        "revision": "c381f2e5a10054074afe127aac2af53a00533142",
+        "generated_at": "2026-08-11T15:13:03.257579+00:00",
+        "revision": null,
         "source_files": [
           "jarvis/tools/__init__.py",
           "jarvis/tools/base.py",
@@ -2011,8 +2094,8 @@
         "layer": "controlled-capability"
       },
       "provenance": {
-        "generated_at": "2026-08-11T14:48:03.754693+00:00",
-        "revision": "c381f2e5a10054074afe127aac2af53a00533142",
+        "generated_at": "2026-08-11T15:13:03.257579+00:00",
+        "revision": null,
         "source_files": [
           "jarvis/vision/__init__.py",
           "jarvis/vision/fusion.py",
@@ -2042,8 +2125,8 @@
         "path": "docs/decisions/0001-phase-0-boundaries.md"
       },
       "provenance": {
-        "generated_at": "2026-08-11T14:48:03.754693+00:00",
-        "revision": "c381f2e5a10054074afe127aac2af53a00533142",
+        "generated_at": "2026-08-11T15:13:03.257579+00:00",
+        "revision": null,
         "source_files": [
           "docs/decisions/0001-phase-0-boundaries.md"
         ],
@@ -2063,8 +2146,8 @@
         "path": "docs/decisions/0002-local-conversation-and-speech.md"
       },
       "provenance": {
-        "generated_at": "2026-08-11T14:48:03.754693+00:00",
-        "revision": "c381f2e5a10054074afe127aac2af53a00533142",
+        "generated_at": "2026-08-11T15:13:03.257579+00:00",
+        "revision": null,
         "source_files": [
           "docs/decisions/0002-local-conversation-and-speech.md"
         ],
@@ -2084,8 +2167,8 @@
         "path": "docs/decisions/0003-bounded-single-agent-orchestration.md"
       },
       "provenance": {
-        "generated_at": "2026-08-11T14:48:03.754693+00:00",
-        "revision": "c381f2e5a10054074afe127aac2af53a00533142",
+        "generated_at": "2026-08-11T15:13:03.257579+00:00",
+        "revision": null,
         "source_files": [
           "docs/decisions/0003-bounded-single-agent-orchestration.md"
         ],
@@ -2105,8 +2188,8 @@
         "path": "docs/decisions/0004-versioned-tool-contract.md"
       },
       "provenance": {
-        "generated_at": "2026-08-11T14:48:03.754693+00:00",
-        "revision": "c381f2e5a10054074afe127aac2af53a00533142",
+        "generated_at": "2026-08-11T15:13:03.257579+00:00",
+        "revision": null,
         "source_files": [
           "docs/decisions/0004-versioned-tool-contract.md"
         ],
@@ -2126,8 +2209,8 @@
         "path": "docs/decisions/0005-central-tool-registry.md"
       },
       "provenance": {
-        "generated_at": "2026-08-11T14:48:03.754693+00:00",
-        "revision": "c381f2e5a10054074afe127aac2af53a00533142",
+        "generated_at": "2026-08-11T15:13:03.257579+00:00",
+        "revision": null,
         "source_files": [
           "docs/decisions/0005-central-tool-registry.md"
         ],
@@ -2147,8 +2230,8 @@
         "path": "docs/decisions/0006-permission-broker.md"
       },
       "provenance": {
-        "generated_at": "2026-08-11T14:48:03.754693+00:00",
-        "revision": "c381f2e5a10054074afe127aac2af53a00533142",
+        "generated_at": "2026-08-11T15:13:03.257579+00:00",
+        "revision": null,
         "source_files": [
           "docs/decisions/0006-permission-broker.md"
         ],
@@ -2168,8 +2251,8 @@
         "path": "docs/decisions/0007-controlled-windows-computer-capabilities.md"
       },
       "provenance": {
-        "generated_at": "2026-08-11T14:48:03.754693+00:00",
-        "revision": "c381f2e5a10054074afe127aac2af53a00533142",
+        "generated_at": "2026-08-11T15:13:03.257579+00:00",
+        "revision": null,
         "source_files": [
           "docs/decisions/0007-controlled-windows-computer-capabilities.md"
         ],
@@ -2189,8 +2272,8 @@
         "path": "docs/decisions/0008-visual-grounding-and-verification.md"
       },
       "provenance": {
-        "generated_at": "2026-08-11T14:48:03.754693+00:00",
-        "revision": "c381f2e5a10054074afe127aac2af53a00533142",
+        "generated_at": "2026-08-11T15:13:03.257579+00:00",
+        "revision": null,
         "source_files": [
           "docs/decisions/0008-visual-grounding-and-verification.md"
         ],
@@ -2210,8 +2293,8 @@
         "path": "docs/decisions/0009-controlled-camera-support.md"
       },
       "provenance": {
-        "generated_at": "2026-08-11T14:48:03.754693+00:00",
-        "revision": "c381f2e5a10054074afe127aac2af53a00533142",
+        "generated_at": "2026-08-11T15:13:03.257579+00:00",
+        "revision": null,
         "source_files": [
           "docs/decisions/0009-controlled-camera-support.md"
         ],
@@ -2231,8 +2314,8 @@
         "path": "docs/decisions/0010-controlled-application-manager.md"
       },
       "provenance": {
-        "generated_at": "2026-08-11T14:48:03.754693+00:00",
-        "revision": "c381f2e5a10054074afe127aac2af53a00533142",
+        "generated_at": "2026-08-11T15:13:03.257579+00:00",
+        "revision": null,
         "source_files": [
           "docs/decisions/0010-controlled-application-manager.md"
         ],
@@ -2252,8 +2335,8 @@
         "path": "docs/decisions/0011-advisory-capability-discovery.md"
       },
       "provenance": {
-        "generated_at": "2026-08-11T14:48:03.754693+00:00",
-        "revision": "c381f2e5a10054074afe127aac2af53a00533142",
+        "generated_at": "2026-08-11T15:13:03.257579+00:00",
+        "revision": null,
         "source_files": [
           "docs/decisions/0011-advisory-capability-discovery.md"
         ],
@@ -2273,8 +2356,8 @@
         "path": "docs/decisions/0012-propose-and-test-improvement-engine.md"
       },
       "provenance": {
-        "generated_at": "2026-08-11T14:48:03.754693+00:00",
-        "revision": "c381f2e5a10054074afe127aac2af53a00533142",
+        "generated_at": "2026-08-11T15:13:03.257579+00:00",
+        "revision": null,
         "source_files": [
           "docs/decisions/0012-propose-and-test-improvement-engine.md"
         ],
@@ -2294,8 +2377,8 @@
         "path": "docs/decisions/0013-controlled-system-self-testing.md"
       },
       "provenance": {
-        "generated_at": "2026-08-11T14:48:03.754693+00:00",
-        "revision": "c381f2e5a10054074afe127aac2af53a00533142",
+        "generated_at": "2026-08-11T15:13:03.257579+00:00",
+        "revision": null,
         "source_files": [
           "docs/decisions/0013-controlled-system-self-testing.md"
         ],
@@ -2307,6 +2390,27 @@
       "title": "ADR 0013: controlled system-level self-testing"
     },
     {
+      "authority": "historical",
+      "content": "# ADR 0014: separate memory domains and policy-gated persistence\n\n## Decision\n\nUse four conceptually distinct memory paths: bounded process-local conversation\ncontext, policy-gated durable user memory, compact durable action episodes, and a\nread-only adapter to the Phase 12 project-knowledge index. Use SQLite with reviewed,\nordered migrations for the two durable categories. Do not introduce a vector database\nor make memory a planner-controlled capability.\n\n## Consequences\n\nThe application gains inspect/delete/retention-cleanup controls and provenance for\ndurable records without silently retaining every utterance or duplicating project\nknowledge. Retrieval keeps source/type results separate. The local SQLite adapter is\nnot a user-identity or secret-management system: future multi-user UI/API composition\nmust enforce ownership, and credentials require a dedicated secret store. Historical\nweb/tool content is retained only as labelled untrusted data.\n",
+      "id": "docs:decisions:0014-separated-memory-domains",
+      "kind": "decision",
+      "metadata": {
+        "path": "docs/decisions/0014-separated-memory-domains.md"
+      },
+      "provenance": {
+        "generated_at": "2026-08-11T15:13:03.257579+00:00",
+        "revision": null,
+        "source_files": [
+          "docs/decisions/0014-separated-memory-domains.md"
+        ],
+        "source_hashes": {
+          "docs/decisions/0014-separated-memory-domains.md": "299b4dffaaa51a05d9944fe66bd5fe8e0436a9b476cc19aa1b38f55e84e83cb9"
+        }
+      },
+      "summary": "Use four conceptually distinct memory paths: bounded process-local conversation context, policy-gated durable user memory, compact durable action episodes, and a read-only adapter to the Phase 12 project-knowledge index. Use SQLite with reviewed, ordered migrations for the two durable categories. Do not introduce a vector database or make memory a planner-controlled capability. The application gai",
+      "title": "ADR 0014: separate memory domains and policy-gated persistence"
+    },
+    {
       "authority": "authoritative",
       "content": "# Contributing to JARVIS\r\n\r\nJARVIS is a local-first, Windows-first desktop assistant targeting Python 3.12+.\r\n\r\n## Development setup\r\n\r\n```powershell\r\npython -m venv .venv\r\n.\\.venv\\Scripts\\Activate.ps1\r\npython -m pip install -r requirements-dev.lock\r\n```\r\n\r\nRun the complete quality gate before opening a pull request:\r\n\r\n```powershell\r\npython scripts/quality.py\r\n```\r\n\r\nThe gate checks formatting, linting, strict typing, tests, and the 90% coverage threshold.\r\n\r\n## Contribution expectations\r\n\r\n- Add or update tests for behavioral changes.\r\n- Preserve the local-first architecture and bounded orchestration safeguards.\r\n- Do not add privileged OS capabilities without a separate design review.\r\n- Keep `.env`, credentials, local model files, recordings, and machine-specific state local-only.\r\n- Use `JARVIS_` environment variables; configuration precedence is process environment, `.env`, then typed defaults.\r\n- Pull requests must pass the complete quality gate on the Windows CI runner.\r\n",
       "id": "CONTRIBUTING",
@@ -2315,8 +2419,8 @@
         "path": "CONTRIBUTING.md"
       },
       "provenance": {
-        "generated_at": "2026-08-11T14:48:03.754693+00:00",
-        "revision": "c381f2e5a10054074afe127aac2af53a00533142",
+        "generated_at": "2026-08-11T15:13:03.257579+00:00",
+        "revision": null,
         "source_files": [
           "CONTRIBUTING.md"
         ],
@@ -2336,8 +2440,8 @@
         "path": "README.md"
       },
       "provenance": {
-        "generated_at": "2026-08-11T14:48:03.754693+00:00",
-        "revision": "c381f2e5a10054074afe127aac2af53a00533142",
+        "generated_at": "2026-08-11T15:13:03.257579+00:00",
+        "revision": null,
         "source_files": [
           "README.md"
         ],
@@ -2357,8 +2461,8 @@
         "path": "docs/application-manager.md"
       },
       "provenance": {
-        "generated_at": "2026-08-11T14:48:03.754693+00:00",
-        "revision": "c381f2e5a10054074afe127aac2af53a00533142",
+        "generated_at": "2026-08-11T15:13:03.257579+00:00",
+        "revision": null,
         "source_files": [
           "docs/application-manager.md"
         ],
@@ -2371,20 +2475,20 @@
     },
     {
       "authority": "authoritative",
-      "content": "# Architecture\n\nPhase 0 establishes a local-first Python 3.12+ application with a small FastAPI health surface. The package boundaries are intentional:\n\n- `core` owns configuration, errors, logging, and cross-cutting primitives.\n- `ai/providers` contains provider interfaces and future adapters. Provider SDKs must not leak into core orchestration.\n- `tools` is the only future entry point for capabilities that may affect the host.\n- `permissions` will become the deny-by-default permission broker.\n- `memory`, `computer`, and `autonomy` are reserved domain boundaries and contain no capability implementation yet.\n- `security` owns security policy and controls.\n- `frontend` is separate from domain models and services.\n\nAI code may not directly access privileged OS capabilities. Privileged operations must go through a tool and the permission broker. Domain models must not depend on UI code. Long-running operations must carry task IDs, support cancellation, and emit observability data as those capabilities are introduced.\n\nPhase 1 adds a deliberately narrow conversational path: normalized text or transient microphone audio is sent through a provider-neutral conversation service, then surfaced to the desktop UI and optionally local TTS. `bootstrap.py` is the composition root and is the only application location that selects Ollama, faster-whisper, sounddevice, or pyttsx3. The PySide6 UI calls `JarvisAssistantService`, never a provider directly.\n\nConversation history is process-local and typed. The ordinary chat path has no long-term memory, tool execution, computer control, planning, or autonomous behavior. Raw microphone samples remain in memory only and are discarded after transcription. Long-running streams have cancellation requests and UI-visible status events.\n\nPhase 2 adds a separate, bounded task path while preserving the ordinary chat path:\n\n`request \u2192 interpret \u2192 construct task \u2192 plan \u2192 select capability \u2192 execute \u2192 observe \u2192 verify \u2192 respond`\n\n`AgentOrchestrator` owns task lifecycle transitions and delegates interpretation, planning, capability selection, execution, observation, verification, and response generation to focused services. Task and plan snapshots are typed immutable records stored through `TaskStore`; Phase 2 uses `InMemoryTaskStore`, but the interface supports a later SQLite adapter.\n\nModel planning is treated as untrusted input. `SchemaValidatedPlanner` validates it through strict Pydantic schemas before it becomes an application-owned `Plan`. The model cannot select unregistered capabilities, alter task state, override budgets, or determine final success. `ToolRegistry` currently permits only explicitly injected fake/test tools; no OS-capable tools are implemented.\n\nEach execution has maximum-step, timeout, cancellation, and replan limits. A tool observation is not success: a `StepVerifier` must return explicit success evidence. Failed or unverifiable results replan within budget or transition to an observable failure state.\n\nPhase 3 replaces the minimal capability string contract with a versioned Tool/Skill boundary. Every registered tool exposes a `ToolManifest`, strict input/output schemas, declared permissions, supported platforms, timeout guidance, and health state. The orchestrator passes only `ToolExecutionContext`, then consumes a structured `ToolResult`; it does not import a tool implementation or expose an application container. The current registry contains only calculator, local-time, and unavailable-weather tools. See `docs/tools.md` for the authoring contract.\n\nPhase 4 makes `ToolRegistry` the central capability catalog. Registration is\nexplicit and deterministic; duplicate IDs cannot replace an implementation.\nRegistration, enabled state, platform support, health, and usability are\ntracked separately. Unknown-directory plugin discovery is prohibited.\n\nThe health API remains health-only. It reports application version, health state, and startup completion; it intentionally does not expose shell, filesystem, computer-control, camera, or autonomous behavior.\n\nPhase 5 replaces caller-supplied permission sets with a mandatory brokered tool\npath:\n\n`AI/planner -> strict tool input -> trusted action descriptor -> PermissionBroker -> policy -> optional trusted-user approval -> private authorized implementation`\n\n`ToolRegistry` binds each exact tool instance and its manifest permissions to one\n`PermissionBroker`. `Tool.invoke` is the reserved entry point; subclasses cannot\noverride it or define a public `execute` method. The base validates model arguments,\nasks the broker to authorize the exact fingerprinted action, attaches the broker\nreceipt, invokes `_execute_authorized`, and records the outcome. Unknown tools,\npermissions, scopes, and policy all fail closed. See `docs/threat-model.md` and\n`docs/permission-model.md` for the trust assumptions and policy contract.\n\nPhase 6 adds a controlled computer capability layer without changing that boundary:\n\n`AI/planner -> typed computer tool -> PermissionBroker -> policy/approval -> adapter -> Windows`\n\nThe planner sees semantic tool contracts such as application launch, window focus,\nand control text entry. It does not receive Windows library objects, handles, raw\nprocess launch, a shell-string primitive, or direct clipboard/filesystem/screenshot\nAPIs. `ComputerAdapter` is the platform-neutral interface; the optional\n`WindowsUiAutomationAdapter` translates authorized semantic requests to Windows UI\nAutomation. Coordinate clicks are an explicitly labelled fallback tool rather than\nthe normal control path. Screenshot bytes stay in a trusted `ScreenshotStore`; tool\nresults expose only metadata and an opaque reference. Controlled terminal execution\nresolves a trusted command ID to a fixed executable and command family, uses an\nargument array with `shell=False`, and supports timeout and cancellation.\n\nPhase 7 adds a provider-neutral visual workflow above the computer tools:\n\n`OBSERVE -> UNDERSTAND -> GROUND -> ACT -> OBSERVE AGAIN -> VERIFY`\n\n`BrokeredDesktopObserver` obtains screenshots, windows, and optional accessibility\ntrees only through registered screen-read tools. A `VisionProvider` receives a\nscreenshot reference, objective, semantic tree, and prior observation and returns\nstructured suggestions. Trusted fusion assigns target IDs, validates DPI-aware\ngeometry, and fingerprints the current display. `VisualInteractionService`\nre-observes immediately before action, rejects stale or materially changed state,\nuses the existing brokered computer tool for the action, then obtains a new\nobservation for explicit success/failure/uncertain verification. Vision code has no\ndirect keyboard, mouse, window, or policy access.\n\nPhase 8 adds a separate one-shot camera boundary:\n\n`AI/planner -> camera.list/camera.capture -> PermissionBroker(camera.read) -> CameraController -> CameraProvider`\n\nThe controller owns device opening, bounded frame capture, visible inactive/opening/\nactive/error state, and `finally` cleanup. Camera tools never expose an unrestricted\nstream. Captured bytes are placed only in an expiring in-memory frame store by\ndefault; `CameraVisionBridge` passes an expiring reference to the existing\n`VisionProvider` and releases it after analysis. Camera image reasoning remains\nseparate from camera hardware and from permission decisions.\n\nPhase 9 adds an opt-in controlled application-manager boundary:\n\n`AI/planner -> typed application tool -> PermissionBroker -> policy + fresh trusted approval -> immutable plan -> provider/runtime -> Windows`\n\nInventory and package-search results are evidence, not authority. Trusted composition\ninjects an inventory provider, package provider, managed runtime, and ephemeral plan\nstore; none is registered in the default tool catalog. A package plan is immutable,\nexpires, and is consumed before the provider operation. Installation/update tools\nreceive `application.install` and the hard `software_installation` safety class, so\neven an allow policy requires a fresh trusted-user approval. The approval describes\nthe exact provider-issued package ID, source, publisher, and version. The runtime\naccepts a current `ApplicationRecord`, never a model executable/path, and can close\nonly processes it launched and tracks. Post-operation verification re-queries the\ninventory, checks identity/version/executable, and confirms launch capability.\n\nPhase 10 adds an advisory capability-gap boundary:\n\n`missing capability -> discover evidence -> explainable evaluation -> recommendation -> user/policy decision`\n\n`CapabilityGap` records the unmet task requirement and evidence. Provider-neutral\ndiscovery can read a trusted internal tool catalog, trusted plugin/integration/software\ncatalogs, or already-authorized controlled web research. Every candidate remains data:\nit is not a tool registration, installation plan, permission grant, setup action, or\nexecution request. External descriptions are isolated as untrusted hashed evidence;\nthey never become instructions. Rankings score functional fit, source quality,\nprivileges, maintenance, compatibility, reversibility, and testability with stable\nfactor explanations. A future tool adapter can be proposed only as a data-only\nspecification; generated source is neither written, imported, nor executed.\n\nPhase 11 adds a high-risk, proposal-and-test improvement boundary:\n\n`observe -> identify -> specify -> assess risk -> isolate -> modify -> gate -> evaluate -> propose`\n\n`ImprovementEngine` separates structured candidate reasoning, a data-only coding\nagent, trusted worktree creation and file application, dependency analysis,\nsandboxed test gates, independent security checking, protected regression\nevaluation, and proposal storage. The coding agent receives a bounded specification\nand safe evidence records, then returns typed text changes; it receives no filesystem,\ncommand, Git, permission, approval, merge, or deployment primitive. Trusted code\napplies those changes only to a generated detached worktree outside the clean\nproduction checkout and repeatedly verifies that production stayed at the same\nfull revision.\n\nA run may normally select no worthwhile improvement. A selected change must pass\nformat/lint, type, unit, integration, security, regression, and startup/health gates,\nplus the default-deny dependency guard. Protected evaluation compares the candidate\nwith a baseline captured before modification; generated tests alone cannot establish\nimprovement. Success produces only an expiring, fingerprinted\n`AWAITING_TRUSTED_APPROVAL` proposal with previous-known-good rollback metadata.\nPhase 11 has no autonomous approval, merge, push, installation, deployment, or\nproduction-write path. See `docs/autonomous-improvement.md`.\n\nPhase 12 adds repository-grounded project knowledge without creating a new\nauthorization path. Human-authored `docs/` and ADRs remain authoritative or\nhistorical sources; `knowledge/generated/project-index.json` is a disposable\ngenerated view with per-source hashes, Git revision, and generation time. The\nindexer derives components from package source and tools/permissions from the\ntrusted registry and enums. `KnowledgeStore` provides local lexical search and\nstale-source detection. Knowledge is context only: it cannot register tools,\ngrant permissions, execute actions, or rewrite historical decisions.\n\nPhase 13 adds a controlled system-test boundary:\n\n`trusted suite catalog -> controlled subprocess -> redacted evidence -> TestRun -> diagnosis`\n\nTest suites contain fixed executable/argument vectors, a project-relative working\ndirectory, timeout, output format, category, and hardware policy. `ControlledTestRunner`\ndoes not expose a model-selectable shell; unknown suites and scope escapes fail closed.\nStructured results and separate artifacts can inform Phase 11 evaluation, but test\nsuccess does not authorize an improvement, merge, deployment, installation, or any\nhost capability. Deterministic fake-provider workflow suites run in CI, while startup\nand hardware tests require explicit trusted/manual enablement. See\n`docs/system-testing.md`.\n",
+      "content": "# Architecture\n\nPhase 0 establishes a local-first Python 3.12+ application with a small FastAPI health surface. The package boundaries are intentional:\n\n- `core` owns configuration, errors, logging, and cross-cutting primitives.\n- `ai/providers` contains provider interfaces and future adapters. Provider SDKs must not leak into core orchestration.\n- `tools` is the only future entry point for capabilities that may affect the host.\n- `permissions` will become the deny-by-default permission broker.\n- `memory`, `computer`, and `autonomy` are reserved domain boundaries and contain no capability implementation yet.\n- `security` owns security policy and controls.\n- `frontend` is separate from domain models and services.\n\nAI code may not directly access privileged OS capabilities. Privileged operations must go through a tool and the permission broker. Domain models must not depend on UI code. Long-running operations must carry task IDs, support cancellation, and emit observability data as those capabilities are introduced.\n\nPhase 1 adds a deliberately narrow conversational path: normalized text or transient microphone audio is sent through a provider-neutral conversation service, then surfaced to the desktop UI and optionally local TTS. `bootstrap.py` is the composition root and is the only application location that selects Ollama, faster-whisper, sounddevice, or pyttsx3. The PySide6 UI calls `JarvisAssistantService`, never a provider directly.\n\nConversation history is process-local and typed. The ordinary chat path has no long-term memory, tool execution, computer control, planning, or autonomous behavior. Raw microphone samples remain in memory only and are discarded after transcription. Long-running streams have cancellation requests and UI-visible status events.\n\nPhase 2 adds a separate, bounded task path while preserving the ordinary chat path:\n\n`request \u2192 interpret \u2192 construct task \u2192 plan \u2192 select capability \u2192 execute \u2192 observe \u2192 verify \u2192 respond`\n\n`AgentOrchestrator` owns task lifecycle transitions and delegates interpretation, planning, capability selection, execution, observation, verification, and response generation to focused services. Task and plan snapshots are typed immutable records stored through `TaskStore`; Phase 2 uses `InMemoryTaskStore`, but the interface supports a later SQLite adapter.\n\nModel planning is treated as untrusted input. `SchemaValidatedPlanner` validates it through strict Pydantic schemas before it becomes an application-owned `Plan`. The model cannot select unregistered capabilities, alter task state, override budgets, or determine final success. `ToolRegistry` currently permits only explicitly injected fake/test tools; no OS-capable tools are implemented.\n\nEach execution has maximum-step, timeout, cancellation, and replan limits. A tool observation is not success: a `StepVerifier` must return explicit success evidence. Failed or unverifiable results replan within budget or transition to an observable failure state.\n\nPhase 3 replaces the minimal capability string contract with a versioned Tool/Skill boundary. Every registered tool exposes a `ToolManifest`, strict input/output schemas, declared permissions, supported platforms, timeout guidance, and health state. The orchestrator passes only `ToolExecutionContext`, then consumes a structured `ToolResult`; it does not import a tool implementation or expose an application container. The current registry contains only calculator, local-time, and unavailable-weather tools. See `docs/tools.md` for the authoring contract.\n\nPhase 4 makes `ToolRegistry` the central capability catalog. Registration is\nexplicit and deterministic; duplicate IDs cannot replace an implementation.\nRegistration, enabled state, platform support, health, and usability are\ntracked separately. Unknown-directory plugin discovery is prohibited.\n\nThe health API remains health-only. It reports application version, health state, and startup completion; it intentionally does not expose shell, filesystem, computer-control, camera, or autonomous behavior.\n\nPhase 5 replaces caller-supplied permission sets with a mandatory brokered tool\npath:\n\n`AI/planner -> strict tool input -> trusted action descriptor -> PermissionBroker -> policy -> optional trusted-user approval -> private authorized implementation`\n\n`ToolRegistry` binds each exact tool instance and its manifest permissions to one\n`PermissionBroker`. `Tool.invoke` is the reserved entry point; subclasses cannot\noverride it or define a public `execute` method. The base validates model arguments,\nasks the broker to authorize the exact fingerprinted action, attaches the broker\nreceipt, invokes `_execute_authorized`, and records the outcome. Unknown tools,\npermissions, scopes, and policy all fail closed. See `docs/threat-model.md` and\n`docs/permission-model.md` for the trust assumptions and policy contract.\n\nPhase 6 adds a controlled computer capability layer without changing that boundary:\n\n`AI/planner -> typed computer tool -> PermissionBroker -> policy/approval -> adapter -> Windows`\n\nThe planner sees semantic tool contracts such as application launch, window focus,\nand control text entry. It does not receive Windows library objects, handles, raw\nprocess launch, a shell-string primitive, or direct clipboard/filesystem/screenshot\nAPIs. `ComputerAdapter` is the platform-neutral interface; the optional\n`WindowsUiAutomationAdapter` translates authorized semantic requests to Windows UI\nAutomation. Coordinate clicks are an explicitly labelled fallback tool rather than\nthe normal control path. Screenshot bytes stay in a trusted `ScreenshotStore`; tool\nresults expose only metadata and an opaque reference. Controlled terminal execution\nresolves a trusted command ID to a fixed executable and command family, uses an\nargument array with `shell=False`, and supports timeout and cancellation.\n\nPhase 7 adds a provider-neutral visual workflow above the computer tools:\n\n`OBSERVE -> UNDERSTAND -> GROUND -> ACT -> OBSERVE AGAIN -> VERIFY`\n\n`BrokeredDesktopObserver` obtains screenshots, windows, and optional accessibility\ntrees only through registered screen-read tools. A `VisionProvider` receives a\nscreenshot reference, objective, semantic tree, and prior observation and returns\nstructured suggestions. Trusted fusion assigns target IDs, validates DPI-aware\ngeometry, and fingerprints the current display. `VisualInteractionService`\nre-observes immediately before action, rejects stale or materially changed state,\nuses the existing brokered computer tool for the action, then obtains a new\nobservation for explicit success/failure/uncertain verification. Vision code has no\ndirect keyboard, mouse, window, or policy access.\n\nPhase 8 adds a separate one-shot camera boundary:\n\n`AI/planner -> camera.list/camera.capture -> PermissionBroker(camera.read) -> CameraController -> CameraProvider`\n\nThe controller owns device opening, bounded frame capture, visible inactive/opening/\nactive/error state, and `finally` cleanup. Camera tools never expose an unrestricted\nstream. Captured bytes are placed only in an expiring in-memory frame store by\ndefault; `CameraVisionBridge` passes an expiring reference to the existing\n`VisionProvider` and releases it after analysis. Camera image reasoning remains\nseparate from camera hardware and from permission decisions.\n\nPhase 9 adds an opt-in controlled application-manager boundary:\n\n`AI/planner -> typed application tool -> PermissionBroker -> policy + fresh trusted approval -> immutable plan -> provider/runtime -> Windows`\n\nInventory and package-search results are evidence, not authority. Trusted composition\ninjects an inventory provider, package provider, managed runtime, and ephemeral plan\nstore; none is registered in the default tool catalog. A package plan is immutable,\nexpires, and is consumed before the provider operation. Installation/update tools\nreceive `application.install` and the hard `software_installation` safety class, so\neven an allow policy requires a fresh trusted-user approval. The approval describes\nthe exact provider-issued package ID, source, publisher, and version. The runtime\naccepts a current `ApplicationRecord`, never a model executable/path, and can close\nonly processes it launched and tracks. Post-operation verification re-queries the\ninventory, checks identity/version/executable, and confirms launch capability.\n\nPhase 10 adds an advisory capability-gap boundary:\n\n`missing capability -> discover evidence -> explainable evaluation -> recommendation -> user/policy decision`\n\n`CapabilityGap` records the unmet task requirement and evidence. Provider-neutral\ndiscovery can read a trusted internal tool catalog, trusted plugin/integration/software\ncatalogs, or already-authorized controlled web research. Every candidate remains data:\nit is not a tool registration, installation plan, permission grant, setup action, or\nexecution request. External descriptions are isolated as untrusted hashed evidence;\nthey never become instructions. Rankings score functional fit, source quality,\nprivileges, maintenance, compatibility, reversibility, and testability with stable\nfactor explanations. A future tool adapter can be proposed only as a data-only\nspecification; generated source is neither written, imported, nor executed.\n\nPhase 11 adds a high-risk, proposal-and-test improvement boundary:\n\n`observe -> identify -> specify -> assess risk -> isolate -> modify -> gate -> evaluate -> propose`\n\n`ImprovementEngine` separates structured candidate reasoning, a data-only coding\nagent, trusted worktree creation and file application, dependency analysis,\nsandboxed test gates, independent security checking, protected regression\nevaluation, and proposal storage. The coding agent receives a bounded specification\nand safe evidence records, then returns typed text changes; it receives no filesystem,\ncommand, Git, permission, approval, merge, or deployment primitive. Trusted code\napplies those changes only to a generated detached worktree outside the clean\nproduction checkout and repeatedly verifies that production stayed at the same\nfull revision.\n\nA run may normally select no worthwhile improvement. A selected change must pass\nformat/lint, type, unit, integration, security, regression, and startup/health gates,\nplus the default-deny dependency guard. Protected evaluation compares the candidate\nwith a baseline captured before modification; generated tests alone cannot establish\nimprovement. Success produces only an expiring, fingerprinted\n`AWAITING_TRUSTED_APPROVAL` proposal with previous-known-good rollback metadata.\nPhase 11 has no autonomous approval, merge, push, installation, deployment, or\nproduction-write path. See `docs/autonomous-improvement.md`.\n\nPhase 12 adds repository-grounded project knowledge without creating a new\nauthorization path. Human-authored `docs/` and ADRs remain authoritative or\nhistorical sources; `knowledge/generated/project-index.json` is a disposable\ngenerated view with per-source hashes, Git revision, and generation time. The\nindexer derives components from package source and tools/permissions from the\ntrusted registry and enums. `KnowledgeStore` provides local lexical search and\nstale-source detection. Knowledge is context only: it cannot register tools,\ngrant permissions, execute actions, or rewrite historical decisions.\n\nPhase 13 adds a controlled system-test boundary:\n\n`trusted suite catalog -> controlled subprocess -> redacted evidence -> TestRun -> diagnosis`\n\nTest suites contain fixed executable/argument vectors, a project-relative working\ndirectory, timeout, output format, category, and hardware policy. `ControlledTestRunner`\ndoes not expose a model-selectable shell; unknown suites and scope escapes fail closed.\nStructured results and separate artifacts can inform Phase 11 evaluation, but test\nsuccess does not authorize an improvement, merge, deployment, installation, or any\nhost capability. Deterministic fake-provider workflow suites run in CI, while startup\nand hardware tests require explicit trusted/manual enablement. See\n`docs/system-testing.md`.\n\nPhase 14 adds four explicitly separate memory domains without adding authority:\n\n`bounded process-local conversation context | policy-gated SQLite user memory | compact SQLite action episodes | read-only Phase 12 project knowledge`\n\n`ConversationContextService` owns only bounded in-process context and optional\ntrusted summarization. `LongTermMemoryService` requires an explicit trusted policy\ndecision and user confirmation before persisting a user-sourced fact. `EpisodicMemoryService`\nretains compact completed-action outcomes instead of permission audit logs. `ProjectSystemMemory`\nqueries `KnowledgeStore` directly, retaining provenance/staleness without copying\nproject data into user memory. The durable SQLite store uses reviewed sequential\nmigrations, retention expiry, secret rejection, and user-facing inspection/deletion\noperations. Retrieval returns separate conversation, long-term, episodic, and system\nlists; untrusted historical content remains data, never instructions. See\n`docs/memory.md`.\n",
       "id": "docs:architecture",
       "kind": "documentation",
       "metadata": {
         "path": "docs/architecture.md"
       },
       "provenance": {
-        "generated_at": "2026-08-11T14:48:03.754693+00:00",
-        "revision": "c381f2e5a10054074afe127aac2af53a00533142",
+        "generated_at": "2026-08-11T15:13:03.257579+00:00",
+        "revision": null,
         "source_files": [
           "docs/architecture.md"
         ],
         "source_hashes": {
-          "docs/architecture.md": "86e1c0740754cc7f43d0f4485bb803d3ce10c19493f690f690ec5f2bd714e0e7"
+          "docs/architecture.md": "fd53fdd971bf8a311871dc82da9b4b0fbaf1dc363aff99b505b725573a9374e0"
         }
       },
       "summary": "Phase 0 establishes a local-first Python 3.12+ application with a small FastAPI health surface. The package boundaries are intentional: - `core` owns configuration, errors, logging, and cross-cutting primitives. - `ai/providers` contains provider interfaces and future adapters. Provider SDKs must not leak into core orchestration. - `tools` is the only future entry point for capabilities that may a",
@@ -2399,8 +2503,8 @@
         "path": "docs/autonomous-improvement.md"
       },
       "provenance": {
-        "generated_at": "2026-08-11T14:48:03.754693+00:00",
-        "revision": "c381f2e5a10054074afe127aac2af53a00533142",
+        "generated_at": "2026-08-11T15:13:03.257579+00:00",
+        "revision": null,
         "source_files": [
           "docs/autonomous-improvement.md"
         ],
@@ -2420,8 +2524,8 @@
         "path": "docs/camera-support.md"
       },
       "provenance": {
-        "generated_at": "2026-08-11T14:48:03.754693+00:00",
-        "revision": "c381f2e5a10054074afe127aac2af53a00533142",
+        "generated_at": "2026-08-11T15:13:03.257579+00:00",
+        "revision": null,
         "source_files": [
           "docs/camera-support.md"
         ],
@@ -2441,8 +2545,8 @@
         "path": "docs/capability-discovery.md"
       },
       "provenance": {
-        "generated_at": "2026-08-11T14:48:03.754693+00:00",
-        "revision": "c381f2e5a10054074afe127aac2af53a00533142",
+        "generated_at": "2026-08-11T15:13:03.257579+00:00",
+        "revision": null,
         "source_files": [
           "docs/capability-discovery.md"
         ],
@@ -2462,8 +2566,8 @@
         "path": "docs/computer-capabilities.md"
       },
       "provenance": {
-        "generated_at": "2026-08-11T14:48:03.754693+00:00",
-        "revision": "c381f2e5a10054074afe127aac2af53a00533142",
+        "generated_at": "2026-08-11T15:13:03.257579+00:00",
+        "revision": null,
         "source_files": [
           "docs/computer-capabilities.md"
         ],
@@ -2476,24 +2580,45 @@
     },
     {
       "authority": "authoritative",
-      "content": "# Development\n\nJARVIS targets Python 3.12+ and Windows first. Create a virtual environment and install the pinned baseline:\n\n```powershell\npython -m venv .venv\n.\\.venv\\Scripts\\Activate.ps1\npython -m pip install -r requirements-dev.lock\n\nProduction/runtime installation can use `requirements.lock`; development and test tools are isolated in `requirements-dev.lock`.\n```\n\nConfiguration precedence is: process environment variables, then values in `.env`, then typed defaults in `jarvis/core/config.py`. Variables use the `JARVIS_` prefix. Copy `.env.example` to `.env` for local overrides; never commit `.env` or secrets.\n\nRun the health-only service with `python -m uvicorn jarvis.api:app --reload`. Run the full quality gate with `python scripts/quality.py`. It checks formatting, linting, static typing, tests, and the 90% coverage threshold.\n\n## Optional Phase 6 Windows integration\n\nThe controlled computer layer is not enabled by the default catalog. To install its\noptional Windows UI Automation dependencies for a manually configured, brokered\nintegration, run `python -m pip install -e \".[windows]\"`. Real desktop checks are\nopt-in: set `JARVIS_WINDOWS_INTEGRATION=true` and run\n`python -m pytest -m windows_integration`. Run them only on a dedicated interactive\nWindows desktop with a trusted application and policy configuration. The ordinary\nCI suite uses mocks and does not claim a desktop action was performed.\n\n## Phase 2 orchestration\n\nPhase 2 is a core service, not an enabled desktop workflow yet. `AgentOrchestrator` requires an injected `TaskStore`, planner, tool registry, executor, observer, verifier, response generator, and finite limits. Production composition intentionally provides no OS-capable tools. Use deterministic fake planners and tools in tests while adding new capability types.\n\nThe relevant safeguards are configured through `JARVIS_AGENT_MAX_STEPS`, `JARVIS_AGENT_TIMEOUT_SECONDS`, and `JARVIS_AGENT_MAX_REPLANS`. Cancellation persists to the task store and interrupts an active asynchronous tool call. Any future persistent store must implement `TaskStore` without moving lifecycle state transitions out of the orchestrator.\n\n## Phase 11 improvement adapters\n\nPhase 11 has no default autonomous runner. Compose it only in a trusted development\nor review process, with the production checkout and a dedicated worktree parent as\ndisjoint canonical directories. The production checkout must be clean and pinned to\nthe reviewed full revision. Never put the workspace parent under the repository,\nshared Git directory, a symlink, or a junction; never give that path, a revision, or\nGit arguments to model output.\n\nThe coding adapter must implement `CodingAgent` as a data-only change proposer. It\nmust not receive a path object for production, an open file, subprocess/shell API,\nGit client, network client, credentials, permission broker, approval service, or\napplication container. All changes pass through `TrustedWorkspaceChangeApplier`.\nDo not extend the writable control-path set to include `.git`, workflows, or the\nquality script, and do not reinterpret generated prose as a path, command, policy,\ngate definition, dependency exception, or approval.\n\nExecutable gates require host-owned absolute executables, fixed argument arrays,\ntimeouts, full process-tree cancellation, and a concrete `SandboxedProcessAdapter`\nthat enforces every attested property. The repository intentionally has no permissive\nin-process implementation. Fake adapters are appropriate for deterministic unit\ntests but must never be used to justify a real proposal. A production security gate\nshould compose deeper static/dependency scanning in addition to the built-in minimum\npreflight.\n\nDependency exceptions are operator-reviewed configuration bound to exact before and\nafter manifest digests, package records, risk analysis, and reversibility. Do not\nallow names, version ranges, registries, or coding-model explanations as wildcard\nexceptions. Phase 11 does not install or download dependencies.\n\nTo exercise the worktree and sandbox integration manually, use a disposable clone,\nan empty sibling workspace directory, no credentials or production secrets, disabled\nnetwork, strict CPU/memory/disk/process limits, and a non-production account. Capture\nthe initial full revision/status, run one bounded proposal cycle, and confirm the\noriginal revision and status are identical afterward. Report Git/worktree and\nsandbox evidence separately from fake-adapter CI evidence. Do not approve, merge,\npush, install, restart, or deploy as part of this procedure.\n\n## Phase 1 manual smoke test\n\n1. Install [Ollama](https://ollama.com/) for Windows, then run `ollama pull llama3.2:3b`. Ollama normally starts its local server automatically; if it is not running, use `ollama serve` in a separate terminal.\n2. Copy `.env.example` to `.env`. Set `JARVIS_AI_MODEL` to a locally pulled model and leave `JARVIS_AI_ENDPOINT=http://127.0.0.1:11434` unless Ollama is configured differently.\n3. Install the desktop client with `python -m pip install -e \".[desktop]\"`, then start it with `python -m jarvis.desktop`.\n4. Send `Jarvis, hoeveel is 25 procent van 800?`. The expected response is 200 (or an equivalent explanation).\n5. For microphone input, install `python -m pip install -e \".[speech]\"`, set `JARVIS_STT_ENABLED=true`, and restart JARVIS. Leave `JARVIS_STT_DEVICE` blank to use the Windows default input, or set it to an exact numeric device ID from `python -c \"import sounddevice as sd; print(sd.query_devices())\"`. `JARVIS_STT_COMPUTE_DEVICE=cpu` and `JARVIS_STT_COMPUTE_TYPE=int8` are the safe Windows defaults; set CUDA only on a machine with a matching CUDA runtime. Click **Start microphone**, speak, then click **Stop microphone**. The device is open only between those clicks.\n6. For spoken responses, install the same speech extra, set `JARVIS_TTS_ENABLED=true`, optionally set `JARVIS_TTS_VOICE`, and restart. A completed text response should play through the configured Windows voice.\n7. Disable either feature by setting its corresponding `JARVIS_STT_ENABLED` or `JARVIS_TTS_ENABLED` value to `false`; restart the app. No raw recordings are written to disk.\n",
+      "content": "# Development\n\nJARVIS targets Python 3.12+ and Windows first. Create a virtual environment and install the pinned baseline:\n\n```powershell\npython -m venv .venv\n.\\.venv\\Scripts\\Activate.ps1\npython -m pip install -r requirements-dev.lock\n\nProduction/runtime installation can use `requirements.lock`; development and test tools are isolated in `requirements-dev.lock`.\n```\n\nConfiguration precedence is: process environment variables, then values in `.env`, then typed defaults in `jarvis/core/config.py`. Variables use the `JARVIS_` prefix. Copy `.env.example` to `.env` for local overrides; never commit `.env` or secrets.\n\nRun the health-only service with `python -m uvicorn jarvis.api:app --reload`. Run the full quality gate with `python scripts/quality.py`. It checks formatting, linting, static typing, tests, and the 90% coverage threshold.\n\n## Optional Phase 6 Windows integration\n\nThe controlled computer layer is not enabled by the default catalog. To install its\noptional Windows UI Automation dependencies for a manually configured, brokered\nintegration, run `python -m pip install -e \".[windows]\"`. Real desktop checks are\nopt-in: set `JARVIS_WINDOWS_INTEGRATION=true` and run\n`python -m pytest -m windows_integration`. Run them only on a dedicated interactive\nWindows desktop with a trusted application and policy configuration. The ordinary\nCI suite uses mocks and does not claim a desktop action was performed.\n\n## Phase 2 orchestration\n\nPhase 2 is a core service, not an enabled desktop workflow yet. `AgentOrchestrator` requires an injected `TaskStore`, planner, tool registry, executor, observer, verifier, response generator, and finite limits. Production composition intentionally provides no OS-capable tools. Use deterministic fake planners and tools in tests while adding new capability types.\n\nThe relevant safeguards are configured through `JARVIS_AGENT_MAX_STEPS`, `JARVIS_AGENT_TIMEOUT_SECONDS`, and `JARVIS_AGENT_MAX_REPLANS`. Cancellation persists to the task store and interrupts an active asynchronous tool call. Any future persistent store must implement `TaskStore` without moving lifecycle state transitions out of the orchestrator.\n\n## Phase 11 improvement adapters\n\nPhase 11 has no default autonomous runner. Compose it only in a trusted development\nor review process, with the production checkout and a dedicated worktree parent as\ndisjoint canonical directories. The production checkout must be clean and pinned to\nthe reviewed full revision. Never put the workspace parent under the repository,\nshared Git directory, a symlink, or a junction; never give that path, a revision, or\nGit arguments to model output.\n\nThe coding adapter must implement `CodingAgent` as a data-only change proposer. It\nmust not receive a path object for production, an open file, subprocess/shell API,\nGit client, network client, credentials, permission broker, approval service, or\napplication container. All changes pass through `TrustedWorkspaceChangeApplier`.\nDo not extend the writable control-path set to include `.git`, workflows, or the\nquality script, and do not reinterpret generated prose as a path, command, policy,\ngate definition, dependency exception, or approval.\n\nExecutable gates require host-owned absolute executables, fixed argument arrays,\ntimeouts, full process-tree cancellation, and a concrete `SandboxedProcessAdapter`\nthat enforces every attested property. The repository intentionally has no permissive\nin-process implementation. Fake adapters are appropriate for deterministic unit\ntests but must never be used to justify a real proposal. A production security gate\nshould compose deeper static/dependency scanning in addition to the built-in minimum\npreflight.\n\nDependency exceptions are operator-reviewed configuration bound to exact before and\nafter manifest digests, package records, risk analysis, and reversibility. Do not\nallow names, version ranges, registries, or coding-model explanations as wildcard\nexceptions. Phase 11 does not install or download dependencies.\n\nTo exercise the worktree and sandbox integration manually, use a disposable clone,\nan empty sibling workspace directory, no credentials or production secrets, disabled\nnetwork, strict CPU/memory/disk/process limits, and a non-production account. Capture\nthe initial full revision/status, run one bounded proposal cycle, and confirm the\noriginal revision and status are identical afterward. Report Git/worktree and\nsandbox evidence separately from fake-adapter CI evidence. Do not approve, merge,\npush, install, restart, or deploy as part of this procedure.\n\n## Phase 14 memory storage\n\nCompose `SQLiteMemoryStore` with an application-owned local path outside the source\ncheckout and an authenticated user boundary. Run its reviewed migrations when the\napplication initializes; do not place database files, exports, or backup copies in\nGit. Persist a long-term candidate only through `LongTermMemoryService`, after an\nexplicit user confirmation and allow decision. Use `EpisodicMemoryService` for\ncompact completed task evidence, not the permission audit sink. Call the provided\ninspection/deletion/retention-cleanup operations from trusted UI/API code only.\n\nNever send tokens, passwords, cookies, or `.env` values to this store. Historical\nweb/tool content must retain its untrusted-data label on retrieval. For a temporary\nmigration check, run `python -m pytest tests/test_memory.py -q`; the tests create and\nremove only temporary databases.\n\n## Phase 1 manual smoke test\n\n1. Install [Ollama](https://ollama.com/) for Windows, then run `ollama pull llama3.2:3b`. Ollama normally starts its local server automatically; if it is not running, use `ollama serve` in a separate terminal.\n2. Copy `.env.example` to `.env`. Set `JARVIS_AI_MODEL` to a locally pulled model and leave `JARVIS_AI_ENDPOINT=http://127.0.0.1:11434` unless Ollama is configured differently.\n3. Install the desktop client with `python -m pip install -e \".[desktop]\"`, then start it with `python -m jarvis.desktop`.\n4. Send `Jarvis, hoeveel is 25 procent van 800?`. The expected response is 200 (or an equivalent explanation).\n5. For microphone input, install `python -m pip install -e \".[speech]\"`, set `JARVIS_STT_ENABLED=true`, and restart JARVIS. Leave `JARVIS_STT_DEVICE` blank to use the Windows default input, or set it to an exact numeric device ID from `python -c \"import sounddevice as sd; print(sd.query_devices())\"`. `JARVIS_STT_COMPUTE_DEVICE=cpu` and `JARVIS_STT_COMPUTE_TYPE=int8` are the safe Windows defaults; set CUDA only on a machine with a matching CUDA runtime. Click **Start microphone**, speak, then click **Stop microphone**. The device is open only between those clicks.\n6. For spoken responses, install the same speech extra, set `JARVIS_TTS_ENABLED=true`, optionally set `JARVIS_TTS_VOICE`, and restart. A completed text response should play through the configured Windows voice.\n7. Disable either feature by setting its corresponding `JARVIS_STT_ENABLED` or `JARVIS_TTS_ENABLED` value to `false`; restart the app. No raw recordings are written to disk.\n",
       "id": "docs:development",
       "kind": "documentation",
       "metadata": {
         "path": "docs/development.md"
       },
       "provenance": {
-        "generated_at": "2026-08-11T14:48:03.754693+00:00",
-        "revision": "c381f2e5a10054074afe127aac2af53a00533142",
+        "generated_at": "2026-08-11T15:13:03.257579+00:00",
+        "revision": null,
         "source_files": [
           "docs/development.md"
         ],
         "source_hashes": {
-          "docs/development.md": "bc3b3aee58d4edddfcf3979b889343e0cc3ecb8b8ee14e0693a1ba0ed2653642"
+          "docs/development.md": "047fc31a15db0b749b6fabe626f4331d4ca41dc375bfeb27b9830017f3559b45"
         }
       },
       "summary": "JARVIS targets Python 3.12+ and Windows first. Create a virtual environment and install the pinned baseline: ```powershell python -m venv .venv .\\.venv\\Scripts\\Activate.ps1 python -m pip install -r requirements-dev.lock Production/runtime installation can use `requirements.lock`; development and test tools are isolated in `requirements-dev.lock`. ``` Configuration precedence is: process environmen",
       "title": "Development"
+    },
+    {
+      "authority": "authoritative",
+      "content": "# Memory model\n\nPhase 14 keeps four different kinds of memory separate. Memory is context, never a\npermission grant, tool registration, approval, or executable instruction.\n\n## What is persisted\n\n`SQLiteMemoryStore` is a local durable store with ordered application migrations in\n`jarvis.memory.store`. Its caller explicitly chooses the database path; the library\ndoes not create a hidden repository database or upload data. Each record has a UUID,\ndurable type, safe content and JSON data, UTC creation/update/access times, source\nprovenance, optional confidence, sensitivity, retention policy, and computed expiry.\nThe store rejects malformed migrations, duplicate IDs, expired records, and\nsecret-like content. It has inspect, individual-delete, category-delete, and\nexpiry-cleanup operations.\n\nOnly two categories enter this database:\n\n- **Long-term user memory** contains a confirmed, user-sourced, sufficiently\n  confident preference or fact. `LongTermRetentionPolicy` evaluates a candidate first\n  and emits a machine-readable allow/deny reason. Casual conversation, tool/web data,\n  low-confidence candidates, unconfirmed candidates, and untrusted sources are denied.\n- **Episodic memory** contains a compact completed task record: objective, bounded tool\n  actions, outcome, errors, and relevant evidence. It is not a copy of the permission\n  audit trail, raw transcripts, screenshots, or full tool output.\n\nRetention is explicit: 30 days, one year, or until the user deletes it. Expiry is\nbound to the selected policy and enforced on retrieval and cleanup.\n\n## What is not persisted here\n\n- **Short-term conversation context** is a bounded process-local\n  `ConversationContextService`. It trims old context and can use an explicit trusted\n  summarizer seam. `clear(conversation_id)` drops it immediately; it never calls the\n  SQLite store. The existing chat service remains process-local as well.\n- **System/project memory** is a read-only `ProjectSystemMemory` adapter around the\n  Phase 12 `KnowledgeStore`. It queries the generated project index and retains its\n  source hashes/stale flag; it never copies source knowledge into user memory.\n- API tokens, passwords, authentication cookies, and other secret-like values are\n  rejected. They require a dedicated platform or application secret store, which is\n  outside this memory subsystem.\n\n## Provenance, trust, and retrieval\n\nEvery durable record records source category/reference/receipt time and whether its\ncontent was untrusted. Historical web or tool text is returned only as labelled data\n(`content_is_untrusted_data`); it must not be interpreted as instructions or used to\nalter policy, tools, prompts, approvals, or execution.\n\n`MemoryRetrievalService` returns four separate result lists: `conversation`,\n`long_term`, `episodic`, and `system`. It uses deterministic local lexical matching,\nnot a vector database. Callers must preserve these source/type labels when preparing\ncontext for an AI provider or UI.\n\n## User privacy controls\n\nTrusted application/UI code must authenticate the requesting user before exposing the\nstore, then may call `get`/`list` to inspect, `delete` for one record,\n`delete_category` for a durable category, `ConversationContextService.clear` for a\nconversation, and `cleanup_expired` for scheduled retention cleanup. No model text\ncan directly call these methods in the agent tool path; a future UI/API must add its\nown authenticated ownership checks before multi-user use.\n\n## Updating and testing\n\nMigrations run when a `SQLiteMemoryStore` is opened and can be invoked explicitly by\n`apply_migrations()`. New migrations must be ordered, reviewed Python constants and\nmust include a temporary-database test. Run the focused deterministic suite with:\n\n```powershell\n.\\.venv\\Scripts\\python.exe -m pytest tests/test_memory.py -q\n```\n\nThen run `python scripts/quality.py`. The tests use temporary SQLite databases and\nfake clocks only; they do not persist user data, contact a network, invoke tools, or\nactivate hardware.\n",
+      "id": "docs:memory",
+      "kind": "documentation",
+      "metadata": {
+        "path": "docs/memory.md"
+      },
+      "provenance": {
+        "generated_at": "2026-08-11T15:13:03.257579+00:00",
+        "revision": null,
+        "source_files": [
+          "docs/memory.md"
+        ],
+        "source_hashes": {
+          "docs/memory.md": "aedc7472de9f77e307c4148cab4a43f9a561ec8252d06a4406428e76538abd5c"
+        }
+      },
+      "summary": "Phase 14 keeps four different kinds of memory separate. Memory is context, never a permission grant, tool registration, approval, or executable instruction. `SQLiteMemoryStore` is a local durable store with ordered application migrations in `jarvis.memory.store`. Its caller explicitly chooses the database path; the library does not create a hidden repository database or upload data. Each record ha",
+      "title": "Memory model"
     },
     {
       "authority": "authoritative",
@@ -2504,8 +2629,8 @@
         "path": "docs/permission-model.md"
       },
       "provenance": {
-        "generated_at": "2026-08-11T14:48:03.754693+00:00",
-        "revision": "c381f2e5a10054074afe127aac2af53a00533142",
+        "generated_at": "2026-08-11T15:13:03.257579+00:00",
+        "revision": null,
         "source_files": [
           "docs/permission-model.md"
         ],
@@ -2525,8 +2650,8 @@
         "path": "docs/security-principles.md"
       },
       "provenance": {
-        "generated_at": "2026-08-11T14:48:03.754693+00:00",
-        "revision": "c381f2e5a10054074afe127aac2af53a00533142",
+        "generated_at": "2026-08-11T15:13:03.257579+00:00",
+        "revision": null,
         "source_files": [
           "docs/security-principles.md"
         ],
@@ -2546,8 +2671,8 @@
         "path": "docs/system-testing.md"
       },
       "provenance": {
-        "generated_at": "2026-08-11T14:48:03.754693+00:00",
-        "revision": "c381f2e5a10054074afe127aac2af53a00533142",
+        "generated_at": "2026-08-11T15:13:03.257579+00:00",
+        "revision": null,
         "source_files": [
           "docs/system-testing.md"
         ],
@@ -2560,20 +2685,20 @@
     },
     {
       "authority": "authoritative",
-      "content": "# Testing\n\nTests live under `tests/` and use `pytest`. Unit and fake-provider integration tests cover typed settings, health/version, AI streaming, failed Ollama connectivity, process-local conversation history, cancellation, STT recording/transcription lifecycle, TTS lifecycle, and the UI-facing application service. Phase 2 tests add one-step and multi-step task success, tool failure, verification failure, replanning, step limits, cancellation, timeout, malformed plan payloads, and unavailable capabilities. The CI and local quality command run formatting, linting, mypy, tests, and coverage.\n\nPhase 3 tool tests cover successful calculator execution, strict unknown-field and type rejection, timeout, cancellation, unavailable weather, structured internal failure, typed local-time output, and orchestration of `25 procent van 800` through the registered calculator tool.\n\nNew code should test normal behavior and security-relevant failure paths. Tests must not require network access, machine-specific paths, cloud credentials, microphones, speakers, Ollama, or privileged host capabilities. Desktop and physical audio hardware smoke tests remain manual.\n\nPhase 5 security tests use a non-mutating privileged probe tool. They cover fail-\nclosed unknown/malformed permissions and tools, missing/disabled policy, filesystem\ntraversal and scope/link escape, trusted approval data, expiry, one-time replay,\nargument mutation, model-forged grants, cancellation, deny-once, bounded remembered\ngrants, hard-safety overrides, reserved tool entry points, and secret-safe audit\nevidence. Link-escape coverage skips only when the test identity cannot create a\nWindows symlink/junction.\n\nPhase 6 deterministic tests use mock computer, filesystem, screenshot, and command\nadapters. They cover broker denial before adapter invocation, catalogued application\nlaunch, semantic input, labelled mouse fallback, separate clipboard permissions,\nfilesystem scope denial, secure screenshot-reference lifecycle, command timeout,\nand cancellation. Real Windows desktop tests are marked `windows_integration` and\nare skipped unless `JARVIS_WINDOWS_INTEGRATION=true`; they are not part of ordinary\nCI and must never be reported as a successful UI interaction when skipped.\n\nPhase 7 uses static screenshot-reference and accessibility-tree fixtures with mock\ncomputer adapters and a provider stub. The deterministic suite covers target finding,\nsemantic/vision agreement, dimensions and DPI conversion, screenshot-content stale\nstate, verification success/failure/uncertainty, broker denial after identifying a\nsensitive Send target, and a capped revised retry loop. No test treats a successful\ntool result as visual success without a new observation and verification result.\n\nPhase 8 camera tests use a mock provider/session exclusively in CI. They cover no\ndevice, permission denial before provider open, successful one-shot capture,\nbusy/failure state, timeout and cancellation cleanup, shutdown cleanup, serialized\nconcurrent access, ephemeral frame release, and handoff to the existing vision\nprovider. Real camera hardware is not claimed or exercised by these tests.\n\nPhase 9 application-manager tests use fake inventory, package-provider, and runtime\nadapters exclusively. They cover already-installed idempotency, ambiguous/missing\npackage search, denied trusted approval before provider invocation, provider failure,\npost-install identity mismatch, independent identity/version/launch verification,\nseparate updates with downgrade rejection, and launch failure. Windows registry,\nwinget, and process integration are optional manual checks; CI never installs or\nupdates software.\n\nPhase 10 discovery tests use static catalog and research-evidence providers only.\nThey cover no candidates, one clear candidate, conflicting/ranked candidates,\nprompt-injection text isolated as a digest, excessive requested permissions,\nincompatible platform fit, provenance retention, a trusted internal manifest catalog,\nand data-only future-adapter scaffolding. No test performs a web fetch, registration,\ninstallation, setup, API call, or generated-code execution.\n\nPhase 11 deterministic tests use fake Git/worktree, coding-agent, sandbox-process,\nprotected-metric, and proposal-store adapters. They cover structured candidate\ngeneration, the normal no-worthwhile-improvement outcome, explainable prioritization\nand trusted risk escalation, detached-worktree ownership, rejection of production or\nout-of-boundary writes, failed or missing gates, evaluation regression, default-deny\ndependency changes, external prompt-injection content isolation, and the mandatory\nawaiting-trusted-approval proposal state with known-good rollback metadata.\nAdversarial cases also cover ambiguous/traversing paths, forged handles, nested gate\nconfiguration and baseline-test mutation, malformed enum directions, unapproved\nsetup/requirements manifests, no-op and oversized change sets, incomplete sandbox\nattestation, cancellation, and proposal task/workspace/expiry fingerprint tampering.\n\nThese tests do not claim that a real coding model improved JARVIS, that a Windows Git\nworktree resisted an OS-level attack, that a concrete process sandbox enforced its\nattestation, or that merge/deployment occurred. Real integration testing must use a\ndedicated disposable clone and workspace parent, a reviewed Git executable, no\ncredentials, no production secrets, network disabled, strict resource limits, and a\nplatform sandbox capable of denying production/shared-Git access. Verify the\nproduction revision and status before and after; retain evidence digests, then remove\nthe disposable environment through a trusted maintenance procedure. No real\nmerge/deployment approval test belongs in Phase 11.\n\nPhase 13 adds controlled system-level self-testing above individual pytest cases.\n`ControlledTestRunner` accepts only catalogued executable/argument vectors with\nproject-scoped working directories, timeout/cancellation, capped redacted artifacts,\nand a machine-readable `TestRun`. Runner tests cover success, assertion failure,\nlaunch crash, timeout, malformed structured output, cancellation, partial suites,\nhardware gating, and path/unknown-suite rejection. Deterministic workflow evaluations\nuse fake planners/tools for calculator, approval pause, bounded retry, cancellation,\nand verification failure. Optional startup smoke coverage uses fake process and health\nadapters in CI; real localhost startup and hardware/manual suites are not claimed as\nexecuted. See `docs/system-testing.md`.\n",
+      "content": "# Testing\n\nTests live under `tests/` and use `pytest`. Unit and fake-provider integration tests cover typed settings, health/version, AI streaming, failed Ollama connectivity, process-local conversation history, cancellation, STT recording/transcription lifecycle, TTS lifecycle, and the UI-facing application service. Phase 2 tests add one-step and multi-step task success, tool failure, verification failure, replanning, step limits, cancellation, timeout, malformed plan payloads, and unavailable capabilities. The CI and local quality command run formatting, linting, mypy, tests, and coverage.\n\nPhase 3 tool tests cover successful calculator execution, strict unknown-field and type rejection, timeout, cancellation, unavailable weather, structured internal failure, typed local-time output, and orchestration of `25 procent van 800` through the registered calculator tool.\n\nNew code should test normal behavior and security-relevant failure paths. Tests must not require network access, machine-specific paths, cloud credentials, microphones, speakers, Ollama, or privileged host capabilities. Desktop and physical audio hardware smoke tests remain manual.\n\nPhase 5 security tests use a non-mutating privileged probe tool. They cover fail-\nclosed unknown/malformed permissions and tools, missing/disabled policy, filesystem\ntraversal and scope/link escape, trusted approval data, expiry, one-time replay,\nargument mutation, model-forged grants, cancellation, deny-once, bounded remembered\ngrants, hard-safety overrides, reserved tool entry points, and secret-safe audit\nevidence. Link-escape coverage skips only when the test identity cannot create a\nWindows symlink/junction.\n\nPhase 6 deterministic tests use mock computer, filesystem, screenshot, and command\nadapters. They cover broker denial before adapter invocation, catalogued application\nlaunch, semantic input, labelled mouse fallback, separate clipboard permissions,\nfilesystem scope denial, secure screenshot-reference lifecycle, command timeout,\nand cancellation. Real Windows desktop tests are marked `windows_integration` and\nare skipped unless `JARVIS_WINDOWS_INTEGRATION=true`; they are not part of ordinary\nCI and must never be reported as a successful UI interaction when skipped.\n\nPhase 7 uses static screenshot-reference and accessibility-tree fixtures with mock\ncomputer adapters and a provider stub. The deterministic suite covers target finding,\nsemantic/vision agreement, dimensions and DPI conversion, screenshot-content stale\nstate, verification success/failure/uncertainty, broker denial after identifying a\nsensitive Send target, and a capped revised retry loop. No test treats a successful\ntool result as visual success without a new observation and verification result.\n\nPhase 8 camera tests use a mock provider/session exclusively in CI. They cover no\ndevice, permission denial before provider open, successful one-shot capture,\nbusy/failure state, timeout and cancellation cleanup, shutdown cleanup, serialized\nconcurrent access, ephemeral frame release, and handoff to the existing vision\nprovider. Real camera hardware is not claimed or exercised by these tests.\n\nPhase 9 application-manager tests use fake inventory, package-provider, and runtime\nadapters exclusively. They cover already-installed idempotency, ambiguous/missing\npackage search, denied trusted approval before provider invocation, provider failure,\npost-install identity mismatch, independent identity/version/launch verification,\nseparate updates with downgrade rejection, and launch failure. Windows registry,\nwinget, and process integration are optional manual checks; CI never installs or\nupdates software.\n\nPhase 10 discovery tests use static catalog and research-evidence providers only.\nThey cover no candidates, one clear candidate, conflicting/ranked candidates,\nprompt-injection text isolated as a digest, excessive requested permissions,\nincompatible platform fit, provenance retention, a trusted internal manifest catalog,\nand data-only future-adapter scaffolding. No test performs a web fetch, registration,\ninstallation, setup, API call, or generated-code execution.\n\nPhase 11 deterministic tests use fake Git/worktree, coding-agent, sandbox-process,\nprotected-metric, and proposal-store adapters. They cover structured candidate\ngeneration, the normal no-worthwhile-improvement outcome, explainable prioritization\nand trusted risk escalation, detached-worktree ownership, rejection of production or\nout-of-boundary writes, failed or missing gates, evaluation regression, default-deny\ndependency changes, external prompt-injection content isolation, and the mandatory\nawaiting-trusted-approval proposal state with known-good rollback metadata.\nAdversarial cases also cover ambiguous/traversing paths, forged handles, nested gate\nconfiguration and baseline-test mutation, malformed enum directions, unapproved\nsetup/requirements manifests, no-op and oversized change sets, incomplete sandbox\nattestation, cancellation, and proposal task/workspace/expiry fingerprint tampering.\n\nThese tests do not claim that a real coding model improved JARVIS, that a Windows Git\nworktree resisted an OS-level attack, that a concrete process sandbox enforced its\nattestation, or that merge/deployment occurred. Real integration testing must use a\ndedicated disposable clone and workspace parent, a reviewed Git executable, no\ncredentials, no production secrets, network disabled, strict resource limits, and a\nplatform sandbox capable of denying production/shared-Git access. Verify the\nproduction revision and status before and after; retain evidence digests, then remove\nthe disposable environment through a trusted maintenance procedure. No real\nmerge/deployment approval test belongs in Phase 11.\n\nPhase 13 adds controlled system-level self-testing above individual pytest cases.\n`ControlledTestRunner` accepts only catalogued executable/argument vectors with\nproject-scoped working directories, timeout/cancellation, capped redacted artifacts,\nand a machine-readable `TestRun`. Runner tests cover success, assertion failure,\nlaunch crash, timeout, malformed structured output, cancellation, partial suites,\nhardware gating, and path/unknown-suite rejection. Deterministic workflow evaluations\nuse fake planners/tools for calculator, approval pause, bounded retry, cancellation,\nand verification failure. Optional startup smoke coverage uses fake process and health\nadapters in CI; real localhost startup and hardware/manual suites are not claimed as\nexecuted. See `docs/system-testing.md`.\n\nPhase 14 memory tests use temporary SQLite databases and fake clocks. They cover\nordered migrations, write/read provenance, retention cleanup, individual/category\ndeletion, explicit long-term eligibility, secret rejection, compact episodic records,\nbounded conversation summary/clear lifecycle, source-separated retrieval, stale-aware\nproject knowledge handoff, untrusted remembered-content labels, and malformed\nmigration rejection. They do not persist real user data or invoke a secret store.\n",
       "id": "docs:testing",
       "kind": "documentation",
       "metadata": {
         "path": "docs/testing.md"
       },
       "provenance": {
-        "generated_at": "2026-08-11T14:48:03.754693+00:00",
-        "revision": "c381f2e5a10054074afe127aac2af53a00533142",
+        "generated_at": "2026-08-11T15:13:03.257579+00:00",
+        "revision": null,
         "source_files": [
           "docs/testing.md"
         ],
         "source_hashes": {
-          "docs/testing.md": "082d33495c8e56119b9f8aaebb07d163da1db35b786e04a00d2015eb25d71299"
+          "docs/testing.md": "ced72e6f173fce2b9bb7dfd34dc963a6bfade47d7b6367e15d86119079f09cdc"
         }
       },
       "summary": "Tests live under `tests/` and use `pytest`. Unit and fake-provider integration tests cover typed settings, health/version, AI streaming, failed Ollama connectivity, process-local conversation history, cancellation, STT recording/transcription lifecycle, TTS lifecycle, and the UI-facing application service. Phase 2 tests add one-step and multi-step task success, tool failure, verification failure, ",
@@ -2581,20 +2706,20 @@
     },
     {
       "authority": "authoritative",
-      "content": "# Phase 5 permission-boundary threat model\n\n## Assets and security goals\n\nJARVIS must protect user files, credentials, private sensor data, clipboard data,\napplications, network destinations, and host availability. Untrusted model output\nmust never create, widen, remember, or approve authority. A tool may execute a\nprivileged action only after trusted code has validated its arguments, described\nthe exact action, evaluated policy, and (when required) matched a live trusted-user\napproval to the same task, tool, permission, scope, and argument fingerprint.\n\n## Capability inventory\n\nCurrent implemented capability contracts are:\n\n- calculator and local-time agent tools, which are non-privileged;\n- an unavailable weather placeholder, which performs no network request;\n- Ollama HTTP transport (`network.request`), selected by trusted composition code;\n- on-demand microphone capture (`microphone.read`), started by a direct UI gesture;\n- local speech synthesis/audio output, which is not an input or host-mutation\n  permission in the Phase 5 taxonomy.\n- controlled, opt-in computer tools for window discovery, catalogued application\n  launch, focus, semantic text entry, explicit mouse fallback, screen capture,\n  clipboard, scoped filesystem read, and catalogued terminal commands. They are\n  not registered in the default runtime catalog.\n\nThe Ollama and microphone paths are provider/UI flows, not planner-selected tools.\nThey remain separately bounded by trusted configuration and an explicit user\ngesture. If either becomes planner-selectable it must first be converted to a\nbrokered tool.\n\nPlanned or reserved privileged capabilities are filesystem write, camera capture,\napplication installation, arbitrary network requests, source-code modification,\npersistent memory storage, and system power control. Computer input uses its own\n`computer.input` permission. Each capability requires a granular permission;\nthere is no aggregate computer-access permission.\n\nDeveloper-only subprocess use in `scripts/quality.py` is outside the running\nassistant and is not an agent capability.\n\n## Adversaries and abuse cases\n\nThe primary adversary is malicious or confused model output, including prompt\ninjection embedded in files, web content, tool output, or user text. It may name an\nunknown permission or tool, forge an approval claim, alter arguments after a user\nreview, replay an approval, request an over-broad scope, use path traversal or a\nlink/junction escape, or disguise a destructive command as an ordinary action.\n\nOther failures include buggy tools under-declaring permissions, stale or disabled\npolicy, races around cancellation/expiry, approval API misuse, secret leakage in\naudit logs, and a developer accidentally calling a privileged implementation\nwithout the broker.\n\nPhase 6 additionally considers UI spoofing/incorrect-window targeting, raw input\nused in place of semantic controls, application-ID or command-ID substitution,\nshell interpretation, unbounded child processes, screenshots or clipboard data\nleaking through results, and filesystem paths escaping approved roots after policy\nevaluation.\n\nPhase 7 adds adversarial visual content, provider hallucination, accessibility/vision\ndisagreement, stale screenshots, race conditions between observation and input,\nwindow switching, coordinate/DPI confusion, and visual recognition of sensitive\ncontrols. A model or provider may describe a button but must not turn that description\ninto authority or a verified outcome.\n\nPhase 9 adds package-search poisoning, package/source substitution, stale or replayed\ninstall plans, malicious registry/display-icon entries, version downgrade, a package\nmanager interpreting a shell string, verification that trusts package-manager output,\nand closing an arbitrary user process. Package catalog and inventory data are treated\nas evidence: only trusted composition chooses providers, only immutable plans can\nreach a provider, and post-operation success comes from an independent re-query.\n\nPhase 10 adds search-result poisoning, prompt injection in READMEs/package pages/API\ndocumentation, provenance spoofing, malicious package/plugin identity, biased ranking,\nand a discovery result being mistaken for an approved capability. Discovery sources are\nevidence only. External text is never interpreted as a command, policy, instruction,\napproval, package operation, or dynamic source module; it is retained only as a digest\nand untrusted evidence label.\n\n## Trust boundaries\n\n1. Model/planner output to strict plan and tool-input schemas: entirely untrusted.\n2. Registered tool metadata and action descriptors: trusted application code,\n   reviewed with the tool implementation.\n3. Tool to `PermissionBroker`: mandatory runtime authorization boundary.\n4. Policy configuration and normalized scope roots: trusted operator input.\n5. Approval presentation and decision: trusted application UI/API plus an\n   authenticated human identity; model/tool identities are rejected.\n6. Broker to host/provider implementation: only an exact, short-lived\n   authorization receipt may cross this boundary.\n7. Audit sink: trusted append-only destination receiving fingerprints and safe\n   summaries, never raw arguments or secrets.\n8. Platform-neutral adapter to Windows UI Automation/Win32/subprocess APIs: only\n   the authorized private tool hook may call this boundary. Windows adapter output\n   is evidence, not an authorization decision.\n9. Vision provider output to trusted semantic-first fusion: untrusted structured\n   suggestions; it cannot directly access input adapters, the broker, or approvals.\n10. Application inventory/package provider to manager: provider results are\n    untrusted evidence, normalized and verified by trusted manager code. A package\n    provider may only execute its fixed executable plus validated argument array.\n11. Manager to process/package runtime: only a broker-authorized, immutable plan or\n    freshly resolved inventory record crosses this boundary; executable strings,\n    repository names, and package IDs cannot be supplied as raw OS commands.\n12. Discovery providers to recommendation service: catalogs and research data are\n    untrusted candidate evidence. Trusted service code validates candidate shape,\n    retains provenance, scores explicit factors, and emits advisory output only.\n\nPython does not provide an in-process security sandbox. The boundary assumes\nregistered tool code and the application process are trusted and reviewed; a\nmalicious Python module running in-process can call operating-system APIs directly.\nThe registry therefore prohibits dynamic discovery, and privileged implementation\nmethods are deliberately private and reachable only through the brokered tool\nentry point by convention and tests.\n\n## Fail-closed invariants\n\n- Unknown/malformed permissions, unknown tools/actions, malformed scopes, missing\n  or disabled policies, and invalid action descriptors deny with machine-readable\n  reasons.\n- Approval data is built from trusted descriptors, never free-form model prose.\n- Approval matching includes task, tool, action, permission, normalized scope, and\n  a canonical full-argument fingerprint.\n- One-time approvals are atomically consumed once and cannot authorize changed\n  arguments. Cancellation and expiry win over execution.\n- Limited remembered grants have explicit scope and expiry and cannot cover hard\n  safety actions. There is no global or unbounded remember option.\n- Bulk deletion and destructive system commands require a fresh trusted approval;\n  privilege escalation is denied by hard policy.\n- Filesystem scope accepts only absolute, canonical paths beneath trusted roots and\n  rejects traversal plus symlink/junction escape.\n- Audit records contain decision provenance and execution outcome without raw\n  arguments, approval tokens, credentials, or file contents.\n- Application and terminal command IDs resolve only through trusted catalogues;\n  executable paths and shell strings are never model-controlled.\n- Terminal execution uses an argument vector with `shell=False`, explicit working\n  directory and timeout, and kills the child process on timeout or cancellation.\n- Screenshot bytes remain in a trusted artifact store. The model receives an opaque\n  reference and metadata, not an adapter-private binary payload.\n- Visual actions name a current trusted-fusion target ID. The interaction service\n  re-observes and rejects changed display/window/target/fingerprint state before it\n  invokes an action tool, then verifies with a new observation.\n- A visual finding never grants a permission. Sensitive input still receives the\n  original tool's policy, approval, audit, cancellation, and hard-safety controls.\n- Application discovery never launches or installs. Installation and update tools\n  are opt-in only, require `application.install`, and use the hard\n  `software_installation` class: fresh trusted approval is mandatory and may not be\n  remembered. Approval summaries contain exact package identity/source/publisher/\n  version from an immutable expiring plan, not model text.\n- Package-manager invocation is a fixed executable and independently validated\n  argument vector (`shell=False`); no model string becomes a command. An update must\n  be strictly newer than the installed normalized numeric version. Verification\n  re-queries inventory and checks expected name/publisher/version plus launch\n  capability. The managed runtime closes only its own tracked launch process.\n- Discovery does not authorize a capability. Recommendations do not register tools,\n  alter policy, install a package/plugin, create credentials, call an API, or execute\n  generated code. Any later implementation must independently pass normal tool,\n  broker, policy, approval, provider, and test review.\n\n## Phase 11 autonomous-improvement extension\n\n### Privileged capability inventory\n\nPhase 11 implements trusted repository inspection and scoped source modification in\nan isolated worktree, but exposes neither operation as a model-selectable tool. Its\ninitial proposal-only mode does not merge, install dependencies, push to a remote,\nrestart a service, or deploy. If planner access is introduced later, repository\ninspection requires scoped `filesystem.read`; candidate writes require scoped\n`filesystem.write` and `code.modify`; trusted Git operations require a catalogued\n`terminal.execute` command family. Any future dependency installation, remote\nnetwork operation, production write, merge, deployment, restart, or system mutation\nis a separate privileged capability and receives its own policy and trusted approval.\n\n### Additional adversaries and abuse cases\n\nSelf-improvement adds self-authorization, generated code modifying the running\ncheckout, forged or escaped worktree paths, symlink/junction races, Git hook/config\nside effects, baseline or gate tampering, generated tests concealing a regression,\nsecurity-check evasion, proposal replay or mutation, dependency insertion,\nsecret/network access from tests, resource exhaustion, and prompt injection in issue\nor telemetry evidence. A coding model may also attempt to alter workflows, quality\ngates, the broker, or the improvement engine itself so a later unsafe change appears\nvalid.\n\n### Additional trust boundaries\n\n13. Observation sources to candidate generation: logs, issue text, web content,\n    package metadata, and tool output are evidence, never coding instructions. Raw\n    external text is reduced to a digest and fixed untrusted label before the coding\n    boundary.\n14. Improvement reasoning to coding agent: trusted application code supplies a\n    concrete bounded specification and structured safe evidence. The coding agent\n    returns untrusted typed file-change data and receives no filesystem, command,\n    Git, approval, or deployment capability.\n15. Coding output to isolated workspace: the trusted change applier validates\n    workspace ownership, specification/path boundaries, canonical containment, link\n    safety, and exact base digests before writing.\n16. Worktree/gate boundary to host: trusted Git creates a generated detached\n    worktree; independently confined gate processes must attest that production,\n    shared Git metadata, network, secrets, and source mutation are unavailable.\n17. Evaluation to proposal: independently protected baseline metrics and every\n    mandatory gate must pass before a fingerprinted, expiring proposal is stored.\n18. Proposal to future merge/deployment: outside Phase 11. Only a separately\n    authenticated trusted user and brokered execution service may cross it after\n    revalidating the exact proposal; model/tool approval claims are untrusted.\n\n### Additional fail-closed invariants\n\n- Improvement observation and prioritization do not authorize source modification.\n  The normal outcome may be `NO_WORTHWHILE_IMPROVEMENT`, and risk classification may\n  raise but never lower a candidate's declared risk.\n- The coding agent can return only bounded typed text changes. Trusted code generates\n  workspace paths and revisions, rejects changes outside the specification, forbids\n  `.git`, workflow, and quality-gate control paths, checks existing-file digests, and\n  never writes the production checkout.\n- Production and workspace roots must be disjoint canonical directories. Production\n  must be clean at a full immutable revision and remain unchanged throughout the run;\n  a forged handle, reparse escape, identity change, or integrity failure quarantines\n  the candidate.\n- Dependency manifest changes deny unless an exact path/base-digest/candidate-digest\n  transition has trusted risk and reversibility analysis. Eligibility never grants\n  installation, download, merge, or deployment authority.\n- A proposal contains every mandatory passing gate exactly once, an independently\n  improved protected baseline comparison, exact change/tree evidence, expiry, and\n  the previous known-good revision. The engine can create only\n  `AWAITING_TRUSTED_APPROVAL` and has no approval, merge, push, or deploy method.\n- Real process confinement is an external trusted boundary, not a Python type. A gate\n  without complete workspace-only/network-disabled/secrets-removed/process-tree\n  attestation fails. Fake CI adapters demonstrate control flow, not OS isolation.\n\n### Residual security assumptions\n\nPython does not isolate mutually untrusted in-process adapters. Application\ncomposition, the Git client, change applier, gate definitions, concrete OS sandbox,\nsecurity scanners, metric provider, proposal store, and any future approval/merge\nservice remain in the trusted computing base. A malicious imported Python module can\nbypass these interfaces; dynamic loading remains prohibited.\n\nGit worktrees share repository object metadata. Trusted worktree creation necessarily\ntouches that metadata, while coding and gate processes must not receive access to it.\nThe concrete sandbox must additionally enforce CPU, memory, disk, process, handle,\nnetwork, and secret isolation; the Phase 11 interface and deterministic mocks cannot\nprove those Windows/container controls. The built-in static pattern checker is only\na minimum preflight and does not replace deeper scanning or human review. See the\nexplicit threat/control/residual-risk table in `docs/autonomous-improvement.md`.\n",
+      "content": "# Phase 5 permission-boundary threat model\n\n## Assets and security goals\n\nJARVIS must protect user files, credentials, private sensor data, clipboard data,\napplications, network destinations, and host availability. Untrusted model output\nmust never create, widen, remember, or approve authority. A tool may execute a\nprivileged action only after trusted code has validated its arguments, described\nthe exact action, evaluated policy, and (when required) matched a live trusted-user\napproval to the same task, tool, permission, scope, and argument fingerprint.\n\n## Capability inventory\n\nCurrent implemented capability contracts are:\n\n- calculator and local-time agent tools, which are non-privileged;\n- an unavailable weather placeholder, which performs no network request;\n- Ollama HTTP transport (`network.request`), selected by trusted composition code;\n- on-demand microphone capture (`microphone.read`), started by a direct UI gesture;\n- local speech synthesis/audio output, which is not an input or host-mutation\n  permission in the Phase 5 taxonomy.\n- controlled, opt-in computer tools for window discovery, catalogued application\n  launch, focus, semantic text entry, explicit mouse fallback, screen capture,\n  clipboard, scoped filesystem read, and catalogued terminal commands. They are\n  not registered in the default runtime catalog.\n\nThe Ollama and microphone paths are provider/UI flows, not planner-selected tools.\nThey remain separately bounded by trusted configuration and an explicit user\ngesture. If either becomes planner-selectable it must first be converted to a\nbrokered tool.\n\nPlanned or reserved privileged capabilities are filesystem write, camera capture,\napplication installation, arbitrary network requests, source-code modification,\npersistent memory storage, and system power control. Computer input uses its own\n`computer.input` permission. Each capability requires a granular permission;\nthere is no aggregate computer-access permission.\n\nDeveloper-only subprocess use in `scripts/quality.py` is outside the running\nassistant and is not an agent capability.\n\n## Adversaries and abuse cases\n\nThe primary adversary is malicious or confused model output, including prompt\ninjection embedded in files, web content, tool output, or user text. It may name an\nunknown permission or tool, forge an approval claim, alter arguments after a user\nreview, replay an approval, request an over-broad scope, use path traversal or a\nlink/junction escape, or disguise a destructive command as an ordinary action.\n\nOther failures include buggy tools under-declaring permissions, stale or disabled\npolicy, races around cancellation/expiry, approval API misuse, secret leakage in\naudit logs, and a developer accidentally calling a privileged implementation\nwithout the broker.\n\nPhase 6 additionally considers UI spoofing/incorrect-window targeting, raw input\nused in place of semantic controls, application-ID or command-ID substitution,\nshell interpretation, unbounded child processes, screenshots or clipboard data\nleaking through results, and filesystem paths escaping approved roots after policy\nevaluation.\n\nPhase 7 adds adversarial visual content, provider hallucination, accessibility/vision\ndisagreement, stale screenshots, race conditions between observation and input,\nwindow switching, coordinate/DPI confusion, and visual recognition of sensitive\ncontrols. A model or provider may describe a button but must not turn that description\ninto authority or a verified outcome.\n\nPhase 9 adds package-search poisoning, package/source substitution, stale or replayed\ninstall plans, malicious registry/display-icon entries, version downgrade, a package\nmanager interpreting a shell string, verification that trusts package-manager output,\nand closing an arbitrary user process. Package catalog and inventory data are treated\nas evidence: only trusted composition chooses providers, only immutable plans can\nreach a provider, and post-operation success comes from an independent re-query.\n\nPhase 10 adds search-result poisoning, prompt injection in READMEs/package pages/API\ndocumentation, provenance spoofing, malicious package/plugin identity, biased ranking,\nand a discovery result being mistaken for an approved capability. Discovery sources are\nevidence only. External text is never interpreted as a command, policy, instruction,\napproval, package operation, or dynamic source module; it is retained only as a digest\nand untrusted evidence label.\n\n## Trust boundaries\n\n1. Model/planner output to strict plan and tool-input schemas: entirely untrusted.\n2. Registered tool metadata and action descriptors: trusted application code,\n   reviewed with the tool implementation.\n3. Tool to `PermissionBroker`: mandatory runtime authorization boundary.\n4. Policy configuration and normalized scope roots: trusted operator input.\n5. Approval presentation and decision: trusted application UI/API plus an\n   authenticated human identity; model/tool identities are rejected.\n6. Broker to host/provider implementation: only an exact, short-lived\n   authorization receipt may cross this boundary.\n7. Audit sink: trusted append-only destination receiving fingerprints and safe\n   summaries, never raw arguments or secrets.\n8. Platform-neutral adapter to Windows UI Automation/Win32/subprocess APIs: only\n   the authorized private tool hook may call this boundary. Windows adapter output\n   is evidence, not an authorization decision.\n9. Vision provider output to trusted semantic-first fusion: untrusted structured\n   suggestions; it cannot directly access input adapters, the broker, or approvals.\n10. Application inventory/package provider to manager: provider results are\n    untrusted evidence, normalized and verified by trusted manager code. A package\n    provider may only execute its fixed executable plus validated argument array.\n11. Manager to process/package runtime: only a broker-authorized, immutable plan or\n    freshly resolved inventory record crosses this boundary; executable strings,\n    repository names, and package IDs cannot be supplied as raw OS commands.\n12. Discovery providers to recommendation service: catalogs and research data are\n    untrusted candidate evidence. Trusted service code validates candidate shape,\n    retains provenance, scores explicit factors, and emits advisory output only.\n\nPython does not provide an in-process security sandbox. The boundary assumes\nregistered tool code and the application process are trusted and reviewed; a\nmalicious Python module running in-process can call operating-system APIs directly.\nThe registry therefore prohibits dynamic discovery, and privileged implementation\nmethods are deliberately private and reachable only through the brokered tool\nentry point by convention and tests.\n\n## Fail-closed invariants\n\n- Unknown/malformed permissions, unknown tools/actions, malformed scopes, missing\n  or disabled policies, and invalid action descriptors deny with machine-readable\n  reasons.\n- Approval data is built from trusted descriptors, never free-form model prose.\n- Approval matching includes task, tool, action, permission, normalized scope, and\n  a canonical full-argument fingerprint.\n- One-time approvals are atomically consumed once and cannot authorize changed\n  arguments. Cancellation and expiry win over execution.\n- Limited remembered grants have explicit scope and expiry and cannot cover hard\n  safety actions. There is no global or unbounded remember option.\n- Bulk deletion and destructive system commands require a fresh trusted approval;\n  privilege escalation is denied by hard policy.\n- Filesystem scope accepts only absolute, canonical paths beneath trusted roots and\n  rejects traversal plus symlink/junction escape.\n- Audit records contain decision provenance and execution outcome without raw\n  arguments, approval tokens, credentials, or file contents.\n- Application and terminal command IDs resolve only through trusted catalogues;\n  executable paths and shell strings are never model-controlled.\n- Terminal execution uses an argument vector with `shell=False`, explicit working\n  directory and timeout, and kills the child process on timeout or cancellation.\n- Screenshot bytes remain in a trusted artifact store. The model receives an opaque\n  reference and metadata, not an adapter-private binary payload.\n- Visual actions name a current trusted-fusion target ID. The interaction service\n  re-observes and rejects changed display/window/target/fingerprint state before it\n  invokes an action tool, then verifies with a new observation.\n- A visual finding never grants a permission. Sensitive input still receives the\n  original tool's policy, approval, audit, cancellation, and hard-safety controls.\n- Application discovery never launches or installs. Installation and update tools\n  are opt-in only, require `application.install`, and use the hard\n  `software_installation` class: fresh trusted approval is mandatory and may not be\n  remembered. Approval summaries contain exact package identity/source/publisher/\n  version from an immutable expiring plan, not model text.\n- Package-manager invocation is a fixed executable and independently validated\n  argument vector (`shell=False`); no model string becomes a command. An update must\n  be strictly newer than the installed normalized numeric version. Verification\n  re-queries inventory and checks expected name/publisher/version plus launch\n  capability. The managed runtime closes only its own tracked launch process.\n- Discovery does not authorize a capability. Recommendations do not register tools,\n  alter policy, install a package/plugin, create credentials, call an API, or execute\n  generated code. Any later implementation must independently pass normal tool,\n  broker, policy, approval, provider, and test review.\n\n## Phase 11 autonomous-improvement extension\n\n### Privileged capability inventory\n\nPhase 11 implements trusted repository inspection and scoped source modification in\nan isolated worktree, but exposes neither operation as a model-selectable tool. Its\ninitial proposal-only mode does not merge, install dependencies, push to a remote,\nrestart a service, or deploy. If planner access is introduced later, repository\ninspection requires scoped `filesystem.read`; candidate writes require scoped\n`filesystem.write` and `code.modify`; trusted Git operations require a catalogued\n`terminal.execute` command family. Any future dependency installation, remote\nnetwork operation, production write, merge, deployment, restart, or system mutation\nis a separate privileged capability and receives its own policy and trusted approval.\n\n### Additional adversaries and abuse cases\n\nSelf-improvement adds self-authorization, generated code modifying the running\ncheckout, forged or escaped worktree paths, symlink/junction races, Git hook/config\nside effects, baseline or gate tampering, generated tests concealing a regression,\nsecurity-check evasion, proposal replay or mutation, dependency insertion,\nsecret/network access from tests, resource exhaustion, and prompt injection in issue\nor telemetry evidence. A coding model may also attempt to alter workflows, quality\ngates, the broker, or the improvement engine itself so a later unsafe change appears\nvalid.\n\n### Additional trust boundaries\n\n13. Observation sources to candidate generation: logs, issue text, web content,\n    package metadata, and tool output are evidence, never coding instructions. Raw\n    external text is reduced to a digest and fixed untrusted label before the coding\n    boundary.\n14. Improvement reasoning to coding agent: trusted application code supplies a\n    concrete bounded specification and structured safe evidence. The coding agent\n    returns untrusted typed file-change data and receives no filesystem, command,\n    Git, approval, or deployment capability.\n15. Coding output to isolated workspace: the trusted change applier validates\n    workspace ownership, specification/path boundaries, canonical containment, link\n    safety, and exact base digests before writing.\n16. Worktree/gate boundary to host: trusted Git creates a generated detached\n    worktree; independently confined gate processes must attest that production,\n    shared Git metadata, network, secrets, and source mutation are unavailable.\n17. Evaluation to proposal: independently protected baseline metrics and every\n    mandatory gate must pass before a fingerprinted, expiring proposal is stored.\n18. Proposal to future merge/deployment: outside Phase 11. Only a separately\n    authenticated trusted user and brokered execution service may cross it after\n    revalidating the exact proposal; model/tool approval claims are untrusted.\n\n### Additional fail-closed invariants\n\n- Improvement observation and prioritization do not authorize source modification.\n  The normal outcome may be `NO_WORTHWHILE_IMPROVEMENT`, and risk classification may\n  raise but never lower a candidate's declared risk.\n- The coding agent can return only bounded typed text changes. Trusted code generates\n  workspace paths and revisions, rejects changes outside the specification, forbids\n  `.git`, workflow, and quality-gate control paths, checks existing-file digests, and\n  never writes the production checkout.\n- Production and workspace roots must be disjoint canonical directories. Production\n  must be clean at a full immutable revision and remain unchanged throughout the run;\n  a forged handle, reparse escape, identity change, or integrity failure quarantines\n  the candidate.\n- Dependency manifest changes deny unless an exact path/base-digest/candidate-digest\n  transition has trusted risk and reversibility analysis. Eligibility never grants\n  installation, download, merge, or deployment authority.\n- A proposal contains every mandatory passing gate exactly once, an independently\n  improved protected baseline comparison, exact change/tree evidence, expiry, and\n  the previous known-good revision. The engine can create only\n  `AWAITING_TRUSTED_APPROVAL` and has no approval, merge, push, or deploy method.\n- Real process confinement is an external trusted boundary, not a Python type. A gate\n  without complete workspace-only/network-disabled/secrets-removed/process-tree\n  attestation fails. Fake CI adapters demonstrate control flow, not OS isolation.\n\n### Residual security assumptions\n\nPython does not isolate mutually untrusted in-process adapters. Application\ncomposition, the Git client, change applier, gate definitions, concrete OS sandbox,\nsecurity scanners, metric provider, proposal store, and any future approval/merge\nservice remain in the trusted computing base. A malicious imported Python module can\nbypass these interfaces; dynamic loading remains prohibited.\n\nGit worktrees share repository object metadata. Trusted worktree creation necessarily\ntouches that metadata, while coding and gate processes must not receive access to it.\nThe concrete sandbox must additionally enforce CPU, memory, disk, process, handle,\nnetwork, and secret isolation; the Phase 11 interface and deterministic mocks cannot\nprove those Windows/container controls. The built-in static pattern checker is only\na minimum preflight and does not replace deeper scanning or human review. See the\nexplicit threat/control/residual-risk table in `docs/autonomous-improvement.md`.\n\n## Phase 14 memory extension\n\nDurable memory introduces private user facts, task evidence, SQLite files, migration\nintegrity, and retention/deletion controls as protected assets. Model output,\nconversation text, web/tool output, remembered data, and source references are data\nonly; they cannot grant a permission, become an approval, register a tool, or issue\nan instruction. A trusted long-term policy requires explicit user confirmation,\nuser-source provenance, confidence, and non-secret/non-untrusted content. The store\ndefensively rejects secret-like values even if a caller bypasses that policy.\n\nThe persistence boundary is trusted application/UI code to `SQLiteMemoryStore`; a\nfuture multi-user API must add authenticated ownership checks before exposing the\ninspect/delete operations. The project-knowledge boundary remains read-only through\n`KnowledgeStore`, so generated repository documentation is not copied into personal\nmemory. Local SQLite encryption, device-level access control, and a platform secret\nstore are deployment responsibilities outside this Phase 14 library; the subsystem\ntherefore rejects rather than stores credentials.\n",
       "id": "docs:threat-model",
       "kind": "documentation",
       "metadata": {
         "path": "docs/threat-model.md"
       },
       "provenance": {
-        "generated_at": "2026-08-11T14:48:03.754693+00:00",
-        "revision": "c381f2e5a10054074afe127aac2af53a00533142",
+        "generated_at": "2026-08-11T15:13:03.257579+00:00",
+        "revision": null,
         "source_files": [
           "docs/threat-model.md"
         ],
         "source_hashes": {
-          "docs/threat-model.md": "23d2f30da363df45034d60e93081045c097c2c49fa16630b7156cafe45c542a1"
+          "docs/threat-model.md": "7440516c08abe24d3a436c5c5a8ca8ee6835cd51573be045a9caa8f65918176f"
         }
       },
       "summary": "JARVIS must protect user files, credentials, private sensor data, clipboard data, applications, network destinations, and host availability. Untrusted model output must never create, widen, remember, or approve authority. A tool may execute a privileged action only after trusted code has validated its arguments, described the exact action, evaluated policy, and (when required) matched a live trust",
@@ -2609,8 +2734,8 @@
         "path": "docs/tools.md"
       },
       "provenance": {
-        "generated_at": "2026-08-11T14:48:03.754693+00:00",
-        "revision": "c381f2e5a10054074afe127aac2af53a00533142",
+        "generated_at": "2026-08-11T15:13:03.257579+00:00",
+        "revision": null,
         "source_files": [
           "docs/tools.md"
         ],
@@ -2630,8 +2755,8 @@
         "path": "docs/visual-understanding.md"
       },
       "provenance": {
-        "generated_at": "2026-08-11T14:48:03.754693+00:00",
-        "revision": "c381f2e5a10054074afe127aac2af53a00533142",
+        "generated_at": "2026-08-11T15:13:03.257579+00:00",
+        "revision": null,
         "source_files": [
           "docs/visual-understanding.md"
         ],
@@ -2649,8 +2774,8 @@
       "kind": "permission",
       "metadata": {},
       "provenance": {
-        "generated_at": "2026-08-11T14:48:03.754693+00:00",
-        "revision": "c381f2e5a10054074afe127aac2af53a00533142",
+        "generated_at": "2026-08-11T15:13:03.257579+00:00",
+        "revision": null,
         "source_files": [
           "jarvis/permissions/models.py"
         ],
@@ -2668,8 +2793,8 @@
       "kind": "permission",
       "metadata": {},
       "provenance": {
-        "generated_at": "2026-08-11T14:48:03.754693+00:00",
-        "revision": "c381f2e5a10054074afe127aac2af53a00533142",
+        "generated_at": "2026-08-11T15:13:03.257579+00:00",
+        "revision": null,
         "source_files": [
           "jarvis/permissions/models.py"
         ],
@@ -2687,8 +2812,8 @@
       "kind": "permission",
       "metadata": {},
       "provenance": {
-        "generated_at": "2026-08-11T14:48:03.754693+00:00",
-        "revision": "c381f2e5a10054074afe127aac2af53a00533142",
+        "generated_at": "2026-08-11T15:13:03.257579+00:00",
+        "revision": null,
         "source_files": [
           "jarvis/permissions/models.py"
         ],
@@ -2706,8 +2831,8 @@
       "kind": "permission",
       "metadata": {},
       "provenance": {
-        "generated_at": "2026-08-11T14:48:03.754693+00:00",
-        "revision": "c381f2e5a10054074afe127aac2af53a00533142",
+        "generated_at": "2026-08-11T15:13:03.257579+00:00",
+        "revision": null,
         "source_files": [
           "jarvis/permissions/models.py"
         ],
@@ -2725,8 +2850,8 @@
       "kind": "permission",
       "metadata": {},
       "provenance": {
-        "generated_at": "2026-08-11T14:48:03.754693+00:00",
-        "revision": "c381f2e5a10054074afe127aac2af53a00533142",
+        "generated_at": "2026-08-11T15:13:03.257579+00:00",
+        "revision": null,
         "source_files": [
           "jarvis/permissions/models.py"
         ],
@@ -2744,8 +2869,8 @@
       "kind": "permission",
       "metadata": {},
       "provenance": {
-        "generated_at": "2026-08-11T14:48:03.754693+00:00",
-        "revision": "c381f2e5a10054074afe127aac2af53a00533142",
+        "generated_at": "2026-08-11T15:13:03.257579+00:00",
+        "revision": null,
         "source_files": [
           "jarvis/permissions/models.py"
         ],
@@ -2763,8 +2888,8 @@
       "kind": "permission",
       "metadata": {},
       "provenance": {
-        "generated_at": "2026-08-11T14:48:03.754693+00:00",
-        "revision": "c381f2e5a10054074afe127aac2af53a00533142",
+        "generated_at": "2026-08-11T15:13:03.257579+00:00",
+        "revision": null,
         "source_files": [
           "jarvis/permissions/models.py"
         ],
@@ -2782,8 +2907,8 @@
       "kind": "permission",
       "metadata": {},
       "provenance": {
-        "generated_at": "2026-08-11T14:48:03.754693+00:00",
-        "revision": "c381f2e5a10054074afe127aac2af53a00533142",
+        "generated_at": "2026-08-11T15:13:03.257579+00:00",
+        "revision": null,
         "source_files": [
           "jarvis/permissions/models.py"
         ],
@@ -2801,8 +2926,8 @@
       "kind": "permission",
       "metadata": {},
       "provenance": {
-        "generated_at": "2026-08-11T14:48:03.754693+00:00",
-        "revision": "c381f2e5a10054074afe127aac2af53a00533142",
+        "generated_at": "2026-08-11T15:13:03.257579+00:00",
+        "revision": null,
         "source_files": [
           "jarvis/permissions/models.py"
         ],
@@ -2820,8 +2945,8 @@
       "kind": "permission",
       "metadata": {},
       "provenance": {
-        "generated_at": "2026-08-11T14:48:03.754693+00:00",
-        "revision": "c381f2e5a10054074afe127aac2af53a00533142",
+        "generated_at": "2026-08-11T15:13:03.257579+00:00",
+        "revision": null,
         "source_files": [
           "jarvis/permissions/models.py"
         ],
@@ -2839,8 +2964,8 @@
       "kind": "permission",
       "metadata": {},
       "provenance": {
-        "generated_at": "2026-08-11T14:48:03.754693+00:00",
-        "revision": "c381f2e5a10054074afe127aac2af53a00533142",
+        "generated_at": "2026-08-11T15:13:03.257579+00:00",
+        "revision": null,
         "source_files": [
           "jarvis/permissions/models.py"
         ],
@@ -2858,8 +2983,8 @@
       "kind": "permission",
       "metadata": {},
       "provenance": {
-        "generated_at": "2026-08-11T14:48:03.754693+00:00",
-        "revision": "c381f2e5a10054074afe127aac2af53a00533142",
+        "generated_at": "2026-08-11T15:13:03.257579+00:00",
+        "revision": null,
         "source_files": [
           "jarvis/permissions/models.py"
         ],
@@ -2877,8 +3002,8 @@
       "kind": "permission",
       "metadata": {},
       "provenance": {
-        "generated_at": "2026-08-11T14:48:03.754693+00:00",
-        "revision": "c381f2e5a10054074afe127aac2af53a00533142",
+        "generated_at": "2026-08-11T15:13:03.257579+00:00",
+        "revision": null,
         "source_files": [
           "jarvis/permissions/models.py"
         ],
@@ -2896,8 +3021,8 @@
       "kind": "permission",
       "metadata": {},
       "provenance": {
-        "generated_at": "2026-08-11T14:48:03.754693+00:00",
-        "revision": "c381f2e5a10054074afe127aac2af53a00533142",
+        "generated_at": "2026-08-11T15:13:03.257579+00:00",
+        "revision": null,
         "source_files": [
           "jarvis/permissions/models.py"
         ],
@@ -2910,13 +3035,13 @@
     },
     {
       "authority": "generated",
-      "content": ".github/ISSUE_TEMPLATE/bug_report.md\n.github/ISSUE_TEMPLATE/feature_request.md\n.github/dependabot.yml\n.github/pull_request_template.md\n.github/workflows/ci.yml\nCONTRIBUTING.md\nREADME.md\ndocs/application-manager.md\ndocs/architecture.md\ndocs/autonomous-improvement.md\ndocs/camera-support.md\ndocs/capability-discovery.md\ndocs/computer-capabilities.md\ndocs/decisions/0001-phase-0-boundaries.md\ndocs/decisions/0002-local-conversation-and-speech.md\ndocs/decisions/0003-bounded-single-agent-orchestration.md\ndocs/decisions/0004-versioned-tool-contract.md\ndocs/decisions/0005-central-tool-registry.md\ndocs/decisions/0006-permission-broker.md\ndocs/decisions/0007-controlled-windows-computer-capabilities.md\ndocs/decisions/0008-visual-grounding-and-verification.md\ndocs/decisions/0009-controlled-camera-support.md\ndocs/decisions/0010-controlled-application-manager.md\ndocs/decisions/0011-advisory-capability-discovery.md\ndocs/decisions/0012-propose-and-test-improvement-engine.md\ndocs/decisions/0013-controlled-system-self-testing.md\ndocs/development.md\ndocs/permission-model.md\ndocs/security-principles.md\ndocs/system-testing.md\ndocs/testing.md\ndocs/threat-model.md\ndocs/tools.md\ndocs/visual-understanding.md\njarvis/__init__.py\njarvis/ai/__init__.py\njarvis/ai/models.py\njarvis/ai/providers/__init__.py\njarvis/ai/providers/base.py\njarvis/ai/providers/ollama.py\njarvis/api.py\njarvis/application.py\njarvis/applications/__init__.py\njarvis/applications/catalog.py\njarvis/applications/configuration.py\njarvis/applications/manager.py\njarvis/applications/models.py\njarvis/applications/plans.py\njarvis/applications/providers.py\njarvis/applications/runtime.py\njarvis/applications/tools.py\njarvis/autonomy/__init__.py\njarvis/autonomy/execution.py\njarvis/autonomy/models.py\njarvis/autonomy/orchestrator.py\njarvis/autonomy/planning.py\njarvis/autonomy/response.py\njarvis/autonomy/store.py\njarvis/bootstrap.py\njarvis/camera/__init__.py\njarvis/camera/catalog.py\njarvis/camera/controller.py\njarvis/camera/models.py\njarvis/camera/provider.py\njarvis/camera/store.py\njarvis/camera/tools.py\njarvis/camera/vision.py\njarvis/computer/__init__.py\njarvis/computer/accessibility.py\njarvis/computer/adapters.py\njarvis/computer/artifacts.py\njarvis/computer/catalog.py\njarvis/computer/filesystem.py\njarvis/computer/models.py\njarvis/computer/terminal.py\njarvis/computer/tools.py\njarvis/conversation/__init__.py\njarvis/conversation/service.py\njarvis/core/__init__.py\njarvis/core/config.py\njarvis/core/errors.py\njarvis/core/health.py\njarvis/core/logging.py\njarvis/desktop.py\njarvis/discovery/__init__.py\njarvis/discovery/models.py\njarvis/discovery/providers.py\njarvis/discovery/service.py\njarvis/frontend/__init__.py\njarvis/frontend/desktop.py\njarvis/improvement/__init__.py\njarvis/improvement/adapters.py\njarvis/improvement/analysis.py\njarvis/improvement/dependencies.py\njarvis/improvement/engine.py\njarvis/improvement/integrity.py\njarvis/improvement/models.py\njarvis/improvement/workspace.py\njarvis/knowledge/__init__.py\njarvis/knowledge/indexer.py\njarvis/knowledge/models.py\njarvis/knowledge/store.py\njarvis/memory/__init__.py\njarvis/permissions/__init__.py\njarvis/permissions/audit.py\njarvis/permissions/broker.py\njarvis/permissions/models.py\njarvis/permissions/policy.py\njarvis/security/__init__.py\njarvis/speech/__init__.py\njarvis/speech/stt.py\njarvis/speech/tts.py\njarvis/testing/__init__.py\njarvis/testing/catalog.py\njarvis/testing/diagnosis.py\njarvis/testing/models.py\njarvis/testing/regressions.py\njarvis/testing/runner.py\njarvis/testing/smoke.py\njarvis/testing/workflows.py\njarvis/tools/__init__.py\njarvis/tools/base.py\njarvis/tools/calculator.py\njarvis/tools/catalog.py\njarvis/tools/harness.py\njarvis/tools/local_time.py\njarvis/tools/models.py\njarvis/tools/registry.py\njarvis/tools/weather.py\njarvis/vision/__init__.py\njarvis/vision/fusion.py\njarvis/vision/gateway.py\njarvis/vision/interaction.py\njarvis/vision/models.py\njarvis/vision/providers.py\npyproject.toml\nscripts/__init__.py\nscripts/quality.py\nscripts/refresh_knowledge.py\nscripts/run_system_tests.py\ntests/__init__.py\ntests/fakes.py\ntests/fixtures/desktop_observations.json\ntests/fixtures/regressions/calculator-workflow.json\ntests/fixtures/regressions/permission-pause.json\ntests/test_application.py\ntests/test_applications.py\ntests/test_bootstrap.py\ntests/test_camera.py\ntests/test_computer.py\ntests/test_config.py\ntests/test_conversation.py\ntests/test_discovery.py\ntests/test_health.py\ntests/test_improvement.py\ntests/test_ollama_provider.py\ntests/test_orchestrator.py\ntests/test_speech.py\ntests/test_system_testing.py\ntests/test_tool_registry.py\ntests/test_tools.py\ntests/test_vision.py\ntests/test_windows_integration.py",
+      "content": ".github/ISSUE_TEMPLATE/bug_report.md\n.github/ISSUE_TEMPLATE/feature_request.md\n.github/dependabot.yml\n.github/pull_request_template.md\n.github/workflows/ci.yml\nCONTRIBUTING.md\nREADME.md\ndocs/application-manager.md\ndocs/architecture.md\ndocs/autonomous-improvement.md\ndocs/camera-support.md\ndocs/capability-discovery.md\ndocs/computer-capabilities.md\ndocs/decisions/0001-phase-0-boundaries.md\ndocs/decisions/0002-local-conversation-and-speech.md\ndocs/decisions/0003-bounded-single-agent-orchestration.md\ndocs/decisions/0004-versioned-tool-contract.md\ndocs/decisions/0005-central-tool-registry.md\ndocs/decisions/0006-permission-broker.md\ndocs/decisions/0007-controlled-windows-computer-capabilities.md\ndocs/decisions/0008-visual-grounding-and-verification.md\ndocs/decisions/0009-controlled-camera-support.md\ndocs/decisions/0010-controlled-application-manager.md\ndocs/decisions/0011-advisory-capability-discovery.md\ndocs/decisions/0012-propose-and-test-improvement-engine.md\ndocs/decisions/0013-controlled-system-self-testing.md\ndocs/decisions/0014-separated-memory-domains.md\ndocs/development.md\ndocs/memory.md\ndocs/permission-model.md\ndocs/security-principles.md\ndocs/system-testing.md\ndocs/testing.md\ndocs/threat-model.md\ndocs/tools.md\ndocs/visual-understanding.md\njarvis/__init__.py\njarvis/ai/__init__.py\njarvis/ai/models.py\njarvis/ai/providers/__init__.py\njarvis/ai/providers/base.py\njarvis/ai/providers/ollama.py\njarvis/api.py\njarvis/application.py\njarvis/applications/__init__.py\njarvis/applications/catalog.py\njarvis/applications/configuration.py\njarvis/applications/manager.py\njarvis/applications/models.py\njarvis/applications/plans.py\njarvis/applications/providers.py\njarvis/applications/runtime.py\njarvis/applications/tools.py\njarvis/autonomy/__init__.py\njarvis/autonomy/execution.py\njarvis/autonomy/models.py\njarvis/autonomy/orchestrator.py\njarvis/autonomy/planning.py\njarvis/autonomy/response.py\njarvis/autonomy/store.py\njarvis/bootstrap.py\njarvis/camera/__init__.py\njarvis/camera/catalog.py\njarvis/camera/controller.py\njarvis/camera/models.py\njarvis/camera/provider.py\njarvis/camera/store.py\njarvis/camera/tools.py\njarvis/camera/vision.py\njarvis/computer/__init__.py\njarvis/computer/accessibility.py\njarvis/computer/adapters.py\njarvis/computer/artifacts.py\njarvis/computer/catalog.py\njarvis/computer/filesystem.py\njarvis/computer/models.py\njarvis/computer/terminal.py\njarvis/computer/tools.py\njarvis/conversation/__init__.py\njarvis/conversation/service.py\njarvis/core/__init__.py\njarvis/core/config.py\njarvis/core/errors.py\njarvis/core/health.py\njarvis/core/logging.py\njarvis/desktop.py\njarvis/discovery/__init__.py\njarvis/discovery/models.py\njarvis/discovery/providers.py\njarvis/discovery/service.py\njarvis/frontend/__init__.py\njarvis/frontend/desktop.py\njarvis/improvement/__init__.py\njarvis/improvement/adapters.py\njarvis/improvement/analysis.py\njarvis/improvement/dependencies.py\njarvis/improvement/engine.py\njarvis/improvement/integrity.py\njarvis/improvement/models.py\njarvis/improvement/workspace.py\njarvis/knowledge/__init__.py\njarvis/knowledge/indexer.py\njarvis/knowledge/models.py\njarvis/knowledge/store.py\njarvis/memory/__init__.py\njarvis/memory/models.py\njarvis/memory/policy.py\njarvis/memory/services.py\njarvis/memory/store.py\njarvis/permissions/__init__.py\njarvis/permissions/audit.py\njarvis/permissions/broker.py\njarvis/permissions/models.py\njarvis/permissions/policy.py\njarvis/security/__init__.py\njarvis/speech/__init__.py\njarvis/speech/stt.py\njarvis/speech/tts.py\njarvis/testing/__init__.py\njarvis/testing/catalog.py\njarvis/testing/diagnosis.py\njarvis/testing/models.py\njarvis/testing/regressions.py\njarvis/testing/runner.py\njarvis/testing/smoke.py\njarvis/testing/workflows.py\njarvis/tools/__init__.py\njarvis/tools/base.py\njarvis/tools/calculator.py\njarvis/tools/catalog.py\njarvis/tools/harness.py\njarvis/tools/local_time.py\njarvis/tools/models.py\njarvis/tools/registry.py\njarvis/tools/weather.py\njarvis/vision/__init__.py\njarvis/vision/fusion.py\njarvis/vision/gateway.py\njarvis/vision/interaction.py\njarvis/vision/models.py\njarvis/vision/providers.py\npyproject.toml\nscripts/__init__.py\nscripts/quality.py\nscripts/refresh_knowledge.py\nscripts/run_system_tests.py\ntests/__init__.py\ntests/fakes.py\ntests/fixtures/desktop_observations.json\ntests/fixtures/regressions/calculator-workflow.json\ntests/fixtures/regressions/permission-pause.json\ntests/test_application.py\ntests/test_applications.py\ntests/test_bootstrap.py\ntests/test_camera.py\ntests/test_computer.py\ntests/test_config.py\ntests/test_conversation.py\ntests/test_discovery.py\ntests/test_health.py\ntests/test_improvement.py\ntests/test_memory.py\ntests/test_ollama_provider.py\ntests/test_orchestrator.py\ntests/test_speech.py\ntests/test_system_testing.py\ntests/test_tool_registry.py\ntests/test_tools.py\ntests/test_vision.py\ntests/test_windows_integration.py",
       "id": "project-tree",
       "kind": "project-tree",
       "metadata": {},
       "provenance": {
-        "generated_at": "2026-08-11T14:48:03.754693+00:00",
-        "revision": "c381f2e5a10054074afe127aac2af53a00533142",
+        "generated_at": "2026-08-11T15:13:03.257579+00:00",
+        "revision": null,
         "source_files": [
           ".github/ISSUE_TEMPLATE/bug_report.md",
           ".github/ISSUE_TEMPLATE/feature_request.md",
@@ -2944,7 +3069,9 @@
           "docs/decisions/0011-advisory-capability-discovery.md",
           "docs/decisions/0012-propose-and-test-improvement-engine.md",
           "docs/decisions/0013-controlled-system-self-testing.md",
+          "docs/decisions/0014-separated-memory-domains.md",
           "docs/development.md",
+          "docs/memory.md",
           "docs/permission-model.md",
           "docs/security-principles.md",
           "docs/system-testing.md",
@@ -3021,6 +3148,10 @@
           "jarvis/knowledge/models.py",
           "jarvis/knowledge/store.py",
           "jarvis/memory/__init__.py",
+          "jarvis/memory/models.py",
+          "jarvis/memory/policy.py",
+          "jarvis/memory/services.py",
+          "jarvis/memory/store.py",
           "jarvis/permissions/__init__.py",
           "jarvis/permissions/audit.py",
           "jarvis/permissions/broker.py",
@@ -3073,6 +3204,7 @@
           "tests/test_discovery.py",
           "tests/test_health.py",
           "tests/test_improvement.py",
+          "tests/test_memory.py",
           "tests/test_ollama_provider.py",
           "tests/test_orchestrator.py",
           "tests/test_speech.py",
@@ -3091,7 +3223,7 @@
           "CONTRIBUTING.md": "2dc37801fd094593c4c9bceaf2d8003a49d6409d3f85026ffe410af47a2063f6",
           "README.md": "3961f33d09c72e2ff02fcce447f08609aecfc2a12c51033788eb7189db9169a3",
           "docs/application-manager.md": "77a2a902c3e2974cd04c8d109be86aea5f50c154c4d8630c0a15857d87f0fc3f",
-          "docs/architecture.md": "86e1c0740754cc7f43d0f4485bb803d3ce10c19493f690f690ec5f2bd714e0e7",
+          "docs/architecture.md": "fd53fdd971bf8a311871dc82da9b4b0fbaf1dc363aff99b505b725573a9374e0",
           "docs/autonomous-improvement.md": "9ec26d533ad61a37551145781e889fd3ebfc9c40dde1115a09cb07c091b6d363",
           "docs/camera-support.md": "b11fdbe985c9f2a3727c1f209f68580508a3a0d8b291a8f25380a255e4fdbacb",
           "docs/capability-discovery.md": "d7505d2b26c95a41aeb771323fc2102c4d02ca7d2dd1ebc90c8bf76a5749bbf8",
@@ -3109,12 +3241,14 @@
           "docs/decisions/0011-advisory-capability-discovery.md": "5a7466cdac9016a00a082262c654ed483b44d4ce3bd4cd9a68ca05089e5798d2",
           "docs/decisions/0012-propose-and-test-improvement-engine.md": "08f5c2cca8e6eb76bd400412b8be18f3c0e839283571a2a70eb1f127b169b580",
           "docs/decisions/0013-controlled-system-self-testing.md": "38def4a828acbfb025e9e5e3de085b43041036f538b2844ea03dde16c6433607",
-          "docs/development.md": "bc3b3aee58d4edddfcf3979b889343e0cc3ecb8b8ee14e0693a1ba0ed2653642",
+          "docs/decisions/0014-separated-memory-domains.md": "299b4dffaaa51a05d9944fe66bd5fe8e0436a9b476cc19aa1b38f55e84e83cb9",
+          "docs/development.md": "047fc31a15db0b749b6fabe626f4331d4ca41dc375bfeb27b9830017f3559b45",
+          "docs/memory.md": "aedc7472de9f77e307c4148cab4a43f9a561ec8252d06a4406428e76538abd5c",
           "docs/permission-model.md": "6cffdc9109f461a2e24a0adb197b99a8baacf9c9bcb028dbe4041d048d2d90d6",
           "docs/security-principles.md": "8b832862ff208713bf79b883a23ddf7ab5131422c08217bc5585bd9a91958c4d",
           "docs/system-testing.md": "a88710cdc44021acdcd67b46ff5b23508f0c127283796241c5852237b08ac06e",
-          "docs/testing.md": "082d33495c8e56119b9f8aaebb07d163da1db35b786e04a00d2015eb25d71299",
-          "docs/threat-model.md": "23d2f30da363df45034d60e93081045c097c2c49fa16630b7156cafe45c542a1",
+          "docs/testing.md": "ced72e6f173fce2b9bb7dfd34dc963a6bfade47d7b6367e15d86119079f09cdc",
+          "docs/threat-model.md": "7440516c08abe24d3a436c5c5a8ca8ee6835cd51573be045a9caa8f65918176f",
           "docs/tools.md": "3247b2215dab7be49fc904dc582e7ec530cc2295f5f38acbecf437f0c59e14ed",
           "docs/visual-understanding.md": "43e26284d5493e3f9be57b088a1b15749be91637d17eb2224a112044bf71e95f",
           "jarvis/__init__.py": "3b329714bb355e967f1d419e72c8125ba40b7b42dcdf3a75d8b51c4391142c91",
@@ -3182,10 +3316,14 @@
           "jarvis/improvement/models.py": "f706da6cfa366a70d0070b922c730333135f7b2858f08776f05d521aa0498313",
           "jarvis/improvement/workspace.py": "7222da9151aec7d387a20546a4f79db828204509a3e69321bde7355295e02a4a",
           "jarvis/knowledge/__init__.py": "cf93b7e6885557dc13ccdea94ea0a3c9d8036515c436ce7b078d4b698363f9cf",
-          "jarvis/knowledge/indexer.py": "6bb9f19681ebd1b3e71408e56158f9baa1dcf44299a343b3313b548a107bbd62",
+          "jarvis/knowledge/indexer.py": "723e20881fd09eb6daf37e01b26b3c43e0de2dcdde652eed8c344e83bd809d96",
           "jarvis/knowledge/models.py": "d105e8a5343077df4aeb072c6b56c6254cd2216d6d7555516168674ba0c343b5",
           "jarvis/knowledge/store.py": "81e1ffd3f6ab6e15a5f5ec6b00fcaa4ca6465e3f3b67be20242a1f197e86f3cd",
-          "jarvis/memory/__init__.py": "361ed566e1810607d62c825886992aedeaf9e3ac1926bc0bcf742c151890605d",
+          "jarvis/memory/__init__.py": "4d7e6dafb46f28027ecc3f1c4b2b0e1d8f5241da6fc53fe6abfdc530c89e853f",
+          "jarvis/memory/models.py": "241631bc5c7447b50b6deeb4019de6135358b998878142188167ac3d50298073",
+          "jarvis/memory/policy.py": "1a875b9279a288d4c2b62a46d4672e4f55e1e19df505aaaec51193e2764e5663",
+          "jarvis/memory/services.py": "f47821326ad313281bacc9f4d056b803322d0a632f49525a16f46fe91e66d3df",
+          "jarvis/memory/store.py": "aad58ae21afdf87813b9e17526b09522c438de7c965fdb785c0c5847c1cd975b",
           "jarvis/permissions/__init__.py": "fc18d1bf621227bd7f8ea475eff6ccc31e17c397d40562372209d600ce3f3931",
           "jarvis/permissions/audit.py": "460a82d26de397683a601c093fa280da94495aaf86a358f2a2933361fcf7a4b5",
           "jarvis/permissions/broker.py": "3247592bbf8c6c3e27309da474194c037ed830f78059f65dc0d2fc37f89a53ee",
@@ -3238,6 +3376,7 @@
           "tests/test_discovery.py": "6a0bcdfcdb0e6c06b29c076c8907e9fd6a4affb109db33c1db65ac1e711b2f40",
           "tests/test_health.py": "ffdc743c6e7ac679f29de7a52511e52dbe7624ffcc328d76322ad933f91f0799",
           "tests/test_improvement.py": "95139cd9fb111364501f4c152c28aefabdc53cdc312459350f548c10df8dc70f",
+          "tests/test_memory.py": "f89edde4260da6e9da2049392eac21209ec2534347d4a623a64306dc138af275",
           "tests/test_ollama_provider.py": "63b20975083b035b4ee6614475c4a579e743947ab28894480a18cf4c70cd1758",
           "tests/test_orchestrator.py": "d68370205f3ef4320e0d993b617d4feb702f2cadb09579b9200f5feb6ba641fd",
           "tests/test_speech.py": "675b76efb0c3a61f8286fffd201835fe59efb9179f6a34de2cc00e30847be712",
@@ -3260,8 +3399,8 @@
         "tool_id": "calculator"
       },
       "provenance": {
-        "generated_at": "2026-08-11T14:48:03.754693+00:00",
-        "revision": "c381f2e5a10054074afe127aac2af53a00533142",
+        "generated_at": "2026-08-11T15:13:03.257579+00:00",
+        "revision": null,
         "source_files": [
           "jarvis/tools/calculator.py",
           "jarvis/tools/registry.py"
@@ -3283,8 +3422,8 @@
         "tool_id": "local_time"
       },
       "provenance": {
-        "generated_at": "2026-08-11T14:48:03.754693+00:00",
-        "revision": "c381f2e5a10054074afe127aac2af53a00533142",
+        "generated_at": "2026-08-11T15:13:03.257579+00:00",
+        "revision": null,
         "source_files": [
           "jarvis/tools/local_time.py",
           "jarvis/tools/registry.py"
@@ -3306,8 +3445,8 @@
         "tool_id": "weather"
       },
       "provenance": {
-        "generated_at": "2026-08-11T14:48:03.754693+00:00",
-        "revision": "c381f2e5a10054074afe127aac2af53a00533142",
+        "generated_at": "2026-08-11T15:13:03.257579+00:00",
+        "revision": null,
         "source_files": [
           "jarvis/tools/registry.py",
           "jarvis/tools/weather.py"
@@ -3337,7 +3476,7 @@
     "code.modify",
     "system.power"
   ],
-  "revision": "c381f2e5a10054074afe127aac2af53a00533142",
+  "revision": null,
   "schema_version": 1,
   "tools": [
     {
@@ -3357,8 +3496,8 @@
         "windows"
       ],
       "provenance": {
-        "generated_at": "2026-08-11T14:48:03.754693+00:00",
-        "revision": "c381f2e5a10054074afe127aac2af53a00533142",
+        "generated_at": "2026-08-11T15:13:03.257579+00:00",
+        "revision": null,
         "source_files": [
           "jarvis/tools/calculator.py",
           "jarvis/tools/registry.py"
@@ -3389,8 +3528,8 @@
         "windows"
       ],
       "provenance": {
-        "generated_at": "2026-08-11T14:48:03.754693+00:00",
-        "revision": "c381f2e5a10054074afe127aac2af53a00533142",
+        "generated_at": "2026-08-11T15:13:03.257579+00:00",
+        "revision": null,
         "source_files": [
           "jarvis/tools/local_time.py",
           "jarvis/tools/registry.py"
@@ -3420,8 +3559,8 @@
         "windows"
       ],
       "provenance": {
-        "generated_at": "2026-08-11T14:48:03.754693+00:00",
-        "revision": "c381f2e5a10054074afe127aac2af53a00533142",
+        "generated_at": "2026-08-11T15:13:03.257579+00:00",
+        "revision": null,
         "source_files": [
           "jarvis/tools/registry.py",
           "jarvis/tools/weather.py"

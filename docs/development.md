@@ -68,6 +68,21 @@ original revision and status are identical afterward. Report Git/worktree and
 sandbox evidence separately from fake-adapter CI evidence. Do not approve, merge,
 push, install, restart, or deploy as part of this procedure.
 
+## Phase 14 memory storage
+
+Compose `SQLiteMemoryStore` with an application-owned local path outside the source
+checkout and an authenticated user boundary. Run its reviewed migrations when the
+application initializes; do not place database files, exports, or backup copies in
+Git. Persist a long-term candidate only through `LongTermMemoryService`, after an
+explicit user confirmation and allow decision. Use `EpisodicMemoryService` for
+compact completed task evidence, not the permission audit sink. Call the provided
+inspection/deletion/retention-cleanup operations from trusted UI/API code only.
+
+Never send tokens, passwords, cookies, or `.env` values to this store. Historical
+web/tool content must retain its untrusted-data label on retrieval. For a temporary
+migration check, run `python -m pytest tests/test_memory.py -q`; the tests create and
+remove only temporary databases.
+
 ## Phase 1 manual smoke test
 
 1. Install [Ollama](https://ollama.com/) for Windows, then run `ollama pull llama3.2:3b`. Ollama normally starts its local server automatically; if it is not running, use `ollama serve` in a separate terminal.

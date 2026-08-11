@@ -26,7 +26,7 @@ Clock = Callable[[], datetime]
 _SECRET_PATH = re.compile(r"(^|[._-])(env|secret|credential|password|token)([._-]|$)", re.I)
 _SECRET_VALUE = re.compile(
     r"(?:api[_-]?key|access[_-]?token|client[_-]?secret|password|secret)"
-    r"\s*[:=]\s*['\"][^'\"]+['\"]",
+    r"\s*[:=]\s*['\"](?!(?:secret|password|token)['\"])[^'\"]+['\"]",
     re.I,
 )
 _TOKEN_VALUE = re.compile(r"\b(?:gh[oprsu]|sk)-[A-Za-z0-9_-]{12,}\b")
