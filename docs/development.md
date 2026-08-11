@@ -14,6 +14,16 @@ Configuration precedence is: process environment variables, then values in `.env
 
 Run the health-only service with `python -m uvicorn jarvis.api:app --reload`. Run the full quality gate with `python scripts/quality.py`. It checks formatting, linting, static typing, tests, and the 90% coverage threshold.
 
+## Optional Phase 6 Windows integration
+
+The controlled computer layer is not enabled by the default catalog. To install its
+optional Windows UI Automation dependencies for a manually configured, brokered
+integration, run `python -m pip install -e ".[windows]"`. Real desktop checks are
+opt-in: set `JARVIS_WINDOWS_INTEGRATION=true` and run
+`python -m pytest -m windows_integration`. Run them only on a dedicated interactive
+Windows desktop with a trusted application and policy configuration. The ordinary
+CI suite uses mocks and does not claim a desktop action was performed.
+
 ## Phase 2 orchestration
 
 Phase 2 is a core service, not an enabled desktop workflow yet. `AgentOrchestrator` requires an injected `TaskStore`, planner, tool registry, executor, observer, verifier, response generator, and finite limits. Production composition intentionally provides no OS-capable tools. Use deterministic fake planners and tools in tests while adding new capability types.

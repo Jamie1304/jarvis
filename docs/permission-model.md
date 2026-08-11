@@ -5,7 +5,12 @@
 The broker recognizes only `filesystem.read`, `filesystem.write`, `screen.read`,
 `camera.read`, `microphone.read`, `clipboard.read`, `clipboard.write`,
 `terminal.execute`, `application.launch`, `application.install`,
-`network.request`, `code.modify`, and `system.power`.
+`network.request`, `code.modify`, `system.power`, and `computer.input`.
+
+`computer.input` is limited to authorized keyboard/control entry, window focus,
+and the explicitly labelled coordinate-mouse fallback. It is not an aggregate
+computer-access grant. Clipboard read/write, screenshots, application launch,
+filesystem access, and terminal execution retain their own permissions.
 
 Risk is classified as low, medium, high, or critical by trusted tool code. Reading
 private data or sending a bounded network request is normally medium; mutations,
@@ -56,3 +61,21 @@ use canonical resolved paths and platform-aware containment, never string prefix
    fingerprint, not arguments or contents.
 8. Test unknown/malformed inputs, scope escapes, approval expiry/replay/mutation,
    cancellation, disabled policy, and the tool's destructive cases.
+
+## Controlled Windows computer tools
+
+Computer tools use a platform-neutral adapter and must retain the brokered base
+tool entry point. A tool resolves applications and terminal commands only from
+trusted application-owned catalogues. It must not accept an executable, a complete
+shell command, an arbitrary Windows handle, a policy decision, or approval text
+from the model as authority.
+
+Terminal tools pass a trusted executable plus a validated, catalogue-allowlisted
+argument array to an adapter using `shell=False`; policy scopes the command family,
+working directory, tool, task, and duration. Filesystem tools execute only the canonical path emitted
+by the broker's scoped receipt. Screenshot tools save bytes in a trusted artifact
+store and return an opaque reference and metadata, never binary image payloads.
+
+Terminal catalogue entries are `destructive_system_command` by default, so even an
+allow policy produces a fresh approval request. Only trusted code may classify a
+narrowly reviewed, non-destructive command as ordinary.

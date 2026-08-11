@@ -11,7 +11,7 @@ approval to the same task, tool, permission, scope, and argument fingerprint.
 
 ## Capability inventory
 
-Current runtime capabilities are:
+Current implemented capability contracts are:
 
 - calculator and local-time agent tools, which are non-privileged;
 - an unavailable weather placeholder, which performs no network request;
@@ -19,16 +19,20 @@ Current runtime capabilities are:
 - on-demand microphone capture (`microphone.read`), started by a direct UI gesture;
 - local speech synthesis/audio output, which is not an input or host-mutation
   permission in the Phase 5 taxonomy.
+- controlled, opt-in computer tools for window discovery, catalogued application
+  launch, focus, semantic text entry, explicit mouse fallback, screen capture,
+  clipboard, scoped filesystem read, and catalogued terminal commands. They are
+  not registered in the default runtime catalog.
 
 The Ollama and microphone paths are provider/UI flows, not planner-selected tools.
 They remain separately bounded by trusted configuration and an explicit user
 gesture. If either becomes planner-selectable it must first be converted to a
 brokered tool.
 
-Planned or reserved privileged capabilities are filesystem read/write, screen and
-camera capture, clipboard read/write, terminal execution, application launch and
-installation, arbitrary network requests, source-code modification, persistent
-memory storage, and system power control. Each requires its granular permission;
+Planned or reserved privileged capabilities are filesystem write, camera capture,
+application installation, arbitrary network requests, source-code modification,
+persistent memory storage, and system power control. Computer input uses its own
+`computer.input` permission. Each capability requires a granular permission;
 there is no aggregate computer-access permission.
 
 Developer-only subprocess use in `scripts/quality.py` is outside the running
@@ -47,6 +51,12 @@ policy, races around cancellation/expiry, approval API misuse, secret leakage in
 audit logs, and a developer accidentally calling a privileged implementation
 without the broker.
 
+Phase 6 additionally considers UI spoofing/incorrect-window targeting, raw input
+used in place of semantic controls, application-ID or command-ID substitution,
+shell interpretation, unbounded child processes, screenshots or clipboard data
+leaking through results, and filesystem paths escaping approved roots after policy
+evaluation.
+
 ## Trust boundaries
 
 1. Model/planner output to strict plan and tool-input schemas: entirely untrusted.
@@ -60,6 +70,9 @@ without the broker.
    authorization receipt may cross this boundary.
 7. Audit sink: trusted append-only destination receiving fingerprints and safe
    summaries, never raw arguments or secrets.
+8. Platform-neutral adapter to Windows UI Automation/Win32/subprocess APIs: only
+   the authorized private tool hook may call this boundary. Windows adapter output
+   is evidence, not an authorization decision.
 
 Python does not provide an in-process security sandbox. The boundary assumes
 registered tool code and the application process are trusted and reviewed; a
@@ -86,3 +99,9 @@ entry point by convention and tests.
   rejects traversal plus symlink/junction escape.
 - Audit records contain decision provenance and execution outcome without raw
   arguments, approval tokens, credentials, or file contents.
+- Application and terminal command IDs resolve only through trusted catalogues;
+  executable paths and shell strings are never model-controlled.
+- Terminal execution uses an argument vector with `shell=False`, explicit working
+  directory and timeout, and kills the child process on timeout or cancellation.
+- Screenshot bytes remain in a trusted artifact store. The model receives an opaque
+  reference and metadata, not an adapter-private binary payload.

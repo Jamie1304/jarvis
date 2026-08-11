@@ -28,3 +28,14 @@ time-limited and unavailable to hard-safety actions. Privilege escalation always
 denies; bulk deletion and destructive system commands always require a fresh human
 approval. Audit records contain fingerprints and normalized scope, never raw
 arguments or secrets.
+
+Phase 6 extends the same invariants to Windows interaction. Semantic actions are
+brokered tools backed by a platform-neutral adapter; the model never receives a
+Windows automation object or unrestricted OS primitive. Keyboard/control input and
+the coordinate fallback require `computer.input`; capture, clipboard, filesystem,
+launch, and terminal operations require their separate permissions. A trusted
+catalogue resolves application IDs and command IDs. Terminal execution uses an
+executable and argument array with `shell=False`, while filesystem execution uses
+the broker-normalized in-scope path only. Optional real desktop integration is not
+evidence of execution in CI; adapters must return structured evidence only after
+they actually perform an action.
