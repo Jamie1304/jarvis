@@ -176,3 +176,16 @@ migrations, retention expiry, secret rejection, and user-facing inspection/delet
 operations. Retrieval returns separate conversation, long-term, episodic, and system
 lists; untrusted historical content remains data, never instructions. See
 `docs/memory.md`.
+
+Phase 15 introduces a durable single-agent planning control plane:
+
+`goal -> untrusted proposal -> validated owned DAG -> brokered execution -> step verification -> goal verification -> replan / complete`
+
+`PlanValidator` resolves every node against the live `ToolRegistry`, validates exact
+capability, manifest permissions, Pydantic arguments, dependencies, graph bounds, and
+trusted verification rules. `PlanningEngine` alone owns lifecycle transitions,
+budgets, scheduling, cancellation, retries, permission pauses, and replanning.
+`SQLitePlanningStore` atomically retains the complete task plus versioned plan, so a
+broker pause resumes without reconstructing the task. Resume never grants permission;
+the same exact action re-enters the broker. Step success is evidence only, and the
+plan completes only after goal-level verification. See `docs/planning-engine.md`.

@@ -90,3 +90,15 @@ metrics must improve over a pre-change baseline bound to the candidate and immut
 base revision. Success emits only an expiring fingerprinted proposal with rollback
 metadata and `AWAITING_TRUSTED_APPROVAL`; the engine cannot approve, merge, push,
 install, deploy, or modify the running copy.
+
+Phase 15 treats plans as untrusted structured proposals, never execution authority.
+Trusted validation resolves every node against the live registry and requires exact
+tool capability, manifest permission, argument-schema, bounded-DAG, and verification-
+rule agreement. A permission name or approval claim in model output has no effect:
+the exact tool action always re-enters `PermissionBroker`, including after a durable
+pause and resume. The deterministic engine owns lifecycle, budgets, cancellation,
+bounded retry, and evidence-bound replan while preserving the original constraints.
+No task completes merely because its tools returned success; trusted step and goal
+verification must both accept observed evidence. Ambiguous post-crash action state,
+unknown tools or permissions, malformed snapshots, cycles, and exhausted budgets fail
+closed.
