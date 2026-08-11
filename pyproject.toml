@@ -25,7 +25,7 @@ dev = [
     "pytest-asyncio==0.25.2",
     "ruff==0.9.10",
 ]
-desktop = ["PySide6==6.8.1"]
+desktop = ["PySide6==6.11.1"]
 speech = [
     "faster-whisper==1.1.0",
     "numpy==2.2.1",
