@@ -42,3 +42,10 @@ post-install identity mismatch, independent identity/version/launch verification
 separate updates with downgrade rejection, and launch failure. Windows registry,
 winget, and process integration are optional manual checks; CI never installs or
 updates software.
+
+Phase 10 discovery tests use static catalog and research-evidence providers only.
+They cover no candidates, one clear candidate, conflicting/ranked candidates,
+prompt-injection text isolated as a digest, excessive requested permissions,
+incompatible platform fit, provenance retention, a trusted internal manifest catalog,
+and data-only future-adapter scaffolding. No test performs a web fetch, registration,
+installation, setup, API call, or generated-code execution.
