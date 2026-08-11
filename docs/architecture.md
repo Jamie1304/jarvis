@@ -139,3 +139,12 @@ improvement. Success produces only an expiring, fingerprinted
 `AWAITING_TRUSTED_APPROVAL` proposal with previous-known-good rollback metadata.
 Phase 11 has no autonomous approval, merge, push, installation, deployment, or
 production-write path. See `docs/autonomous-improvement.md`.
+
+Phase 12 adds repository-grounded project knowledge without creating a new
+authorization path. Human-authored `docs/` and ADRs remain authoritative or
+historical sources; `knowledge/generated/project-index.json` is a disposable
+generated view with per-source hashes, Git revision, and generation time. The
+indexer derives components from package source and tools/permissions from the
+trusted registry and enums. `KnowledgeStore` provides local lexical search and
+stale-source detection. Knowledge is context only: it cannot register tools,
+grant permissions, execute actions, or rewrite historical decisions.
