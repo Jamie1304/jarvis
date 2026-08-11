@@ -92,7 +92,7 @@ class FakeTool(Tool[FakeToolInput, FakeToolOutput]):
     def input_model(self) -> type[FakeToolInput]:
         return FakeToolInput
 
-    async def execute(
+    async def _execute_authorized(
         self, context: ToolExecutionContext, validated_input: FakeToolInput
     ) -> ToolResult:
         del validated_input
@@ -137,12 +137,13 @@ def make_orchestrator(
     timeout_seconds: float = 1,
     max_replans: int = 1,
 ) -> AgentOrchestrator:
+    registry = ToolRegistry(tools)
     return AgentOrchestrator(
         store=InMemoryTaskStore(),
         interpreter=DefaultRequestInterpreter(),
         planner=SchemaValidatedPlanner(advisor),
-        selector=RegistryCapabilitySelector(ToolRegistry(tools)),
-        executor=DefaultToolExecutor(),
+        selector=RegistryCapabilitySelector(registry),
+        executor=DefaultToolExecutor(registry.permission_broker),
         observer=DefaultObservationService(),
         verifier=EvidenceVerifier(),
         response_generator=DefaultTaskResponseGenerator(),
