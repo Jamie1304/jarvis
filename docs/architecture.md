@@ -148,3 +148,16 @@ indexer derives components from package source and tools/permissions from the
 trusted registry and enums. `KnowledgeStore` provides local lexical search and
 stale-source detection. Knowledge is context only: it cannot register tools,
 grant permissions, execute actions, or rewrite historical decisions.
+
+Phase 13 adds a controlled system-test boundary:
+
+`trusted suite catalog -> controlled subprocess -> redacted evidence -> TestRun -> diagnosis`
+
+Test suites contain fixed executable/argument vectors, a project-relative working
+directory, timeout, output format, category, and hardware policy. `ControlledTestRunner`
+does not expose a model-selectable shell; unknown suites and scope escapes fail closed.
+Structured results and separate artifacts can inform Phase 11 evaluation, but test
+success does not authorize an improvement, merge, deployment, installation, or any
+host capability. Deterministic fake-provider workflow suites run in CI, while startup
+and hardware tests require explicit trusted/manual enablement. See
+`docs/system-testing.md`.

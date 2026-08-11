@@ -71,3 +71,14 @@ platform sandbox capable of denying production/shared-Git access. Verify the
 production revision and status before and after; retain evidence digests, then remove
 the disposable environment through a trusted maintenance procedure. No real
 merge/deployment approval test belongs in Phase 11.
+
+Phase 13 adds controlled system-level self-testing above individual pytest cases.
+`ControlledTestRunner` accepts only catalogued executable/argument vectors with
+project-scoped working directories, timeout/cancellation, capped redacted artifacts,
+and a machine-readable `TestRun`. Runner tests cover success, assertion failure,
+launch crash, timeout, malformed structured output, cancellation, partial suites,
+hardware gating, and path/unknown-suite rejection. Deterministic workflow evaluations
+use fake planners/tools for calculator, approval pause, bounded retry, cancellation,
+and verification failure. Optional startup smoke coverage uses fake process and health
+adapters in CI; real localhost startup and hardware/manual suites are not claimed as
+executed. See `docs/system-testing.md`.

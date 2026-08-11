@@ -304,7 +304,7 @@ class ProjectKnowledgeBuilder:
         return tuple(sorted(interfaces)), tuple(sorted(dependencies))
 
     def _repository_files(self) -> tuple[str, ...]:
-        roots = ("jarvis", "docs", "scripts", "tests")
+        roots = (".github", "jarvis", "docs", "scripts", "tests")
         paths = {
             self._relative(path)
             for root in roots
