@@ -51,3 +51,19 @@ to replace `invoke` or define a public `execute` entry point are rejected.
 Use semantic versions. Increment the major version for a breaking schema or behavior change, minor for compatible capability additions, and patch for compatible fixes. Keep declared permissions minimal; current tools request no privileged permissions. Future filesystem, shell, computer-control, camera, or network tools require dedicated provider abstractions, an explicit policy, a trusted action descriptor, and adversarial permission tests before registration.
 
 Calculator and local-time are safe local tools. Weather is an explicit unavailable placeholder until an approved network provider exists.
+
+## Computer-tool rules
+
+Computer tools are privileged tools. Keep their planner-facing interfaces semantic:
+use application IDs, window IDs, control IDs, and text-entry operations rather than
+Windows-library types or coordinate clicks. Coordinate actions are a separately
+named fallback, require `computer.input`, and must include a safe trusted reason.
+
+Never expose a `shell(command)` or `subprocess`-string tool. Resolve a model-supplied
+command ID through a trusted catalogue, validate each argument separately, include
+a bounded timeout and cancellation token, and execute with `shell=False`. Resolve
+application IDs in the same way. A filesystem implementation must consume only the
+authorized canonical scope path from the broker receipt. Screenshot implementations
+must persist bytes behind a trusted artifact reference and return metadata/evidence,
+not an image blob. Add deterministic mock-adapter tests for every adapter-facing
+action and keep actual Windows desktop tests explicitly opt-in.

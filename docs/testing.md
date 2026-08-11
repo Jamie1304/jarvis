@@ -13,3 +13,11 @@ argument mutation, model-forged grants, cancellation, deny-once, bounded remembe
 grants, hard-safety overrides, reserved tool entry points, and secret-safe audit
 evidence. Link-escape coverage skips only when the test identity cannot create a
 Windows symlink/junction.
+
+Phase 6 deterministic tests use mock computer, filesystem, screenshot, and command
+adapters. They cover broker denial before adapter invocation, catalogued application
+launch, semantic input, labelled mouse fallback, separate clipboard permissions,
+filesystem scope denial, secure screenshot-reference lifecycle, command timeout,
+and cancellation. Real Windows desktop tests are marked `windows_integration` and
+are skipped unless `JARVIS_WINDOWS_INTEGRATION=true`; they are not part of ordinary
+CI and must never be reported as a successful UI interaction when skipped.

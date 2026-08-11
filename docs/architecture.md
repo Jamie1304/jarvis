@@ -47,3 +47,18 @@ asks the broker to authorize the exact fingerprinted action, attaches the broker
 receipt, invokes `_execute_authorized`, and records the outcome. Unknown tools,
 permissions, scopes, and policy all fail closed. See `docs/threat-model.md` and
 `docs/permission-model.md` for the trust assumptions and policy contract.
+
+Phase 6 adds a controlled computer capability layer without changing that boundary:
+
+`AI/planner -> typed computer tool -> PermissionBroker -> policy/approval -> adapter -> Windows`
+
+The planner sees semantic tool contracts such as application launch, window focus,
+and control text entry. It does not receive Windows library objects, handles, raw
+process launch, a shell-string primitive, or direct clipboard/filesystem/screenshot
+APIs. `ComputerAdapter` is the platform-neutral interface; the optional
+`WindowsUiAutomationAdapter` translates authorized semantic requests to Windows UI
+Automation. Coordinate clicks are an explicitly labelled fallback tool rather than
+the normal control path. Screenshot bytes stay in a trusted `ScreenshotStore`; tool
+results expose only metadata and an opaque reference. Controlled terminal execution
+resolves a trusted command ID to a fixed executable and command family, uses an
+argument array with `shell=False`, and supports timeout and cancellation.

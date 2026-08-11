@@ -12,6 +12,7 @@ class Permission(StrEnum):
     FILESYSTEM_READ = "filesystem.read"
     FILESYSTEM_WRITE = "filesystem.write"
     SCREEN_READ = "screen.read"
+    COMPUTER_INPUT = "computer.input"
     CAMERA_READ = "camera.read"
     MICROPHONE_READ = "microphone.read"
     CLIPBOARD_READ = "clipboard.read"
