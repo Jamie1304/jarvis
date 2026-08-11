@@ -6,10 +6,12 @@ import argparse
 import asyncio
 import json
 import subprocess
+import sys
 from pathlib import Path
 
-from jarvis.testing.catalog import create_deterministic_suite_catalog
-from jarvis.testing.runner import ControlledTestRunner, TestArtifactStore
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
 
 def _revision(project_root: Path) -> str:
@@ -29,7 +31,10 @@ def _revision(project_root: Path) -> str:
 
 
 async def _run(suite_id: str) -> int:
-    project_root = Path(__file__).resolve().parents[1]
+    from jarvis.testing.catalog import create_deterministic_suite_catalog
+    from jarvis.testing.runner import ControlledTestRunner, TestArtifactStore
+
+    project_root = PROJECT_ROOT
     runner = ControlledTestRunner(
         create_deterministic_suite_catalog(),
         project_root,
@@ -41,6 +46,8 @@ async def _run(suite_id: str) -> int:
 
 
 def main() -> int:
+    from jarvis.testing.catalog import create_deterministic_suite_catalog
+
     catalog = create_deterministic_suite_catalog()
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(

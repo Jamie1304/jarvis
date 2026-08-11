@@ -17,8 +17,8 @@
       ],
       "name": "ai",
       "provenance": {
-        "generated_at": "2026-08-11T14:38:31.460236+00:00",
-        "revision": "cb754ae51f8cf21f1e64833834de5f0d1e8cd93d",
+        "generated_at": "2026-08-11T14:43:11.175278+00:00",
+        "revision": "b85cbafdcf3ab2c440247f98763cc48108e80c86",
         "source_files": [
           "jarvis/ai/__init__.py",
           "jarvis/ai/models.py",
@@ -84,8 +84,8 @@
       ],
       "name": "applications",
       "provenance": {
-        "generated_at": "2026-08-11T14:38:31.460236+00:00",
-        "revision": "cb754ae51f8cf21f1e64833834de5f0d1e8cd93d",
+        "generated_at": "2026-08-11T14:43:11.175278+00:00",
+        "revision": "b85cbafdcf3ab2c440247f98763cc48108e80c86",
         "source_files": [
           "jarvis/applications/__init__.py",
           "jarvis/applications/catalog.py",
@@ -209,8 +209,8 @@
       ],
       "name": "autonomy",
       "provenance": {
-        "generated_at": "2026-08-11T14:38:31.460236+00:00",
-        "revision": "cb754ae51f8cf21f1e64833834de5f0d1e8cd93d",
+        "generated_at": "2026-08-11T14:43:11.175278+00:00",
+        "revision": "b85cbafdcf3ab2c440247f98763cc48108e80c86",
         "source_files": [
           "jarvis/autonomy/__init__.py",
           "jarvis/autonomy/execution.py",
@@ -312,8 +312,8 @@
       ],
       "name": "camera",
       "provenance": {
-        "generated_at": "2026-08-11T14:38:31.460236+00:00",
-        "revision": "cb754ae51f8cf21f1e64833834de5f0d1e8cd93d",
+        "generated_at": "2026-08-11T14:43:11.175278+00:00",
+        "revision": "b85cbafdcf3ab2c440247f98763cc48108e80c86",
         "source_files": [
           "jarvis/camera/__init__.py",
           "jarvis/camera/catalog.py",
@@ -416,8 +416,8 @@
       ],
       "name": "computer",
       "provenance": {
-        "generated_at": "2026-08-11T14:38:31.460236+00:00",
-        "revision": "cb754ae51f8cf21f1e64833834de5f0d1e8cd93d",
+        "generated_at": "2026-08-11T14:43:11.175278+00:00",
+        "revision": "b85cbafdcf3ab2c440247f98763cc48108e80c86",
         "source_files": [
           "jarvis/computer/__init__.py",
           "jarvis/computer/accessibility.py",
@@ -543,8 +543,8 @@
       ],
       "name": "conversation",
       "provenance": {
-        "generated_at": "2026-08-11T14:38:31.460236+00:00",
-        "revision": "cb754ae51f8cf21f1e64833834de5f0d1e8cd93d",
+        "generated_at": "2026-08-11T14:43:11.175278+00:00",
+        "revision": "b85cbafdcf3ab2c440247f98763cc48108e80c86",
         "source_files": [
           "jarvis/conversation/__init__.py",
           "jarvis/conversation/service.py"
@@ -585,8 +585,8 @@
       ],
       "name": "core",
       "provenance": {
-        "generated_at": "2026-08-11T14:38:31.460236+00:00",
-        "revision": "cb754ae51f8cf21f1e64833834de5f0d1e8cd93d",
+        "generated_at": "2026-08-11T14:43:11.175278+00:00",
+        "revision": "b85cbafdcf3ab2c440247f98763cc48108e80c86",
         "source_files": [
           "jarvis/core/__init__.py",
           "jarvis/core/config.py",
@@ -662,8 +662,8 @@
       ],
       "name": "discovery",
       "provenance": {
-        "generated_at": "2026-08-11T14:38:31.460236+00:00",
-        "revision": "cb754ae51f8cf21f1e64833834de5f0d1e8cd93d",
+        "generated_at": "2026-08-11T14:43:11.175278+00:00",
+        "revision": "b85cbafdcf3ab2c440247f98763cc48108e80c86",
         "source_files": [
           "jarvis/discovery/__init__.py",
           "jarvis/discovery/models.py",
@@ -729,8 +729,8 @@
       ],
       "name": "frontend",
       "provenance": {
-        "generated_at": "2026-08-11T14:38:31.460236+00:00",
-        "revision": "cb754ae51f8cf21f1e64833834de5f0d1e8cd93d",
+        "generated_at": "2026-08-11T14:43:11.175278+00:00",
+        "revision": "b85cbafdcf3ab2c440247f98763cc48108e80c86",
         "source_files": [
           "jarvis/frontend/__init__.py",
           "jarvis/frontend/desktop.py"
@@ -781,8 +781,8 @@
       ],
       "name": "improvement",
       "provenance": {
-        "generated_at": "2026-08-11T14:38:31.460236+00:00",
-        "revision": "cb754ae51f8cf21f1e64833834de5f0d1e8cd93d",
+        "generated_at": "2026-08-11T14:43:11.175278+00:00",
+        "revision": "b85cbafdcf3ab2c440247f98763cc48108e80c86",
         "source_files": [
           "jarvis/improvement/__init__.py",
           "jarvis/improvement/adapters.py",
@@ -936,8 +936,8 @@
       ],
       "name": "knowledge",
       "provenance": {
-        "generated_at": "2026-08-11T14:38:31.460236+00:00",
-        "revision": "cb754ae51f8cf21f1e64833834de5f0d1e8cd93d",
+        "generated_at": "2026-08-11T14:43:11.175278+00:00",
+        "revision": "b85cbafdcf3ab2c440247f98763cc48108e80c86",
         "source_files": [
           "jarvis/knowledge/__init__.py",
           "jarvis/knowledge/indexer.py",
@@ -985,8 +985,8 @@
       "dependencies": [],
       "name": "memory",
       "provenance": {
-        "generated_at": "2026-08-11T14:38:31.460236+00:00",
-        "revision": "cb754ae51f8cf21f1e64833834de5f0d1e8cd93d",
+        "generated_at": "2026-08-11T14:43:11.175278+00:00",
+        "revision": "b85cbafdcf3ab2c440247f98763cc48108e80c86",
         "source_files": [
           "jarvis/memory/__init__.py"
         ],
@@ -1019,8 +1019,8 @@
       ],
       "name": "permissions",
       "provenance": {
-        "generated_at": "2026-08-11T14:38:31.460236+00:00",
-        "revision": "cb754ae51f8cf21f1e64833834de5f0d1e8cd93d",
+        "generated_at": "2026-08-11T14:43:11.175278+00:00",
+        "revision": "b85cbafdcf3ab2c440247f98763cc48108e80c86",
         "source_files": [
           "jarvis/permissions/__init__.py",
           "jarvis/permissions/audit.py",
@@ -1098,8 +1098,8 @@
       "dependencies": [],
       "name": "security",
       "provenance": {
-        "generated_at": "2026-08-11T14:38:31.460236+00:00",
-        "revision": "cb754ae51f8cf21f1e64833834de5f0d1e8cd93d",
+        "generated_at": "2026-08-11T14:43:11.175278+00:00",
+        "revision": "b85cbafdcf3ab2c440247f98763cc48108e80c86",
         "source_files": [
           "jarvis/security/__init__.py"
         ],
@@ -1130,8 +1130,8 @@
       ],
       "name": "speech",
       "provenance": {
-        "generated_at": "2026-08-11T14:38:31.460236+00:00",
-        "revision": "cb754ae51f8cf21f1e64833834de5f0d1e8cd93d",
+        "generated_at": "2026-08-11T14:43:11.175278+00:00",
+        "revision": "b85cbafdcf3ab2c440247f98763cc48108e80c86",
         "source_files": [
           "jarvis/speech/__init__.py",
           "jarvis/speech/stt.py",
@@ -1200,8 +1200,8 @@
       ],
       "name": "testing",
       "provenance": {
-        "generated_at": "2026-08-11T14:38:31.460236+00:00",
-        "revision": "cb754ae51f8cf21f1e64833834de5f0d1e8cd93d",
+        "generated_at": "2026-08-11T14:43:11.175278+00:00",
+        "revision": "b85cbafdcf3ab2c440247f98763cc48108e80c86",
         "source_files": [
           "jarvis/testing/__init__.py",
           "jarvis/testing/catalog.py",
@@ -1309,8 +1309,8 @@
       ],
       "name": "tools",
       "provenance": {
-        "generated_at": "2026-08-11T14:38:31.460236+00:00",
-        "revision": "cb754ae51f8cf21f1e64833834de5f0d1e8cd93d",
+        "generated_at": "2026-08-11T14:43:11.175278+00:00",
+        "revision": "b85cbafdcf3ab2c440247f98763cc48108e80c86",
         "source_files": [
           "jarvis/tools/__init__.py",
           "jarvis/tools/base.py",
@@ -1422,8 +1422,8 @@
       ],
       "name": "vision",
       "provenance": {
-        "generated_at": "2026-08-11T14:38:31.460236+00:00",
-        "revision": "cb754ae51f8cf21f1e64833834de5f0d1e8cd93d",
+        "generated_at": "2026-08-11T14:43:11.175278+00:00",
+        "revision": "b85cbafdcf3ab2c440247f98763cc48108e80c86",
         "source_files": [
           "jarvis/vision/__init__.py",
           "jarvis/vision/fusion.py",
@@ -1497,7 +1497,7 @@
       ]
     }
   ],
-  "generated_at": "2026-08-11T14:38:31.460236+00:00",
+  "generated_at": "2026-08-11T14:43:11.175278+00:00",
   "items": [
     {
       "authority": "generated",
@@ -1508,8 +1508,8 @@
         "layer": "provider"
       },
       "provenance": {
-        "generated_at": "2026-08-11T14:38:31.460236+00:00",
-        "revision": "cb754ae51f8cf21f1e64833834de5f0d1e8cd93d",
+        "generated_at": "2026-08-11T14:43:11.175278+00:00",
+        "revision": "b85cbafdcf3ab2c440247f98763cc48108e80c86",
         "source_files": [
           "jarvis/ai/__init__.py",
           "jarvis/ai/models.py",
@@ -1537,8 +1537,8 @@
         "layer": "controlled-capability"
       },
       "provenance": {
-        "generated_at": "2026-08-11T14:38:31.460236+00:00",
-        "revision": "cb754ae51f8cf21f1e64833834de5f0d1e8cd93d",
+        "generated_at": "2026-08-11T14:43:11.175278+00:00",
+        "revision": "b85cbafdcf3ab2c440247f98763cc48108e80c86",
         "source_files": [
           "jarvis/applications/__init__.py",
           "jarvis/applications/catalog.py",
@@ -1574,8 +1574,8 @@
         "layer": "orchestration"
       },
       "provenance": {
-        "generated_at": "2026-08-11T14:38:31.460236+00:00",
-        "revision": "cb754ae51f8cf21f1e64833834de5f0d1e8cd93d",
+        "generated_at": "2026-08-11T14:43:11.175278+00:00",
+        "revision": "b85cbafdcf3ab2c440247f98763cc48108e80c86",
         "source_files": [
           "jarvis/autonomy/__init__.py",
           "jarvis/autonomy/execution.py",
@@ -1607,8 +1607,8 @@
         "layer": "controlled-capability"
       },
       "provenance": {
-        "generated_at": "2026-08-11T14:38:31.460236+00:00",
-        "revision": "cb754ae51f8cf21f1e64833834de5f0d1e8cd93d",
+        "generated_at": "2026-08-11T14:43:11.175278+00:00",
+        "revision": "b85cbafdcf3ab2c440247f98763cc48108e80c86",
         "source_files": [
           "jarvis/camera/__init__.py",
           "jarvis/camera/catalog.py",
@@ -1642,8 +1642,8 @@
         "layer": "controlled-capability"
       },
       "provenance": {
-        "generated_at": "2026-08-11T14:38:31.460236+00:00",
-        "revision": "cb754ae51f8cf21f1e64833834de5f0d1e8cd93d",
+        "generated_at": "2026-08-11T14:43:11.175278+00:00",
+        "revision": "b85cbafdcf3ab2c440247f98763cc48108e80c86",
         "source_files": [
           "jarvis/computer/__init__.py",
           "jarvis/computer/accessibility.py",
@@ -1679,8 +1679,8 @@
         "layer": "application-service"
       },
       "provenance": {
-        "generated_at": "2026-08-11T14:38:31.460236+00:00",
-        "revision": "cb754ae51f8cf21f1e64833834de5f0d1e8cd93d",
+        "generated_at": "2026-08-11T14:43:11.175278+00:00",
+        "revision": "b85cbafdcf3ab2c440247f98763cc48108e80c86",
         "source_files": [
           "jarvis/conversation/__init__.py",
           "jarvis/conversation/service.py"
@@ -1702,8 +1702,8 @@
         "layer": "cross-cutting"
       },
       "provenance": {
-        "generated_at": "2026-08-11T14:38:31.460236+00:00",
-        "revision": "cb754ae51f8cf21f1e64833834de5f0d1e8cd93d",
+        "generated_at": "2026-08-11T14:43:11.175278+00:00",
+        "revision": "b85cbafdcf3ab2c440247f98763cc48108e80c86",
         "source_files": [
           "jarvis/core/__init__.py",
           "jarvis/core/config.py",
@@ -1731,8 +1731,8 @@
         "layer": "advisory-capability"
       },
       "provenance": {
-        "generated_at": "2026-08-11T14:38:31.460236+00:00",
-        "revision": "cb754ae51f8cf21f1e64833834de5f0d1e8cd93d",
+        "generated_at": "2026-08-11T14:43:11.175278+00:00",
+        "revision": "b85cbafdcf3ab2c440247f98763cc48108e80c86",
         "source_files": [
           "jarvis/discovery/__init__.py",
           "jarvis/discovery/models.py",
@@ -1758,8 +1758,8 @@
         "layer": "presentation"
       },
       "provenance": {
-        "generated_at": "2026-08-11T14:38:31.460236+00:00",
-        "revision": "cb754ae51f8cf21f1e64833834de5f0d1e8cd93d",
+        "generated_at": "2026-08-11T14:43:11.175278+00:00",
+        "revision": "b85cbafdcf3ab2c440247f98763cc48108e80c86",
         "source_files": [
           "jarvis/frontend/__init__.py",
           "jarvis/frontend/desktop.py"
@@ -1781,8 +1781,8 @@
         "layer": "proposal-only-improvement"
       },
       "provenance": {
-        "generated_at": "2026-08-11T14:38:31.460236+00:00",
-        "revision": "cb754ae51f8cf21f1e64833834de5f0d1e8cd93d",
+        "generated_at": "2026-08-11T14:43:11.175278+00:00",
+        "revision": "b85cbafdcf3ab2c440247f98763cc48108e80c86",
         "source_files": [
           "jarvis/improvement/__init__.py",
           "jarvis/improvement/adapters.py",
@@ -1816,8 +1816,8 @@
         "layer": "domain"
       },
       "provenance": {
-        "generated_at": "2026-08-11T14:38:31.460236+00:00",
-        "revision": "cb754ae51f8cf21f1e64833834de5f0d1e8cd93d",
+        "generated_at": "2026-08-11T14:43:11.175278+00:00",
+        "revision": "b85cbafdcf3ab2c440247f98763cc48108e80c86",
         "source_files": [
           "jarvis/knowledge/__init__.py",
           "jarvis/knowledge/indexer.py",
@@ -1843,8 +1843,8 @@
         "layer": "reserved-domain"
       },
       "provenance": {
-        "generated_at": "2026-08-11T14:38:31.460236+00:00",
-        "revision": "cb754ae51f8cf21f1e64833834de5f0d1e8cd93d",
+        "generated_at": "2026-08-11T14:43:11.175278+00:00",
+        "revision": "b85cbafdcf3ab2c440247f98763cc48108e80c86",
         "source_files": [
           "jarvis/memory/__init__.py"
         ],
@@ -1864,8 +1864,8 @@
         "layer": "security-boundary"
       },
       "provenance": {
-        "generated_at": "2026-08-11T14:38:31.460236+00:00",
-        "revision": "cb754ae51f8cf21f1e64833834de5f0d1e8cd93d",
+        "generated_at": "2026-08-11T14:43:11.175278+00:00",
+        "revision": "b85cbafdcf3ab2c440247f98763cc48108e80c86",
         "source_files": [
           "jarvis/permissions/__init__.py",
           "jarvis/permissions/audit.py",
@@ -1893,8 +1893,8 @@
         "layer": "security-boundary"
       },
       "provenance": {
-        "generated_at": "2026-08-11T14:38:31.460236+00:00",
-        "revision": "cb754ae51f8cf21f1e64833834de5f0d1e8cd93d",
+        "generated_at": "2026-08-11T14:43:11.175278+00:00",
+        "revision": "b85cbafdcf3ab2c440247f98763cc48108e80c86",
         "source_files": [
           "jarvis/security/__init__.py"
         ],
@@ -1914,8 +1914,8 @@
         "layer": "provider"
       },
       "provenance": {
-        "generated_at": "2026-08-11T14:38:31.460236+00:00",
-        "revision": "cb754ae51f8cf21f1e64833834de5f0d1e8cd93d",
+        "generated_at": "2026-08-11T14:43:11.175278+00:00",
+        "revision": "b85cbafdcf3ab2c440247f98763cc48108e80c86",
         "source_files": [
           "jarvis/speech/__init__.py",
           "jarvis/speech/stt.py",
@@ -1939,8 +1939,8 @@
         "layer": "domain"
       },
       "provenance": {
-        "generated_at": "2026-08-11T14:38:31.460236+00:00",
-        "revision": "cb754ae51f8cf21f1e64833834de5f0d1e8cd93d",
+        "generated_at": "2026-08-11T14:43:11.175278+00:00",
+        "revision": "b85cbafdcf3ab2c440247f98763cc48108e80c86",
         "source_files": [
           "jarvis/testing/__init__.py",
           "jarvis/testing/catalog.py",
@@ -1974,8 +1974,8 @@
         "layer": "capability-boundary"
       },
       "provenance": {
-        "generated_at": "2026-08-11T14:38:31.460236+00:00",
-        "revision": "cb754ae51f8cf21f1e64833834de5f0d1e8cd93d",
+        "generated_at": "2026-08-11T14:43:11.175278+00:00",
+        "revision": "b85cbafdcf3ab2c440247f98763cc48108e80c86",
         "source_files": [
           "jarvis/tools/__init__.py",
           "jarvis/tools/base.py",
@@ -2011,8 +2011,8 @@
         "layer": "controlled-capability"
       },
       "provenance": {
-        "generated_at": "2026-08-11T14:38:31.460236+00:00",
-        "revision": "cb754ae51f8cf21f1e64833834de5f0d1e8cd93d",
+        "generated_at": "2026-08-11T14:43:11.175278+00:00",
+        "revision": "b85cbafdcf3ab2c440247f98763cc48108e80c86",
         "source_files": [
           "jarvis/vision/__init__.py",
           "jarvis/vision/fusion.py",
@@ -2042,8 +2042,8 @@
         "path": "docs/decisions/0001-phase-0-boundaries.md"
       },
       "provenance": {
-        "generated_at": "2026-08-11T14:38:31.460236+00:00",
-        "revision": "cb754ae51f8cf21f1e64833834de5f0d1e8cd93d",
+        "generated_at": "2026-08-11T14:43:11.175278+00:00",
+        "revision": "b85cbafdcf3ab2c440247f98763cc48108e80c86",
         "source_files": [
           "docs/decisions/0001-phase-0-boundaries.md"
         ],
@@ -2063,8 +2063,8 @@
         "path": "docs/decisions/0002-local-conversation-and-speech.md"
       },
       "provenance": {
-        "generated_at": "2026-08-11T14:38:31.460236+00:00",
-        "revision": "cb754ae51f8cf21f1e64833834de5f0d1e8cd93d",
+        "generated_at": "2026-08-11T14:43:11.175278+00:00",
+        "revision": "b85cbafdcf3ab2c440247f98763cc48108e80c86",
         "source_files": [
           "docs/decisions/0002-local-conversation-and-speech.md"
         ],
@@ -2084,8 +2084,8 @@
         "path": "docs/decisions/0003-bounded-single-agent-orchestration.md"
       },
       "provenance": {
-        "generated_at": "2026-08-11T14:38:31.460236+00:00",
-        "revision": "cb754ae51f8cf21f1e64833834de5f0d1e8cd93d",
+        "generated_at": "2026-08-11T14:43:11.175278+00:00",
+        "revision": "b85cbafdcf3ab2c440247f98763cc48108e80c86",
         "source_files": [
           "docs/decisions/0003-bounded-single-agent-orchestration.md"
         ],
@@ -2105,8 +2105,8 @@
         "path": "docs/decisions/0004-versioned-tool-contract.md"
       },
       "provenance": {
-        "generated_at": "2026-08-11T14:38:31.460236+00:00",
-        "revision": "cb754ae51f8cf21f1e64833834de5f0d1e8cd93d",
+        "generated_at": "2026-08-11T14:43:11.175278+00:00",
+        "revision": "b85cbafdcf3ab2c440247f98763cc48108e80c86",
         "source_files": [
           "docs/decisions/0004-versioned-tool-contract.md"
         ],
@@ -2126,8 +2126,8 @@
         "path": "docs/decisions/0005-central-tool-registry.md"
       },
       "provenance": {
-        "generated_at": "2026-08-11T14:38:31.460236+00:00",
-        "revision": "cb754ae51f8cf21f1e64833834de5f0d1e8cd93d",
+        "generated_at": "2026-08-11T14:43:11.175278+00:00",
+        "revision": "b85cbafdcf3ab2c440247f98763cc48108e80c86",
         "source_files": [
           "docs/decisions/0005-central-tool-registry.md"
         ],
@@ -2147,8 +2147,8 @@
         "path": "docs/decisions/0006-permission-broker.md"
       },
       "provenance": {
-        "generated_at": "2026-08-11T14:38:31.460236+00:00",
-        "revision": "cb754ae51f8cf21f1e64833834de5f0d1e8cd93d",
+        "generated_at": "2026-08-11T14:43:11.175278+00:00",
+        "revision": "b85cbafdcf3ab2c440247f98763cc48108e80c86",
         "source_files": [
           "docs/decisions/0006-permission-broker.md"
         ],
@@ -2168,8 +2168,8 @@
         "path": "docs/decisions/0007-controlled-windows-computer-capabilities.md"
       },
       "provenance": {
-        "generated_at": "2026-08-11T14:38:31.460236+00:00",
-        "revision": "cb754ae51f8cf21f1e64833834de5f0d1e8cd93d",
+        "generated_at": "2026-08-11T14:43:11.175278+00:00",
+        "revision": "b85cbafdcf3ab2c440247f98763cc48108e80c86",
         "source_files": [
           "docs/decisions/0007-controlled-windows-computer-capabilities.md"
         ],
@@ -2189,8 +2189,8 @@
         "path": "docs/decisions/0008-visual-grounding-and-verification.md"
       },
       "provenance": {
-        "generated_at": "2026-08-11T14:38:31.460236+00:00",
-        "revision": "cb754ae51f8cf21f1e64833834de5f0d1e8cd93d",
+        "generated_at": "2026-08-11T14:43:11.175278+00:00",
+        "revision": "b85cbafdcf3ab2c440247f98763cc48108e80c86",
         "source_files": [
           "docs/decisions/0008-visual-grounding-and-verification.md"
         ],
@@ -2210,8 +2210,8 @@
         "path": "docs/decisions/0009-controlled-camera-support.md"
       },
       "provenance": {
-        "generated_at": "2026-08-11T14:38:31.460236+00:00",
-        "revision": "cb754ae51f8cf21f1e64833834de5f0d1e8cd93d",
+        "generated_at": "2026-08-11T14:43:11.175278+00:00",
+        "revision": "b85cbafdcf3ab2c440247f98763cc48108e80c86",
         "source_files": [
           "docs/decisions/0009-controlled-camera-support.md"
         ],
@@ -2231,8 +2231,8 @@
         "path": "docs/decisions/0010-controlled-application-manager.md"
       },
       "provenance": {
-        "generated_at": "2026-08-11T14:38:31.460236+00:00",
-        "revision": "cb754ae51f8cf21f1e64833834de5f0d1e8cd93d",
+        "generated_at": "2026-08-11T14:43:11.175278+00:00",
+        "revision": "b85cbafdcf3ab2c440247f98763cc48108e80c86",
         "source_files": [
           "docs/decisions/0010-controlled-application-manager.md"
         ],
@@ -2252,8 +2252,8 @@
         "path": "docs/decisions/0011-advisory-capability-discovery.md"
       },
       "provenance": {
-        "generated_at": "2026-08-11T14:38:31.460236+00:00",
-        "revision": "cb754ae51f8cf21f1e64833834de5f0d1e8cd93d",
+        "generated_at": "2026-08-11T14:43:11.175278+00:00",
+        "revision": "b85cbafdcf3ab2c440247f98763cc48108e80c86",
         "source_files": [
           "docs/decisions/0011-advisory-capability-discovery.md"
         ],
@@ -2273,8 +2273,8 @@
         "path": "docs/decisions/0012-propose-and-test-improvement-engine.md"
       },
       "provenance": {
-        "generated_at": "2026-08-11T14:38:31.460236+00:00",
-        "revision": "cb754ae51f8cf21f1e64833834de5f0d1e8cd93d",
+        "generated_at": "2026-08-11T14:43:11.175278+00:00",
+        "revision": "b85cbafdcf3ab2c440247f98763cc48108e80c86",
         "source_files": [
           "docs/decisions/0012-propose-and-test-improvement-engine.md"
         ],
@@ -2294,8 +2294,8 @@
         "path": "docs/decisions/0013-controlled-system-self-testing.md"
       },
       "provenance": {
-        "generated_at": "2026-08-11T14:38:31.460236+00:00",
-        "revision": "cb754ae51f8cf21f1e64833834de5f0d1e8cd93d",
+        "generated_at": "2026-08-11T14:43:11.175278+00:00",
+        "revision": "b85cbafdcf3ab2c440247f98763cc48108e80c86",
         "source_files": [
           "docs/decisions/0013-controlled-system-self-testing.md"
         ],
@@ -2315,8 +2315,8 @@
         "path": "CONTRIBUTING.md"
       },
       "provenance": {
-        "generated_at": "2026-08-11T14:38:31.460236+00:00",
-        "revision": "cb754ae51f8cf21f1e64833834de5f0d1e8cd93d",
+        "generated_at": "2026-08-11T14:43:11.175278+00:00",
+        "revision": "b85cbafdcf3ab2c440247f98763cc48108e80c86",
         "source_files": [
           "CONTRIBUTING.md"
         ],
@@ -2336,8 +2336,8 @@
         "path": "README.md"
       },
       "provenance": {
-        "generated_at": "2026-08-11T14:38:31.460236+00:00",
-        "revision": "cb754ae51f8cf21f1e64833834de5f0d1e8cd93d",
+        "generated_at": "2026-08-11T14:43:11.175278+00:00",
+        "revision": "b85cbafdcf3ab2c440247f98763cc48108e80c86",
         "source_files": [
           "README.md"
         ],
@@ -2357,8 +2357,8 @@
         "path": "docs/application-manager.md"
       },
       "provenance": {
-        "generated_at": "2026-08-11T14:38:31.460236+00:00",
-        "revision": "cb754ae51f8cf21f1e64833834de5f0d1e8cd93d",
+        "generated_at": "2026-08-11T14:43:11.175278+00:00",
+        "revision": "b85cbafdcf3ab2c440247f98763cc48108e80c86",
         "source_files": [
           "docs/application-manager.md"
         ],
@@ -2378,8 +2378,8 @@
         "path": "docs/architecture.md"
       },
       "provenance": {
-        "generated_at": "2026-08-11T14:38:31.460236+00:00",
-        "revision": "cb754ae51f8cf21f1e64833834de5f0d1e8cd93d",
+        "generated_at": "2026-08-11T14:43:11.175278+00:00",
+        "revision": "b85cbafdcf3ab2c440247f98763cc48108e80c86",
         "source_files": [
           "docs/architecture.md"
         ],
@@ -2399,8 +2399,8 @@
         "path": "docs/autonomous-improvement.md"
       },
       "provenance": {
-        "generated_at": "2026-08-11T14:38:31.460236+00:00",
-        "revision": "cb754ae51f8cf21f1e64833834de5f0d1e8cd93d",
+        "generated_at": "2026-08-11T14:43:11.175278+00:00",
+        "revision": "b85cbafdcf3ab2c440247f98763cc48108e80c86",
         "source_files": [
           "docs/autonomous-improvement.md"
         ],
@@ -2420,8 +2420,8 @@
         "path": "docs/camera-support.md"
       },
       "provenance": {
-        "generated_at": "2026-08-11T14:38:31.460236+00:00",
-        "revision": "cb754ae51f8cf21f1e64833834de5f0d1e8cd93d",
+        "generated_at": "2026-08-11T14:43:11.175278+00:00",
+        "revision": "b85cbafdcf3ab2c440247f98763cc48108e80c86",
         "source_files": [
           "docs/camera-support.md"
         ],
@@ -2441,8 +2441,8 @@
         "path": "docs/capability-discovery.md"
       },
       "provenance": {
-        "generated_at": "2026-08-11T14:38:31.460236+00:00",
-        "revision": "cb754ae51f8cf21f1e64833834de5f0d1e8cd93d",
+        "generated_at": "2026-08-11T14:43:11.175278+00:00",
+        "revision": "b85cbafdcf3ab2c440247f98763cc48108e80c86",
         "source_files": [
           "docs/capability-discovery.md"
         ],
@@ -2462,8 +2462,8 @@
         "path": "docs/computer-capabilities.md"
       },
       "provenance": {
-        "generated_at": "2026-08-11T14:38:31.460236+00:00",
-        "revision": "cb754ae51f8cf21f1e64833834de5f0d1e8cd93d",
+        "generated_at": "2026-08-11T14:43:11.175278+00:00",
+        "revision": "b85cbafdcf3ab2c440247f98763cc48108e80c86",
         "source_files": [
           "docs/computer-capabilities.md"
         ],
@@ -2483,8 +2483,8 @@
         "path": "docs/development.md"
       },
       "provenance": {
-        "generated_at": "2026-08-11T14:38:31.460236+00:00",
-        "revision": "cb754ae51f8cf21f1e64833834de5f0d1e8cd93d",
+        "generated_at": "2026-08-11T14:43:11.175278+00:00",
+        "revision": "b85cbafdcf3ab2c440247f98763cc48108e80c86",
         "source_files": [
           "docs/development.md"
         ],
@@ -2504,8 +2504,8 @@
         "path": "docs/permission-model.md"
       },
       "provenance": {
-        "generated_at": "2026-08-11T14:38:31.460236+00:00",
-        "revision": "cb754ae51f8cf21f1e64833834de5f0d1e8cd93d",
+        "generated_at": "2026-08-11T14:43:11.175278+00:00",
+        "revision": "b85cbafdcf3ab2c440247f98763cc48108e80c86",
         "source_files": [
           "docs/permission-model.md"
         ],
@@ -2525,8 +2525,8 @@
         "path": "docs/security-principles.md"
       },
       "provenance": {
-        "generated_at": "2026-08-11T14:38:31.460236+00:00",
-        "revision": "cb754ae51f8cf21f1e64833834de5f0d1e8cd93d",
+        "generated_at": "2026-08-11T14:43:11.175278+00:00",
+        "revision": "b85cbafdcf3ab2c440247f98763cc48108e80c86",
         "source_files": [
           "docs/security-principles.md"
         ],
@@ -2546,8 +2546,8 @@
         "path": "docs/system-testing.md"
       },
       "provenance": {
-        "generated_at": "2026-08-11T14:38:31.460236+00:00",
-        "revision": "cb754ae51f8cf21f1e64833834de5f0d1e8cd93d",
+        "generated_at": "2026-08-11T14:43:11.175278+00:00",
+        "revision": "b85cbafdcf3ab2c440247f98763cc48108e80c86",
         "source_files": [
           "docs/system-testing.md"
         ],
@@ -2567,8 +2567,8 @@
         "path": "docs/testing.md"
       },
       "provenance": {
-        "generated_at": "2026-08-11T14:38:31.460236+00:00",
-        "revision": "cb754ae51f8cf21f1e64833834de5f0d1e8cd93d",
+        "generated_at": "2026-08-11T14:43:11.175278+00:00",
+        "revision": "b85cbafdcf3ab2c440247f98763cc48108e80c86",
         "source_files": [
           "docs/testing.md"
         ],
@@ -2588,8 +2588,8 @@
         "path": "docs/threat-model.md"
       },
       "provenance": {
-        "generated_at": "2026-08-11T14:38:31.460236+00:00",
-        "revision": "cb754ae51f8cf21f1e64833834de5f0d1e8cd93d",
+        "generated_at": "2026-08-11T14:43:11.175278+00:00",
+        "revision": "b85cbafdcf3ab2c440247f98763cc48108e80c86",
         "source_files": [
           "docs/threat-model.md"
         ],
@@ -2609,8 +2609,8 @@
         "path": "docs/tools.md"
       },
       "provenance": {
-        "generated_at": "2026-08-11T14:38:31.460236+00:00",
-        "revision": "cb754ae51f8cf21f1e64833834de5f0d1e8cd93d",
+        "generated_at": "2026-08-11T14:43:11.175278+00:00",
+        "revision": "b85cbafdcf3ab2c440247f98763cc48108e80c86",
         "source_files": [
           "docs/tools.md"
         ],
@@ -2630,8 +2630,8 @@
         "path": "docs/visual-understanding.md"
       },
       "provenance": {
-        "generated_at": "2026-08-11T14:38:31.460236+00:00",
-        "revision": "cb754ae51f8cf21f1e64833834de5f0d1e8cd93d",
+        "generated_at": "2026-08-11T14:43:11.175278+00:00",
+        "revision": "b85cbafdcf3ab2c440247f98763cc48108e80c86",
         "source_files": [
           "docs/visual-understanding.md"
         ],
@@ -2649,8 +2649,8 @@
       "kind": "permission",
       "metadata": {},
       "provenance": {
-        "generated_at": "2026-08-11T14:38:31.460236+00:00",
-        "revision": "cb754ae51f8cf21f1e64833834de5f0d1e8cd93d",
+        "generated_at": "2026-08-11T14:43:11.175278+00:00",
+        "revision": "b85cbafdcf3ab2c440247f98763cc48108e80c86",
         "source_files": [
           "jarvis/permissions/models.py"
         ],
@@ -2668,8 +2668,8 @@
       "kind": "permission",
       "metadata": {},
       "provenance": {
-        "generated_at": "2026-08-11T14:38:31.460236+00:00",
-        "revision": "cb754ae51f8cf21f1e64833834de5f0d1e8cd93d",
+        "generated_at": "2026-08-11T14:43:11.175278+00:00",
+        "revision": "b85cbafdcf3ab2c440247f98763cc48108e80c86",
         "source_files": [
           "jarvis/permissions/models.py"
         ],
@@ -2687,8 +2687,8 @@
       "kind": "permission",
       "metadata": {},
       "provenance": {
-        "generated_at": "2026-08-11T14:38:31.460236+00:00",
-        "revision": "cb754ae51f8cf21f1e64833834de5f0d1e8cd93d",
+        "generated_at": "2026-08-11T14:43:11.175278+00:00",
+        "revision": "b85cbafdcf3ab2c440247f98763cc48108e80c86",
         "source_files": [
           "jarvis/permissions/models.py"
         ],
@@ -2706,8 +2706,8 @@
       "kind": "permission",
       "metadata": {},
       "provenance": {
-        "generated_at": "2026-08-11T14:38:31.460236+00:00",
-        "revision": "cb754ae51f8cf21f1e64833834de5f0d1e8cd93d",
+        "generated_at": "2026-08-11T14:43:11.175278+00:00",
+        "revision": "b85cbafdcf3ab2c440247f98763cc48108e80c86",
         "source_files": [
           "jarvis/permissions/models.py"
         ],
@@ -2725,8 +2725,8 @@
       "kind": "permission",
       "metadata": {},
       "provenance": {
-        "generated_at": "2026-08-11T14:38:31.460236+00:00",
-        "revision": "cb754ae51f8cf21f1e64833834de5f0d1e8cd93d",
+        "generated_at": "2026-08-11T14:43:11.175278+00:00",
+        "revision": "b85cbafdcf3ab2c440247f98763cc48108e80c86",
         "source_files": [
           "jarvis/permissions/models.py"
         ],
@@ -2744,8 +2744,8 @@
       "kind": "permission",
       "metadata": {},
       "provenance": {
-        "generated_at": "2026-08-11T14:38:31.460236+00:00",
-        "revision": "cb754ae51f8cf21f1e64833834de5f0d1e8cd93d",
+        "generated_at": "2026-08-11T14:43:11.175278+00:00",
+        "revision": "b85cbafdcf3ab2c440247f98763cc48108e80c86",
         "source_files": [
           "jarvis/permissions/models.py"
         ],
@@ -2763,8 +2763,8 @@
       "kind": "permission",
       "metadata": {},
       "provenance": {
-        "generated_at": "2026-08-11T14:38:31.460236+00:00",
-        "revision": "cb754ae51f8cf21f1e64833834de5f0d1e8cd93d",
+        "generated_at": "2026-08-11T14:43:11.175278+00:00",
+        "revision": "b85cbafdcf3ab2c440247f98763cc48108e80c86",
         "source_files": [
           "jarvis/permissions/models.py"
         ],
@@ -2782,8 +2782,8 @@
       "kind": "permission",
       "metadata": {},
       "provenance": {
-        "generated_at": "2026-08-11T14:38:31.460236+00:00",
-        "revision": "cb754ae51f8cf21f1e64833834de5f0d1e8cd93d",
+        "generated_at": "2026-08-11T14:43:11.175278+00:00",
+        "revision": "b85cbafdcf3ab2c440247f98763cc48108e80c86",
         "source_files": [
           "jarvis/permissions/models.py"
         ],
@@ -2801,8 +2801,8 @@
       "kind": "permission",
       "metadata": {},
       "provenance": {
-        "generated_at": "2026-08-11T14:38:31.460236+00:00",
-        "revision": "cb754ae51f8cf21f1e64833834de5f0d1e8cd93d",
+        "generated_at": "2026-08-11T14:43:11.175278+00:00",
+        "revision": "b85cbafdcf3ab2c440247f98763cc48108e80c86",
         "source_files": [
           "jarvis/permissions/models.py"
         ],
@@ -2820,8 +2820,8 @@
       "kind": "permission",
       "metadata": {},
       "provenance": {
-        "generated_at": "2026-08-11T14:38:31.460236+00:00",
-        "revision": "cb754ae51f8cf21f1e64833834de5f0d1e8cd93d",
+        "generated_at": "2026-08-11T14:43:11.175278+00:00",
+        "revision": "b85cbafdcf3ab2c440247f98763cc48108e80c86",
         "source_files": [
           "jarvis/permissions/models.py"
         ],
@@ -2839,8 +2839,8 @@
       "kind": "permission",
       "metadata": {},
       "provenance": {
-        "generated_at": "2026-08-11T14:38:31.460236+00:00",
-        "revision": "cb754ae51f8cf21f1e64833834de5f0d1e8cd93d",
+        "generated_at": "2026-08-11T14:43:11.175278+00:00",
+        "revision": "b85cbafdcf3ab2c440247f98763cc48108e80c86",
         "source_files": [
           "jarvis/permissions/models.py"
         ],
@@ -2858,8 +2858,8 @@
       "kind": "permission",
       "metadata": {},
       "provenance": {
-        "generated_at": "2026-08-11T14:38:31.460236+00:00",
-        "revision": "cb754ae51f8cf21f1e64833834de5f0d1e8cd93d",
+        "generated_at": "2026-08-11T14:43:11.175278+00:00",
+        "revision": "b85cbafdcf3ab2c440247f98763cc48108e80c86",
         "source_files": [
           "jarvis/permissions/models.py"
         ],
@@ -2877,8 +2877,8 @@
       "kind": "permission",
       "metadata": {},
       "provenance": {
-        "generated_at": "2026-08-11T14:38:31.460236+00:00",
-        "revision": "cb754ae51f8cf21f1e64833834de5f0d1e8cd93d",
+        "generated_at": "2026-08-11T14:43:11.175278+00:00",
+        "revision": "b85cbafdcf3ab2c440247f98763cc48108e80c86",
         "source_files": [
           "jarvis/permissions/models.py"
         ],
@@ -2896,8 +2896,8 @@
       "kind": "permission",
       "metadata": {},
       "provenance": {
-        "generated_at": "2026-08-11T14:38:31.460236+00:00",
-        "revision": "cb754ae51f8cf21f1e64833834de5f0d1e8cd93d",
+        "generated_at": "2026-08-11T14:43:11.175278+00:00",
+        "revision": "b85cbafdcf3ab2c440247f98763cc48108e80c86",
         "source_files": [
           "jarvis/permissions/models.py"
         ],
@@ -2915,8 +2915,8 @@
       "kind": "project-tree",
       "metadata": {},
       "provenance": {
-        "generated_at": "2026-08-11T14:38:31.460236+00:00",
-        "revision": "cb754ae51f8cf21f1e64833834de5f0d1e8cd93d",
+        "generated_at": "2026-08-11T14:43:11.175278+00:00",
+        "revision": "b85cbafdcf3ab2c440247f98763cc48108e80c86",
         "source_files": [
           ".github/ISSUE_TEMPLATE/bug_report.md",
           ".github/ISSUE_TEMPLATE/feature_request.md",
@@ -3222,7 +3222,7 @@
           "scripts/__init__.py": "158d28e634dcd64f2dd76d2e699b5e928729ef41ff17ed29b22836ba59d232c2",
           "scripts/quality.py": "0d6cc2c994d349dd3d5ea9539992592c4e3a7d150636845069a5022ef50ba601",
           "scripts/refresh_knowledge.py": "613b302d0bb3b5f838f5feae2aaa40fe2ece5f04f13c04e3915115a248f95e55",
-          "scripts/run_system_tests.py": "faed3f0b7fe67083e99ee7a1902c14be33528517a214a11c4033dea9526dde4f",
+          "scripts/run_system_tests.py": "144c3f0fcec78f576eb724a8059413454a0a5259c80187ae21a8ec47e2a83343",
           "tests/__init__.py": "7e9af23c4d8769e855436c950c52874ef9d5ac0c36f24531913b3ca965d6860f",
           "tests/fakes.py": "8615d32f1b29fb3a215e81759a82a8dcfcbbfaba885cf908ed92747bf02e53ba",
           "tests/fixtures/desktop_observations.json": "635aba5ec53683b182e42bda74a26efa8cc62d024ce217f95ec65cac3cb24049",
@@ -3260,8 +3260,8 @@
         "tool_id": "calculator"
       },
       "provenance": {
-        "generated_at": "2026-08-11T14:38:31.460236+00:00",
-        "revision": "cb754ae51f8cf21f1e64833834de5f0d1e8cd93d",
+        "generated_at": "2026-08-11T14:43:11.175278+00:00",
+        "revision": "b85cbafdcf3ab2c440247f98763cc48108e80c86",
         "source_files": [
           "jarvis/tools/calculator.py",
           "jarvis/tools/registry.py"
@@ -3283,8 +3283,8 @@
         "tool_id": "local_time"
       },
       "provenance": {
-        "generated_at": "2026-08-11T14:38:31.460236+00:00",
-        "revision": "cb754ae51f8cf21f1e64833834de5f0d1e8cd93d",
+        "generated_at": "2026-08-11T14:43:11.175278+00:00",
+        "revision": "b85cbafdcf3ab2c440247f98763cc48108e80c86",
         "source_files": [
           "jarvis/tools/local_time.py",
           "jarvis/tools/registry.py"
@@ -3306,8 +3306,8 @@
         "tool_id": "weather"
       },
       "provenance": {
-        "generated_at": "2026-08-11T14:38:31.460236+00:00",
-        "revision": "cb754ae51f8cf21f1e64833834de5f0d1e8cd93d",
+        "generated_at": "2026-08-11T14:43:11.175278+00:00",
+        "revision": "b85cbafdcf3ab2c440247f98763cc48108e80c86",
         "source_files": [
           "jarvis/tools/registry.py",
           "jarvis/tools/weather.py"
@@ -3337,7 +3337,7 @@
     "code.modify",
     "system.power"
   ],
-  "revision": "cb754ae51f8cf21f1e64833834de5f0d1e8cd93d",
+  "revision": "b85cbafdcf3ab2c440247f98763cc48108e80c86",
   "schema_version": 1,
   "tools": [
     {
@@ -3357,8 +3357,8 @@
         "windows"
       ],
       "provenance": {
-        "generated_at": "2026-08-11T14:38:31.460236+00:00",
-        "revision": "cb754ae51f8cf21f1e64833834de5f0d1e8cd93d",
+        "generated_at": "2026-08-11T14:43:11.175278+00:00",
+        "revision": "b85cbafdcf3ab2c440247f98763cc48108e80c86",
         "source_files": [
           "jarvis/tools/calculator.py",
           "jarvis/tools/registry.py"
@@ -3389,8 +3389,8 @@
         "windows"
       ],
       "provenance": {
-        "generated_at": "2026-08-11T14:38:31.460236+00:00",
-        "revision": "cb754ae51f8cf21f1e64833834de5f0d1e8cd93d",
+        "generated_at": "2026-08-11T14:43:11.175278+00:00",
+        "revision": "b85cbafdcf3ab2c440247f98763cc48108e80c86",
         "source_files": [
           "jarvis/tools/local_time.py",
           "jarvis/tools/registry.py"
@@ -3420,8 +3420,8 @@
         "windows"
       ],
       "provenance": {
-        "generated_at": "2026-08-11T14:38:31.460236+00:00",
-        "revision": "cb754ae51f8cf21f1e64833834de5f0d1e8cd93d",
+        "generated_at": "2026-08-11T14:43:11.175278+00:00",
+        "revision": "b85cbafdcf3ab2c440247f98763cc48108e80c86",
         "source_files": [
           "jarvis/tools/registry.py",
           "jarvis/tools/weather.py"
