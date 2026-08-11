@@ -289,3 +289,29 @@ brokers, tool manifests, and a protected single-user SQLite path. SQLite is not 
 authentication boundary or distributed scheduler, and in-process Python adapters are
 not sandboxed from each other. Tool-specific cross-process idempotency and distributed
 execution leases are not claimed in Phase 15.
+
+## Phase 16 multi-agent extension
+
+Delegation adds malicious graph decomposition, recursive spawning, privilege
+laundering between agents, excessive fan-out, context oversharing, forged resource
+usage, agent-result prompt injection, deadlock, cancellation loss, and duplicate or
+partial side effects. The proposal, node inputs, claimed scopes, agent output, and
+referenced evidence are untrusted. One agent asking another to perform an action is
+not approval and cannot transfer authority.
+
+The coordinator, registry/contracts, graph validator, scheduler, clocks, provider
+usage adapters, and single-agent fallback form the trusted boundary. Only the
+coordinator creates nodes. Workers have no recursive delegation API. Every child
+scope is intersected by validation with the parent and exact worker contract before
+launch; privileged capability adapters must still use the existing registered tool
+and Permission Broker. Context crosses only through bounded selected keys and evidence
+references. Contract snapshots prevent post-validation schema/scope replacement.
+Reservations, concurrency, timeouts, cancellation, and aggregate goal verification
+are host-owned.
+
+Unknown/cyclic/malformed/escalating graphs deny. Unavailable agents and graphs without
+a proven independent-specialist advantage fall back before delegated execution.
+Runtime failure returns typed failed/partial evidence and blocks dependants rather
+than silently retrying or assuming success. Residual risk remains that same-process
+Python workers are trusted code, resource usage relies on provider-side accounting,
+and this phase has no durable/distributed multi-agent lease or crash recovery.

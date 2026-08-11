@@ -100,6 +100,22 @@ modify broker state during resume. Run `python -m pytest tests/test_planning_eng
 -q` for focused control-plane checks and `python scripts/run_system_tests.py --suite
 deterministic-workflows` for the meeting workflow evaluation.
 
+## Phase 16 optional multi-agent composition
+
+Leave `JARVIS_MULTI_AGENT_ENABLED=false` unless trusted composition has registered
+reviewed worker adapters and a representative evaluation shows a concrete benefit.
+Construct contracts with strict task/result schemas and least-privilege tool,
+capability, permission, and resource scopes. Never register an orchestrator as a
+worker or give a worker the coordinator, registry, broker approval API, application
+container, global conversation, raw memory store, or arbitrary command/OS handle.
+
+A model-backed worker adapter must construct resource usage from trusted provider
+metadata, not model text. Any worker needing a privileged action must use a narrow
+brokered tool port; the contract's permission list does not authorize execution.
+Select only the node's required context/evidence references and exclude secrets and
+unrelated conversation. Run `python -m pytest tests/test_multi_agent.py -q` and the
+`multi-agent-comparison` deterministic workflow when changing contracts or scheduling.
+
 ## Phase 1 manual smoke test
 
 1. Install [Ollama](https://ollama.com/) for Windows, then run `ollama pull llama3.2:3b`. Ollama normally starts its local server automatically; if it is not running, use `ollama serve` in a separate terminal.

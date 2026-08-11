@@ -102,3 +102,15 @@ No task completes merely because its tools returned success; trusted step and go
 verification must both accept observed evidence. Ambiguous post-crash action state,
 unknown tools or permissions, malformed snapshots, cycles, and exhausted budgets fail
 closed.
+
+Phase 16 does not turn delegation into authority. Multi-agent mode is off by default,
+and deterministic policy uses it only for independent work across distinct registered
+specialisms. The coordinator validates every child tool/capability/permission scope as
+a subset of both the parent request and exact worker contract. Those declarations are
+not grants; computer and other privileged actions still enter their registered tool
+and `PermissionBroker`. Workers receive no spawn, approval, registry, application-
+container, or global-conversation handle. Concurrency, node/global timeout,
+cancellation, and model/token/cost reservations are bounded. Malformed graphs, cycles,
+scope escalation, and budget overflow fail closed; unavailable agents fall back before
+any delegated action starts. Contract mutation after validation is rejected, and node
+success cannot bypass trusted aggregate goal-evidence verification.
