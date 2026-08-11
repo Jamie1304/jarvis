@@ -161,3 +161,18 @@ success does not authorize an improvement, merge, deployment, installation, or a
 host capability. Deterministic fake-provider workflow suites run in CI, while startup
 and hardware tests require explicit trusted/manual enablement. See
 `docs/system-testing.md`.
+
+Phase 14 adds four explicitly separate memory domains without adding authority:
+
+`bounded process-local conversation context | policy-gated SQLite user memory | compact SQLite action episodes | read-only Phase 12 project knowledge`
+
+`ConversationContextService` owns only bounded in-process context and optional
+trusted summarization. `LongTermMemoryService` requires an explicit trusted policy
+decision and user confirmation before persisting a user-sourced fact. `EpisodicMemoryService`
+retains compact completed-action outcomes instead of permission audit logs. `ProjectSystemMemory`
+queries `KnowledgeStore` directly, retaining provenance/staleness without copying
+project data into user memory. The durable SQLite store uses reviewed sequential
+migrations, retention expiry, secret rejection, and user-facing inspection/deletion
+operations. Retrieval returns separate conversation, long-term, episodic, and system
+lists; untrusted historical content remains data, never instructions. See
+`docs/memory.md`.
