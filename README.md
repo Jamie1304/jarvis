@@ -2,7 +2,10 @@
 
 [![Windows quality](https://github.com/Jamie1304/jarvis/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/Jamie1304/jarvis/actions/workflows/ci.yml)
 
-JARVIS is a local-first Windows desktop AI assistant. Phase 3 adds versioned, schema-validated calculator and local-time tools behind a bounded orchestration core; no privileged OS capabilities are registered.
+JARVIS is a local-first Windows desktop AI assistant. Phase 5 adds a granular,
+deny-by-default permission broker with scoped policy, trusted-user approvals,
+hard-safety rules, and a secret-safe audit trail. No privileged OS tool is enabled
+by the default catalog.
 
 ## Quick start
 

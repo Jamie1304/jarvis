@@ -1,0 +1,88 @@
+# Phase 5 permission-boundary threat model
+
+## Assets and security goals
+
+JARVIS must protect user files, credentials, private sensor data, clipboard data,
+applications, network destinations, and host availability. Untrusted model output
+must never create, widen, remember, or approve authority. A tool may execute a
+privileged action only after trusted code has validated its arguments, described
+the exact action, evaluated policy, and (when required) matched a live trusted-user
+approval to the same task, tool, permission, scope, and argument fingerprint.
+
+## Capability inventory
+
+Current runtime capabilities are:
+
+- calculator and local-time agent tools, which are non-privileged;
+- an unavailable weather placeholder, which performs no network request;
+- Ollama HTTP transport (`network.request`), selected by trusted composition code;
+- on-demand microphone capture (`microphone.read`), started by a direct UI gesture;
+- local speech synthesis/audio output, which is not an input or host-mutation
+  permission in the Phase 5 taxonomy.
+
+The Ollama and microphone paths are provider/UI flows, not planner-selected tools.
+They remain separately bounded by trusted configuration and an explicit user
+gesture. If either becomes planner-selectable it must first be converted to a
+brokered tool.
+
+Planned or reserved privileged capabilities are filesystem read/write, screen and
+camera capture, clipboard read/write, terminal execution, application launch and
+installation, arbitrary network requests, source-code modification, persistent
+memory storage, and system power control. Each requires its granular permission;
+there is no aggregate computer-access permission.
+
+Developer-only subprocess use in `scripts/quality.py` is outside the running
+assistant and is not an agent capability.
+
+## Adversaries and abuse cases
+
+The primary adversary is malicious or confused model output, including prompt
+injection embedded in files, web content, tool output, or user text. It may name an
+unknown permission or tool, forge an approval claim, alter arguments after a user
+review, replay an approval, request an over-broad scope, use path traversal or a
+link/junction escape, or disguise a destructive command as an ordinary action.
+
+Other failures include buggy tools under-declaring permissions, stale or disabled
+policy, races around cancellation/expiry, approval API misuse, secret leakage in
+audit logs, and a developer accidentally calling a privileged implementation
+without the broker.
+
+## Trust boundaries
+
+1. Model/planner output to strict plan and tool-input schemas: entirely untrusted.
+2. Registered tool metadata and action descriptors: trusted application code,
+   reviewed with the tool implementation.
+3. Tool to `PermissionBroker`: mandatory runtime authorization boundary.
+4. Policy configuration and normalized scope roots: trusted operator input.
+5. Approval presentation and decision: trusted application UI/API plus an
+   authenticated human identity; model/tool identities are rejected.
+6. Broker to host/provider implementation: only an exact, short-lived
+   authorization receipt may cross this boundary.
+7. Audit sink: trusted append-only destination receiving fingerprints and safe
+   summaries, never raw arguments or secrets.
+
+Python does not provide an in-process security sandbox. The boundary assumes
+registered tool code and the application process are trusted and reviewed; a
+malicious Python module running in-process can call operating-system APIs directly.
+The registry therefore prohibits dynamic discovery, and privileged implementation
+methods are deliberately private and reachable only through the brokered tool
+entry point by convention and tests.
+
+## Fail-closed invariants
+
+- Unknown/malformed permissions, unknown tools/actions, malformed scopes, missing
+  or disabled policies, and invalid action descriptors deny with machine-readable
+  reasons.
+- Approval data is built from trusted descriptors, never free-form model prose.
+- Approval matching includes task, tool, action, permission, normalized scope, and
+  a canonical full-argument fingerprint.
+- One-time approvals are atomically consumed once and cannot authorize changed
+  arguments. Cancellation and expiry win over execution.
+- Limited remembered grants have explicit scope and expiry and cannot cover hard
+  safety actions. There is no global or unbounded remember option.
+- Bulk deletion and destructive system commands require a fresh trusted approval;
+  privilege escalation is denied by hard policy.
+- Filesystem scope accepts only absolute, canonical paths beneath trusted roots and
+  rejects traversal plus symlink/junction escape.
+- Audit records contain decision provenance and execution outcome without raw
+  arguments, approval tokens, credentials, or file contents.

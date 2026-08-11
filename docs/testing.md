@@ -5,3 +5,11 @@ Tests live under `tests/` and use `pytest`. Unit and fake-provider integration t
 Phase 3 tool tests cover successful calculator execution, strict unknown-field and type rejection, timeout, cancellation, unavailable weather, structured internal failure, typed local-time output, and orchestration of `25 procent van 800` through the registered calculator tool.
 
 New code should test normal behavior and security-relevant failure paths. Tests must not require network access, machine-specific paths, cloud credentials, microphones, speakers, Ollama, or privileged host capabilities. Desktop and physical audio hardware smoke tests remain manual.
+
+Phase 5 security tests use a non-mutating privileged probe tool. They cover fail-
+closed unknown/malformed permissions and tools, missing/disabled policy, filesystem
+traversal and scope/link escape, trusted approval data, expiry, one-time replay,
+argument mutation, model-forged grants, cancellation, deny-once, bounded remembered
+grants, hard-safety overrides, reserved tool entry points, and secret-safe audit
+evidence. Link-escape coverage skips only when the test identity cannot create a
+Windows symlink/junction.
