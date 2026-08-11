@@ -7,7 +7,9 @@ desktop visual understanding with semantic UI fusion, grounded current-screen ta
 and explicit post-action verification. Phase 6's controlled brokered Windows
 capabilities and Phase 5's granular deny-by-default permission broker, trusted-user
 approvals, hard-safety rules, and secret-safe audit trail remain mandatory. No
-privileged OS tool is enabled by the default catalog.
+privileged OS tool is enabled by the default catalog. Phase 8 adds optional, brokered
+one-shot camera capture with expiring frame handoff to the vision provider; physical
+camera access remains disabled unless explicitly composed and authorized.
 
 ## Quick start
 

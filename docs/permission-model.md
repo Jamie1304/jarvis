@@ -12,6 +12,11 @@ and the explicitly labelled coordinate-mouse fallback. It is not an aggregate
 computer-access grant. Clipboard read/write, screenshots, application launch,
 filesystem access, and terminal execution retain their own permissions.
 
+Camera access is similarly explicit: `camera.list` and `camera.capture` declare
+`camera.read`, and a model mentioning a camera does not invoke either tool. Device
+IDs are additionally constrained by a trusted application catalogue. There is no
+camera-open or infinite-stream agent primitive.
+
 Risk is classified as low, medium, high, or critical by trusted tool code. Reading
 private data or sending a bounded network request is normally medium; mutations,
 process launch, and clipboard writes are high; installation, power control,

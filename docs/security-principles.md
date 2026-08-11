@@ -47,3 +47,10 @@ a new observation afterward. A visual target cannot bypass the permission broker
 the mapped computer action still needs its own declared permission, policy decision,
 approval where applicable, audit record, and cancellation handling. Low confidence or
 missing semantic evidence is `UNCERTAIN`, never success.
+
+Phase 8 keeps camera activation behind `camera.read` and a trusted device catalogue.
+The controller exposes camera state to the application, opens only for a bounded
+one-shot capture, and closes in all success, failure, timeout, cancellation, and
+shutdown paths. Camera frames are ephemeral by default and are never written to disk.
+Vision receives only a short-lived reference through the provider abstraction; a
+camera image cannot grant input, messaging, or any other permission.
