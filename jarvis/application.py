@@ -12,6 +12,8 @@ from jarvis.conversation.service import ConversationService
 from jarvis.core.errors import ConversationError, ServiceUnavailableError, SpeechDisabledError
 from jarvis.speech.stt import SpeechToTextService, Transcription
 from jarvis.speech.tts import TextToSpeechService
+from jarvis.state import ApplicationStateMachine
+from jarvis.state.models import ApplicationState
 from jarvis.voice.activation import AudioFrame, LocalVoiceController, VoiceStatus
 
 
@@ -56,6 +58,7 @@ class JarvisAssistantService:
         tts: TextToSpeechService | None = None,
         orchestrator: AgentOrchestrator | None = None,
         voice: LocalVoiceController | None = None,
+        state_machine: ApplicationStateMachine | None = None,
     ) -> None:
         self._conversation = conversation
         self._normalizer = normalizer or InputNormalizer()
@@ -63,6 +66,7 @@ class JarvisAssistantService:
         self._tts = tts
         self._orchestrator = orchestrator
         self._voice = voice
+        self._state_machine = state_machine
 
     def create_conversation(self, system_prompt: str | None = None) -> UUID:
         """Create a UI conversation with optional system context."""
@@ -92,6 +96,16 @@ class JarvisAssistantService:
         """Return the UI-safe voice state, when optional voice is configured."""
 
         return self._voice.status if self._voice is not None else None
+
+    @property
+    def application_state(self) -> ApplicationState:
+        """Read-only global lifecycle state for UI rendering."""
+
+        return (
+            self._state_machine.application_state
+            if self._state_machine is not None
+            else ApplicationState.IDLE
+        )
 
     async def handle_voice_frame(self, frame: AudioFrame) -> None:
         """Forward one transient frame to the configured voice state machine."""

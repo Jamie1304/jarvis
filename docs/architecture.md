@@ -86,6 +86,13 @@ delegates task creation/cancellation to `AgentOrchestrator` through a typed
 adapter. TTS interruption is explicit and does not bypass the Permission
 Broker. See `docs/voice-activation.md` for lifecycle and privacy guarantees.
 
+Phase 18 makes `jarvis.state.ApplicationStateMachine` the formal lifecycle
+coordinator. It owns separate global application and per-task state, explicit
+fail-closed transition tables, durable task recovery snapshots, and auditable
+transition records. Planner, legacy orchestrator, and optional voice adapters
+can publish progress through it without allowing UI/model code to mutate state.
+See `docs/state-machine.md`.
+
 `AI/planner -> camera.list/camera.capture -> PermissionBroker(camera.read) -> CameraController -> CameraProvider`
 
 The controller owns device opening, bounded frame capture, visible inactive/opening/

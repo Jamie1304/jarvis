@@ -8,6 +8,7 @@ from uuid import UUID, uuid4
 import pytest
 from jarvis.speech.stt import AudioData, SttProvider, Transcription
 from jarvis.speech.tts import TextToSpeechService, TtsProvider
+from jarvis.state import ApplicationStateMachine
 from jarvis.voice import (
     AudioFrame,
     AudioSource,
@@ -206,3 +207,27 @@ async def test_microphone_source_is_closed_on_exhaustion() -> None:
     controller = LocalVoiceController(FakeWake(), FakeVad(), FakeStt("unused"))
     await controller.run(source)
     assert source.started and source.stopped
+
+
+@pytest.mark.asyncio
+async def test_voice_can_publish_to_authoritative_application_state() -> None:
+    tts_provider = FakeTts()
+    tts_provider.release.set()
+    state_machine = ApplicationStateMachine()
+    controller = LocalVoiceController(
+        FakeWake(),
+        FakeVad(),
+        FakeStt("do work"),
+        task_runner=FakeRunner(),
+        tts=TextToSpeechService(tts_provider, enabled=True),
+        config=VoiceConfig(cooldown_seconds=0),
+        state_machine=state_machine,
+    )
+    await drive_and_get(controller)
+    assert state_machine.application_state.name == "IDLE"
+    assert [item.to_state.name for item in state_machine.history() if item.task_id is None] == [
+        "LISTENING",
+        "PROCESSING",
+        "SPEAKING",
+        "IDLE",
+    ]

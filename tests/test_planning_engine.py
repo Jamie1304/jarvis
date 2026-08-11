@@ -54,6 +54,7 @@ from jarvis.planning import (
     StepExecutionStatus,
     StepResult,
 )
+from jarvis.state import ApplicationStateMachine
 from jarvis.tools.base import Tool
 from jarvis.tools.models import (
     SemanticVersion,
@@ -284,6 +285,7 @@ def _harness(
     tools: tuple[_Tool, ...] = (_Tool("prepare"),),
     goal_verifier: PlanningGoalVerifier | None = None,
     executor: PlanningStepExecutor | None = None,
+    state_machine: ApplicationStateMachine | None = None,
 ) -> _Harness:
     registry = ToolRegistry(tools)
     advisor = _Advisor(proposals)
@@ -296,6 +298,7 @@ def _harness(
         executor=selected_executor,
         step_verifier=EvidencePlanningStepVerifier(),
         goal_verifier=goal_verifier or CompletionCriteriaVerifier(),
+        state_machine=state_machine,
     )
     return _Harness(store, advisor, selected_executor, engine)
 
@@ -309,6 +312,23 @@ async def test_simple_plan_completes_only_after_goal_verification(tmp_path: Path
     assert task.status is PlanningTaskStatus.COMPLETED
     assert task.result_evidence == ("prepare-ready",)
     assert harness.store.load_plan(task.task_id).steps[0].attempts == 1  # type: ignore[union-attr]
+
+
+@pytest.mark.asyncio
+async def test_planner_publishes_authoritative_state_transitions(tmp_path: Path) -> None:
+    state_machine = ApplicationStateMachine()
+    harness = _harness(
+        tmp_path,
+        (_plan(_step("prepare")),),
+        (_result("prepare-ready"),),
+        state_machine=state_machine,
+    )
+    task = await harness.engine.submit("Prepare my system for a meeting")
+    snapshot = state_machine.task(task.task_id)
+    assert snapshot is not None
+    assert snapshot.state.value == "completed"
+    assert snapshot.plan_revision == 1
+    assert state_machine.application_state.value == "idle"
 
 
 @pytest.mark.asyncio

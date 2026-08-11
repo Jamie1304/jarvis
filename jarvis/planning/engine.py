@@ -31,6 +31,8 @@ from jarvis.planning.models import (
 )
 from jarvis.planning.store import PlanningStore, PlanningStoreError
 from jarvis.planning.validation import PlanValidationError, PlanValidator
+from jarvis.state import ApplicationStateMachine
+from jarvis.state.models import TaskState, TransitionEvent
 from jarvis.tools.models import (
     ToolCaller,
     ToolExecutionContext,
@@ -207,6 +209,7 @@ class PlanningEngine:
         step_verifier: PlanningStepVerifier,
         goal_verifier: PlanningGoalVerifier,
         clock: Callable[[], datetime] = _now,
+        state_machine: ApplicationStateMachine | None = None,
     ) -> None:
         self._store = store
         self._advisor = advisor
@@ -215,6 +218,7 @@ class PlanningEngine:
         self._step_verifier = step_verifier
         self._goal_verifier = goal_verifier
         self._clock = clock
+        self._state_machine = state_machine
         self._cancellations: dict[UUID, asyncio.Event] = {}
 
     async def create_task(
@@ -242,6 +246,7 @@ class PlanningEngine:
             updated_at=now,
         )
         self._store.create_task(task)
+        self._publish_state(task)
         if budgets.max_model_calls < 1:
             return self._fail_budget(task, "model_call_budget_exhausted")
         try:
@@ -270,7 +275,7 @@ class PlanningEngine:
             usage=replace(task.usage, model_calls=1),
             updated_at=self._clock(),
         )
-        self._store.save_state(task, plan)
+        self._save_state(task, plan)
         return task
 
     async def submit(
@@ -343,7 +348,7 @@ class PlanningEngine:
             active_step_id=None,
             updated_at=now,
         )
-        self._store.save_state(task, plan)
+        self._save_state(task, plan)
         return await self.run(task_id)
 
     def cancel(self, task_id: UUID) -> PlanningTask:
@@ -354,7 +359,7 @@ class PlanningEngine:
         if event is not None:
             event.set()
         task = replace(task, cancellation_requested=True, updated_at=self._clock())
-        self._store.save_state(task, plan)
+        self._save_state(task, plan)
         return task
 
     async def _run(
@@ -404,7 +409,7 @@ class PlanningEngine:
                         plan,
                         replace(step, status=PlanningStepStatus.QUEUED, error=step_error),
                     )
-                    self._store.save_state(task, plan)
+                    self._save_state(task, plan)
                     continue
                 return await self._replan_or_fail(task, plan, step, step_error, execution.evidence)
             if execution.status is StepExecutionStatus.DETERMINISTIC_FAILURE:
@@ -417,7 +422,7 @@ class PlanningEngine:
                 updated_at=self._clock(),
             )
             plan = self._replace_step(plan, replace(step, status=PlanningStepStatus.VERIFYING))
-            self._store.save_state(task, plan)
+            self._save_state(task, plan)
             try:
                 verification = await self._step_verifier.verify(step, execution)
             except Exception as adapter_error:
@@ -452,7 +457,7 @@ class PlanningEngine:
                 active_step_id=None,
                 updated_at=self._clock(),
             )
-            self._store.save_state(task, plan)
+            self._save_state(task, plan)
 
     def _begin_step(
         self, task: PlanningTask, plan: OwnedPlan, step: PlanningStep
@@ -477,7 +482,7 @@ class PlanningEngine:
             updated_at=now,
         )
         plan = self._replace_step(replace(plan, status=OwnedPlanStatus.ACTIVE), step)
-        self._store.save_state(task, plan)
+        self._save_state(task, plan)
         return task, plan, step
 
     async def _replan_or_fail(
@@ -495,7 +500,7 @@ class PlanningEngine:
             return self._fail_budget(task, "model_call_budget_exhausted", plan=failed_plan)
         now = self._clock()
         task = replace(task, status=PlanningTaskStatus.REPLANNING, updated_at=now)
-        self._store.save_state(task, failed_plan)
+        self._save_state(task, failed_plan)
         replan_evidence = ReplanEvidence(
             original_goal=task.goal,
             original_assumptions=task.original_assumptions,
@@ -539,12 +544,12 @@ class PlanningEngine:
             usage=replace(task.usage, model_calls=task.usage.model_calls + 1),
             updated_at=self._clock(),
         )
-        self._store.save_state(task, replacement)
+        self._save_state(task, replacement)
         return await self._run(task, replacement, self._cancellations[task.task_id])
 
     async def _verify_goal(self, task: PlanningTask, plan: OwnedPlan) -> PlanningTask:
         task = replace(task, status=PlanningTaskStatus.VERIFYING, updated_at=self._clock())
-        self._store.save_state(task, plan)
+        self._save_state(task, plan)
         try:
             verification = await self._goal_verifier.verify(task, plan)
         except Exception as error:
@@ -572,7 +577,7 @@ class PlanningEngine:
             error=None,
             updated_at=now,
         )
-        self._store.save_state(task, plan)
+        self._save_state(task, plan)
         return task
 
     def _pause(
@@ -594,7 +599,7 @@ class PlanningEngine:
             waiting_request_ids=request_ids,
             updated_at=now,
         )
-        self._store.save_state(task, plan)
+        self._save_state(task, plan)
         return task
 
     def _cancelled(self, task: PlanningTask, plan: OwnedPlan) -> PlanningTask:
@@ -627,7 +632,7 @@ class PlanningEngine:
             ),
             updated_at=now,
         )
-        self._store.save_state(task, plan)
+        self._save_state(task, plan)
         return task
 
     def _fail_budget(
@@ -664,9 +669,9 @@ class PlanningEngine:
             updated_at=self._clock(),
         )
         if plan is None:
-            self._store.save_task(task)
+            self._save_task(task)
         else:
-            self._store.save_state(
+            self._save_state(
                 task,
                 replace(
                     plan,
@@ -689,6 +694,68 @@ class PlanningEngine:
         ):
             return "expensive_action_budget_exhausted"
         return None
+
+    def _save_state(self, task: PlanningTask, plan: OwnedPlan) -> None:
+        self._publish_state(task, plan_revision=plan.version)
+        self._store.save_state(task, plan)
+
+    def _save_task(self, task: PlanningTask) -> None:
+        self._publish_state(task)
+        self._store.save_task(task)
+
+    def _publish_state(self, task: PlanningTask, *, plan_revision: int | None = None) -> None:
+        """Publish planner progress through the authoritative coordinator."""
+
+        if self._state_machine is None:
+            return
+        target = {
+            PlanningTaskStatus.CREATED: TaskState.CREATED,
+            PlanningTaskStatus.PLANNING: TaskState.PLANNING,
+            PlanningTaskStatus.READY: TaskState.WAITING,
+            PlanningTaskStatus.EXECUTING: TaskState.EXECUTING,
+            PlanningTaskStatus.WAITING_FOR_PERMISSION: TaskState.WAITING_FOR_PERMISSION,
+            PlanningTaskStatus.VERIFYING: TaskState.VERIFYING,
+            PlanningTaskStatus.REPLANNING: TaskState.THINKING,
+            PlanningTaskStatus.COMPLETED: TaskState.COMPLETED,
+            PlanningTaskStatus.FAILED: TaskState.ERROR,
+            PlanningTaskStatus.CANCELLED: TaskState.CANCELLED,
+            PlanningTaskStatus.BUDGET_EXHAUSTED: TaskState.ERROR,
+        }[task.status]
+        events = {
+            TaskState.THINKING: TransitionEvent.REPLAN_REQUESTED,
+            TaskState.PLANNING: TransitionEvent.PLAN_REQUESTED,
+            TaskState.WAITING: TransitionEvent.PLAN_READY,
+            TaskState.WAITING_FOR_PERMISSION: TransitionEvent.PERMISSION_REQUIRED,
+            TaskState.EXECUTING: TransitionEvent.EXECUTION_STARTED,
+            TaskState.VERIFYING: TransitionEvent.VERIFICATION_STARTED,
+            TaskState.COMPLETED: TransitionEvent.TASK_COMPLETED,
+            TaskState.ERROR: TransitionEvent.TASK_FAILED,
+            TaskState.CANCELLED: TransitionEvent.TASK_CANCELLED,
+        }
+        current = self._state_machine.task(task.task_id)
+        if current is None:
+            self._state_machine.create_task(task.task_id, reason="planner task created")
+            current = self._state_machine.task(task.task_id)
+        if current is None or current.state is target:
+            return
+        if current.state is TaskState.CREATED and target is TaskState.PLANNING:
+            self._state_machine.transition_task(
+                task.task_id,
+                TaskState.THINKING,
+                TransitionEvent.TASK_THINKING,
+                reason="planner started thinking",
+            )
+            current = self._state_machine.task(task.task_id)
+        if current is None or current.state is target:
+            return
+        self._state_machine.transition_task(
+            task.task_id,
+            target,
+            events[target],
+            reason=f"planner status: {task.status.value}",
+            plan_revision=plan_revision,
+            active_step_id=task.active_step_id,
+        )
 
     def _load_state(self, task_id: UUID) -> tuple[PlanningTask, OwnedPlan]:
         task = self._store.load_task(task_id)

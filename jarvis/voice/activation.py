@@ -18,16 +18,11 @@ from jarvis.autonomy.models import Task, TaskStatus
 from jarvis.autonomy.orchestrator import AgentOrchestrator
 from jarvis.speech.stt import AudioData, SttProvider
 from jarvis.speech.tts import TextToSpeechService
+from jarvis.state import ApplicationStateMachine
+from jarvis.state.models import ApplicationState, TransitionEvent
 
-
-class VoiceState(StrEnum):
-    """UI-visible voice lifecycle states owned by this one state machine."""
-
-    IDLE = "idle"
-    LISTENING = "listening"
-    PROCESSING = "processing"
-    SPEAKING = "speaking"
-    ERROR = "error"
+# Compatibility name for UI clients; application state is authoritative.
+VoiceState = ApplicationState
 
 
 class InterruptionCommand(StrEnum):
@@ -191,6 +186,7 @@ class LocalVoiceController:
         task_runner: VoiceTaskRunner | None = None,
         tts: TextToSpeechService | None = None,
         config: VoiceConfig | None = None,
+        state_machine: ApplicationStateMachine | None = None,
     ) -> None:
         self._wake = wake_provider
         self._vad = vad
@@ -198,6 +194,7 @@ class LocalVoiceController:
         self._runner = task_runner
         self._tts = tts
         self._config = config or VoiceConfig()
+        self._state_machine = state_machine
         self._status = VoiceStatus(VoiceState.IDLE, True, None, "ready", datetime.now(UTC))
         self._history: list[VoiceStatus] = [self._status]
         self._session_id: UUID | None = None
@@ -335,6 +332,15 @@ class LocalVoiceController:
         return outcome
 
     def _transition(self, state: VoiceState, reason: str) -> None:
+        if self._state_machine is not None and state is not self._state_machine.application_state:
+            event = {
+                VoiceState.LISTENING: TransitionEvent.WAKE_DETECTED,
+                VoiceState.PROCESSING: TransitionEvent.SPEECH_CAPTURED,
+                VoiceState.SPEAKING: TransitionEvent.RESPONSE_STARTED,
+                VoiceState.IDLE: TransitionEvent.RESPONSE_FINISHED,
+                VoiceState.ERROR: TransitionEvent.APP_ERROR,
+            }.get(state, TransitionEvent.TASK_THINKING)
+            self._state_machine.transition_application(state, event, reason=reason)
         self._status = VoiceStatus(
             state, state is VoiceState.IDLE, self._session_id, reason, datetime.now(UTC)
         )

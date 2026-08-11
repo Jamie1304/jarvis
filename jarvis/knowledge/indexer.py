@@ -44,6 +44,7 @@ _LAYER = {
     "memory": "durable-memory",
     "multi_agent": "optional-control-plane",
     "voice": "local-input",
+    "state": "core-control-plane",
     "planning": "control-plane",
     "permissions": "security-boundary",
     "security": "security-boundary",
