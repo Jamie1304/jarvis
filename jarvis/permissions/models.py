@@ -78,6 +78,7 @@ class SafetyClass(StrEnum):
     BULK_DELETION = "bulk_deletion"
     PRIVILEGE_ESCALATION = "privilege_escalation"
     DESTRUCTIVE_SYSTEM_COMMAND = "destructive_system_command"
+    SOFTWARE_INSTALLATION = "software_installation"
 
 
 class ApprovalStatus(StrEnum):

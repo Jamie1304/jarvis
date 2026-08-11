@@ -87,3 +87,18 @@ stream. Captured bytes are placed only in an expiring in-memory frame store by
 default; `CameraVisionBridge` passes an expiring reference to the existing
 `VisionProvider` and releases it after analysis. Camera image reasoning remains
 separate from camera hardware and from permission decisions.
+
+Phase 9 adds an opt-in controlled application-manager boundary:
+
+`AI/planner -> typed application tool -> PermissionBroker -> policy + fresh trusted approval -> immutable plan -> provider/runtime -> Windows`
+
+Inventory and package-search results are evidence, not authority. Trusted composition
+injects an inventory provider, package provider, managed runtime, and ephemeral plan
+store; none is registered in the default tool catalog. A package plan is immutable,
+expires, and is consumed before the provider operation. Installation/update tools
+receive `application.install` and the hard `software_installation` safety class, so
+even an allow policy requires a fresh trusted-user approval. The approval describes
+the exact provider-issued package ID, source, publisher, and version. The runtime
+accepts a current `ApplicationRecord`, never a model executable/path, and can close
+only processes it launched and tracks. Post-operation verification re-queries the
+inventory, checks identity/version/executable, and confirms launch capability.

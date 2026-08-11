@@ -95,3 +95,21 @@ path. Surface `inactive`, `opening`, `active`, and `error` state to the applicat
 UI. Provider errors, disconnects, timeout, cancellation, and shutdown must release
 the handle. Pass frames to vision only through `CameraVisionBridge`, which releases
 the temporary frame after provider completion.
+
+## Application-manager rules
+
+Application discovery and package search may produce evidence only. Never pass a
+model-supplied executable, install command, package source, or package identity to an
+OS/package-manager API. Require a trusted provider-issued `InstallationPlan`; make it
+immutable, short-lived, and single-use. Its broker descriptor must summarize exact
+package ID, source, publisher, and version from trusted plan data. Mark install/update
+as `software_installation`, declare `application.install`, and do not register those
+tools in the default catalog.
+
+Construct package-manager invocations with one fixed executable and a validated
+argument array, never a shell string. Re-query inventory after an operation and verify
+expected identity, version, executable, and launch capability before reporting
+success. Updates must be distinct from installs and reject non-newer targets. Do not
+add a generic application configuration tool: register only an application-specific
+adapter with a reviewed schema/API or config-file contract. Closing must be limited to
+a process the managed runtime launched and owns.

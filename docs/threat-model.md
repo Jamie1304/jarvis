@@ -63,6 +63,13 @@ window switching, coordinate/DPI confusion, and visual recognition of sensitive
 controls. A model or provider may describe a button but must not turn that description
 into authority or a verified outcome.
 
+Phase 9 adds package-search poisoning, package/source substitution, stale or replayed
+install plans, malicious registry/display-icon entries, version downgrade, a package
+manager interpreting a shell string, verification that trusts package-manager output,
+and closing an arbitrary user process. Package catalog and inventory data are treated
+as evidence: only trusted composition chooses providers, only immutable plans can
+reach a provider, and post-operation success comes from an independent re-query.
+
 ## Trust boundaries
 
 1. Model/planner output to strict plan and tool-input schemas: entirely untrusted.
@@ -81,6 +88,12 @@ into authority or a verified outcome.
    is evidence, not an authorization decision.
 9. Vision provider output to trusted semantic-first fusion: untrusted structured
    suggestions; it cannot directly access input adapters, the broker, or approvals.
+10. Application inventory/package provider to manager: provider results are
+    untrusted evidence, normalized and verified by trusted manager code. A package
+    provider may only execute its fixed executable plus validated argument array.
+11. Manager to process/package runtime: only a broker-authorized, immutable plan or
+    freshly resolved inventory record crosses this boundary; executable strings,
+    repository names, and package IDs cannot be supplied as raw OS commands.
 
 Python does not provide an in-process security sandbox. The boundary assumes
 registered tool code and the application process are trusted and reviewed; a
@@ -118,3 +131,13 @@ entry point by convention and tests.
   invokes an action tool, then verifies with a new observation.
 - A visual finding never grants a permission. Sensitive input still receives the
   original tool's policy, approval, audit, cancellation, and hard-safety controls.
+- Application discovery never launches or installs. Installation and update tools
+  are opt-in only, require `application.install`, and use the hard
+  `software_installation` class: fresh trusted approval is mandatory and may not be
+  remembered. Approval summaries contain exact package identity/source/publisher/
+  version from an immutable expiring plan, not model text.
+- Package-manager invocation is a fixed executable and independently validated
+  argument vector (`shell=False`); no model string becomes a command. An update must
+  be strictly newer than the installed normalized numeric version. Verification
+  re-queries inventory and checks expected name/publisher/version plus launch
+  capability. The managed runtime closes only its own tracked launch process.

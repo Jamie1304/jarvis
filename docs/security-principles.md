@@ -54,3 +54,14 @@ one-shot capture, and closes in all success, failure, timeout, cancellation, and
 shutdown paths. Camera frames are ephemeral by default and are never written to disk.
 Vision receives only a short-lived reference through the provider abstraction; a
 camera image cannot grant input, messaging, or any other permission.
+
+Phase 9 treats application inventory and package catalogs as untrusted evidence, not
+execution authority. Package operations occur only from an immutable expiring plan
+created by trusted manager code, passed through the broker with the exact package and
+source in a fresh trusted-user approval, and then consumed. `software_installation`
+cannot receive a remembered grant or automatic allow. Providers construct a fixed
+executable plus validated argument array with no shell interpretation. Post-install
+success requires an independent inventory re-query, identity/version/executable
+checks, and launch-capability evidence; package-manager text is not proof. Generic
+application configuration is forbidden: only reviewed per-application adapters may
+be registered. Managed close operations apply only to runtime-owned process IDs.
