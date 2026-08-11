@@ -37,9 +37,16 @@ class Settings(BaseSettings):
     stt_sample_rate: int = Field(default=16_000, gt=0)
     tts_enabled: bool = False
     tts_voice: str | None = None
+    voice_enabled: bool = False
+    voice_wake_word: str = "Jarvis"
+    voice_wake_confidence_threshold: float = Field(default=0.8, ge=0, le=1)
+    voice_cooldown_seconds: float = Field(default=1.0, ge=0, le=60)
     agent_max_steps: int = Field(default=8, gt=0, le=32)
     agent_timeout_seconds: float = Field(default=30.0, gt=0, le=300)
     agent_max_replans: int = Field(default=2, ge=0, le=8)
+    multi_agent_enabled: bool = False
+    multi_agent_max_concurrency: int = Field(default=3, gt=0, le=16)
+    multi_agent_timeout_seconds: float = Field(default=120.0, gt=0, le=3_600)
 
     @field_validator("stt_device", mode="before")
     @classmethod

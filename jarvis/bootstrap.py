@@ -13,6 +13,7 @@ from jarvis.speech.stt import (
     SpeechToTextService,
 )
 from jarvis.speech.tts import DisabledTtsProvider, Pyttsx3TtsProvider, TextToSpeechService
+from jarvis.state import ApplicationStateMachine
 
 
 def create_ai_provider(settings: Settings) -> AIProvider:
@@ -55,4 +56,10 @@ def create_assistant_service(
         else DisabledTtsProvider(),
         enabled=settings.tts_enabled,
     )
-    return JarvisAssistantService(conversation, stt=stt, tts=tts, orchestrator=orchestrator)
+    return JarvisAssistantService(
+        conversation,
+        stt=stt,
+        tts=tts,
+        orchestrator=orchestrator,
+        state_machine=ApplicationStateMachine(),
+    )

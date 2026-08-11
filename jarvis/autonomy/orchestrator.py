@@ -38,9 +38,10 @@ from jarvis.core.errors import (
     VerificationFailedError,
     VerificationUnverifiableError,
 )
+from jarvis.state import ApplicationStateMachine
+from jarvis.state.models import TaskState, TransitionEvent
 from jarvis.tools.base import Tool
 from jarvis.tools.models import (
-    PermissionContext,
     ToolCaller,
     ToolExecutionContext,
     ToolResult,
@@ -66,6 +67,7 @@ class AgentOrchestrator:
         max_steps: int,
         timeout_seconds: float,
         max_replans: int,
+        state_machine: ApplicationStateMachine | None = None,
     ) -> None:
         if max_steps < 1 or timeout_seconds <= 0 or max_replans < 0:
             raise ValueError(
@@ -82,6 +84,7 @@ class AgentOrchestrator:
         self._max_steps = max_steps
         self._timeout_seconds = timeout_seconds
         self._max_replans = max_replans
+        self._state_machine = state_machine
         self._cancellations: dict[UUID, asyncio.Event] = {}
 
     async def create_task(
@@ -104,6 +107,7 @@ class AgentOrchestrator:
             correlation_id=correlation_id or uuid4(),
         )
         await self._store.create_task(task)
+        self._publish_state(task)
         return task
 
     async def run(self, task_id: UUID) -> Task:
@@ -226,7 +230,6 @@ class AgentOrchestrator:
             correlation_id=task.correlation_id,
             caller=ToolCaller.AGENT,
             cancellation=cancellation,
-            permissions=PermissionContext(),
             logger=logging.getLogger(f"jarvis.tools.{tool.manifest.tool_id}"),
         )
         raw_input: dict[str, object] = {
@@ -264,7 +267,51 @@ class AgentOrchestrator:
             updated_at=datetime.now(UTC),
         )
         await self._store.save_task(updated)
+        self._publish_state(updated)
         return updated
+
+    def _publish_state(self, task: Task) -> None:
+        if self._state_machine is None:
+            return
+        target = {
+            TaskStatus.CREATED: TaskState.CREATED,
+            TaskStatus.PLANNING: TaskState.PLANNING,
+            TaskStatus.EXECUTING: TaskState.EXECUTING,
+            TaskStatus.VERIFYING: TaskState.VERIFYING,
+            TaskStatus.REPLANNING: TaskState.THINKING,
+            TaskStatus.COMPLETED: TaskState.COMPLETED,
+            TaskStatus.FAILED: TaskState.ERROR,
+            TaskStatus.CANCELLED: TaskState.CANCELLED,
+            TaskStatus.TIMED_OUT: TaskState.ERROR,
+        }[task.status]
+        event = {
+            TaskState.THINKING: TransitionEvent.REPLAN_REQUESTED,
+            TaskState.PLANNING: TransitionEvent.PLAN_REQUESTED,
+            TaskState.EXECUTING: TransitionEvent.EXECUTION_STARTED,
+            TaskState.VERIFYING: TransitionEvent.VERIFICATION_STARTED,
+            TaskState.COMPLETED: TransitionEvent.TASK_COMPLETED,
+            TaskState.ERROR: TransitionEvent.TASK_FAILED,
+            TaskState.CANCELLED: TransitionEvent.TASK_CANCELLED,
+        }
+        current = self._state_machine.task(task.task_id)
+        if current is None:
+            self._state_machine.create_task(task.task_id, reason="legacy task created")
+            current = self._state_machine.task(task.task_id)
+        if current is None or current.state is target:
+            return
+        if current.state is TaskState.CREATED and target is TaskState.PLANNING:
+            self._state_machine.transition_task(
+                task.task_id,
+                TaskState.THINKING,
+                TransitionEvent.TASK_THINKING,
+                reason="task entered planning",
+            )
+            current = self._state_machine.task(task.task_id)
+        if current is None or current.state is target:
+            return
+        self._state_machine.transition_task(
+            task.task_id, target, event[target], reason=f"task status: {task.status.value}"
+        )
 
     async def _save_step(self, plan: Plan, replacement: PlanStep) -> Plan:
         steps = tuple(

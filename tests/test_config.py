@@ -14,6 +14,9 @@ def test_settings_have_safe_local_defaults(monkeypatch: MonkeyPatch) -> None:
         "JARVIS_AGENT_MAX_STEPS",
         "JARVIS_AGENT_TIMEOUT_SECONDS",
         "JARVIS_AGENT_MAX_REPLANS",
+        "JARVIS_MULTI_AGENT_ENABLED",
+        "JARVIS_MULTI_AGENT_MAX_CONCURRENCY",
+        "JARVIS_MULTI_AGENT_TIMEOUT_SECONDS",
     ):
         monkeypatch.delenv(name, raising=False)
     settings = Settings(_env_file=None)
@@ -28,6 +31,8 @@ def test_settings_have_safe_local_defaults(monkeypatch: MonkeyPatch) -> None:
     assert settings.stt_compute_type == "int8"
     assert settings.tts_enabled is False
     assert settings.agent_max_steps == 8
+    assert settings.multi_agent_enabled is False
+    assert settings.multi_agent_max_concurrency == 3
 
 
 def test_environment_values_override_defaults(monkeypatch: MonkeyPatch) -> None:
