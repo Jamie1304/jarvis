@@ -7,6 +7,7 @@ import logging
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import Any
 from uuid import uuid4
 
@@ -40,6 +41,19 @@ from jarvis.permissions.models import (
     ScopeConstraint,
 )
 from jarvis.permissions.policy import PolicyEngine
+from jarvis.planning.engine import (
+    BrokeredPlanningStepExecutor,
+    CompletionCriteriaVerifier,
+    EvidencePlanningStepVerifier,
+    PlanningEngine,
+)
+from jarvis.planning.engine import (
+    PlanAdvisor as DagPlanAdvisor,
+)
+from jarvis.planning.models import PlanningTaskStatus as DagTaskStatus
+from jarvis.planning.models import ReplanEvidence
+from jarvis.planning.store import SQLitePlanningStore
+from jarvis.planning.validation import PlanValidator
 from jarvis.tools.base import Tool
 from jarvis.tools.calculator import CalculatorTool
 from jarvis.tools.models import (
@@ -188,6 +202,34 @@ class _PermissionProbe(Tool[_Input, _Output]):
         return ToolResult.success(_Output(summary="should not execute"))
 
 
+class _MeetingPlanningAdvisor(DagPlanAdvisor):
+    """Static fake proposal for a multi-step meeting-preparation DAG evaluation."""
+
+    async def propose(
+        self, goal: str, assumptions: tuple[str, ...], constraints: tuple[str, ...]
+    ) -> object:
+        return {
+            "goal": goal,
+            "assumptions": list(assumptions),
+            "constraints": list(constraints),
+            "required_capabilities": ["test"],
+            "required_permissions": [],
+            "completion_criteria": [
+                "calendar-ready",
+                "notes-ready",
+                "focus-ready",
+            ],
+            "steps": [
+                _meeting_step("calendar"),
+                _meeting_step("notes"),
+                _meeting_step("focus", dependencies=["calendar", "notes"]),
+            ],
+        }
+
+    async def replan(self, evidence: ReplanEvidence) -> object:
+        raise AssertionError(f"Meeting fixture should not replan: {evidence.error.code}")
+
+
 class DeterministicWorkflowEvaluator:
     """Run fixed agent scenarios; no provider, hardware, network, or OS tool is used."""
 
@@ -198,6 +240,7 @@ class DeterministicWorkflowEvaluator:
             "tool-failure-retry": self._tool_failure_retry,
             "cancellation": self._cancellation,
             "verification-failure": self._verification_failure,
+            "meeting-preparation": self._meeting_preparation,
         }
         try:
             return await scenarios[scenario_id]()
@@ -291,6 +334,45 @@ class DeterministicWorkflowEvaluator:
             (error_code,),
         )
 
+    async def _meeting_preparation(self) -> WorkflowEvaluation:
+        tool = _ScenarioTool(
+            "meeting-fixture",
+            (
+                ("calendar checked", ("calendar-ready",)),
+                ("notes prepared", ("notes-ready",)),
+                ("focus enabled", ("focus-ready",)),
+            ),
+        )
+        registry = ToolRegistry((tool,))
+        with TemporaryDirectory() as directory:
+            store = SQLitePlanningStore(Path(directory) / "planning.sqlite3")
+            engine = PlanningEngine(
+                store=store,
+                advisor=_MeetingPlanningAdvisor(),
+                validator=PlanValidator(registry, max_steps=8),
+                executor=BrokeredPlanningStepExecutor(registry),
+                step_verifier=EvidencePlanningStepVerifier(),
+                goal_verifier=CompletionCriteriaVerifier(),
+            )
+            task = await engine.submit(
+                "Prepare my system for a meeting",
+                assumptions=("Meeting details are already available",),
+                constraints=("Do not contact attendees",),
+            )
+            plan = store.load_plan(task.task_id)
+            store.close()
+        passed = (
+            task.status is DagTaskStatus.COMPLETED
+            and plan is not None
+            and tuple(step.key for step in plan.steps) == ("calendar", "notes", "focus")
+        )
+        return WorkflowEvaluation(
+            "meeting-preparation",
+            passed,
+            "Meeting preparation DAG completed and passed goal verification",
+            task.result_evidence,
+        )
+
 
 def _orchestrator(
     advisor: _Advisor, tools: tuple[Tool[Any, Any], ...], *, max_replans: int
@@ -324,4 +406,20 @@ def _plan(capability: str, expected: str, *, expression: str | None = None) -> d
                 "expected_outcome": expected,
             }
         ],
+    }
+
+
+def _meeting_step(key: str, *, dependencies: list[str] | None = None) -> dict[str, object]:
+    return {
+        "key": key,
+        "tool_id": "meeting-fixture",
+        "capability": "test",
+        "input": {},
+        "dependencies": dependencies or [],
+        "required_permissions": [],
+        "expected_output": f"{key} prepared",
+        "verification_rule": "evidence_contains_all",
+        "expected_evidence": [f"{key}-ready"],
+        "expensive_action": False,
+        "max_retries": 0,
     }

@@ -260,3 +260,32 @@ inspect/delete operations. The project-knowledge boundary remains read-only thro
 memory. Local SQLite encryption, device-level access control, and a platform secret
 store are deployment responsibilities outside this Phase 14 library; the subsystem
 therefore rejects rather than stores credentials.
+
+## Phase 15 planning extension
+
+The goal, proposed steps, arguments, dependencies, claimed permissions, tool output,
+failure evidence, and replan are untrusted. A malicious planner may name a privileged
+tool without its permissions, forge approval text, create a cycle, exhaust resources,
+change original constraints during replan, reuse stale evidence, or rely on a crash to
+repeat an action. A corrupt local planning snapshot may also claim impossible status
+or omit graph state.
+
+The live registry/manifests/schemas, validator, engine, permission broker, persistence
+migrations, clock, and verification adapters form the trusted boundary. A proposal is
+accepted only when tools and capabilities resolve, declared permissions exactly match
+the tool manifest, arguments validate, dependencies form a bounded DAG, and rules are
+host-owned. No plan field is authority. Every privileged call still enters the broker;
+a persisted request ID or model assertion cannot approve it.
+
+State and usage are saved before observable boundaries. Permission waits retain the
+whole graph and resume through the broker. Retry/model/step/time/expensive-action
+budgets are independent and fail closed. Replans are bound to actual failure evidence
+and must preserve the original task contract. Completion requires independent
+goal-level evidence. Unknown post-crash running/verifying state fails rather than
+silently replaying a potentially irreversible action.
+
+Residual assumptions are that trusted composition supplies honest clocks, verifiers,
+brokers, tool manifests, and a protected single-user SQLite path. SQLite is not an
+authentication boundary or distributed scheduler, and in-process Python adapters are
+not sandboxed from each other. Tool-specific cross-process idempotency and distributed
+execution leases are not claimed in Phase 15.

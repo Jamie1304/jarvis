@@ -40,7 +40,9 @@ quality gate.
 
 `DeterministicWorkflowEvaluator` uses fake planners/tools or the safe calculator tool
 to cover calculator success, permission pause before execution, bounded replan/retry,
-cancellation, and verification failure. It does not contact an AI provider, send a
+cancellation, verification failure, and a Phase 15 meeting-preparation DAG. The
+meeting scenario runs independent calendar and notes nodes before a dependent focus
+node through broker-bound fake tools. It does not contact an AI provider, send a
 message, access hardware, or use a privileged computer tool.
 
 Previously fixed behavior is represented by JSON records in

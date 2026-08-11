@@ -89,3 +89,12 @@ deletion, explicit long-term eligibility, secret rejection, compact episodic rec
 bounded conversation summary/clear lifecycle, source-separated retrieval, stale-aware
 project knowledge handoff, untrusted remembered-content labels, and malformed
 migration rejection. They do not persist real user data or invoke a secret store.
+
+Phase 15 planning tests use fake advisors/executors plus real registry/schema and
+permission-broker integration. They cover a simple plan, dependency DAG ordering,
+cycle and unresolved-dependency rejection, missing tools/capabilities/permissions,
+strict arguments, bounded steps and all execution budgets, durable permission
+pause/resume, restart fail-closed behavior, active/downstream cancellation, transient
+retry, evidence-bound replan, malformed persisted state, and goal-verification
+failure after all steps succeed. The deterministic `meeting-preparation` workflow
+uses three fake brokered tools and no external services or hardware.

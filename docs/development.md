@@ -83,6 +83,23 @@ web/tool content must retain its untrusted-data label on retrieval. For a tempor
 migration check, run `python -m pytest tests/test_memory.py -q`; the tests create and
 remove only temporary databases.
 
+## Phase 15 planning composition
+
+Construct `PlanValidator` and `BrokeredPlanningStepExecutor` from the same trusted
+`ToolRegistry`; do not provide a second registry or direct tool/adapter executor.
+Planner output must cross the strict proposal schema before persistence. Add new
+verification rules only as reviewed deterministic application code, never as model
+expressions. Store the SQLite database in an application-owned directory and apply
+the ordered migrations during trusted startup.
+
+Cancellation-aware executors must stop the active action when possible and report a
+structured outcome. If a restarted task contains a running/verifying step, preserve
+the fail-closed unknown-outcome behavior unless the individual tool provides a
+reviewed idempotency and evidence protocol. Do not infer approval from the plan or
+modify broker state during resume. Run `python -m pytest tests/test_planning_engine.py
+-q` for focused control-plane checks and `python scripts/run_system_tests.py --suite
+deterministic-workflows` for the meeting workflow evaluation.
+
 ## Phase 1 manual smoke test
 
 1. Install [Ollama](https://ollama.com/) for Windows, then run `ollama pull llama3.2:3b`. Ollama normally starts its local server automatically; if it is not running, use `ollama serve` in a separate terminal.

@@ -218,6 +218,7 @@ async def test_runner_parses_structured_individual_results(tmp_path: Path) -> No
         "tool-failure-retry",
         "cancellation",
         "verification-failure",
+        "meeting-preparation",
     ),
 )
 async def test_deterministic_workflow_scenarios(scenario_id: str) -> None:
