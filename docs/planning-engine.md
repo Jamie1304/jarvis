@@ -71,4 +71,3 @@ or parallel action execution is implemented in this phase.
 The deterministic meeting-preparation evaluation uses fake calendar, notes, and focus
 tools. Calendar and notes are independent DAG nodes; focus depends on both. It sends no
 messages and accesses no real desktop, calendar, microphone, camera, or network.
-
