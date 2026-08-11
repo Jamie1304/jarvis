@@ -82,3 +82,16 @@ before input, and verify from a fresh observation afterward. Coordinate actions 
 be based on normalized bounds and trusted current display/DPI geometry. A retry must
 run a new observe/diagnose/ground cycle and use a materially revised action; repeat
 clicks with stale state are prohibited.
+
+## Camera-tool rules
+
+Use only the explicit `camera.list` and `camera.capture` tools. A camera provider is
+injected by trusted composition; model text cannot select an executable, open a
+session, choose an unapproved device, or start a stream. `camera.capture` is one-shot,
+bounded, and returns an expiring frame reference—not bytes or a stream handle.
+
+Always keep device ownership in `CameraController` and close sessions in a `finally`
+path. Surface `inactive`, `opening`, `active`, and `error` state to the application
+UI. Provider errors, disconnects, timeout, cancellation, and shutdown must release
+the handle. Pass frames to vision only through `CameraVisionBridge`, which releases
+the temporary frame after provider completion.

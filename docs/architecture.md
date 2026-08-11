@@ -76,3 +76,14 @@ re-observes immediately before action, rejects stale or materially changed state
 uses the existing brokered computer tool for the action, then obtains a new
 observation for explicit success/failure/uncertain verification. Vision code has no
 direct keyboard, mouse, window, or policy access.
+
+Phase 8 adds a separate one-shot camera boundary:
+
+`AI/planner -> camera.list/camera.capture -> PermissionBroker(camera.read) -> CameraController -> CameraProvider`
+
+The controller owns device opening, bounded frame capture, visible inactive/opening/
+active/error state, and `finally` cleanup. Camera tools never expose an unrestricted
+stream. Captured bytes are placed only in an expiring in-memory frame store by
+default; `CameraVisionBridge` passes an expiring reference to the existing
+`VisionProvider` and releases it after analysis. Camera image reasoning remains
+separate from camera hardware and from permission decisions.

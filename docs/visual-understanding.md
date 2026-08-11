@@ -33,6 +33,11 @@ handle. A production provider that needs image bytes must receive a separately t
 screenshot-store reader; application composition is responsible for its privacy and
 network policy.
 
+The same request contract accepts `source=VisualSource.CAMERA` for a camera frame
+reference. `CameraVisionBridge` reads a live frame from the trusted ephemeral store,
+invokes the provider, and releases the frame in `finally`; it never turns camera
+observation into an action permission.
+
 ## Grounded targets and coordinates
 
 Only trusted fusion generates a `CandidateTarget.target_id`. An action proposal must

@@ -14,6 +14,11 @@ class TargetSource(StrEnum):
     FUSED = "fused"
 
 
+class VisualSource(StrEnum):
+    SCREEN = "screen"
+    CAMERA = "camera"
+
+
 class ActionIntent(StrEnum):
     FOCUS = "focus"
     SET_TEXT = "set_text"
@@ -148,6 +153,7 @@ class VisionRequest:
     task_objective: str
     accessibility_tree: tuple[AccessibilityNode, ...]
     previous_observation: "DesktopObservation | None"
+    source: VisualSource = VisualSource.SCREEN
 
 
 @dataclass(frozen=True, slots=True)

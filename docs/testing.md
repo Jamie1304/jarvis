@@ -28,3 +28,9 @@ semantic/vision agreement, dimensions and DPI conversion, screenshot-content sta
 state, verification success/failure/uncertainty, broker denial after identifying a
 sensitive Send target, and a capped revised retry loop. No test treats a successful
 tool result as visual success without a new observation and verification result.
+
+Phase 8 camera tests use a mock provider/session exclusively in CI. They cover no
+device, permission denial before provider open, successful one-shot capture,
+busy/failure state, timeout and cancellation cleanup, shutdown cleanup, serialized
+concurrent access, ephemeral frame release, and handoff to the existing vision
+provider. Real camera hardware is not claimed or exercised by these tests.
