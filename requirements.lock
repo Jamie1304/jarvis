@@ -1,0 +1,19 @@
+# Locked direct and transitive dependencies for Python 3.12+.
+annotated-types==0.7.0
+anyio==4.8.0
+certifi==2024.12.14
+click==8.4.2
+fastapi==0.115.6
+h11==0.14.0
+httpcore==1.0.7
+httpx==0.28.1
+idna==3.10
+pydantic==2.10.5
+pydantic-core==2.27.2
+pydantic-settings==2.7.1
+python-dotenv==1.0.1
+sniffio==1.3.1
+starlette==0.41.3
+typing-extensions==4.12.2
+typing-inspection==0.4.0
+uvicorn==0.34.0

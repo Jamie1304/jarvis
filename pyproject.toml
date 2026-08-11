@@ -1,0 +1,85 @@
+[build-system]
+requires = ["setuptools>=75.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "jarvis"
+version = "0.1.0"
+description = "Local-first desktop AI agent engineering foundation"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi==0.115.6",
+    "httpx==0.28.1",
+    "pydantic==2.10.5",
+    "pydantic-settings==2.7.1",
+    "uvicorn==0.34.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "coverage[toml]==7.6.10",
+    "httpx==0.28.1",
+    "mypy==1.14.1",
+    "pytest==8.3.4",
+    "pytest-asyncio==0.25.2",
+    "ruff==0.9.10",
+]
+desktop = ["PySide6==6.8.1"]
+speech = [
+    "faster-whisper==1.1.0",
+    "numpy==2.2.1",
+    "pyttsx3==2.98",
+    "requests==2.32.3",
+    "sounddevice==0.5.1",
+]
+
+[tool.setuptools.packages.find]
+include = ["jarvis*"]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+src = ["jarvis", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP"]
+
+[tool.ruff.format]
+quote-style = "double"
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+plugins = ["pydantic.mypy"]
+exclude = ["build", "dist", "jarvis/desktop.py", "jarvis/frontend/desktop.py"]
+
+[tool.pytest.ini_options]
+addopts = "--strict-config --strict-markers"
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.coverage.run]
+branch = true
+source = ["jarvis"]
+
+[tool.coverage.report]
+fail_under = 90
+exclude_lines = ["pragma: no cover", "if TYPE_CHECKING:"]
+omit = [
+    "jarvis/desktop.py",
+    "jarvis/frontend/desktop.py",
+    "jarvis/ai/providers/ollama.py",
+    "jarvis/speech/stt.py",
+    "jarvis/speech/tts.py",
+]
+
+[tool.pydantic-mypy]
+init_forbid_extra = true
+init_typed = true
+warn_required_dynamic_aliases = true
+warn_untyped_fields = true
+
+[[tool.mypy.overrides]]
+module = ["PySide6", "PySide6.*"]
+ignore_missing_imports = true
