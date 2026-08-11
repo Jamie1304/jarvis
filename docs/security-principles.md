@@ -65,3 +65,11 @@ success requires an independent inventory re-query, identity/version/executable
 checks, and launch-capability evidence; package-manager text is not proof. Generic
 application configuration is forbidden: only reviewed per-application adapters may
 be registered. Managed close operations apply only to runtime-owned process IDs.
+
+Phase 10 makes capability discovery advisory-only. Catalog entries, package metadata,
+documentation, search results, and web pages are untrusted data, including text that
+claims to override policy or asks JARVIS to execute a command. The discovery layer
+preserves source reference, safe summary, and a digest for external content, but never
+forwards raw external instructions as an action. Scoring is explainable and cannot
+grant permissions, register a tool, install software, create configuration, or execute
+a candidate. Recommendations always end at a user/policy decision.

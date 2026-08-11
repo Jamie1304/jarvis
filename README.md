@@ -12,7 +12,9 @@ one-shot camera capture with expiring frame handoff to the vision provider; phys
 camera access remains disabled unless explicitly composed and authorized. Phase 9 adds
 an opt-in application-manager boundary with inventory, immutable package plans, fresh
 approval-bound installation/update, independent verification, and no default package
-or process capability.
+or process capability. Phase 10 adds advisory capability-gap detection and
+provider-neutral candidate discovery; discovery findings cannot install, execute, or
+authorize anything.
 
 ## Quick start
 

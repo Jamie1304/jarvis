@@ -70,6 +70,13 @@ and closing an arbitrary user process. Package catalog and inventory data are tr
 as evidence: only trusted composition chooses providers, only immutable plans can
 reach a provider, and post-operation success comes from an independent re-query.
 
+Phase 10 adds search-result poisoning, prompt injection in READMEs/package pages/API
+documentation, provenance spoofing, malicious package/plugin identity, biased ranking,
+and a discovery result being mistaken for an approved capability. Discovery sources are
+evidence only. External text is never interpreted as a command, policy, instruction,
+approval, package operation, or dynamic source module; it is retained only as a digest
+and untrusted evidence label.
+
 ## Trust boundaries
 
 1. Model/planner output to strict plan and tool-input schemas: entirely untrusted.
@@ -94,6 +101,9 @@ reach a provider, and post-operation success comes from an independent re-query.
 11. Manager to process/package runtime: only a broker-authorized, immutable plan or
     freshly resolved inventory record crosses this boundary; executable strings,
     repository names, and package IDs cannot be supplied as raw OS commands.
+12. Discovery providers to recommendation service: catalogs and research data are
+    untrusted candidate evidence. Trusted service code validates candidate shape,
+    retains provenance, scores explicit factors, and emits advisory output only.
 
 Python does not provide an in-process security sandbox. The boundary assumes
 registered tool code and the application process are trusted and reviewed; a
@@ -141,3 +151,7 @@ entry point by convention and tests.
   be strictly newer than the installed normalized numeric version. Verification
   re-queries inventory and checks expected name/publisher/version plus launch
   capability. The managed runtime closes only its own tracked launch process.
+- Discovery does not authorize a capability. Recommendations do not register tools,
+  alter policy, install a package/plugin, create credentials, call an API, or execute
+  generated code. Any later implementation must independently pass normal tool,
+  broker, policy, approval, provider, and test review.

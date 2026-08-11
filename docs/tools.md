@@ -113,3 +113,19 @@ success. Updates must be distinct from installs and reject non-newer targets. Do
 add a generic application configuration tool: register only an application-specific
 adapter with a reviewed schema/API or config-file contract. Closing must be limited to
 a process the managed runtime launched and owns.
+
+## Capability-discovery rules
+
+Discovery is not authorization. A provider may return candidate metadata and
+provenance, but it must not dynamically import a plugin, register a tool, install a
+package, execute setup, call arbitrary API code, or treat documentation/search content
+as instructions. Controlled web research must arrive through a separately authorized
+read path and be represented as untrusted evidence metadata/digest, never as a prompt
+for JARVIS.
+
+Keep candidate evaluation explainable: preserve factor scores for fit, source trust,
+permissions, maintenance, compatibility, reversibility, and testability. A selected
+candidate is a recommendation only. A future tool adapter may be expressed as a typed
+specification, but source generation, dynamic import, and automatic registration are
+prohibited. Installation/setup remains subject to the Phase 9 plan, broker, policy,
+and trusted-user approval flow.

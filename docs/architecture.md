@@ -102,3 +102,17 @@ the exact provider-issued package ID, source, publisher, and version. The runtim
 accepts a current `ApplicationRecord`, never a model executable/path, and can close
 only processes it launched and tracks. Post-operation verification re-queries the
 inventory, checks identity/version/executable, and confirms launch capability.
+
+Phase 10 adds an advisory capability-gap boundary:
+
+`missing capability -> discover evidence -> explainable evaluation -> recommendation -> user/policy decision`
+
+`CapabilityGap` records the unmet task requirement and evidence. Provider-neutral
+discovery can read a trusted internal tool catalog, trusted plugin/integration/software
+catalogs, or already-authorized controlled web research. Every candidate remains data:
+it is not a tool registration, installation plan, permission grant, setup action, or
+execution request. External descriptions are isolated as untrusted hashed evidence;
+they never become instructions. Rankings score functional fit, source quality,
+privileges, maintenance, compatibility, reversibility, and testability with stable
+factor explanations. A future tool adapter can be proposed only as a data-only
+specification; generated source is neither written, imported, nor executed.
