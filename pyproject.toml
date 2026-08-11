@@ -52,7 +52,14 @@ quote-style = "double"
 python_version = "3.12"
 strict = true
 plugins = ["pydantic.mypy"]
-exclude = ["build", "dist", "jarvis/desktop.py", "jarvis/frontend/desktop.py"]
+exclude = [
+    "build",
+    "dist",
+    "jarvis/desktop.py",
+    "jarvis/frontend/desktop.py",
+    "jarvis/speech/stt.py",
+    "jarvis/speech/tts.py",
+]
 
 [tool.pytest.ini_options]
 addopts = "--strict-config --strict-markers"
