@@ -79,6 +79,13 @@ direct keyboard, mouse, window, or policy access.
 
 Phase 8 adds a separate one-shot camera boundary:
 
+Phase 17 adds optional local voice activation in `jarvis/voice`. The controller
+owns one UI-visible voice state machine and sends idle frames only to a local
+wake-word provider. After wake it uses VAD and existing transient STT, then
+delegates task creation/cancellation to `AgentOrchestrator` through a typed
+adapter. TTS interruption is explicit and does not bypass the Permission
+Broker. See `docs/voice-activation.md` for lifecycle and privacy guarantees.
+
 `AI/planner -> camera.list/camera.capture -> PermissionBroker(camera.read) -> CameraController -> CameraProvider`
 
 The controller owns device opening, bounded frame capture, visible inactive/opening/

@@ -12,6 +12,7 @@ from jarvis.conversation.service import ConversationService
 from jarvis.core.errors import ConversationError, ServiceUnavailableError, SpeechDisabledError
 from jarvis.speech.stt import SpeechToTextService, Transcription
 from jarvis.speech.tts import TextToSpeechService
+from jarvis.voice.activation import AudioFrame, LocalVoiceController, VoiceStatus
 
 
 class AssistantEventKind(StrEnum):
@@ -54,12 +55,14 @@ class JarvisAssistantService:
         stt: SpeechToTextService | None = None,
         tts: TextToSpeechService | None = None,
         orchestrator: AgentOrchestrator | None = None,
+        voice: LocalVoiceController | None = None,
     ) -> None:
         self._conversation = conversation
         self._normalizer = normalizer or InputNormalizer()
         self._stt = stt
         self._tts = tts
         self._orchestrator = orchestrator
+        self._voice = voice
 
     def create_conversation(self, system_prompt: str | None = None) -> UUID:
         """Create a UI conversation with optional system context."""
@@ -83,6 +86,26 @@ class JarvisAssistantService:
     @property
     def tts_enabled(self) -> bool:
         return self._tts is not None and self._tts.enabled
+
+    @property
+    def voice_status(self) -> VoiceStatus | None:
+        """Return the UI-safe voice state, when optional voice is configured."""
+
+        return self._voice.status if self._voice is not None else None
+
+    async def handle_voice_frame(self, frame: AudioFrame) -> None:
+        """Forward one transient frame to the configured voice state machine."""
+
+        if self._voice is None:
+            raise SpeechDisabledError("Voice activation is disabled")
+        await self._voice.handle_frame(frame)
+
+    async def interrupt_voice(self, text: str) -> None:
+        """Apply an explicit voice interruption through the central task adapter."""
+
+        if self._voice is None:
+            raise SpeechDisabledError("Voice activation is disabled")
+        await self._voice.interrupt(text)
 
     async def start_recording(self) -> None:
         """Start transient microphone recording."""
@@ -140,10 +163,13 @@ class JarvisAssistantService:
     async def aclose(self) -> None:
         """Release local speech resources when the UI exits."""
 
-        if self._stt is not None:
-            await self._stt.aclose()
-        if self._tts is not None:
-            await self._tts.aclose()
+        if self._voice is not None:
+            await self._voice.aclose()
+        else:
+            if self._stt is not None:
+                await self._stt.aclose()
+            if self._tts is not None:
+                await self._tts.aclose()
         await self._conversation.aclose()
 
     def _require_orchestrator(self) -> AgentOrchestrator:

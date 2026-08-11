@@ -43,6 +43,7 @@ _LAYER = {
     "improvement": "proposal-only-improvement",
     "memory": "durable-memory",
     "multi_agent": "optional-control-plane",
+    "voice": "local-input",
     "planning": "control-plane",
     "permissions": "security-boundary",
     "security": "security-boundary",
