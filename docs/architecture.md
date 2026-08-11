@@ -34,3 +34,16 @@ Registration, enabled state, platform support, health, and usability are
 tracked separately. Unknown-directory plugin discovery is prohibited.
 
 The health API remains health-only. It reports application version, health state, and startup completion; it intentionally does not expose shell, filesystem, computer-control, camera, or autonomous behavior.
+
+Phase 5 replaces caller-supplied permission sets with a mandatory brokered tool
+path:
+
+`AI/planner -> strict tool input -> trusted action descriptor -> PermissionBroker -> policy -> optional trusted-user approval -> private authorized implementation`
+
+`ToolRegistry` binds each exact tool instance and its manifest permissions to one
+`PermissionBroker`. `Tool.invoke` is the reserved entry point; subclasses cannot
+override it or define a public `execute` method. The base validates model arguments,
+asks the broker to authorize the exact fingerprinted action, attaches the broker
+receipt, invokes `_execute_authorized`, and records the outcome. Unknown tools,
+permissions, scopes, and policy all fail closed. See `docs/threat-model.md` and
+`docs/permission-model.md` for the trust assumptions and policy contract.

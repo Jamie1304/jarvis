@@ -15,3 +15,16 @@
 - Tools receive only explicit execution context, not the application container. Unexpected implementation exceptions are logged and mapped to structured failures.
 
 Phase 3 retains the deny-by-default boundary: only registered, non-privileged capabilities are available, and calculator/local-time declare no permissions.
+
+Phase 5 enforces the boundary. Tool callers cannot pass grants or approval claims.
+The registry binds trusted manifest permissions to an exact tool instance, and the
+base tool entry point always consults that registry's `PermissionBroker` after
+strict argument validation. Policy recognizes granular dotted permissions only;
+unknown tools/permissions, malformed or escaping scopes, missing rules, and
+disabled rules deny. Approval requests and safe summaries come from trusted tool
+descriptors, while exact canonical argument fingerprints prevent mutation/replay.
+One-time approvals are consumed atomically. Remembered grants are scope- and
+time-limited and unavailable to hard-safety actions. Privilege escalation always
+denies; bulk deletion and destructive system commands always require a fresh human
+approval. Audit records contain fingerprints and normalized scope, never raw
+arguments or secrets.

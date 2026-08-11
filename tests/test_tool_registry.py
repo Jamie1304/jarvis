@@ -65,7 +65,7 @@ class RegistryTool(Tool[RegistryInput, RegistryOutput]):
     def input_model(self) -> type[RegistryInput]:
         return RegistryInput
 
-    async def execute(
+    async def _execute_authorized(
         self, context: ToolExecutionContext, validated_input: RegistryInput
     ) -> ToolResult:
         del context

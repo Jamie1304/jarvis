@@ -87,7 +87,7 @@ class ProbeTool(Tool[ProbeInput, ProbeOutput]):
     def input_model(self) -> type[ProbeInput]:
         return ProbeInput
 
-    async def execute(
+    async def _execute_authorized(
         self, context: ToolExecutionContext, validated_input: ProbeInput
     ) -> ToolResult:
         del context
@@ -225,12 +225,13 @@ async def test_orchestrator_executes_registered_calculator_and_verifies_200() ->
             ],
         }
     )
+    registry = ToolRegistry((CalculatorTool(),))
     orchestrator = AgentOrchestrator(
         store=InMemoryTaskStore(),
         interpreter=DefaultRequestInterpreter(),
         planner=SchemaValidatedPlanner(advisor),
-        selector=RegistryCapabilitySelector(ToolRegistry((CalculatorTool(),))),
-        executor=DefaultToolExecutor(),
+        selector=RegistryCapabilitySelector(registry),
+        executor=DefaultToolExecutor(registry.permission_broker),
         observer=DefaultObservationService(),
         verifier=EvidenceVerifier(),
         response_generator=DefaultTaskResponseGenerator(),
