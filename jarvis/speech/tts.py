@@ -48,7 +48,7 @@ class Pyttsx3TtsProvider(TtsProvider):
 
     def _speak_sync(self, text: str) -> None:
         try:
-            import pyttsx3  # type: ignore[import-untyped]
+            import pyttsx3
         except ImportError as error:
             raise SpeechError(
                 "Text-to-speech dependency is missing; install the speech extra"

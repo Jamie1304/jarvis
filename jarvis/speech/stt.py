@@ -79,7 +79,7 @@ class FasterWhisperSttProvider(SttProvider):
     def _transcribe_sync(self, audio: AudioData) -> Transcription:
         try:
             import numpy as np
-            from faster_whisper import WhisperModel  # type: ignore[import-untyped]
+            from faster_whisper import WhisperModel
         except ImportError as error:
             raise SpeechError(
                 "Speech-to-text dependency is missing: "
@@ -136,7 +136,7 @@ class SoundDeviceRecorder(AudioRecorder):
 
     def _start_sync(self) -> None:
         try:
-            import sounddevice as sd  # type: ignore[import-untyped]
+            import sounddevice as sd
         except ImportError as error:
             raise SpeechError(
                 "Microphone dependencies are missing; install the speech extra"

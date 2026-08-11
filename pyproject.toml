@@ -52,7 +52,14 @@ quote-style = "double"
 python_version = "3.12"
 strict = true
 plugins = ["pydantic.mypy"]
-exclude = ["build", "dist", "jarvis/desktop.py", "jarvis/frontend/desktop.py"]
+exclude = [
+    "build",
+    "dist",
+    "jarvis/desktop.py",
+    "jarvis/frontend/desktop.py",
+    "jarvis/speech/stt.py",
+    "jarvis/speech/tts.py",
+]
 
 [tool.pytest.ini_options]
 addopts = "--strict-config --strict-markers"
@@ -81,5 +88,12 @@ warn_required_dynamic_aliases = true
 warn_untyped_fields = true
 
 [[tool.mypy.overrides]]
-module = ["PySide6", "PySide6.*"]
+module = [
+    "PySide6",
+    "PySide6.*",
+    "numpy",
+    "faster_whisper",
+    "pyttsx3",
+    "sounddevice",
+]
 ignore_missing_imports = true
