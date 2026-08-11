@@ -1,0 +1,9 @@
+{
+  "fixture_id": "permission-pause-no-execution",
+  "title": "Permission requests pause before a privileged tool executes",
+  "category": "permissions",
+  "suite_id": "deterministic-permissions",
+  "scenario_id": "permission-pause",
+  "expected_status": "passed",
+  "source_issue": "internal:permission-broker"
+}
