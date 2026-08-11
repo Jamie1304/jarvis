@@ -42,6 +42,7 @@ _LAYER = {
     "frontend": "presentation",
     "improvement": "proposal-only-improvement",
     "memory": "durable-memory",
+    "multi_agent": "optional-control-plane",
     "planning": "control-plane",
     "permissions": "security-boundary",
     "security": "security-boundary",

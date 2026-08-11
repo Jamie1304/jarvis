@@ -8,6 +8,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from time import monotonic
 from typing import Any
 from uuid import uuid4
 
@@ -29,6 +30,27 @@ from jarvis.autonomy.planning import (
 )
 from jarvis.autonomy.response import DefaultTaskResponseGenerator
 from jarvis.autonomy.store import InMemoryTaskStore
+from jarvis.multi_agent import (
+    AgentContract,
+    AgentInvocation,
+    AgentRegistry,
+    AgentResult,
+    AgentResultStatus,
+    AgentType,
+    AgentWorker,
+    ContextItem,
+    DelegationLimits,
+    DelegationValidator,
+    EvidenceMultiAgentGoalVerifier,
+    EvidenceReference,
+    MultiAgentCoordinator,
+    OrchestrationRequest,
+    OrchestrationStatus,
+    ResourceBudget,
+    ResourceUsage,
+    SingleAgentExecutor,
+    SingleAgentOutcome,
+)
 from jarvis.permissions.broker import PermissionBroker
 from jarvis.permissions.models import (
     ActionDescriptor,
@@ -230,6 +252,86 @@ class _MeetingPlanningAdvisor(DagPlanAdvisor):
         raise AssertionError(f"Meeting fixture should not replan: {evidence.error.code}")
 
 
+class _AgentWorkflowInput(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    topic: str
+
+
+class _AgentWorkflowOutput(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    finding: str
+
+
+def _agent_evidence(reference_id: str) -> EvidenceReference:
+    return EvidenceReference(reference_id, f"Fixture {reference_id}", "b" * 64)
+
+
+class _WorkflowAgent(AgentWorker):
+    def __init__(self, agent_id: str, agent_type: AgentType, delay: float) -> None:
+        self._contract = AgentContract(
+            agent_id,
+            agent_type,
+            f"Deterministic {agent_type.value} evaluation",
+            _AgentWorkflowInput,
+            frozenset(),
+            frozenset({agent_type.value}),
+            frozenset(),
+            ResourceBudget(1, 100, 1, 1),
+            _AgentWorkflowOutput,
+        )
+        self._delay = delay
+        self.started_at = 0.0
+        self.finished_at = 0.0
+
+    @property
+    def contract(self) -> AgentContract:
+        return self._contract
+
+    async def execute(
+        self, invocation: AgentInvocation, cancellation: asyncio.Event
+    ) -> AgentResult:
+        del invocation
+        self.started_at = monotonic()
+        await asyncio.sleep(self._delay)
+        self.finished_at = monotonic()
+        if cancellation.is_set():
+            return AgentResult(
+                status=AgentResultStatus.CANCELLED,
+                output_json="{}",
+                evidence=(),
+                usage=ResourceUsage(),
+            )
+        return AgentResult.success(
+            _AgentWorkflowOutput(finding=f"{self.contract.agent_id}-ready"),
+            evidence=(_agent_evidence(f"{self.contract.agent_id}-ready"),),
+            usage=ResourceUsage(model_calls=1, tokens=20, cost_units=1),
+        )
+
+
+class _MeasuredSingleAgent(SingleAgentExecutor):
+    def __init__(self) -> None:
+        self.work_elapsed_seconds = 0.0
+
+    async def execute(
+        self, request: OrchestrationRequest, cancellation: asyncio.Event
+    ) -> SingleAgentOutcome:
+        del request
+        started = monotonic()
+        await asyncio.sleep(0.12)
+        self.work_elapsed_seconds = monotonic() - started
+        return SingleAgentOutcome(
+            OrchestrationStatus.CANCELLED
+            if cancellation.is_set()
+            else OrchestrationStatus.COMPLETED,
+            (_agent_evidence("brief-ready"),),
+            ResourceUsage(model_calls=3, tokens=60, cost_units=3),
+            "single_evaluation_complete",
+            "Sequential single-agent evaluation completed",
+        )
+
+
 class DeterministicWorkflowEvaluator:
     """Run fixed agent scenarios; no provider, hardware, network, or OS tool is used."""
 
@@ -241,6 +343,7 @@ class DeterministicWorkflowEvaluator:
             "cancellation": self._cancellation,
             "verification-failure": self._verification_failure,
             "meeting-preparation": self._meeting_preparation,
+            "multi-agent-comparison": self._multi_agent_comparison,
         }
         try:
             return await scenarios[scenario_id]()
@@ -373,6 +476,76 @@ class DeterministicWorkflowEvaluator:
             task.result_evidence,
         )
 
+    async def _multi_agent_comparison(self) -> WorkflowEvaluation:
+        research = _WorkflowAgent("research", AgentType.RESEARCH, 0.04)
+        coding = _WorkflowAgent("coding", AgentType.CODING, 0.04)
+        computer = _WorkflowAgent("computer", AgentType.COMPUTER, 0.01)
+        registry = AgentRegistry((research, coding, computer))
+        limits = DelegationLimits(6, 2, ResourceBudget(3, 300, 3, 1))
+        validator = DelegationValidator(registry, limits)
+        fallback = _MeasuredSingleAgent()
+        request = OrchestrationRequest(
+            uuid4(),
+            "Compare a repository change with its test evidence",
+            (ContextItem("constraint", "Use deterministic fixture data only"),),
+            (_agent_evidence("baseline"),),
+            frozenset(),
+            frozenset({"research", "coding", "computer"}),
+            frozenset(),
+            ("computer-ready",),
+        )
+        proposal = {
+            "goal": request.goal,
+            "rationale": "Independent research and code review reduce critical-path latency",
+            "nodes": [
+                _agent_workflow_node("research", "research"),
+                _agent_workflow_node("coding", "coding"),
+                _agent_workflow_node("computer", "computer", dependencies=["research", "coding"]),
+            ],
+        }
+        single_coordinator = MultiAgentCoordinator(
+            enabled=False,
+            registry=registry,
+            validator=validator,
+            single_agent=fallback,
+            goal_verifier=EvidenceMultiAgentGoalVerifier(),
+        )
+        started = monotonic()
+        single = await single_coordinator.execute(request, proposal)
+        single_end_to_end = monotonic() - started
+        multi_coordinator = MultiAgentCoordinator(
+            enabled=True,
+            registry=registry,
+            validator=validator,
+            single_agent=fallback,
+            goal_verifier=EvidenceMultiAgentGoalVerifier(),
+        )
+        started = monotonic()
+        multi = await multi_coordinator.execute(request, proposal)
+        multi_end_to_end = monotonic() - started
+        multi_critical_path = computer.finished_at - min(research.started_at, coding.started_at)
+        improved = multi_critical_path < fallback.work_elapsed_seconds
+        passed = (
+            single.status is OrchestrationStatus.COMPLETED
+            and multi.status is OrchestrationStatus.COMPLETED
+            and improved
+        )
+        return WorkflowEvaluation(
+            "multi-agent-comparison",
+            passed,
+            "Parallel specialists reduced measured fixture latency"
+            if improved
+            else "Multi-agent execution did not improve measured fixture latency",
+            (
+                f"single_work_ms={fallback.work_elapsed_seconds * 1_000:.2f}",
+                f"multi_critical_path_ms={multi_critical_path * 1_000:.2f}",
+                f"single_end_to_end_ms={single_end_to_end * 1_000:.2f}",
+                f"multi_end_to_end_ms={multi_end_to_end * 1_000:.2f}",
+                f"latency_improved={str(improved).lower()}",
+                "resource_cost_equal=true",
+            ),
+        )
+
 
 def _orchestrator(
     advisor: _Advisor, tools: tuple[Tool[Any, Any], ...], *, max_replans: int
@@ -422,4 +595,28 @@ def _meeting_step(key: str, *, dependencies: list[str] | None = None) -> dict[st
         "expected_evidence": [f"{key}-ready"],
         "expensive_action": False,
         "max_retries": 0,
+    }
+
+
+def _agent_workflow_node(
+    key: str, agent_id: str, *, dependencies: list[str] | None = None
+) -> dict[str, object]:
+    return {
+        "key": key,
+        "agent_id": agent_id,
+        "objective": f"Complete deterministic {key} analysis",
+        "input": {"topic": key},
+        "dependencies": dependencies or [],
+        "required_tools": [],
+        "required_capabilities": [agent_id],
+        "required_permissions": [],
+        "context_keys": ["constraint"],
+        "evidence_references": ["baseline"],
+        "budget": {
+            "max_model_calls": 1,
+            "max_tokens": 100,
+            "max_cost_units": 1,
+            "max_elapsed_seconds": 1.0,
+        },
+        "timeout_seconds": 0.5,
     }

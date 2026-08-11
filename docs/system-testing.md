@@ -45,6 +45,11 @@ meeting scenario runs independent calendar and notes nodes before a dependent fo
 node through broker-bound fake tools. It does not contact an AI provider, send a
 message, access hardware, or use a privileged computer tool.
 
+The `multi-agent-comparison` scenario additionally runs the same deterministic brief
+objective through the disabled single-agent path and an enabled three-node delegated
+DAG. It records both elapsed times and equal abstract resource cost. The fixture
+demonstrates critical-path parallelism, not provider quality or production speed.
+
 Previously fixed behavior is represented by JSON records in
 `tests/fixtures/regressions/`. A fixture identifies its suite and deterministic
 scenario, expected passing status, and optional issue reference. It is evidence for a

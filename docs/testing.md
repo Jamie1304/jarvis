@@ -98,3 +98,13 @@ pause/resume, restart fail-closed behavior, active/downstream cancellation, tran
 retry, evidence-bound replan, malformed persisted state, and goal-verification
 failure after all steps succeed. The deterministic `meeting-preparation` workflow
 uses three fake brokered tools and no external services or hardware.
+
+Phase 16 tests keep the feature disabled by default and cover correct/minimal-context
+delegation, unnecessary-delegation fallback, independent parallel execution with a
+concurrency cap, dependency ordering, partial failure, cancellation, node/global
+timeouts, unavailable-agent fallback, recursive-spawn rejection, child privilege
+escalation, reservation/runtime budget exhaustion, cycles, malformed worker output,
+and strict contract/persistence-free graph records. The deterministic comparison runs
+the same fixture in single- and multi-agent modes and reports measured latency plus
+equal abstract resource cost; it uses sleeps and fake workers, not real models or OS
+capabilities.

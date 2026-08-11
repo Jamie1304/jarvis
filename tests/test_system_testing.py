@@ -219,6 +219,7 @@ async def test_runner_parses_structured_individual_results(tmp_path: Path) -> No
         "cancellation",
         "verification-failure",
         "meeting-preparation",
+        "multi-agent-comparison",
     ),
 )
 async def test_deterministic_workflow_scenarios(scenario_id: str) -> None:

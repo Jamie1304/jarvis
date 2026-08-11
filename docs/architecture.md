@@ -189,3 +189,19 @@ budgets, scheduling, cancellation, retries, permission pauses, and replanning.
 broker pause resumes without reconstructing the task. Resume never grants permission;
 the same exact action re-enters the broker. Step success is evidence only, and the
 plan completes only after goal-level verification. See `docs/planning-engine.md`.
+
+Phase 16 adds an optional bounded coordinator above, without replacing Phase 15:
+
+`single-agent default | proposal -> contract/scope validation -> shared delegated DAG -> bounded parallel workers -> typed aggregate result`
+
+Only `MultiAgentCoordinator` creates delegated nodes. `AgentRegistry` contains exact
+trusted worker contracts for research, coding, and computer roles; the main role
+remains application code and cannot be registered as a worker. Nodes receive selected
+context and evidence references rather than global conversation state. Independent
+specialist nodes may run concurrently, while dependencies, cancellation, timeouts,
+partial failure, and model/token/cost budgets remain deterministic. Delegated scopes
+must be subsets of both the parent and worker contract, and privileged actions still
+pass through the normal tool and Permission Broker path. Registered contracts are
+snapshotted against mutation, and all successful nodes still require aggregate goal
+evidence before completion. See
+`docs/multi-agent-orchestration.md`.
