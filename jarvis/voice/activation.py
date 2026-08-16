@@ -21,6 +21,7 @@ from jarvis.speech.stt import AudioData, SttProvider
 from jarvis.speech.tts import TextToSpeechService
 from jarvis.state import ApplicationStateMachine
 from jarvis.state.models import ApplicationState, TransitionEvent
+from jarvis.task_controller import TaskController
 
 # Compatibility name for UI clients; application state is authoritative.
 VoiceState = ApplicationState
@@ -152,7 +153,7 @@ class VoiceTaskRunner(Protocol):
 
 
 class OrchestratorVoiceTaskRunner:
-    """Adapter preserving AgentOrchestrator ownership of task state/cancellation."""
+    """Deprecated compatibility adapter; production must use PlanningVoiceTaskRunner."""
 
     def __init__(self, orchestrator: AgentOrchestrator) -> None:
         self._orchestrator = orchestrator
@@ -172,6 +173,31 @@ class OrchestratorVoiceTaskRunner:
             status=result.status.value,
             response=result.result.summary if result.result else None,
             error=result.error.message if result.error else None,
+        )
+
+
+class PlanningVoiceTaskRunner:
+    """Voice adapter for the canonical TaskController, never AgentOrchestrator."""
+
+    def __init__(self, controller: TaskController) -> None:
+        self._controller = controller
+
+    async def start(self, conversation_id: UUID, request: str) -> VoiceTaskHandle:
+        del conversation_id
+        task = await self._controller.create_task(request)
+        completion = asyncio.create_task(self._run(task.task_id))
+        return VoiceTaskHandle(task.task_id, completion)
+
+    async def cancel(self, task_id: UUID) -> None:
+        self._controller.cancel_task(task_id)
+
+    async def _run(self, task_id: UUID) -> VoiceTaskOutcome:
+        result = await self._controller.run_task(task_id)
+        return VoiceTaskOutcome(
+            task_id,
+            result.status.value,
+            response=None,
+            error=result.error.code if result.error is not None else None,
         )
 
 

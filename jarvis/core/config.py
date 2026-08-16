@@ -1,6 +1,7 @@
 """Typed, environment-aware application settings."""
 
 from functools import lru_cache
+from pathlib import Path
 from typing import Literal
 
 from pydantic import Field, field_validator
@@ -47,6 +48,15 @@ class Settings(BaseSettings):
     multi_agent_enabled: bool = False
     multi_agent_max_concurrency: int = Field(default=3, gt=0, le=16)
     multi_agent_timeout_seconds: float = Field(default=120.0, gt=0, le=3_600)
+    app_data_dir: Path = Path(".jarvis")
+    computer_enabled: bool = False
+    camera_enabled: bool = False
+    application_management_enabled: bool = False
+    package_installation_enabled: bool = False
+    discovery_enabled: bool = True
+    improvement_enabled: bool = False
+    remote_approval_enabled: bool = False
+    autonomous_scheduling_enabled: bool = False
 
     @field_validator("stt_device", mode="before")
     @classmethod

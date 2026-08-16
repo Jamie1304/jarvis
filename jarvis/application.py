@@ -6,14 +6,14 @@ from enum import StrEnum
 from uuid import UUID
 
 from jarvis.ai.models import ProviderHealth
-from jarvis.autonomy.models import Task
-from jarvis.autonomy.orchestrator import AgentOrchestrator
 from jarvis.conversation.service import ConversationService
 from jarvis.core.errors import ConversationError, ServiceUnavailableError, SpeechDisabledError
+from jarvis.planning.models import PlanningTask
 from jarvis.speech.stt import SpeechToTextService, Transcription
 from jarvis.speech.tts import TextToSpeechService
 from jarvis.state import ApplicationStateMachine
 from jarvis.state.models import ApplicationState
+from jarvis.task_controller import TaskController
 from jarvis.voice.activation import AudioFrame, LocalVoiceController, VoiceStatus
 
 
@@ -56,7 +56,7 @@ class JarvisAssistantService:
         normalizer: InputNormalizer | None = None,
         stt: SpeechToTextService | None = None,
         tts: TextToSpeechService | None = None,
-        orchestrator: AgentOrchestrator | None = None,
+        task_controller: TaskController | None = None,
         voice: LocalVoiceController | None = None,
         state_machine: ApplicationStateMachine | None = None,
     ) -> None:
@@ -64,7 +64,7 @@ class JarvisAssistantService:
         self._normalizer = normalizer or InputNormalizer()
         self._stt = stt
         self._tts = tts
-        self._orchestrator = orchestrator
+        self._task_controller = task_controller
         self._voice = voice
         self._state_machine = state_machine
 
@@ -135,29 +135,31 @@ class JarvisAssistantService:
             raise SpeechDisabledError("Speech-to-text is disabled")
         return await self._stt.stop_and_transcribe()
 
-    async def create_task(self, conversation_id: UUID, user_request: str) -> Task:
-        """Create a bounded agent task without changing ordinary chat behavior."""
+    async def create_task(self, conversation_id: UUID, user_request: str) -> PlanningTask:
+        """Create a canonical persisted plan; conversation identity remains UI context only."""
 
-        return await self._require_orchestrator().create_task(
-            conversation_id, self._normalizer.normalize(user_request)
+        del conversation_id
+        return await self._require_task_controller().create_task(
+            self._normalizer.normalize(user_request)
         )
 
-    async def run_task(self, task_id: UUID) -> Task:
-        """Run a previously created bounded task."""
+    async def run_task(self, task_id: UUID) -> PlanningTask:
+        """Run a previously created canonical task."""
 
-        return await self._require_orchestrator().run(task_id)
+        return await self._require_task_controller().run_task(task_id)
 
-    async def submit_task(self, conversation_id: UUID, user_request: str) -> Task:
-        """Create and execute a bounded task as one operation."""
+    async def submit_task(self, conversation_id: UUID, user_request: str) -> PlanningTask:
+        """Create and execute a canonical persisted task."""
 
-        return await self._require_orchestrator().submit(
-            conversation_id, self._normalizer.normalize(user_request)
+        del conversation_id
+        return await self._require_task_controller().submit_task(
+            self._normalizer.normalize(user_request)
         )
 
-    async def cancel_task(self, task_id: UUID) -> Task:
+    async def cancel_task(self, task_id: UUID) -> PlanningTask:
         """Request clean cancellation of a running task."""
 
-        return await self._require_orchestrator().cancel(task_id)
+        return self._require_task_controller().cancel_task(task_id)
 
     async def stream_text(self, conversation_id: UUID, text: str) -> AsyncIterator[AssistantEvent]:
         """Normalize text and stream a response, optionally speaking after completion."""
@@ -186,7 +188,7 @@ class JarvisAssistantService:
                 await self._tts.aclose()
         await self._conversation.aclose()
 
-    def _require_orchestrator(self) -> AgentOrchestrator:
-        if self._orchestrator is None:
-            raise ServiceUnavailableError("Task orchestration is not configured")
-        return self._orchestrator
+    def _require_task_controller(self) -> TaskController:
+        if self._task_controller is None:
+            raise ServiceUnavailableError("Canonical task controller is not configured")
+        return self._task_controller

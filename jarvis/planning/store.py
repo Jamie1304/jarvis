@@ -85,6 +85,11 @@ class PlanningStore(ABC):
     @abstractmethod
     def save_task(self, task: PlanningTask) -> None: ...
 
+    def list_tasks(self) -> tuple[PlanningTask, ...]:
+        """Optional enumeration for runtime task inspection."""
+
+        return ()
+
 
 def _now() -> datetime:
     return datetime.now(UTC)
@@ -177,6 +182,18 @@ class SQLitePlanningStore(PlanningStore):
             return None
         try:
             return _task_from_dict(_object(json.loads(str(row["task_json"]))))
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
+            raise PlanningStoreError("Stored planning task is malformed") from error
+
+    def list_tasks(self) -> tuple[PlanningTask, ...]:
+        with self._lock:
+            rows = tuple(
+                self._connection.execute("SELECT task_json FROM planning_tasks ORDER BY updated_at")
+            )
+        try:
+            return tuple(
+                _task_from_dict(_object(json.loads(str(row["task_json"])))) for row in rows
+            )
         except (KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
             raise PlanningStoreError("Stored planning task is malformed") from error
 

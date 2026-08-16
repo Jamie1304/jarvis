@@ -82,7 +82,8 @@ Phase 8 adds a separate one-shot camera boundary:
 Phase 17 adds optional local voice activation in `jarvis/voice`. The controller
 owns one UI-visible voice state machine and sends idle frames only to a local
 wake-word provider. After wake it uses VAD and existing transient STT, then
-delegates task creation/cancellation to `AgentOrchestrator` through a typed
+delegates task creation/cancellation to the canonical `TaskController` through a typed
+adapter. `OrchestratorVoiceTaskRunner` is retained only as a deprecated migration
 adapter. TTS interruption is explicit and does not bypass the Permission
 Broker. See `docs/voice-activation.md` for lifecycle and privacy guarantees.
 
@@ -92,6 +93,23 @@ fail-closed transition tables, durable task recovery snapshots, and auditable
 transition records. Planner, legacy orchestrator, and optional voice adapters
 can publish progress through it without allowing UI/model code to mutate state.
 See `docs/state-machine.md`.
+
+## Canonical runtime composition
+
+`ApplicationRuntime` is the only production composition owner. It creates one
+settings object, provider, conversation service, bounded event bus, durable state
+and planning stores, state machine, policy engine, SQLite audit sink, permission
+broker, tool registry, `PlanningEngine`, `TaskController`, memory services, and
+project knowledge store. The production path is:
+
+`Application/UI -> TaskController -> PlanningEngine -> ToolRegistry -> Tool -> PermissionBroker -> verification -> durable state/audit/event`
+
+`PlanningEngine` is the canonical production task engine. The legacy
+`AgentOrchestrator` remains for compatibility tests and migration only; it is not
+accepted by the application service or desktop composition. Safe calculator/local
+time tools are enabled by default. Computer control, camera, application/package
+management, self-improvement, remote approval, autonomous scheduling, and
+multi-agent execution are disabled unless explicitly configured and composed.
 
 `AI/planner -> camera.list/camera.capture -> PermissionBroker(camera.read) -> CameraController -> CameraProvider`
 

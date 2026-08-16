@@ -1,9 +1,12 @@
 """Application composition root; concrete providers are selected only here."""
 
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
 from jarvis.ai.providers.base import AIProvider
 from jarvis.ai.providers.ollama import OllamaProvider
 from jarvis.application import JarvisAssistantService
-from jarvis.autonomy.orchestrator import AgentOrchestrator
 from jarvis.conversation.service import ConversationService
 from jarvis.core.config import Settings
 from jarvis.core.errors import ConfigurationError
@@ -14,6 +17,10 @@ from jarvis.speech.stt import (
 )
 from jarvis.speech.tts import DisabledTtsProvider, Pyttsx3TtsProvider, TextToSpeechService
 from jarvis.state import ApplicationStateMachine
+from jarvis.task_controller import TaskController
+
+if TYPE_CHECKING:
+    from jarvis.runtime import ApplicationRuntime
 
 
 def create_ai_provider(settings: Settings) -> AIProvider:
@@ -30,7 +37,7 @@ def create_ai_provider(settings: Settings) -> AIProvider:
 
 
 def create_assistant_service(
-    settings: Settings, *, orchestrator: AgentOrchestrator | None = None
+    settings: Settings, *, task_controller: TaskController | None = None
 ) -> JarvisAssistantService:
     """Build the UI-facing service graph without exposing concrete providers to UI code."""
 
@@ -60,6 +67,27 @@ def create_assistant_service(
         conversation,
         stt=stt,
         tts=tts,
-        orchestrator=orchestrator,
+        task_controller=task_controller,
         state_machine=ApplicationStateMachine(),
+    )
+
+
+def create_application_runtime(settings: Settings) -> ApplicationRuntime:
+    """Construct the one canonical runtime container used by production entry points."""
+
+    from jarvis.runtime import ApplicationRuntime
+
+    return ApplicationRuntime.create(settings)
+
+
+def create_assistant_from_runtime(runtime: ApplicationRuntime) -> JarvisAssistantService:
+    """Expose the runtime-owned services to UI code without rebuilding dependencies."""
+
+    if runtime.container is None:
+        raise ConfigurationError("Application runtime is not ready")
+    container = runtime.container
+    return JarvisAssistantService(
+        container.conversation,
+        task_controller=container.task_controller,
+        state_machine=container.state_machine,
     )

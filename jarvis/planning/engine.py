@@ -319,6 +319,21 @@ class PlanningEngine:
             return task
         return await self.run(task.task_id)
 
+    def get_task(self, task_id: UUID) -> PlanningTask | None:
+        """Return a durable task snapshot without executing it."""
+
+        return self._store.load_task(task_id)
+
+    def list_tasks(self) -> tuple[PlanningTask, ...]:
+        """List persisted task snapshots in store order."""
+
+        return self._store.list_tasks()
+
+    def inspect_plan(self, task_id: UUID) -> OwnedPlan | None:
+        """Return the current immutable plan snapshot without executing it."""
+
+        return self._store.load_plan(task_id)
+
     async def run(self, task_id: UUID) -> PlanningTask:
         if task_id in self._cancellations:
             raise PlanningEngineError("Planning task is already running")
