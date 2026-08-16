@@ -11,8 +11,9 @@ from pydantic import ValidationError
 
 from jarvis.events import EventBus, EventEnvelope, EventType, ToolCompleted, ToolFailed, ToolStarted
 from jarvis.permissions.broker import PermissionBroker
-from jarvis.permissions.models import ActionDescriptor, Risk
+from jarvis.permissions.models import ActionDescriptor, AuthorizationReceipt, Risk
 from jarvis.tools.models import (
+    ToolEffectDisposition,
     ToolExecutionContext,
     ToolHealth,
     ToolHealthStatus,
@@ -22,6 +23,7 @@ from jarvis.tools.models import (
     ToolOutput,
     ToolPlatform,
     ToolResult,
+    ToolResultError,
     ToolResultStatus,
 )
 
@@ -118,10 +120,8 @@ class Tool(ABC, Generic[InputModel, OutputModel]):
             )
         try:
             validated_input = self.input_model.model_validate(dict(raw_input), strict=True)
-        except ValidationError as error:
-            context.logger.info(
-                "Tool input validation failed for %s: %s", self.manifest.tool_id, error
-            )
+        except ValidationError:
+            context.logger.info("Tool input validation failed for %s", self.manifest.tool_id)
             return ToolResult.failure(
                 ToolResultStatus.VALIDATION_ERROR,
                 "invalid_tool_input",
@@ -133,7 +133,24 @@ class Tool(ABC, Generic[InputModel, OutputModel]):
                 "caller_supplied_authorization",
                 "Callers cannot supply authorization receipts",
             )
-        descriptor = self._describe_action(context, validated_input)
+        try:
+            descriptor = self._describe_action(context, validated_input)
+        except Exception:
+            context.logger.error(
+                "Tool %s produced an invalid action descriptor; details were withheld",
+                self.manifest.tool_id,
+            )
+            return ToolResult.failure(
+                ToolResultStatus.PERMISSION_DENIED,
+                "malformed_action",
+                "Trusted tool action metadata was malformed",
+            )
+        if type(descriptor) is not ActionDescriptor:
+            return ToolResult.failure(
+                ToolResultStatus.PERMISSION_DENIED,
+                "malformed_action",
+                "Trusted tool action metadata was malformed",
+            )
         authorization = await broker.authorize(
             tool_id=self.manifest.tool_id,
             tool_identity=self,
@@ -164,6 +181,49 @@ class Tool(ABC, Generic[InputModel, OutputModel]):
                 "Permission broker denied execution or requires trusted user approval",
                 metadata=metadata,
             )
+        preflight_result: ToolResult | None = None
+        try:
+            async with asyncio.timeout(self.manifest.timeout_seconds):
+                health = await self.health_check()
+        except TimeoutError:
+            preflight_result = ToolResult.failure(
+                ToolResultStatus.TIMEOUT,
+                "tool_health_timeout",
+                "Tool health check exceeded its declared timeout",
+            )
+        except Exception:
+            context.logger.error("Tool %s health check failed", self.manifest.tool_id)
+            preflight_result = ToolResult.failure(
+                ToolResultStatus.INTERNAL_FAILURE,
+                "tool_health_failed",
+                "Tool health check failed; provider details were withheld",
+            )
+        else:
+            if health.status is ToolHealthStatus.UNAVAILABLE:
+                preflight_result = ToolResult.failure(
+                    ToolResultStatus.UNAVAILABLE,
+                    "tool_unavailable",
+                    health.detail,
+                )
+
+        begin_reason = await broker.begin_execution(authorization.receipt)
+        if begin_reason is not None:
+            result = ToolResult.failure(
+                ToolResultStatus.PERMISSION_DENIED,
+                begin_reason.value,
+                "Authorization was invalid or expired before execution",
+            )
+            self._emit_result(event_bus, context, result)
+            return result
+        if preflight_result is not None:
+            result = await self._record_outcome(
+                broker,
+                authorization.receipt,
+                preflight_result,
+            )
+            self._emit_result(event_bus, context, result)
+            return result
+
         if event_bus is not None:
             event_bus.publish_nowait(
                 EventEnvelope.create(
@@ -175,44 +235,118 @@ class Tool(ABC, Generic[InputModel, OutputModel]):
                 )
             )
         authorized_context = replace(context, authorization=authorization.receipt)
-        health = await self.health_check()
-        if health.status is ToolHealthStatus.UNAVAILABLE:
-            result = ToolResult.failure(
-                ToolResultStatus.UNAVAILABLE,
-                "tool_unavailable",
-                health.detail,
-            )
-            await broker.record_execution_outcome(authorization.receipt, result.status.value)
-            return result
         try:
             async with asyncio.timeout(self.manifest.timeout_seconds):
                 result = await self._execute_or_cancel(authorized_context, validated_input)
         except TimeoutError:
             result = ToolResult.failure(
-                ToolResultStatus.TIMEOUT,
-                "tool_timeout",
-                "Tool exceeded its declared timeout",
+                (
+                    ToolResultStatus.UNKNOWN_OUTCOME
+                    if self.manifest.declared_permissions
+                    else ToolResultStatus.TIMEOUT
+                ),
+                (
+                    "tool_execution_outcome_unknown"
+                    if self.manifest.declared_permissions
+                    else "tool_timeout"
+                ),
+                "Tool timed out; a privileged effect may have occurred"
+                if self.manifest.declared_permissions
+                else "Tool exceeded its declared timeout",
             )
         except asyncio.CancelledError:
             result = ToolResult.failure(
-                ToolResultStatus.CANCELLED,
-                "tool_cancelled",
-                "Tool invocation was cancelled",
+                (
+                    ToolResultStatus.UNKNOWN_OUTCOME
+                    if self.manifest.declared_permissions
+                    else ToolResultStatus.CANCELLED
+                ),
+                (
+                    "tool_execution_outcome_unknown"
+                    if self.manifest.declared_permissions
+                    else "tool_cancelled"
+                ),
+                "Tool was cancelled; a privileged effect may have occurred"
+                if self.manifest.declared_permissions
+                else "Tool invocation was cancelled",
             )
         except Exception:
-            context.logger.exception("Tool %s failed internally", self.manifest.tool_id)
+            # Provider exceptions are untrusted and may embed file, clipboard,
+            # prompt, or credential content. Never copy their text/traceback to
+            # ordinary logs at this generic boundary.
+            context.logger.error("Tool %s failed internally", self.manifest.tool_id)
             result = ToolResult.failure(
-                ToolResultStatus.INTERNAL_FAILURE,
-                "tool_internal_failure",
-                "Tool failed internally; diagnostic details were logged",
+                (
+                    ToolResultStatus.UNKNOWN_OUTCOME
+                    if self.manifest.declared_permissions
+                    else ToolResultStatus.INTERNAL_FAILURE
+                ),
+                (
+                    "tool_execution_outcome_unknown"
+                    if self.manifest.declared_permissions
+                    else "tool_internal_failure"
+                ),
+                "Tool failed internally; provider details were withheld",
+            )
+        if (
+            self.manifest.declared_permissions
+            and not result.succeeded
+            and result.effect_disposition is not ToolEffectDisposition.NO_EFFECT
+        ):
+            result = ToolResult(
+                status=ToolResultStatus.UNKNOWN_OUTCOME,
+                output=result.output,
+                error=ToolResultError(
+                    "tool_execution_outcome_unknown",
+                    "A privileged effect may have occurred; do not retry automatically",
+                ),
+                evidence=result.evidence,
+                metadata=result.metadata,
+                effect_disposition=ToolEffectDisposition.UNKNOWN,
             )
         if context.cancellation.is_set() and result.succeeded:
             result = ToolResult.failure(
-                ToolResultStatus.CANCELLED,
-                "tool_cancelled",
-                "Tool invocation was cancelled",
+                (
+                    ToolResultStatus.UNKNOWN_OUTCOME
+                    if self.manifest.declared_permissions
+                    else ToolResultStatus.CANCELLED
+                ),
+                (
+                    "tool_execution_outcome_unknown"
+                    if self.manifest.declared_permissions
+                    else "tool_cancelled"
+                ),
+                "A privileged effect completed while cancellation was requested; "
+                "do not retry automatically"
+                if self.manifest.declared_permissions
+                else "Tool invocation was cancelled",
             )
-        await broker.record_execution_outcome(authorization.receipt, result.status.value)
+        result = await self._record_outcome(broker, authorization.receipt, result)
+        self._emit_result(event_bus, context, result)
+        return result
+
+    async def _record_outcome(
+        self,
+        broker: PermissionBroker,
+        receipt: AuthorizationReceipt,
+        result: ToolResult,
+    ) -> ToolResult:
+        try:
+            await broker.record_execution_outcome(receipt, result.status.value)
+        except Exception:
+            return ToolResult.failure(
+                ToolResultStatus.UNKNOWN_OUTCOME,
+                "execution_outcome_unknown",
+                "Execution outcome was not durably recorded; do not retry automatically",
+            )
+        return result
+
+    def _emit_result(
+        self,
+        event_bus: EventBus | None,
+        context: ToolExecutionContext,
+        result: ToolResult,
+    ) -> None:
         if event_bus is not None:
             payload: ToolCompleted | ToolFailed
             event_type: EventType
@@ -234,7 +368,6 @@ class Tool(ABC, Generic[InputModel, OutputModel]):
                     correlation_id=context.correlation_id,
                 )
             )
-        return result
 
     async def _execute_or_cancel(
         self, context: ToolExecutionContext, validated_input: InputModel

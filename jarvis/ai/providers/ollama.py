@@ -112,7 +112,9 @@ class OllamaProvider(AIProvider):
         if self._client is not None:
             yield self._client
         else:
-            async with httpx.AsyncClient(timeout=httpx.Timeout(self._timeout_seconds)) as client:
+            async with httpx.AsyncClient(
+                timeout=httpx.Timeout(self._timeout_seconds), trust_env=False
+            ) as client:
                 yield client
 
     def _payload(self, request: GenerationRequest, *, stream: bool) -> dict[str, Any]:
@@ -144,7 +146,8 @@ class OllamaProvider(AIProvider):
     def _raise_for_ollama_error(response: httpx.Response) -> None:
         if response.status_code < 400:
             return
-        detail = response.text
-        if response.status_code == 404 or "not found" in detail.lower():
-            raise ModelUnavailableError(f"Ollama model is unavailable: {detail}")
-        raise ProviderError(f"Ollama returned HTTP {response.status_code}: {detail}")
+        # Response bodies can echo prompts, credentials, or malicious server text.
+        # Preserve only trusted protocol metadata in application exceptions.
+        if response.status_code == 404:
+            raise ModelUnavailableError("Ollama model is unavailable")
+        raise ProviderError(f"Ollama returned HTTP {response.status_code}")

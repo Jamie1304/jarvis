@@ -23,6 +23,15 @@ class ToolResultStatus(StrEnum):
     VALIDATION_ERROR = "validation_error"
     CANCELLED = "cancelled"
     INTERNAL_FAILURE = "internal_failure"
+    UNKNOWN_OUTCOME = "unknown_outcome"
+
+
+class ToolEffectDisposition(StrEnum):
+    """Trusted provider knowledge about whether an external effect began."""
+
+    NO_EFFECT = "no_effect"
+    CONFIRMED_EFFECT = "confirmed_effect"
+    UNKNOWN = "unknown"
 
 
 class ToolHealthStatus(StrEnum):
@@ -150,6 +159,7 @@ class ToolResult:
     error: ToolResultError | None = None
     evidence: tuple[ToolEvidence, ...] = ()
     metadata: tuple[ToolMetadata, ...] = ()
+    effect_disposition: ToolEffectDisposition = ToolEffectDisposition.UNKNOWN
 
     @property
     def succeeded(self) -> bool:
@@ -165,7 +175,13 @@ class ToolResult:
         evidence: tuple[ToolEvidence, ...] = (),
         metadata: tuple[ToolMetadata, ...] = (),
     ) -> "ToolResult":
-        return cls(ToolResultStatus.SUCCESS, output=output, evidence=evidence, metadata=metadata)
+        return cls(
+            ToolResultStatus.SUCCESS,
+            output=output,
+            evidence=evidence,
+            metadata=metadata,
+            effect_disposition=ToolEffectDisposition.CONFIRMED_EFFECT,
+        )
 
     @classmethod
     def failure(
@@ -175,11 +191,13 @@ class ToolResult:
         message: str,
         *,
         metadata: tuple[ToolMetadata, ...] = (),
+        effect_disposition: ToolEffectDisposition = ToolEffectDisposition.UNKNOWN,
     ) -> "ToolResult":
         return cls(
             status=status,
             error=ToolResultError(code=code, message=message),
             metadata=metadata,
+            effect_disposition=effect_disposition,
         )
 
 

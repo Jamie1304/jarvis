@@ -10,12 +10,8 @@ from jarvis.application import JarvisAssistantService
 from jarvis.conversation.service import ConversationService
 from jarvis.core.config import Settings
 from jarvis.core.errors import ConfigurationError
-from jarvis.speech.stt import (
-    FasterWhisperSttProvider,
-    SoundDeviceRecorder,
-    SpeechToTextService,
-)
-from jarvis.speech.tts import DisabledTtsProvider, Pyttsx3TtsProvider, TextToSpeechService
+from jarvis.security import local_model_endpoint_is_safe
+from jarvis.speech.tts import DisabledTtsProvider, TextToSpeechService
 from jarvis.state import ApplicationStateMachine
 from jarvis.task_controller import TaskController
 
@@ -28,6 +24,8 @@ def create_ai_provider(settings: Settings) -> AIProvider:
 
     if settings.ai_provider.casefold() != "ollama":
         raise ConfigurationError(f"Unsupported AI provider: {settings.ai_provider}")
+    if not local_model_endpoint_is_safe(settings.ai_endpoint):
+        raise ConfigurationError("Ollama endpoint must use a literal local loopback address")
     return OllamaProvider(
         model=settings.ai_model,
         endpoint=settings.ai_endpoint,
@@ -39,7 +37,17 @@ def create_ai_provider(settings: Settings) -> AIProvider:
 def create_assistant_service(
     settings: Settings, *, task_controller: TaskController | None = None
 ) -> JarvisAssistantService:
-    """Build the UI-facing service graph without exposing concrete providers to UI code."""
+    """Build the legacy non-privileged UI service for compatibility tests only.
+
+    Hardware activation belongs to the canonical brokered runtime.  This helper
+    deliberately refuses settings that would otherwise create a microphone or
+    speech-output path outside that runtime.
+    """
+
+    if settings.stt_enabled or settings.tts_enabled or settings.voice_enabled:
+        raise ConfigurationError(
+            "Privileged speech capabilities require the canonical application runtime"
+        )
 
     provider = create_ai_provider(settings)
     conversation = ConversationService(
@@ -48,21 +56,7 @@ def create_assistant_service(
         context_limit=settings.ai_context_limit,
     )
     stt = None
-    if settings.stt_enabled:
-        stt = SpeechToTextService(
-            SoundDeviceRecorder(device=settings.stt_device, sample_rate=settings.stt_sample_rate),
-            FasterWhisperSttProvider(
-                settings.stt_model,
-                device=settings.stt_compute_device,
-                compute_type=settings.stt_compute_type,
-            ),
-        )
-    tts = TextToSpeechService(
-        Pyttsx3TtsProvider(voice=settings.tts_voice)
-        if settings.tts_enabled
-        else DisabledTtsProvider(),
-        enabled=settings.tts_enabled,
-    )
+    tts = TextToSpeechService(DisabledTtsProvider(), enabled=False)
     return JarvisAssistantService(
         conversation,
         stt=stt,
@@ -72,11 +66,13 @@ def create_assistant_service(
     )
 
 
-def create_application_runtime(settings: Settings) -> ApplicationRuntime:
+def create_application_runtime(settings: Settings | None = None) -> ApplicationRuntime:
     """Construct the one canonical runtime container used by production entry points."""
 
     from jarvis.runtime import ApplicationRuntime
 
+    if settings is None:
+        return ApplicationRuntime.create_from_environment()
     return ApplicationRuntime.create(settings)
 
 

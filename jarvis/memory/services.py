@@ -26,7 +26,7 @@ from jarvis.memory.models import (
     Sensitivity,
     SystemMemoryHit,
 )
-from jarvis.memory.policy import LongTermRetentionPolicy
+from jarvis.memory.policy import LongTermRetentionPolicy, contains_secret
 from jarvis.memory.store import SQLiteMemoryStore
 
 _TOKEN = re.compile(r"[a-z0-9_./-]+")
@@ -161,6 +161,19 @@ class EpisodicMemoryService:
         bounded_evidence = tuple(
             self._bounded(value, 512, "Episode evidence") for value in evidence
         )
+        secret_candidates = (
+            objective,
+            outcome,
+            *bounded_errors,
+            *bounded_evidence,
+            *(
+                value
+                for action in actions
+                for value in (action.tool_id, action.action, action.outcome)
+            ),
+        )
+        if any(contains_secret(value) for value in secret_candidates):
+            raise PermissionError("Episodic memory cannot retain credential-like content")
         now = self._clock()
         data = {
             "task_id": str(task_id),
@@ -178,7 +191,9 @@ class EpisodicMemoryService:
             content=f"Completed task: {objective}",
             data=json.dumps(data, sort_keys=True, separators=(",", ":")),
             created_at=now,
-            provenance=MemoryProvenance(MemorySource.TASK, str(task_id), now),
+            # Task episodes may summarize model/tool/web evidence. They remain
+            # useful for retrieval, but never cross back as trusted instructions.
+            provenance=MemoryProvenance(MemorySource.TASK, str(task_id), now, True),
             confidence=None,
             retention=retention,
             sensitivity=Sensitivity.PRIVATE,

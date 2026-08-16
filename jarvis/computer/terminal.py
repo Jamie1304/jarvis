@@ -1,8 +1,10 @@
 """Controlled non-shell command execution for explicitly cataloged executables."""
 
 import asyncio
+import os
 from abc import ABC, abstractmethod
 from collections.abc import Mapping
+from pathlib import Path
 
 from jarvis.computer.models import CommandDefinition, CommandExecution
 
@@ -33,13 +35,28 @@ class SubprocessCommandAdapter(CommandAdapter):
         timeout_seconds: float,
         cancellation: asyncio.Event,
     ) -> CommandExecution:
+        try:
+            executable = Path(command.executable)
+            working_root = Path(working_directory).resolve(strict=True)
+            trusted_executable = executable.resolve(strict=True)
+        except (OSError, RuntimeError):
+            return CommandExecution(
+                None, "", "Trusted command identity is unavailable", rejected=True
+            )
+        if (
+            not executable.is_absolute()
+            or not trusted_executable.is_file()
+            or not working_root.is_dir()
+        ):
+            return CommandExecution(None, "", "Trusted command identity is invalid", rejected=True)
         process = await asyncio.create_subprocess_exec(
-            command.executable,
+            os.fspath(trusted_executable),
             *arguments,
-            cwd=working_directory,
+            cwd=os.fspath(working_root),
             stdin=asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            env=_trusted_subprocess_environment(),
         )
         communication = asyncio.create_task(process.communicate())
         cancellation_wait = asyncio.create_task(cancellation.wait())
@@ -137,3 +154,13 @@ class ControlledCommandService:
             timeout_seconds,
             cancellation,
         )
+
+
+def _trusted_subprocess_environment() -> dict[str, str]:
+    """Pass only OS process essentials; never ambient credentials or Python hooks."""
+
+    allowed = ("SYSTEMROOT", "WINDIR", "TEMP", "TMP")
+    environment = {name: os.environ[name] for name in allowed if name in os.environ}
+    environment["PYTHONIOENCODING"] = "utf-8"
+    environment["PYTHONUTF8"] = "1"
+    return environment

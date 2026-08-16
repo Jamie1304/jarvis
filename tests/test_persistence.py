@@ -35,8 +35,13 @@ async def test_operation_idempotency_keys_fail_closed(tmp_path: Path) -> None:
     store = runtime.container.planning_store
     assert store.reserve_operation(task.task_id, "manual-test", "a" * 64)
     assert not store.reserve_operation(task.task_id, "manual-test", "a" * 64)
+    assert store.release_operation(task.task_id, "manual-test", "a" * 64)
+    assert not store.release_operation(task.task_id, "manual-test", "a" * 64)
+    assert store.reserve_operation(task.task_id, "manual-test", "a" * 64)
     with pytest.raises(PlanningStoreError, match="fingerprint mismatch"):
         store.reserve_operation(task.task_id, "manual-test", "b" * 64)
+    with pytest.raises(PlanningStoreError, match="fingerprint mismatch"):
+        store.release_operation(task.task_id, "manual-test", "b" * 64)
     with pytest.raises(PlanningStoreError, match="malformed"):
         store.reserve_operation(task.task_id, "", "a" * 64)
     await runtime.aclose()
@@ -117,6 +122,7 @@ async def test_audit_is_append_only_and_validates_lifecycle_shape(tmp_path: Path
             action="invoke",
             argument_names=("expression",),
             argument_fingerprint="a" * 64,
+            action_fingerprint="b" * 64,
             normalized_scope=None,
             policy_id=None,
             decision=Decision.ALLOW,

@@ -16,10 +16,11 @@ in-process only and is never a persistence or authorization source.
 ## Transaction model
 
 Planning task/plan versions are written atomically in one SQLite transaction. The
-engine writes that unit first, records lifecycle audit evidence, then updates the
-state projection and emits events. A failed planning write therefore cannot produce
-a later audit/state/event claim. A projection write failure leaves planning truth intact;
-startup rebuilds the projection from the planning store.
+engine writes that unit before advancing the durable state projection. Planning and
+tool lifecycle events are best-effort observations and may be queued before a later
+planning write fails; consumers must reconcile them against the planning store. A
+projection write failure leaves planning truth intact, and startup rebuilds the
+projection from the planning store.
 
 SQLite stores enable foreign keys, WAL, a bounded busy timeout, ordered migrations,
 future-schema refusal, and `PRAGMA integrity_check`. Corrupt or future persistence

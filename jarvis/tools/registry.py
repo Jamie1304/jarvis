@@ -78,6 +78,7 @@ class ToolRegistry:
         self._records: dict[str, ToolRecord] = {}
         self._initialization_failures: dict[str, InitializationFailure] = {}
         self._permission_broker = permission_broker or PermissionBroker(PolicyEngine())
+        self._sealed = False
         for tool in tools:
             self.register(tool)
 
@@ -90,6 +91,8 @@ class ToolRegistry:
     def register(self, tool: Tool[Any, Any]) -> ToolRecord:
         """Register a tool without replacing any existing implementation."""
 
+        if self._sealed:
+            raise ToolRegistrationError("Tool registry is sealed")
         try:
             manifest = tool.manifest
             self._validate_manifest(manifest)
@@ -137,6 +140,8 @@ class ToolRegistry:
         silently treated as a missing capability.
         """
 
+        if self._sealed:
+            raise ToolRegistrationError("Tool registry is sealed")
         if tool_id in self._records or tool_id in self._initialization_failures:
             raise DuplicateToolError(f"Tool ID is already registered: {tool_id}")
         try:
@@ -149,17 +154,31 @@ class ToolRegistry:
         except Exception as error:
             self._initialization_failures[tool_id] = InitializationFailure(
                 tool_id=tool_id,
-                detail=str(error),
+                detail=(
+                    f"Tool factory failed ({type(error).__name__}); provider details were withheld"
+                ),
             )
 
     def unregister(self, tool_id: str) -> bool:
         """Remove an explicitly registered tool and report whether it existed."""
 
+        if self._sealed:
+            raise ToolRegistrationError("Tool registry is sealed")
         record = self._records.pop(tool_id, None)
         if record is None:
             return False
         self._permission_broker.unregister_tool(tool_id, record.tool)
         return True
+
+    def seal(self) -> None:
+        """Make the trusted startup registry immutable for the runtime lifetime."""
+
+        self._sealed = True
+        self._permission_broker.seal_registration()
+
+    @property
+    def sealed(self) -> bool:
+        return self._sealed
 
     def get(self, tool_id: str) -> Tool[Any, Any]:
         """Return a registered tool, even when it is currently unusable."""
@@ -227,8 +246,9 @@ class ToolRegistry:
                 health = await record.tool.health_check()
             except Exception:
                 health = ToolHealth(ToolHealthStatus.UNAVAILABLE, "Health check failed")
-                logging.getLogger(__name__).exception(
-                    "Tool health check failed for %s", record.manifest.tool_id
+                logging.getLogger(__name__).error(
+                    "Tool health check failed for %s; provider details were withheld",
+                    record.manifest.tool_id,
                 )
             self._records[record.manifest.tool_id] = ToolRecord(
                 tool=record.tool,

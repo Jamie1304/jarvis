@@ -201,7 +201,7 @@ async def test_camera_busy_failure_exposes_error_state_and_releases_handles() ->
 
     result = await harness_for(tool, broker()).invoke(tool, {"device_id": "0"})
 
-    assert result.status is ToolResultStatus.EXPECTED_FAILURE
+    assert result.status is ToolResultStatus.UNKNOWN_OUTCOME
     assert controller.status.state is CameraState.ERROR
     assert provider.active_sessions == 0
 

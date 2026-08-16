@@ -13,10 +13,17 @@ from typing import cast
 from uuid import uuid4
 
 import pytest
+from jarvis.permissions.approval import TrustedApprovalAuthenticator
 from jarvis.permissions.broker import PermissionBroker
 from jarvis.permissions.models import (
     ActionDescriptor,
+    ApprovalActorKind,
+    ApprovalChoice,
+    ApprovalIdentity,
+    ApprovalSource,
+    ApprovalStatus,
     Decision,
+    DecisionReason,
     Permission,
     PermissionRequest,
     PermissionScope,
@@ -55,9 +62,11 @@ from jarvis.planning import (
     StepResult,
 )
 from jarvis.state import ApplicationStateMachine
+from jarvis.task_controller import PlanningTaskController
 from jarvis.tools.base import Tool
 from jarvis.tools.models import (
     SemanticVersion,
+    ToolEvidence,
     ToolExecutionContext,
     ToolManifest,
     ToolPlatform,
@@ -155,7 +164,8 @@ class _PermissionTool(_Tool):
         self, context: ToolExecutionContext, validated_input: _Input
     ) -> ToolResult:
         self.executed = True
-        return await super()._execute_authorized(context, validated_input)
+        result = await super()._execute_authorized(context, validated_input)
+        return replace(result, evidence=(ToolEvidence("test", "protected-ready"),))
 
 
 class _Advisor(PlanAdvisor):
@@ -420,6 +430,124 @@ async def test_brokered_executor_pauses_before_privileged_tool_execution(tmp_pat
 
 
 @pytest.mark.asyncio
+async def test_brokered_permission_approval_resumes_without_reusing_reservation(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path.resolve()
+    tool = _PermissionTool(root)
+    policy = PolicyEngine(
+        (
+            PolicyRule(
+                policy_id="planning-approval",
+                permission=Permission.FILESYSTEM_READ,
+                decision=Decision.REQUIRE_APPROVAL,
+                scope=ScopeConstraint(paths=(str(root),), tools=frozenset({"protected"})),
+                actions=frozenset({"invoke:protected"}),
+            ),
+        )
+    )
+    authenticator = TrustedApprovalAuthenticator(ApprovalSource.TRUSTED_UI)
+    broker = PermissionBroker(policy, approval_context_verifier=authenticator.verifier())
+    registry = ToolRegistry((tool,), permission_broker=broker)
+    store = SQLitePlanningStore(tmp_path / "brokered-resume.sqlite3")
+    proposal = _plan(
+        _step("protected", permissions=[Permission.FILESYSTEM_READ.value]),
+        goal="Read the protected planning fixture",
+    )
+    engine = PlanningEngine(
+        store=store,
+        advisor=_Advisor((proposal,)),
+        validator=PlanValidator(registry, max_steps=1),
+        executor=BrokeredPlanningStepExecutor(registry),
+        step_verifier=EvidencePlanningStepVerifier(),
+        goal_verifier=CompletionCriteriaVerifier(),
+    )
+    paused = await engine.submit(
+        "Read the protected planning fixture",
+        budgets=ExecutionBudgets(max_steps=1),
+    )
+    request = (await broker.pending_approvals(paused.task_id))[0]
+    decision = await broker.decide(
+        authenticator.issue_context(
+            request_id=request.request_id,
+            choice=ApprovalChoice.APPROVE_ONCE,
+            identity=ApprovalIdentity("local-user", ApprovalActorKind.TRUSTED_USER),
+        )
+    )
+
+    resumed = await engine.resume(paused.task_id)
+    plan = engine.inspect_plan(paused.task_id)
+
+    assert decision.accepted
+    assert resumed.status is PlanningTaskStatus.COMPLETED
+    assert resumed.usage.executed_steps == 1
+    assert tool.executed
+    assert plan is not None and plan.steps[0].attempts == 1
+    store.close()
+
+
+@pytest.mark.asyncio
+async def test_controller_cancellation_revokes_pending_approval_before_task_state(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path.resolve()
+    tool = _PermissionTool(root)
+    policy = PolicyEngine(
+        (
+            PolicyRule(
+                policy_id="planning-approval",
+                permission=Permission.FILESYSTEM_READ,
+                decision=Decision.REQUIRE_APPROVAL,
+                scope=ScopeConstraint(paths=(str(root),), tools=frozenset({"protected"})),
+                actions=frozenset({"invoke:protected"}),
+            ),
+        )
+    )
+    authenticator = TrustedApprovalAuthenticator(ApprovalSource.TRUSTED_UI)
+    broker = PermissionBroker(policy, approval_context_verifier=authenticator.verifier())
+    registry = ToolRegistry((tool,), permission_broker=broker)
+    store = SQLitePlanningStore(tmp_path / "brokered-cancel.sqlite3")
+    engine = PlanningEngine(
+        store=store,
+        advisor=_Advisor(
+            (
+                _plan(
+                    _step("protected", permissions=[Permission.FILESYSTEM_READ.value]),
+                    goal="Read the protected planning fixture",
+                ),
+            )
+        ),
+        validator=PlanValidator(registry, max_steps=1),
+        executor=BrokeredPlanningStepExecutor(registry),
+        step_verifier=EvidencePlanningStepVerifier(),
+        goal_verifier=CompletionCriteriaVerifier(),
+    )
+    controller = PlanningTaskController(engine, broker)
+    paused = await controller.submit_task("Read the protected planning fixture")
+    request = (await controller.pending_approvals(paused.task_id))[0]
+    context = authenticator.issue_context(
+        request_id=request.request_id,
+        choice=ApprovalChoice.APPROVE_ONCE,
+        identity=ApprovalIdentity("local-user", ApprovalActorKind.TRUSTED_USER),
+    )
+
+    cancelled = await controller.cancel_task(paused.task_id)
+    decision = await controller.submit_approval_decision(context)
+    stored_request = await broker.get_approval(request.request_id)
+
+    assert cancelled.status is PlanningTaskStatus.CANCELLED
+    assert cancelled.waiting_request_ids == ()
+    assert await controller.pending_approvals(paused.task_id) == ()
+    assert not decision.accepted
+    assert decision.reason is DecisionReason.APPROVAL_CANCELLED
+    assert stored_request is not None and stored_request.status is ApprovalStatus.CANCELLED
+    with pytest.raises(PlanningEngineError, match="permission-paused"):
+        await controller.resume_task(paused.task_id)
+    assert not tool.executed
+    store.close()
+
+
+@pytest.mark.asyncio
 async def test_permission_pause_persists_and_resumes_after_restart(tmp_path: Path) -> None:
     request_id = uuid4()
     proposal = _plan(_step("prepare"))
@@ -503,6 +631,37 @@ async def test_transient_failure_retries_with_explicit_bounds(tmp_path: Path) ->
     assert task.status is PlanningTaskStatus.COMPLETED
     assert task.usage.retries == 1
     assert task.usage.executed_steps == 2
+
+
+@pytest.mark.asyncio
+async def test_unknown_external_effect_requires_recovery_and_is_never_replanned(
+    tmp_path: Path,
+) -> None:
+    proposal = _plan(_step("prepare", retries=2))
+    executor = _Executor(
+        (
+            StepExecutionResult(
+                StepExecutionStatus.UNKNOWN_OUTCOME,
+                error_code="execution_outcome_unknown",
+                error_message="Durable outcome evidence was unavailable",
+            ),
+        )
+    )
+    harness = _harness(tmp_path, (proposal,), (), executor=executor)
+
+    task = await harness.engine.submit("Prepare my system for a meeting")
+    inspected = harness.engine.get_task(task.task_id)
+    rerun = await harness.engine.run(task.task_id)
+    plan = harness.engine.inspect_plan(task.task_id)
+
+    assert task.status is PlanningTaskStatus.RECOVERING
+    assert inspected == task == rerun
+    assert task.error is not None
+    assert task.error.failure_kind is FailureKind.UNKNOWN_OUTCOME
+    assert harness.advisor.replan_evidence == []
+    assert executor.calls == ["prepare"]
+    assert plan is not None
+    assert plan.steps[0].status is PlanningStepStatus.RUNNING
 
 
 @pytest.mark.asyncio
@@ -785,6 +944,7 @@ async def test_builtin_step_and_goal_verification_rules() -> None:
     (
         (ToolResultStatus.TIMEOUT, StepExecutionStatus.TRANSIENT_FAILURE),
         (ToolResultStatus.CANCELLED, StepExecutionStatus.CANCELLED),
+        (ToolResultStatus.UNKNOWN_OUTCOME, StepExecutionStatus.UNKNOWN_OUTCOME),
         (ToolResultStatus.EXPECTED_FAILURE, StepExecutionStatus.DETERMINISTIC_FAILURE),
     ),
 )

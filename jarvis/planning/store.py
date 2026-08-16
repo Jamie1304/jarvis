@@ -109,6 +109,11 @@ class PlanningStore(ABC):
 
         return True
 
+    def release_operation(self, task_id: UUID, operation_key: str, fingerprint: str) -> bool:
+        """Release an exact reservation only when trusted execution proves no effect began."""
+
+        return True
+
 
 def _now() -> datetime:
     return datetime.now(UTC)
@@ -254,6 +259,30 @@ class SQLitePlanningStore(PlanningStore):
             except sqlite3.DatabaseError as error:
                 self._connection.rollback()
                 raise PlanningStoreError("Operation idempotency reservation failed") from error
+
+    def release_operation(self, task_id: UUID, operation_key: str, fingerprint: str) -> bool:
+        if not operation_key or len(operation_key) > 128 or len(fingerprint) != 64:
+            raise PlanningStoreError("Operation idempotency key is malformed")
+        with self._lock:
+            try:
+                existing = self._connection.execute(
+                    "SELECT fingerprint FROM planning_operations "
+                    "WHERE task_id = ? AND operation_key = ?",
+                    (str(task_id), operation_key),
+                ).fetchone()
+                if existing is None:
+                    return False
+                if str(existing["fingerprint"]) != fingerprint:
+                    raise PlanningStoreError("Operation idempotency key fingerprint mismatch")
+                self._connection.execute(
+                    "DELETE FROM planning_operations WHERE task_id = ? AND operation_key = ?",
+                    (str(task_id), operation_key),
+                )
+                self._connection.commit()
+                return True
+            except sqlite3.DatabaseError as error:
+                self._connection.rollback()
+                raise PlanningStoreError("Operation idempotency release failed") from error
 
     def load_plan(self, task_id: UUID) -> OwnedPlan | None:
         with self._lock:

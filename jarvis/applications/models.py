@@ -5,7 +5,7 @@ from datetime import datetime
 from enum import StrEnum
 from uuid import UUID
 
-from jarvis.permissions.models import Permission
+from jarvis.permissions.models import Permission, validate_safe_display_text
 
 
 class ApplicationStatus(StrEnum):
@@ -52,6 +52,29 @@ class InstallationVerification:
     publisher: str | None
     version: str
 
+    def validate_for_trusted_display(self) -> None:
+        """Reject package metadata that could spoof a trusted UI surface."""
+
+        validate_safe_display_text(
+            self.application_name,
+            field="Verification application name",
+            max_length=256,
+        )
+        if self.publisher is not None:
+            validate_safe_display_text(
+                self.publisher,
+                field="Verification publisher",
+                max_length=256,
+            )
+        validate_safe_display_text(
+            self.version,
+            field="Verification version",
+            max_length=64,
+        )
+
+    def __post_init__(self) -> None:
+        self.validate_for_trusted_display()
+
 
 @dataclass(frozen=True, slots=True)
 class InstallationCandidate:
@@ -66,6 +89,30 @@ class InstallationCandidate:
     reason_for_selection: str
     confidence: float
     verification: InstallationVerification
+
+    def validate_for_trusted_display(self) -> None:
+        """Validate every provider-controlled field before it reaches a plan or approval."""
+
+        for field, value, max_length in (
+            ("Package identifier", self.package_id, 128),
+            ("Package source", self.source, 128),
+            ("Package name", self.name, 256),
+            ("Package version", self.version, 64),
+            ("Selection reason", self.reason_for_selection, 512),
+        ):
+            validate_safe_display_text(value, field=field, max_length=max_length)
+        if self.publisher is not None:
+            validate_safe_display_text(
+                self.publisher,
+                field="Package publisher",
+                max_length=256,
+            )
+        if type(self.verification) is not InstallationVerification:
+            raise ValueError("Installation verification metadata is malformed")
+        self.verification.validate_for_trusted_display()
+
+    def __post_init__(self) -> None:
+        self.validate_for_trusted_display()
 
 
 @dataclass(frozen=True, slots=True)

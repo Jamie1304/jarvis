@@ -10,7 +10,11 @@ python -m pip install -r requirements-dev.lock
 Production/runtime installation can use `requirements.lock`; development and test tools are isolated in `requirements-dev.lock`.
 ```
 
-Configuration precedence is: process environment variables, then values in `.env`, then typed defaults in `jarvis/core/config.py`. Variables use the `JARVIS_` prefix. Copy `.env.example` to `.env` for local overrides; never commit `.env` or secrets.
+Configuration precedence is: explicit `JARVIS_` process environment variables, then
+typed defaults in `jarvis/core/config.py`. Production startup never implicitly reads
+`.env` from the current working directory. A local launcher may load an owner-selected
+configuration file and export its values before starting JARVIS; never commit that file
+or its secrets.
 
 Run the health-only service with `python -m uvicorn jarvis.api:app --reload`. Run the full quality gate with `python scripts/quality.py`. It checks formatting, linting, static typing, tests, and the 90% coverage threshold.
 
@@ -119,9 +123,30 @@ unrelated conversation. Run `python -m pytest tests/test_multi_agent.py -q` and 
 ## Phase 1 manual smoke test
 
 1. Install [Ollama](https://ollama.com/) for Windows, then run `ollama pull llama3.2:3b`. Ollama normally starts its local server automatically; if it is not running, use `ollama serve` in a separate terminal.
-2. Copy `.env.example` to `.env`. Set `JARVIS_AI_MODEL` to a locally pulled model and leave `JARVIS_AI_ENDPOINT=http://127.0.0.1:11434` unless Ollama is configured differently.
+2. Use `.env.example` only as a reference for variables exported by your trusted local
+   launcher. Set `JARVIS_AI_MODEL` to a locally pulled model and leave
+   `JARVIS_AI_ENDPOINT=http://127.0.0.1:11434`.
 3. Install the desktop client with `python -m pip install -e ".[desktop]"`, then start it with `python -m jarvis.desktop`.
 4. Send `Jarvis, hoeveel is 25 procent van 800?`. The expected response is 200 (or an equivalent explanation).
-5. For microphone input, install `python -m pip install -e ".[speech]"`, set `JARVIS_STT_ENABLED=true`, and restart JARVIS. Leave `JARVIS_STT_DEVICE` blank to use the Windows default input, or set it to an exact numeric device ID from `python -c "import sounddevice as sd; print(sd.query_devices())"`. `JARVIS_STT_COMPUTE_DEVICE=cpu` and `JARVIS_STT_COMPUTE_TYPE=int8` are the safe Windows defaults; set CUDA only on a machine with a matching CUDA runtime. Click **Start microphone**, speak, then click **Stop microphone**. The device is open only between those clicks.
-6. For spoken responses, install the same speech extra, set `JARVIS_TTS_ENABLED=true`, optionally set `JARVIS_TTS_VOICE`, and restart. A completed text response should play through the configured Windows voice.
-7. Disable either feature by setting its corresponding `JARVIS_STT_ENABLED` or `JARVIS_TTS_ENABLED` value to `false`; restart the app. No raw recordings are written to disk.
+5. Microphone and TTS provider adapters are available for opt-in manual provider
+   tests, but the canonical v1 runtime does not activate them. Do not treat
+   `JARVIS_STT_ENABLED` or `JARVIS_TTS_ENABLED` alone as hardware authorization.
+   The compatibility assistant helper now refuses privileged speech activation;
+   conversational voice remains disabled until it is brokered by the canonical
+   runtime.
+
+## Trusted Core changes
+
+Before changing security, permission, tool invocation, runtime composition, or
+self-improvement enforcement code, read
+[`security-constitution.md`](security-constitution.md). Routine generated repair
+must not modify paths classified as `TRUSTED_CORE`. A production-core update needs
+the complete trusted gates and independent update authority; a Trusted Core change
+requires a separate owner security release. Risk labels and passing tests are not
+mutation authorization.
+
+Approval handlers must submit a `TrustedApprovalContext` minted by the
+runtime-owned local approval authenticator after authenticating the human. Never
+accept an `ApprovalIdentity`, `ApprovalSource`, request ID, or model/UI text as a
+decision on its own, and never pass the authenticator to a planner, tool, worker,
+event consumer, or integration.

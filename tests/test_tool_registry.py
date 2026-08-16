@@ -1,3 +1,4 @@
+import logging
 import sys
 from typing import cast
 
@@ -43,6 +44,7 @@ class RegistryTool(Tool[RegistryInput, RegistryOutput]):
             {ToolPlatform.WINDOWS, ToolPlatform.LINUX, ToolPlatform.MACOS}
         )
         self.health = ToolHealth(ToolHealthStatus.AVAILABLE, "healthy")
+        self.health_error: str | None = None
 
     @property
     def manifest(self) -> ToolManifest:
@@ -72,6 +74,8 @@ class RegistryTool(Tool[RegistryInput, RegistryOutput]):
         return ToolResult.success(RegistryOutput(value=validated_input.value))
 
     async def health_check(self) -> ToolHealth:
+        if self.health_error is not None:
+            raise RuntimeError(self.health_error)
         return self.health
 
 
@@ -119,7 +123,13 @@ def test_failed_initialization_is_retained_in_snapshot() -> None:
 
     registry.register_factory("broken", broken_factory)
     failures = cast(list[dict[str, str]], registry.snapshot()["initialization_failures"])
-    assert failures == [{"id": "broken", "detail": "boom"}]
+    assert failures == [
+        {
+            "id": "broken",
+            "detail": "Tool factory failed (RuntimeError); provider details were withheld",
+        }
+    ]
+    assert "boom" not in str(failures)
     with pytest.raises(CapabilityUnavailableError):
         registry.get("broken")
 
@@ -132,6 +142,22 @@ async def test_health_transition_changes_usability() -> None:
     await registry.health_check("registry-tool")
     assert registry.inspect("registry-tool").healthy is False
     assert registry.list_available() == ()
+
+
+@pytest.mark.asyncio
+async def test_health_failure_does_not_log_provider_exception_content(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    secret = "credential-must-not-enter-registry-logs"
+    tool = RegistryTool()
+    tool.health_error = secret
+    registry = ToolRegistry((tool,))
+
+    with caplog.at_level(logging.ERROR):
+        result = await registry.health_check("registry-tool")
+
+    assert result[0][1].status is ToolHealthStatus.UNAVAILABLE
+    assert secret not in caplog.text
 
 
 def test_best_matching_capability_is_highest_version() -> None:
@@ -153,7 +179,12 @@ def test_factory_manifest_mismatch_is_retained_as_initialization_failure() -> No
     registry.register_factory("expected", lambda: RegistryTool("actual"))
 
     assert registry.snapshot()["initialization_failures"] == [
-        {"id": "expected", "detail": "Factory ID 'expected' does not match manifest ID 'actual'"}
+        {
+            "id": "expected",
+            "detail": (
+                "Tool factory failed (ToolRegistrationError); provider details were withheld"
+            ),
+        }
     ]
     with pytest.raises(CapabilityUnavailableError):
         registry.get("expected")

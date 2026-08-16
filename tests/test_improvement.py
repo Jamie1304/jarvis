@@ -931,6 +931,35 @@ async def test_nested_quality_control_paths_cannot_be_modified(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "path",
+    [
+        "jarvis/security/replacement.py",
+        "jarvis/permissions/replacement.py",
+        "jarvis/tools/base.py",
+        "jarvis/improvement/engine.py",
+        "jarvis/runtime.py",
+        "docs/security-constitution.md",
+    ],
+)
+async def test_routine_improvement_cannot_propose_trusted_core_changes(
+    tmp_path: Path,
+    path: str,
+) -> None:
+    harness = _build_harness(tmp_path)
+    workspace = await harness.manager.create("candidate", asyncio.Event())
+    change = ProposedFileChange(path, ChangeOperation.CREATE, "UNTRUSTED = True\n")
+
+    with pytest.raises(WorkspaceSecurityError, match="trusted_core_owner_release_required"):
+        await TrustedWorkspaceChangeApplier(harness.manager).apply(
+            workspace,
+            _specification(path),
+            ProposedChangeSet("spec-security-test", (change,)),
+            asyncio.Event(),
+        )
+
+
+@pytest.mark.asyncio
 async def test_no_op_modification_is_rejected(tmp_path: Path) -> None:
     harness = _build_harness(tmp_path)
     workspace = await harness.manager.create("candidate", asyncio.Event())
@@ -1459,7 +1488,9 @@ async def test_insecure_evaluation_measurement_blocks_proposal(tmp_path: Path) -
 
 
 @pytest.mark.asyncio
-async def test_unapproved_dependency_change_is_rejected_before_tests(tmp_path: Path) -> None:
+async def test_dependency_control_file_is_rejected_by_trusted_mutation_policy(
+    tmp_path: Path,
+) -> None:
     harness = _build_harness(
         tmp_path,
         target="requirements.lock",
@@ -1471,8 +1502,8 @@ async def test_unapproved_dependency_change_is_rejected_before_tests(tmp_path: P
         (_signal(component="requirements.lock", declared_risk=Risk.LOW),),
     )
 
-    assert result.status is ImprovementRunStatus.DEPENDENCY_REJECTED
-    assert result.reason_code == "unapproved_dependency_manifest_change"
+    assert result.status is ImprovementRunStatus.MODIFICATION_REJECTED
+    assert result.reason_code == "coding_output_or_workspace_write_rejected"
     assert result.proposal is None
     assert harness.sandbox.calls == []
 

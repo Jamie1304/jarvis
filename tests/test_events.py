@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from typing import cast
 from uuid import UUID, uuid4
 
@@ -90,6 +91,60 @@ async def test_bounded_queue_drops_oldest_and_failed_subscriber_isolated() -> No
 
 async def _fail(_item: EventEnvelope[EventPayload]) -> None:
     raise RuntimeError("subscriber failure")
+
+
+@pytest.mark.asyncio
+async def test_correlation_ledger_has_deterministic_lru_cap_and_clears_on_close() -> None:
+    bus = InMemoryEventBus(
+        max_events_per_correlation=2,
+        max_correlation_chains=2,
+    )
+    await bus.subscribe(_append_noop)
+    oldest = uuid4()
+    recently_used = uuid4()
+    newest = uuid4()
+
+    await bus.publish(event(oldest))
+    await bus.publish(event(recently_used))
+    await bus.publish(event(oldest))
+    await bus.publish(event(newest))
+
+    assert tuple(bus._chain_counts) == (oldest, newest)
+    assert await bus.publish(event(oldest)) is False
+    assert await bus.publish(event(recently_used)) is True
+    assert tuple(bus._chain_counts) == (oldest, recently_used)
+
+    await bus.close()
+    assert not bus._chain_counts
+
+
+@pytest.mark.parametrize("value", [0, -1, True, 1.5, "2"])
+def test_correlation_ledger_cap_must_be_a_positive_integer(value: object) -> None:
+    with pytest.raises(ValueError, match="max_correlation_chains"):
+        InMemoryEventBus(max_correlation_chains=value)  # type: ignore[arg-type]
+
+
+@pytest.mark.asyncio
+async def test_subscriber_failure_log_does_not_disclose_exception(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    secret = "Bearer subscriber-secret-value"
+
+    async def fail_with_secret(_item: EventEnvelope[EventPayload]) -> None:
+        raise RuntimeError(secret)
+
+    caplog.set_level(logging.ERROR, logger="jarvis.events")
+    bus = InMemoryEventBus()
+    subscription = await bus.subscribe(fail_with_secret)
+    await bus.publish(event())
+    await asyncio.sleep(0.02)
+
+    assert "event subscriber failed" in caplog.text
+    assert secret not in caplog.text
+    assert "RuntimeError" not in caplog.text
+
+    await bus.unsubscribe(subscription)
+    await bus.close()
 
 
 @pytest.mark.asyncio
@@ -221,4 +276,11 @@ def test_payload_rejects_invalid_identifiers_and_envelope_metadata() -> None:
             identifier,
             None,
             SystemError("code", "summary"),
+        )
+    with pytest.raises(ValueError, match="metadata/payload"):
+        EventEnvelope.create(
+            EventType.TOOL_STARTED,
+            SystemError("code", "summary"),
+            source="tests",
+            correlation_id=identifier,
         )

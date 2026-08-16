@@ -15,12 +15,30 @@ from jarvis.memory.models import (
 _SECRET_PATTERNS = (
     re.compile(r"\bgh[pousr]_[A-Za-z0-9_-]{12,}\b", re.IGNORECASE),
     re.compile(r"\bsk-[A-Za-z0-9_-]{12,}\b", re.IGNORECASE),
+    re.compile(
+        r"(?<![A-Za-z0-9_-])eyJ[A-Za-z0-9_-]{5,}"
+        r"\.[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}(?![A-Za-z0-9_-])"
+    ),
+    re.compile(r"\b(?:AKIA|ASIA)[A-Z0-9]{16}\b"),
+    re.compile(
+        r"\bBearer[ \t]+"
+        r"(?=[A-Za-z0-9\-._~+/=]{16,}(?![A-Za-z0-9\-._~+/=]))"
+        r"(?=[A-Za-z0-9\-._~+/=]*[0-9])"
+        r"[A-Za-z0-9][A-Za-z0-9\-._~+/]{15,}={0,2}"
+        r"(?![A-Za-z0-9\-._~+/=])",
+        re.IGNORECASE,
+    ),
+    re.compile(r"-----BEGIN (?:RSA |EC |DSA |OPENSSH |ENCRYPTED )?PRIVATE KEY-----"),
     re.compile(r"\b(?:api[_ -]?key|password|secret|token)\s*[:=]\s*\S+", re.IGNORECASE),
 )
 
 
 def contains_secret(value: str) -> bool:
-    """Conservatively identify credentials that must use a dedicated secret store."""
+    """Heuristically identify common credentials before durable persistence.
+
+    This is a conservative defense-in-depth filter, not a complete DLP or secret
+    classification system. Callers must continue to honor explicit sensitivity.
+    """
 
     return any(pattern.search(value) is not None for pattern in _SECRET_PATTERNS)
 

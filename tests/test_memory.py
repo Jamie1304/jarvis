@@ -32,6 +32,7 @@ from jarvis.memory import (
     Sensitivity,
     SQLiteMemoryStore,
 )
+from jarvis.memory.policy import contains_secret
 
 
 class MutableClock:
@@ -116,6 +117,22 @@ def test_sqlite_migration_write_read_and_provenance(tmp_path: Path) -> None:
         assert loaded.content == record.content
         assert loaded.provenance.source_reference == "conversation:trusted-user"
         assert loaded.last_accessed_at == clock()
+
+
+def test_episodic_memory_rejects_credentials_in_compact_evidence(tmp_path: Path) -> None:
+    with SQLiteMemoryStore(tmp_path / "memory.sqlite3") as store:
+        service = EpisodicMemoryService(store)
+
+        with pytest.raises(PermissionError, match="credential-like"):
+            service.record_completed_action(
+                task_id=uuid4(),
+                objective="Diagnose a provider",
+                actions=(EpisodicAction("provider.health", "check", "failed"),),
+                outcome="Failed safely",
+                evidence=("token=do-not-persist-this-value",),
+            )
+
+        assert store.list(MemoryType.EPISODIC) == ()
 
 
 def test_retention_cleanup_and_privacy_deletion_controls(tmp_path: Path) -> None:
@@ -218,6 +235,83 @@ def test_secret_content_is_excluded_from_long_term_and_low_level_storage(tmp_pat
             )
 
 
+@pytest.mark.parametrize(
+    "secret_value",
+    (
+        pytest.param(
+            "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ0ZXN0In0.not-a-real-signature",
+            id="jwt",
+        ),
+        pytest.param("AKIAIOSFODNN7EXAMPLE", id="aws-access-key-id"),
+        pytest.param("Bearer not-a-real-access-token-1234", id="bearer-token"),
+        pytest.param(
+            "-----BEGIN PRIVATE KEY-----\nnot-real-key-material\n-----END PRIVATE KEY-----",
+            id="pem-private-key",
+        ),
+    ),
+)
+def test_common_credential_formats_are_rejected_at_all_memory_boundaries(
+    tmp_path: Path, secret_value: str
+) -> None:
+    clock = _clock()
+    with SQLiteMemoryStore(tmp_path / "memory.sqlite3", clock=clock) as store:
+        candidate = LongTermMemoryCandidate(
+            content=f"Remember this credential: {secret_value}",
+            data="{}",
+            provenance=_provenance(clock()),
+            confidence=1.0,
+            retention=RetentionPolicy.ONE_YEAR,
+            sensitivity=Sensitivity.PRIVATE,
+            user_confirmed=True,
+        )
+        long_term = LongTermMemoryService(store, clock=clock)
+
+        assert long_term.evaluate(candidate).reason_code == "secret_content"
+        with pytest.raises(PermissionError, match="secret_content"):
+            long_term.persist(candidate)
+        with pytest.raises(ValueError, match="Secret-like"):
+            store.put(
+                MemoryRecord(
+                    memory_id=uuid4(),
+                    memory_type=MemoryType.LONG_TERM,
+                    content=f"Credential evidence: {secret_value}",
+                    data="{}",
+                    created_at=clock(),
+                    provenance=_provenance(clock()),
+                    confidence=1.0,
+                    retention=RetentionPolicy.ONE_YEAR,
+                    sensitivity=Sensitivity.PRIVATE,
+                    expires_at=RetentionPolicy.ONE_YEAR.expiry(clock()),
+                    updated_at=clock(),
+                )
+            )
+        with pytest.raises(PermissionError, match="credential-like"):
+            EpisodicMemoryService(store, clock=clock).record_completed_action(
+                task_id=uuid4(),
+                objective="Verify a provider credential",
+                actions=(EpisodicAction("provider.health", "check", "blocked"),),
+                outcome="Failed safely",
+                evidence=(secret_value,),
+            )
+
+        assert store.list() == ()
+
+
+@pytest.mark.parametrize(
+    "benign_value",
+    (
+        "Use bearer authentication for the internal API.",
+        "The documentation explains JWT validation without storing a token.",
+        "AWS access key IDs commonly begin with an AKIA prefix.",
+        "-----BEGIN PUBLIC KEY----- is not private-key material.",
+    ),
+)
+def test_secret_filter_does_not_reject_benign_security_documentation(
+    benign_value: str,
+) -> None:
+    assert not contains_secret(benign_value)
+
+
 def test_episodic_service_keeps_meaningful_completed_action_compact(tmp_path: Path) -> None:
     clock = _clock()
     with SQLiteMemoryStore(tmp_path / "memory.sqlite3", clock=clock) as store:
@@ -233,6 +327,7 @@ def test_episodic_service_keeps_meaningful_completed_action_compact(tmp_path: Pa
         assert episode.data_object["actions"] == [
             {"action": "evaluate", "outcome": "200", "tool_id": "calculator"}
         ]
+        assert episode.provenance.untrusted_content
         assert len(store.list(MemoryType.EPISODIC)) == 1
 
 
@@ -285,6 +380,7 @@ def test_retrieval_separates_conversation_user_episode_and_system_memory(tmp_pat
         assert results.conversation
         assert results.long_term
         assert results.episodic
+        assert results.episodic[0].content_is_untrusted_data
         assert results.system[0].item_id == "docs:architecture"
 
 

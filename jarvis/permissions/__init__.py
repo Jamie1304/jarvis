@@ -1,5 +1,10 @@
 """Deny-by-default permission broker public API."""
 
+from jarvis.permissions.approval import (
+    ApprovalContextVerifier,
+    TrustedApprovalAuthenticator,
+    TrustedApprovalContext,
+)
 from jarvis.permissions.audit import AuditSink, AuditStoreError, InMemoryAuditSink, SQLiteAuditSink
 from jarvis.permissions.broker import PermissionBroker
 from jarvis.permissions.models import (
@@ -10,6 +15,7 @@ from jarvis.permissions.models import (
     ApprovalRequest,
     ApprovalSource,
     ApprovalStatus,
+    AuditRecord,
     AuthorizationReceipt,
     Decision,
     DecisionReason,
@@ -28,12 +34,14 @@ __all__ = [
     "ActionDescriptor",
     "ApprovalActorKind",
     "ApprovalChoice",
+    "ApprovalContextVerifier",
     "ApprovalIdentity",
     "ApprovalRequest",
     "ApprovalSource",
     "ApprovalStatus",
     "AuditSink",
     "AuditStoreError",
+    "AuditRecord",
     "AuthorizationReceipt",
     "Decision",
     "DecisionReason",
@@ -49,6 +57,8 @@ __all__ = [
     "SafeArgument",
     "SafetyClass",
     "ScopeConstraint",
+    "TrustedApprovalAuthenticator",
+    "TrustedApprovalContext",
     "normalize_path",
     "path_is_within",
 ]

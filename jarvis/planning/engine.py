@@ -161,6 +161,19 @@ class BrokeredPlanningStepExecutor(PlanningStepExecutor):
                     StepExecutionStatus.WAITING_FOR_PERMISSION,
                     approval_request_ids=tuple(request_ids),
                 )
+        if result.status is ToolResultStatus.UNKNOWN_OUTCOME:
+            return StepExecutionResult(
+                StepExecutionStatus.UNKNOWN_OUTCOME,
+                evidence=evidence,
+                error_code=(
+                    result.error.code if result.error is not None else "unknown_operation_outcome"
+                ),
+                error_message=(
+                    result.error.message
+                    if result.error is not None
+                    else "The external effect outcome is unknown"
+                ),
+            )
         error_code = result.error.code if result.error else result.status.value
         error_message = result.error.message if result.error else "Tool execution failed"
         status = (
@@ -387,7 +400,7 @@ class PlanningEngine:
                     error=StepError(
                         "unknown_operation_outcome",
                         "Task was interrupted during an operation; operator resolution is required",
-                        FailureKind.DETERMINISTIC,
+                        FailureKind.UNKNOWN_OUTCOME,
                     ),
                     updated_at=self._clock(),
                 )
@@ -423,10 +436,10 @@ class PlanningEngine:
         if task_id in self._cancellations:
             raise PlanningEngineError("Planning task is already running")
         task, plan = self._load_state(task_id)
-        if (
-            task.status in self._TERMINAL
-            or task.status is PlanningTaskStatus.WAITING_FOR_PERMISSION
-        ):
+        if task.status in self._TERMINAL or task.status in {
+            PlanningTaskStatus.WAITING_FOR_PERMISSION,
+            PlanningTaskStatus.RECOVERING,
+        }:
             return task
         interrupted = next(
             (
@@ -480,6 +493,8 @@ class PlanningEngine:
         task, plan = self._load_state(task_id)
         if task.status in self._TERMINAL:
             return task
+        if task.status is PlanningTaskStatus.WAITING_FOR_PERMISSION:
+            return self._cancelled(task, plan)
         event = self._cancellations.get(task_id)
         if event is not None:
             event.set()
@@ -510,10 +525,15 @@ class PlanningEngine:
                 execution = await self._executor.execute(task, step, cancellation)
             except Exception as adapter_error:
                 execution = StepExecutionResult(
-                    StepExecutionStatus.DETERMINISTIC_FAILURE,
-                    error_code="step_executor_failed",
-                    error_message=(f"Step executor failed ({type(adapter_error).__name__})"),
+                    StepExecutionStatus.UNKNOWN_OUTCOME,
+                    error_code="step_executor_outcome_unknown",
+                    error_message=(
+                        "Step executor failed across the effect boundary "
+                        f"({type(adapter_error).__name__}); operator resolution is required"
+                    ),
                 )
+            if execution.status is StepExecutionStatus.UNKNOWN_OUTCOME:
+                return self._recover_unknown_outcome(task, plan, step, execution)
             if cancellation.is_set() or execution.status is StepExecutionStatus.CANCELLED:
                 return self._cancelled(task, plan)
             if execution.status is StepExecutionStatus.WAITING_FOR_PERMISSION:
@@ -603,7 +623,7 @@ class PlanningEngine:
         # merely setting ``expensive_action`` false. Permissions are validated
         # from the registered tool contract and form the durable-effect boundary.
         if step.expensive_action or step.required_permissions:
-            fingerprint = hashlib.sha256(step.input_json.encode("utf-8")).hexdigest()
+            fingerprint = self._operation_fingerprint(step)
             if not self._store.reserve_operation(task.task_id, str(step.step_id), fingerprint):
                 raise PlanningStoreError("Operation idempotency key was already reserved")
         usage = replace(
@@ -673,6 +693,7 @@ class PlanningEngine:
                 str(validation_error),
                 plan=failed_plan,
             )
+
         except Exception as error:
             return self._fail(
                 task,
@@ -690,6 +711,35 @@ class PlanningEngine:
         )
         self._save_state(task, replacement)
         return await self._run(task, replacement, self._cancellations[task.task_id])
+
+    def _recover_unknown_outcome(
+        self,
+        task: PlanningTask,
+        plan: OwnedPlan,
+        step: PlanningStep,
+        execution: StepExecutionResult,
+    ) -> PlanningTask:
+        """Persist a non-replayable operator-recovery state after an uncertain effect."""
+
+        error = StepError(
+            execution.error_code or "unknown_operation_outcome",
+            execution.error_message
+            or "An external effect may have occurred; operator resolution is required",
+            FailureKind.UNKNOWN_OUTCOME,
+            execution.evidence,
+        )
+        recovering_step = replace(step, status=PlanningStepStatus.RUNNING, error=error)
+        recovering_plan = self._replace_step(plan, recovering_step)
+        recovering_task = replace(
+            task,
+            status=PlanningTaskStatus.RECOVERING,
+            active_step_id=step.step_id,
+            error=error,
+            updated_at=self._clock(),
+        )
+        self._emit_step(EventType.STEP_FAILED, task, step, error.code)
+        self._save_state(recovering_task, recovering_plan)
+        return recovering_task
 
     async def _verify_goal(self, task: PlanningTask, plan: OwnedPlan) -> PlanningTask:
         task = replace(task, status=PlanningTaskStatus.VERIFYING, updated_at=self._clock())
@@ -731,20 +781,43 @@ class PlanningEngine:
         step: PlanningStep,
         request_ids: tuple[UUID, ...],
     ) -> PlanningTask:
+        if step.expensive_action or step.required_permissions:
+            if not self._store.release_operation(
+                task.task_id,
+                str(step.step_id),
+                self._operation_fingerprint(step),
+            ):
+                raise PlanningStoreError("Pre-effect operation reservation was not present")
         now = self._clock()
         plan = self._replace_step(
             replace(plan, status=OwnedPlanStatus.WAITING_FOR_PERMISSION),
-            replace(step, status=PlanningStepStatus.WAITING_FOR_PERMISSION),
+            replace(
+                step,
+                status=PlanningStepStatus.WAITING_FOR_PERMISSION,
+                attempts=max(0, step.attempts - 1),
+            ),
         )
         task = replace(
             task,
             status=PlanningTaskStatus.WAITING_FOR_PERMISSION,
             active_step_id=step.step_id,
             waiting_request_ids=request_ids,
+            usage=replace(
+                task.usage,
+                executed_steps=max(0, task.usage.executed_steps - 1),
+                expensive_actions=max(
+                    0,
+                    task.usage.expensive_actions - int(step.expensive_action),
+                ),
+            ),
             updated_at=now,
         )
         self._save_state(task, plan)
         return task
+
+    @staticmethod
+    def _operation_fingerprint(step: PlanningStep) -> str:
+        return hashlib.sha256(step.input_json.encode("utf-8")).hexdigest()
 
     def _cancelled(self, task: PlanningTask, plan: OwnedPlan) -> PlanningTask:
         steps = tuple(

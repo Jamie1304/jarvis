@@ -15,6 +15,7 @@ from jarvis.applications.models import (
     ApplicationRecord,
     ApplicationSearchResult,
     ApplicationStatus,
+    InstallationCandidate,
     InstallationOutcome,
     InstallationPlan,
     InstallationPlanError,
@@ -67,6 +68,8 @@ class ApplicationManager:
         candidates = await self.package_provider.search(query)
         if not candidates:
             raise PackageNotFoundError("No package candidate was found")
+        for candidate in candidates:
+            self._validate_candidate(candidate)
         if len(candidates) != 1:
             raise ApplicationAmbiguousError("Package search is ambiguous")
         candidate = candidates[0]
@@ -89,6 +92,7 @@ class ApplicationManager:
         candidate = await self.package_provider.find_update(record)
         if candidate is None:
             raise PackageNotFoundError("No package update is available")
+        self._validate_candidate(candidate)
         if not _is_newer(candidate.version, record.version):
             raise ApplicationManagerError("Update target must be a strictly newer version")
         if not _verification_matches(record, candidate.verification):
@@ -175,6 +179,19 @@ class ApplicationManager:
         records: tuple[ApplicationRecord, ...], verification: InstallationVerification
     ) -> tuple[ApplicationRecord, ...]:
         return tuple(record for record in records if _verification_matches(record, verification))
+
+    @staticmethod
+    def _validate_candidate(candidate: object) -> None:
+        """Revalidate provider data at the plan boundary, including mutated records."""
+
+        if type(candidate) is not InstallationCandidate:
+            raise ApplicationManagerError("Package candidate metadata is malformed")
+        try:
+            candidate.validate_for_trusted_display()
+        except ValueError as error:
+            raise ApplicationManagerError(
+                "Package candidate metadata is unsafe to display"
+            ) from error
 
 
 def _semantic_query(value: str) -> str:

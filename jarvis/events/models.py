@@ -216,6 +216,27 @@ class SystemError(EventPayload):
         _text(self.summary)
 
 
+_PAYLOAD_TYPES: dict[EventType, type[EventPayload]] = {
+    EventType.TASK_CREATED: TaskCreated,
+    EventType.TASK_STATE_CHANGED: TaskStateChanged,
+    EventType.PLAN_CREATED: PlanCreated,
+    EventType.PLAN_UPDATED: PlanUpdated,
+    EventType.STEP_STARTED: StepStarted,
+    EventType.STEP_COMPLETED: StepCompleted,
+    EventType.STEP_FAILED: StepFailed,
+    EventType.PERMISSION_REQUESTED: PermissionRequested,
+    EventType.PERMISSION_GRANTED: PermissionGranted,
+    EventType.PERMISSION_DENIED: PermissionDenied,
+    EventType.TOOL_STARTED: ToolStarted,
+    EventType.TOOL_COMPLETED: ToolCompleted,
+    EventType.TOOL_FAILED: ToolFailed,
+    EventType.CAMERA_STATE_CHANGED: CameraStateChanged,
+    EventType.VOICE_STATE_CHANGED: VoiceStateChanged,
+    EventType.CAPABILITY_CHANGED: CapabilityChanged,
+    EventType.SYSTEM_ERROR: SystemError,
+}
+
+
 PayloadT = TypeVar("PayloadT", bound=EventPayload)
 
 
@@ -233,12 +254,23 @@ class EventEnvelope(Generic[PayloadT]):
     sequence: int = 0
 
     def __post_init__(self) -> None:
-        if not isinstance(self.event_id, UUID) or self.schema_version != 1:
+        if (
+            not isinstance(self.event_id, UUID)
+            or not isinstance(self.event_type, EventType)
+            or self.schema_version != 1
+        ):
             raise ValueError("unsupported event envelope")
         if self.timestamp.tzinfo is None:
             raise ValueError("event timestamp must be timezone-aware")
         _text(self.source)
-        if not isinstance(self.correlation_id, UUID) or not isinstance(self.payload, EventPayload):
+        if (
+            not isinstance(self.correlation_id, UUID)
+            or (self.task_id is not None and not isinstance(self.task_id, UUID))
+            or (self.causation_id is not None and not isinstance(self.causation_id, UUID))
+            or type(self.payload) is not _PAYLOAD_TYPES[self.event_type]
+            or not isinstance(self.sequence, int)
+            or self.sequence < 0
+        ):
             raise ValueError("event metadata/payload is not trusted")
 
     @classmethod

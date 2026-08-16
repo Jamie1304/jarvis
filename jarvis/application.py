@@ -159,7 +159,7 @@ class JarvisAssistantService:
     async def cancel_task(self, task_id: UUID) -> PlanningTask:
         """Request clean cancellation of a running task."""
 
-        return self._require_task_controller().cancel_task(task_id)
+        return await self._require_task_controller().cancel_task(task_id)
 
     async def stream_text(self, conversation_id: UUID, text: str) -> AsyncIterator[AssistantEvent]:
         """Normalize text and stream a response, optionally speaking after completion."""

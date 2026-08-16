@@ -9,12 +9,11 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    """Application settings with environment variables taking precedence over .env values."""
+    """Application settings read from explicit process configuration and safe defaults."""
 
     model_config = SettingsConfigDict(
         env_prefix="JARVIS_",
-        env_file=".env",
-        env_file_encoding="utf-8",
+        env_file=None,
         case_sensitive=False,
         extra="ignore",
     )
@@ -57,6 +56,7 @@ class Settings(BaseSettings):
     improvement_enabled: bool = False
     remote_approval_enabled: bool = False
     autonomous_scheduling_enabled: bool = False
+    security_policy_version: int = Field(default=1, ge=1)
 
     @field_validator("stt_device", mode="before")
     @classmethod

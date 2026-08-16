@@ -189,7 +189,7 @@ class PlanningVoiceTaskRunner:
         return VoiceTaskHandle(task.task_id, completion)
 
     async def cancel(self, task_id: UUID) -> None:
-        self._controller.cancel_task(task_id)
+        await self._controller.cancel_task(task_id)
 
     async def _run(self, task_id: UUID) -> VoiceTaskOutcome:
         result = await self._controller.run_task(task_id)

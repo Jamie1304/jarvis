@@ -5,6 +5,62 @@ from datetime import datetime
 from enum import StrEnum
 from uuid import UUID
 
+# Directional formatting controls can make trusted labels appear to say something
+# other than their underlying value.  Keep this explicit even though the controls
+# are currently also non-printable according to Python's Unicode database.
+_BIDI_DISPLAY_CONTROLS = frozenset(
+    {
+        "\u061c",  # Arabic letter mark
+        "\u200e",  # left-to-right mark
+        "\u200f",  # right-to-left mark
+        "\u202a",  # left-to-right embedding
+        "\u202b",  # right-to-left embedding
+        "\u202c",  # pop directional formatting
+        "\u202d",  # left-to-right override
+        "\u202e",  # right-to-left override
+        "\u2066",  # left-to-right isolate
+        "\u2067",  # right-to-left isolate
+        "\u2068",  # first-strong isolate
+        "\u2069",  # pop directional isolate
+        "\u206a",  # deprecated inhibit symmetric swapping
+        "\u206b",  # deprecated activate symmetric swapping
+        "\u206c",  # deprecated inhibit Arabic form shaping
+        "\u206d",  # deprecated activate Arabic form shaping
+        "\u206e",  # deprecated national digit shapes
+        "\u206f",  # deprecated nominal digit shapes
+    }
+)
+
+
+def validate_safe_display_text(
+    value: object,
+    *,
+    field: str,
+    max_length: int,
+    allow_empty: bool = False,
+    require_trimmed: bool = True,
+) -> str:
+    """Validate text before trusted code exposes it in an approval surface.
+
+    Approval displays must preserve a one-to-one relationship between stored and
+    rendered text.  C0/C1 controls (including tab, CR/LF, NUL and ANSI escape),
+    non-printing Unicode, and bidirectional formatting controls are therefore
+    rejected rather than escaped by individual consumers.
+    """
+
+    if (
+        type(value) is not str
+        or (not allow_empty and not value)
+        or len(value) > max_length
+        or (require_trimmed and value != value.strip())
+        or any(
+            not character.isprintable() or character in _BIDI_DISPLAY_CONTROLS
+            for character in value
+        )
+    ):
+        raise ValueError(f"{field} must be bounded printable text without display controls")
+    return value
+
 
 class Permission(StrEnum):
     """Granular privileged capabilities recognized by the broker."""
@@ -62,6 +118,10 @@ class DecisionReason(StrEnum):
     UNTRUSTED_APPROVER = "untrusted_approver"
     INVALID_REMEMBERED_GRANT = "invalid_remembered_grant"
     TASK_CANCELLED = "task_cancelled"
+    MALFORMED_APPROVAL_DECISION = "malformed_approval_decision"
+    AUDIT_UNAVAILABLE = "audit_unavailable"
+    FORGED_AUTHORIZATION_RECEIPT = "forged_authorization_receipt"
+    OPERATION_OUTCOME_UNKNOWN = "operation_outcome_unknown"
 
 
 class Risk(StrEnum):
@@ -151,6 +211,19 @@ class SafeArgument:
     name: str
     value: str
 
+    def __post_init__(self) -> None:
+        validate_safe_display_text(
+            self.name,
+            field="Safe argument name",
+            max_length=128,
+        )
+        validate_safe_display_text(
+            self.value,
+            field="Safe argument value",
+            max_length=512,
+            allow_empty=True,
+        )
+
 
 @dataclass(frozen=True, slots=True)
 class ActionDescriptor:
@@ -162,6 +235,26 @@ class ActionDescriptor:
     permissions: tuple[PermissionRequest, ...]
     safety_class: SafetyClass = SafetyClass.ORDINARY
 
+    def __post_init__(self) -> None:
+        try:
+            validate_safe_display_text(
+                self.action,
+                field="Action",
+                max_length=128,
+            )
+        except ValueError as error:
+            raise ValueError("Action descriptor must use trusted, bounded types") from error
+        if (
+            not isinstance(self.risk, Risk)
+            or not isinstance(self.safety_class, SafetyClass)
+            or not isinstance(self.arguments_summary, tuple)
+            or any(type(item) is not SafeArgument for item in self.arguments_summary)
+            or len({item.name for item in self.arguments_summary}) != len(self.arguments_summary)
+            or not isinstance(self.permissions, tuple)
+            or any(not isinstance(item, PermissionRequest) for item in self.permissions)
+        ):
+            raise ValueError("Action descriptor must use trusted, bounded types")
+
 
 @dataclass(frozen=True, slots=True)
 class PolicyRule:
@@ -171,6 +264,25 @@ class PolicyRule:
     scope: ScopeConstraint
     actions: frozenset[str]
     enabled: bool = True
+
+    def __post_init__(self) -> None:
+        try:
+            validate_safe_display_text(
+                self.policy_id,
+                field="Policy identifier",
+                max_length=128,
+            )
+        except ValueError as error:
+            raise ValueError("Policy rules must use known trusted types") from error
+        if (
+            not isinstance(self.permission, Permission)
+            or not isinstance(self.decision, Decision)
+            or not isinstance(self.scope, ScopeConstraint)
+            or not isinstance(self.actions, frozenset)
+            or any(not isinstance(action, str) for action in self.actions)
+            or not isinstance(self.enabled, bool)
+        ):
+            raise ValueError("Policy rules must use known trusted types")
 
 
 @dataclass(frozen=True, slots=True)
@@ -187,6 +299,18 @@ class ApprovalIdentity:
     identity_id: str
     kind: ApprovalActorKind
 
+    def __post_init__(self) -> None:
+        try:
+            validate_safe_display_text(
+                self.identity_id,
+                field="Approval identity",
+                max_length=256,
+            )
+        except ValueError as error:
+            raise ValueError("Approval identity must use trusted bounded types") from error
+        if not isinstance(self.kind, ApprovalActorKind):
+            raise ValueError("Approval identity must use trusted bounded types")
+
 
 @dataclass(frozen=True, slots=True)
 class ApprovalRequest:
@@ -195,6 +319,7 @@ class ApprovalRequest:
     exact_action: str
     arguments_summary: tuple[SafeArgument, ...]
     argument_fingerprint: str
+    action_fingerprint: str
     permission: Permission
     risk: Risk
     scope: PermissionScope
@@ -202,6 +327,7 @@ class ApprovalRequest:
     policy_id: str
     created_at: datetime
     expires_at: datetime
+    requester_user_id: str | None = None
     status: ApprovalStatus = ApprovalStatus.PENDING
     approval_identity: str | None = None
     approval_source: ApprovalSource | None = None
@@ -213,8 +339,12 @@ class RememberedGrant:
     permission: Permission
     scope: PermissionScope
     tool_id: str
+    action_fingerprint: str
+    policy_id: str
+    policy_reason: DecisionReason
     identity_id: str
     source: ApprovalSource
+    requester_user_id: str | None
     created_at: datetime
     expires_at: datetime
 
@@ -233,12 +363,14 @@ class AuthorizationReceipt:
     tool_id: str
     action: str
     argument_fingerprint: str
+    action_fingerprint: str
     argument_names: tuple[str, ...]
     evaluations: tuple[PolicyEvaluation, ...]
     approval_requests: tuple[ApprovalRequest, ...]
     remembered_grants: tuple[RememberedGrant, ...]
     user_id: str | None
     authorized_at: datetime
+    expires_at: datetime
 
 
 @dataclass(frozen=True, slots=True)
@@ -259,6 +391,7 @@ class AuditRecord:
     action: str
     argument_names: tuple[str, ...]
     argument_fingerprint: str
+    action_fingerprint: str
     normalized_scope: PermissionScope | None
     policy_id: str | None
     decision: Decision
@@ -266,3 +399,4 @@ class AuditRecord:
     approval_identity: str | None
     approval_source: ApprovalSource | None
     execution_outcome: str
+    approval_request_id: UUID | None = None

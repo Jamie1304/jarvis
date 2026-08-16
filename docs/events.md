@@ -4,7 +4,13 @@ JARVIS uses a bounded in-process `EventBus` for coordination, UI updates, and di
 
 ## Contract
 
-Each `EventEnvelope` has an immutable event ID, schema version (`1`), typed `EventType`, timezone-aware timestamp, trusted source, optional task ID, trusted correlation ID, optional causation ID, typed payload, and a bus-assigned sequence number. Correlation and causation IDs are created by application/task code; model text cannot supply them.
+Each `EventEnvelope` has an immutable event ID, schema version (`1`), typed
+`EventType`, timezone-aware timestamp, source label, optional task ID, correlation
+ID, optional causation ID, a matching typed payload, and a bus-assigned sequence
+number. Canonical producers create correlation and causation metadata from
+application/task context rather than model text. The public in-process constructor
+does not authenticate a source label or correlation ID, so consumers treat all
+event metadata as observation and reconcile it against the owning service.
 
 Payloads currently cover:
 
@@ -15,7 +21,12 @@ Payloads currently cover:
 - camera and voice state changes
 - capability changes and bounded system errors
 
-Payloads contain bounded summaries and identifiers only. They do not contain raw tool arguments, credentials, prompts, clipboard values, camera frames, audio, or authorization receipts. `PermissionBroker` and `AuditSink` remain the authoritative decision and durable security records respectively.
+Payload schemas permit only bounded summaries and identifiers and enforce the
+`EventType`/payload pairing. Every producer is responsible for redaction: generic
+payload construction does not prove that an arbitrary bounded string is secret-free.
+Canonical producers must not include raw tool arguments, credentials, prompts,
+clipboard values, camera frames, audio, or authorization receipts. `PermissionBroker`
+and `AuditSink` remain the authoritative decision and durable security records.
 
 ## Delivery semantics
 
@@ -23,7 +34,16 @@ Payloads contain bounded summaries and identifiers only. They do not contain raw
 
 The bus accepts asynchronous typed handlers. `publish_nowait()` is provided for synchronous state/adaptor boundaries and returns false when no running loop or after shutdown. Cancellation never changes authoritative state by itself.
 
-To prevent accidental feedback storms, each correlation chain has a bounded event count (256 by default). Events beyond the cap are dropped and counted. Consumers must not republish indefinitely; any state or permission change must go through its owning service.
+To prevent accidental feedback storms, each correlation chain has a bounded event
+count (256 by default). The correlation ledger itself is a bounded LRU (4096 chains
+by default), so unique correlation IDs cannot make bookkeeping grow without bound.
+Events beyond the per-chain cap are dropped and counted; least-recently-used chain
+state is evicted at the global cap. Consumers must not republish indefinitely; any
+state or permission change must go through its owning service.
+
+This bounds process memory and accidental single-chain recursion; it is not a
+sandbox against a malicious in-process subscriber that continuously rotates fresh
+correlation IDs. Such code is not loaded as an untrusted integration in v1.
 
 ## Versioning and compatibility
 
@@ -31,10 +51,18 @@ Schema version `1` is additive-only for the current release. Consumers must igno
 
 ## Integration boundaries
 
-- `ApplicationStateMachine` emits state observations after recording its authoritative transition.
-- `PlanningEngine` emits plan and step lifecycle observations; it still owns DAG execution and persistence.
+- `ApplicationStateMachine` emits state observations after recording its validated projection transition.
+- `PlanningEngine` emits plan and step lifecycle observations; its planning store remains authoritative for durable task/plan data.
 - `PermissionBroker` emits request/grant/deny observations; events never grant permission.
 - `Tool.invoke` emits lifecycle observations only after broker authorization and never accepts event-supplied authorization.
 - Voice and camera controllers emit state observations while their existing lifecycle/permission checks remain authoritative.
 
-No event consumer may mutate state directly, bypass `PermissionBroker`, or treat an event as proof that an action succeeded. Generic event logs are safe-to-observe summaries; detailed security evidence belongs in the audit sink and controlled artifacts.
+No event consumer may mutate state directly, bypass `PermissionBroker`, or treat an
+event as proof that an action succeeded. Generic event logging must still apply
+redaction because the public bus does not authenticate producers or prove arbitrary
+text secret-free; detailed security evidence belongs in the audit sink and
+controlled artifacts.
+
+Delivery is best effort, and some lifecycle observations can be queued before the
+corresponding durable store write completes. A subscriber must read the authoritative
+planning/state owner before displaying or acting on consequential status.

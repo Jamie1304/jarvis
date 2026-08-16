@@ -34,19 +34,49 @@ For `REQUIRE_APPROVAL`, the broker creates a trusted `ApprovalRequest` containin
 the request/task IDs, trusted action label and safe argument summary, permission,
 risk, normalized scope, policy reason, and expiry. The human-facing UI/API renders
 that object directly and must not substitute model-provided approval text.
+Trusted display values and normalized scopes reject C0/C1 controls, ANSI escapes,
+non-printing Unicode, and bidi override/isolate characters so provider metadata cannot
+spoof the action shown to the user.
 
 A trusted human may approve or deny once, cancel a pending request, or create a
 limited remembered grant. One-time approval is bound to the exact canonical
-argument fingerprint and consumed atomically by execution. Remembered grants must
+keyed argument fingerprint and a separate keyed action/resource fingerprint over
+the trusted safe summary, risk, and safety class. Changing an indirect resource
+identity/version or safety classification requires fresh approval even when the
+model arguments are unchanged. Remembered grants bind the same action fingerprint
+and must
 be no broader than the approved request, must expire within the configured maximum,
 and are forbidden for hard-safety actions. Expired, cancelled, denied, consumed,
 or argument-mismatched approvals do not authorize execution.
+
+The broker does not accept caller-asserted identity/source fields. Trusted local UI
+composition authenticates the human, then uses its separately held
+`TrustedApprovalAuthenticator` to mint an expiring, single-use context bound to the
+request, choice, identity, source, and optional remembered duration. The broker owns
+only the paired verifier. Model, planner, tool, worker, event, and integration
+contexts receive neither minting capability nor a way to construct a valid proof.
+The canonical runtime currently has no authenticator and uses a deny-all verifier;
+remote approval remains disabled.
+
+A broker-minted execution receipt expires no later than its approval and scope,
+and `Tool.invoke` claims it exactly once immediately before the provider effect.
+Health checks occur before this claim. If authorization expires while health is
+checked, the effect does not run. If a privileged timeout, cancellation, provider
+failure, or outcome-audit failure makes the external result uncertain, the tool
+returns `unknown_outcome`; the canonical planner enters `RECOVERING` and neither
+retries nor replans that step. Another exact action is denied while its in-process
+effect outcome remains unresolved.
+After the provider boundary begins, a non-success result is also treated as unknown
+unless trusted provider code explicitly marks it `NO_EFFECT`. A generic
+`expected_failure` is not evidence that a package install, process launch, or other
+external mutation did nothing.
 
 ## Filesystem policy
 
 Filesystem and code permissions require at least one absolute path. Trusted policy
 declares canonical root directories. Requests containing NULs, relative paths,
-`..` components, different drives, or paths resolving through symlinks/junctions
+`..` components, ambiguous separators, Windows device/reserved/ADS forms, UNC or
+extended paths, different drives, or paths resolving through symlinks/junctions
 outside an allowed root are malformed or out of scope and deny. Policy comparisons
 use canonical resolved paths and platform-aware containment, never string prefixes.
 

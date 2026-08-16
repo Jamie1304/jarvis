@@ -1,5 +1,9 @@
 # Architecture
 
+> The authoritative v1 security boundary is defined in
+> [`security-constitution.md`](security-constitution.md). Generated code,
+> integrations, and self-improvement may not weaken that boundary.
+
 Phase 0 establishes a local-first Python 3.12+ application with a small FastAPI health surface. The package boundaries are intentional:
 
 - `core` owns configuration, errors, logging, and cross-cutting primitives.
@@ -99,17 +103,30 @@ See `docs/state-machine.md`.
 `ApplicationRuntime` is the only production composition owner. It creates one
 settings object, provider, conversation service, bounded event bus, durable state
 and planning stores, state machine, policy engine, SQLite audit sink, permission
-broker, tool registry, `PlanningEngine`, `TaskController`, memory services, and
-project knowledge store. The production path is:
+broker with a deny-all approval verifier, tool registry, `PlanningEngine`,
+`TaskController`, memory services, and project knowledge store. The production path
+is:
 
 `Application/UI -> TaskController -> PlanningEngine -> ToolRegistry -> Tool -> PermissionBroker -> verification -> durable state/audit/event`
+
+Approval will eventually use a separate trusted-local path:
+
+`authenticated local UI -> isolated TrustedApprovalAuthenticator -> exact single-use context -> TaskController -> PermissionBroker`
+
+The canonical runtime currently creates no minting authenticator and its broker
+therefore denies every submitted approval context. Before privileged providers are
+enabled, a separately authenticated local UI service must encapsulate the minting
+capability and give only its paired verifier to the broker. Model, tool, worker, and
+integration contexts receive neither capability.
 
 `PlanningEngine` is the canonical production task engine. The legacy
 `AgentOrchestrator` remains for compatibility tests and migration only; it is not
 accepted by the application service or desktop composition. Safe calculator/local
 time tools are enabled by default. Computer control, camera, application/package
 management, self-improvement, remote approval, autonomous scheduling, and
-multi-agent execution are disabled unless explicitly configured and composed.
+multi-agent execution are disabled. Because those production compositions do not
+yet exist, requesting them in v1 configuration fails startup into safe mode rather
+than silently enabling or ignoring them.
 
 `AI/planner -> camera.list/camera.capture -> PermissionBroker(camera.read) -> CameraController -> CameraProvider`
 

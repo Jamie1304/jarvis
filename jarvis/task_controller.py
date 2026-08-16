@@ -2,16 +2,15 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import Protocol
 from uuid import UUID
 
+from jarvis.permissions.approval import TrustedApprovalContext
 from jarvis.permissions.broker import PermissionBroker
 from jarvis.permissions.models import (
-    ApprovalChoice,
     ApprovalDecisionResult,
-    ApprovalIdentity,
     ApprovalRequest,
-    ApprovalSource,
 )
 from jarvis.planning.engine import PlanningEngine
 from jarvis.planning.models import ExecutionBudgets, OwnedPlan, PlanningTask
@@ -29,18 +28,13 @@ class TaskController(Protocol):
     def list_tasks(self) -> tuple[PlanningTask, ...]: ...
     def inspect_plan(self, task_id: UUID) -> OwnedPlan | None: ...
     async def resume_task(self, task_id: UUID) -> PlanningTask: ...
-    def cancel_task(self, task_id: UUID) -> PlanningTask: ...
+    async def cancel_task(self, task_id: UUID) -> PlanningTask: ...
     async def pending_approvals(
         self, task_id: UUID | None = None
     ) -> tuple[ApprovalRequest, ...]: ...
     async def submit_approval_decision(
         self,
-        request_id: UUID,
-        choice: ApprovalChoice,
-        identity: ApprovalIdentity,
-        source: ApprovalSource,
-        *,
-        remember_for_seconds: int | None = None,
+        context: TrustedApprovalContext,
     ) -> ApprovalDecisionResult: ...
 
 
@@ -76,7 +70,14 @@ class PlanningTaskController:
     async def resume_task(self, task_id: UUID) -> PlanningTask:
         return await self._engine.resume(task_id)
 
-    def cancel_task(self, task_id: UUID) -> PlanningTask:
+    async def cancel_task(self, task_id: UUID) -> PlanningTask:
+        """Revoke pending authority before committing task cancellation."""
+
+        try:
+            await self._broker.cancel_task(task_id)
+        except (Exception, asyncio.CancelledError):
+            self._engine.cancel(task_id)
+            raise
         return self._engine.cancel(task_id)
 
     async def pending_approvals(self, task_id: UUID | None = None) -> tuple[ApprovalRequest, ...]:
@@ -84,17 +85,6 @@ class PlanningTaskController:
 
     async def submit_approval_decision(
         self,
-        request_id: UUID,
-        choice: ApprovalChoice,
-        identity: ApprovalIdentity,
-        source: ApprovalSource,
-        *,
-        remember_for_seconds: int | None = None,
+        context: TrustedApprovalContext,
     ) -> ApprovalDecisionResult:
-        return await self._broker.decide(
-            request_id,
-            choice,
-            identity,
-            source,
-            remember_for_seconds=remember_for_seconds,
-        )
+        return await self._broker.decide(context)

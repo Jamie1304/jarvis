@@ -1,9 +1,11 @@
 """Fail-closed scoped policy evaluation and filesystem normalization."""
 
 import os
+import re
 from dataclasses import replace
 from pathlib import Path
 from urllib.parse import urlsplit
+from uuid import UUID
 
 from jarvis.permissions.models import (
     Decision,
@@ -15,6 +17,7 @@ from jarvis.permissions.models import (
     PolicyRule,
     SafetyClass,
     ScopeConstraint,
+    validate_safe_display_text,
 )
 
 _PATH_PERMISSIONS = {
@@ -28,6 +31,19 @@ _APPLICATION_PERMISSIONS = {
 }
 _HOST_PERMISSIONS = {Permission.NETWORK_REQUEST}
 _COMMAND_PERMISSIONS = {Permission.TERMINAL_EXECUTE, Permission.SYSTEM_POWER}
+_WINDOWS_RESERVED = frozenset(
+    {
+        "aux",
+        "clock$",
+        "con",
+        "conin$",
+        "conout$",
+        "nul",
+        "prn",
+        *(f"com{index}" for index in range(1, 10)),
+        *(f"lpt{index}" for index in range(1, 10)),
+    }
+)
 
 
 class ScopeNormalizationError(ValueError):
@@ -37,16 +53,37 @@ class ScopeNormalizationError(ValueError):
 def normalize_path(path: str) -> str:
     """Return one absolute canonical path while rejecting ambiguous traversal."""
 
-    if not isinstance(path, str) or not path or "\x00" in path:
-        raise ScopeNormalizationError("Path must be a non-empty string without NULs")
+    try:
+        validate_safe_display_text(path, field="Path", max_length=4_096)
+    except ValueError as error:
+        raise ScopeNormalizationError("Path must be bounded printable text") from error
+    windows_form = path.replace("/", "\\")
+    if windows_form.startswith(("\\\\", "\\?\\", "\\.\\")):
+        raise ScopeNormalizationError("UNC and Windows device paths are not permitted")
+    components = tuple(item for item in re.split(r"[\\/]", path) if item)
+    separator_body = windows_form[3:] if re.match(r"^[A-Za-z]:\\", windows_form) else windows_form
+    if (
+        "\\\\" in separator_body
+        or any(item in {".", ".."} for item in components)
+        or any(item.endswith((" ", ".")) for item in components)
+        or any(":" in item for item in components[1:])
+        or any(any(character in item for character in '<>"|?*') for item in components)
+        or any(item.split(".", 1)[0].casefold() in _WINDOWS_RESERVED for item in components)
+    ):
+        raise ScopeNormalizationError("Path contains ambiguous Windows components")
     candidate = Path(path)
     if not candidate.is_absolute():
         raise ScopeNormalizationError("Relative paths are not permitted")
     if ".." in candidate.parts:
         raise ScopeNormalizationError("Parent traversal is not permitted")
     try:
-        return os.path.normcase(str(candidate.resolve(strict=False)))
-    except (OSError, RuntimeError) as error:
+        resolved = os.path.normcase(str(candidate.resolve(strict=False)))
+        return validate_safe_display_text(
+            resolved,
+            field="Resolved path",
+            max_length=4_096,
+        )
+    except (OSError, RuntimeError, ValueError) as error:
         raise ScopeNormalizationError("Path could not be resolved safely") from error
 
 
@@ -60,41 +97,60 @@ def path_is_within(path: str, root: str) -> bool:
 
 
 def _normalize_label(value: str, label: str) -> str:
-    if not isinstance(value, str) or not value.strip() or "\x00" in value:
-        raise ScopeNormalizationError(f"{label} must be a non-empty string")
-    normalized = value.strip().casefold()
+    try:
+        normalized = validate_safe_display_text(
+            value,
+            field=label,
+            max_length=512,
+        ).casefold()
+    except ValueError as error:
+        raise ScopeNormalizationError(f"{label} must be bounded printable text") from error
     if any(character.isspace() for character in normalized):
         raise ScopeNormalizationError(f"{label} cannot contain whitespace")
     return normalized
 
 
-def _normalize_action(value: object) -> str:
+def _require_string_tuple(value: object, label: str) -> tuple[str, ...]:
     if (
-        not isinstance(value, str)
-        or not value.strip()
-        or value != value.strip()
-        or len(value) > 128
-        or "\x00" in value
-        or "\n" in value
-        or "\r" in value
+        type(value) is not tuple
+        or len(value) > 64
+        or any(not isinstance(item, str) or len(item) > 4_096 for item in value)
     ):
-        raise ScopeNormalizationError("Action must be a bounded single-line label")
-    return value.casefold()
+        raise ScopeNormalizationError(f"{label} must be a bounded tuple of strings")
+    return value
+
+
+def _normalize_action(value: object) -> str:
+    try:
+        return validate_safe_display_text(
+            value,
+            field="Action",
+            max_length=128,
+        ).casefold()
+    except ValueError as error:
+        raise ScopeNormalizationError("Action must be bounded printable text") from error
 
 
 def _normalize_host(value: str) -> str:
     normalized = _normalize_label(value, "Host").rstrip(".")
-    parsed = urlsplit(f"//{normalized}")
+    try:
+        parsed = urlsplit(f"//{normalized}")
+        port = parsed.port
+    except ValueError as error:
+        raise ScopeNormalizationError("Host must be a bare exact hostname") from error
     if (
         parsed.hostname != normalized
-        or parsed.port is not None
+        or port is not None
         or any(item in normalized for item in ("/", "@", "*"))
     ):
         raise ScopeNormalizationError("Host must be a bare exact hostname")
     try:
-        return normalized.encode("idna").decode("ascii")
+        encoded = normalized.encode("idna").decode("ascii")
     except UnicodeError as error:
         raise ScopeNormalizationError("Host is not valid IDNA") from error
+    if len(encoded) > 253:
+        raise ScopeNormalizationError("Host is too long")
+    return encoded
 
 
 def normalize_scope(scope: PermissionScope, permission: Permission) -> PermissionScope:
@@ -102,19 +158,33 @@ def normalize_scope(scope: PermissionScope, permission: Permission) -> Permissio
 
     if not isinstance(scope, PermissionScope):
         raise ScopeNormalizationError("Scope must be a PermissionScope")
-    if scope.tool_id is None or not scope.tool_id.strip() or scope.task_id is None:
+    paths_input = _require_string_tuple(scope.paths, "Paths")
+    applications_input = _require_string_tuple(scope.applications, "Applications")
+    hosts_input = _require_string_tuple(scope.hosts, "Hosts")
+    commands_input = _require_string_tuple(scope.command_families, "Command families")
+    try:
+        tool_id = validate_safe_display_text(
+            scope.tool_id,
+            field="Tool identifier",
+            max_length=128,
+        )
+    except ValueError as error:
+        raise ScopeNormalizationError("Tool and task scope are mandatory") from error
+    if any(character.isspace() for character in tool_id) or not isinstance(scope.task_id, UUID):
         raise ScopeNormalizationError("Tool and task scope are mandatory")
     if scope.duration_seconds is not None and (
-        isinstance(scope.duration_seconds, bool) or scope.duration_seconds <= 0
+        isinstance(scope.duration_seconds, bool)
+        or not isinstance(scope.duration_seconds, int)
+        or scope.duration_seconds <= 0
     ):
         raise ScopeNormalizationError("Duration must be a positive integer")
-    paths = tuple(dict.fromkeys(normalize_path(path) for path in scope.paths))
+    paths = tuple(dict.fromkeys(normalize_path(path) for path in paths_input))
     applications = tuple(
-        dict.fromkeys(_normalize_label(value, "Application") for value in scope.applications)
+        dict.fromkeys(_normalize_label(value, "Application") for value in applications_input)
     )
-    hosts = tuple(dict.fromkeys(_normalize_host(value) for value in scope.hosts))
+    hosts = tuple(dict.fromkeys(_normalize_host(value) for value in hosts_input))
     command_families = tuple(
-        dict.fromkeys(_normalize_label(value, "Command family") for value in scope.command_families)
+        dict.fromkeys(_normalize_label(value, "Command family") for value in commands_input)
     )
     normalized = replace(
         scope,
@@ -122,7 +192,7 @@ def normalize_scope(scope: PermissionScope, permission: Permission) -> Permissio
         applications=applications,
         hosts=hosts,
         command_families=command_families,
-        tool_id=scope.tool_id.strip(),
+        tool_id=tool_id,
     )
     if permission in _PATH_PERMISSIONS and not normalized.paths:
         raise ScopeNormalizationError("Filesystem permissions require a path")
@@ -138,22 +208,56 @@ def normalize_scope(scope: PermissionScope, permission: Permission) -> Permissio
 def normalize_constraint(scope: ScopeConstraint) -> ScopeConstraint:
     """Canonicalize trusted policy bounds using the same comparisons as requests."""
 
+    if not isinstance(scope, ScopeConstraint):
+        raise ValueError("Policy scope must be a ScopeConstraint")
+    try:
+        paths = _require_string_tuple(scope.paths, "Policy paths")
+        applications = _require_string_tuple(scope.applications, "Policy applications")
+        hosts = _require_string_tuple(scope.hosts, "Policy hosts")
+        command_families = _require_string_tuple(
+            scope.command_families,
+            "Policy command families",
+        )
+    except ScopeNormalizationError as error:
+        raise ValueError("Policy scope containers are malformed") from error
+    if (
+        type(scope.tools) is not frozenset
+        or len(scope.tools) > 64
+        or type(scope.tasks) is not frozenset
+        or len(scope.tasks) > 64
+        or any(not isinstance(item, UUID) for item in scope.tasks)
+    ):
+        raise ValueError("Policy tool/task constraints are malformed")
+    try:
+        normalized_tools = frozenset(
+            validate_safe_display_text(
+                item,
+                field="Policy tool identifier",
+                max_length=128,
+            )
+            for item in scope.tools
+        )
+    except ValueError as error:
+        raise ValueError("Policy tool/task constraints are malformed") from error
+    if any(any(character.isspace() for character in item) for item in normalized_tools):
+        raise ValueError("Policy tool/task constraints are malformed")
     if scope.max_duration_seconds is not None and (
-        isinstance(scope.max_duration_seconds, bool) or scope.max_duration_seconds <= 0
+        isinstance(scope.max_duration_seconds, bool)
+        or not isinstance(scope.max_duration_seconds, int)
+        or scope.max_duration_seconds <= 0
     ):
         raise ValueError("Policy duration must be a positive integer")
     return replace(
         scope,
-        paths=tuple(dict.fromkeys(normalize_path(path) for path in scope.paths)),
+        paths=tuple(dict.fromkeys(normalize_path(path) for path in paths)),
         applications=tuple(
-            dict.fromkeys(_normalize_label(value, "Application") for value in scope.applications)
+            dict.fromkeys(_normalize_label(value, "Application") for value in applications)
         ),
-        hosts=tuple(dict.fromkeys(_normalize_host(value) for value in scope.hosts)),
+        hosts=tuple(dict.fromkeys(_normalize_host(value) for value in hosts)),
         command_families=tuple(
-            dict.fromkeys(
-                _normalize_label(value, "Command family") for value in scope.command_families
-            )
+            dict.fromkeys(_normalize_label(value, "Command family") for value in command_families)
         ),
+        tools=normalized_tools,
     )
 
 
@@ -199,6 +303,8 @@ class PolicyEngine:
                 else DecisionReason.MALFORMED_PERMISSION
             )
             return self._deny(reason)
+        if not isinstance(safety_class, SafetyClass):
+            return self._deny(DecisionReason.MALFORMED_ACTION)
         try:
             scope = normalize_scope(request.scope, permission)
         except (ScopeNormalizationError, TypeError, AttributeError):

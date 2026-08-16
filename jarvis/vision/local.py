@@ -10,6 +10,7 @@ from typing import cast
 
 import httpx
 
+from jarvis.security import local_model_endpoint_is_safe
 from jarvis.vision.models import (
     NormalizedBounds,
     VisibleElement,
@@ -39,7 +40,7 @@ class OllamaVisionProvider(VisionProvider):
         timeout_seconds: float = 30,
         client: httpx.AsyncClient | None = None,
     ) -> None:
-        if not model.strip() or timeout_seconds <= 0 or not endpoint.startswith("http"):
+        if not model.strip() or timeout_seconds <= 0 or not local_model_endpoint_is_safe(endpoint):
             raise ValueError("Local vision provider configuration is invalid")
         self._model, self._screenshots = model, screenshots
         self._endpoint = endpoint.rstrip("/")
@@ -95,7 +96,7 @@ class OllamaVisionProvider(VisionProvider):
     def _client_or_new(self) -> tuple[httpx.AsyncClient, bool]:
         if self._client is not None:
             return self._client, False
-        return httpx.AsyncClient(timeout=self._timeout), True
+        return httpx.AsyncClient(timeout=self._timeout, trust_env=False), True
 
 
 _SCHEMA = (

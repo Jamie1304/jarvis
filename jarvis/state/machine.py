@@ -90,6 +90,7 @@ _APP_TRANSITIONS: dict[ApplicationState, frozenset[ApplicationState]] = {
             ApplicationState.VERIFYING,
             ApplicationState.WAITING_FOR_PERMISSION,
             ApplicationState.WAITING,
+            ApplicationState.RECOVERING,
             ApplicationState.ERROR,
             ApplicationState.IDLE,
         }
@@ -152,6 +153,7 @@ _TASK_TRANSITIONS: dict[TaskState, frozenset[TaskState]] = {
             TaskState.VERIFYING,
             TaskState.WAITING_FOR_PERMISSION,
             TaskState.WAITING,
+            TaskState.RECOVERING,
             TaskState.ERROR,
             TaskState.CANCELLED,
         }

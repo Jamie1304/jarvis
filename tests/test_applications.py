@@ -45,6 +45,8 @@ from jarvis.permissions import (
     PolicyEngine,
     PolicyRule,
     ScopeConstraint,
+    TrustedApprovalAuthenticator,
+    TrustedApprovalContext,
 )
 from jarvis.tools.harness import ToolHarness
 from jarvis.tools.models import ToolResultStatus
@@ -63,17 +65,22 @@ def record(*, version: str = "30.0.0", name: str = "OBS Studio") -> ApplicationR
     )
 
 
-def candidate(*, version: str = "30.0.0", name: str = "OBS Studio") -> InstallationCandidate:
+def candidate(
+    *,
+    version: str = "30.0.0",
+    name: str = "OBS Studio",
+    publisher: str | None = "OBS Project",
+) -> InstallationCandidate:
     return InstallationCandidate(
         "OBSProject.OBSStudio",
         "winget",
         name,
-        "OBS Project",
+        publisher,
         version,
         (Permission.APPLICATION_INSTALL,),
         "Exact trusted provider catalog match",
         0.99,
-        InstallationVerification(name, "OBS Project", version),
+        InstallationVerification(name, publisher, version),
     )
 
 
@@ -176,8 +183,12 @@ def manager(
     )
 
 
+_APPROVAL_AUTHENTICATORS: dict[int, TrustedApprovalAuthenticator] = {}
+
+
 def broker(*, install_decision: Decision = Decision.REQUIRE_APPROVAL) -> PermissionBroker:
-    return PermissionBroker(
+    authenticator = TrustedApprovalAuthenticator(ApprovalSource.TRUSTED_UI)
+    permission_broker = PermissionBroker(
         PolicyEngine(
             (
                 PolicyRule(
@@ -201,7 +212,22 @@ def broker(*, install_decision: Decision = Decision.REQUIRE_APPROVAL) -> Permiss
                     frozenset({"launch managed application", "close managed application"}),
                 ),
             )
-        )
+        ),
+        approval_context_verifier=authenticator.verifier(),
+    )
+    _APPROVAL_AUTHENTICATORS[id(permission_broker)] = authenticator
+    return permission_broker
+
+
+def approval_context(
+    permission_broker: PermissionBroker,
+    request_id: UUID,
+    choice: ApprovalChoice,
+) -> TrustedApprovalContext:
+    return _APPROVAL_AUTHENTICATORS[id(permission_broker)].issue_context(
+        request_id=request_id,
+        choice=choice,
+        identity=ApprovalIdentity("trusted-user", ApprovalActorKind.TRUSTED_USER),
     )
 
 
@@ -238,6 +264,41 @@ async def test_missing_package_is_not_installable() -> None:
         await app_manager.plan_install("obs")
 
 
+@pytest.mark.parametrize(
+    "hostile_publisher",
+    (
+        "Evil\tPublisher",
+        "Evil\x1b[2JPublisher",
+        "Evil\x85Publisher",
+        "Evil\u202ePublisher",
+        "Evil\u2066Publisher\u2069",
+    ),
+)
+def test_installation_candidate_rejects_approval_display_spoofing(
+    hostile_publisher: str,
+) -> None:
+    with pytest.raises(ValueError, match="display controls"):
+        candidate(publisher=hostile_publisher)
+
+
+@pytest.mark.asyncio
+async def test_corrupted_package_metadata_denies_before_plan_or_approval_display() -> None:
+    corrupted = candidate()
+    object.__setattr__(corrupted, "publisher", "Forged\x1b[2JPublisher")
+    packages = FakePackages((corrupted,))
+    tool = PlanInstallTool(manager(FakeInventory(), packages))
+    permission_broker = PermissionBroker(PolicyEngine())
+    runner = harness(tool, permission_broker)
+
+    result = await runner.invoke(tool, {"name": "obs"})
+
+    assert result.status is ToolResultStatus.EXPECTED_FAILURE
+    assert result.error is not None
+    assert result.error.code == "installation_plan_failed"
+    assert await permission_broker.pending_approvals() == ()
+    assert packages.install_calls == []
+
+
 @pytest.mark.asyncio
 async def test_denied_trusted_approval_does_not_reach_package_provider() -> None:
     packages = FakePackages((candidate(),))
@@ -253,10 +314,7 @@ async def test_denied_trusted_approval_does_not_reach_package_provider() -> None
     metadata = dict((item.key, item.value) for item in first.metadata)
     request_id = UUID(metadata["approval_request_id"])
     decision = await permission_broker.decide(
-        request_id,
-        choice=ApprovalChoice.DENY_ONCE,
-        identity=ApprovalIdentity("trusted-user", ApprovalActorKind.TRUSTED_USER),
-        source=ApprovalSource.TRUSTED_UI,
+        approval_context(permission_broker, request_id, ApprovalChoice.DENY_ONCE)
     )
     second = await runner.invoke(tool, {"plan_id": plan.plan_id}, task_id=task_id)
 
@@ -381,8 +439,8 @@ async def test_launch_failure_is_reported_after_broker_authorization() -> None:
 
     result = await runner.invoke(tool, {"application_id": "app:obs-studio"})
 
-    assert result.status is ToolResultStatus.EXPECTED_FAILURE
-    assert result.error is not None and result.error.code == "application_launch_failed"
+    assert result.status is ToolResultStatus.UNKNOWN_OUTCOME
+    assert result.error is not None and result.error.code == "tool_execution_outcome_unknown"
     assert runtime.launches == ["app:obs-studio"]
 
 
@@ -440,10 +498,11 @@ async def test_brokered_install_and_update_execute_only_the_matching_approved_pl
     install_metadata = dict((item.key, item.value) for item in initial.metadata)
     install_request_id = UUID(install_metadata["approval_request_id"])
     await install_broker.decide(
-        install_request_id,
-        ApprovalChoice.APPROVE_ONCE,
-        ApprovalIdentity("trusted-user", ApprovalActorKind.TRUSTED_USER),
-        ApprovalSource.TRUSTED_UI,
+        approval_context(
+            install_broker,
+            install_request_id,
+            ApprovalChoice.APPROVE_ONCE,
+        )
     )
     installed = await install_runner.invoke(
         install_tool, {"plan_id": install_plan.plan_id}, task_id=install_task_id
@@ -473,10 +532,11 @@ async def test_brokered_install_and_update_execute_only_the_matching_approved_pl
     update_metadata = dict((item.key, item.value) for item in waiting.metadata)
     update_request_id = UUID(update_metadata["approval_request_id"])
     await update_broker.decide(
-        update_request_id,
-        ApprovalChoice.APPROVE_ONCE,
-        ApprovalIdentity("trusted-user", ApprovalActorKind.TRUSTED_USER),
-        ApprovalSource.TRUSTED_UI,
+        approval_context(
+            update_broker,
+            update_request_id,
+            ApprovalChoice.APPROVE_ONCE,
+        )
     )
     updated = await update_runner.invoke(
         update_tool, {"plan_id": update_plan.plan_id}, task_id=update_task_id

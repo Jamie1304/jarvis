@@ -1,9 +1,11 @@
 # Phase 18 application/task state machine
 
-`jarvis.state.ApplicationStateMachine` is the authoritative lifecycle
-coordinator. UI code reads its immutable snapshots and transition history; it
-does not assign states. Invalid events raise `InvalidStateTransition` before
-any state is persisted.
+`jarvis.state.ApplicationStateMachine` is the authoritative transition-rule
+coordinator and the durable UI/recovery projection. `SQLitePlanningStore` remains
+the authoritative task/plan data source; successful planning commits are projected
+through the state machine and startup reconciliation repairs projection drift. UI
+code reads immutable snapshots and transition history; it does not assign states.
+Invalid events raise `InvalidStateTransition` before any projection is persisted.
 
 ## Global application states
 
@@ -56,13 +58,14 @@ succeeded.
 
 ## Transition records and persistence
 
-Every accepted transition records `from_state`, `to_state`, event, optional task
+Every projected transition records `from_state`, `to_state`, event, optional task
 ID, UTC timestamp, bounded reason, metadata, and whether it belongs to the
 application or task domain. Invalid transitions are visible exceptions and do
 not append history. `SQLiteStateStore` applies an ordered migration and stores
 task recovery fields (state, cancellation request, active step, plan revision,
-and bounded metadata) plus the transition audit trail. Transient UI details such
-as cursor position or animation are not persisted.
+and bounded metadata) plus the transition history. This store is inspectable but
+rebuildable from committed planning state; it is not a second task source of truth.
+Transient UI details such as cursor position or animation are not persisted.
 
 Multiple tasks have independent snapshots. The coordinator exposes a
 foreground-task ID for UI prioritization; a transition for a non-foreground

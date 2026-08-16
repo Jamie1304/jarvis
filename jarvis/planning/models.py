@@ -52,6 +52,7 @@ class FailureKind(StrEnum):
     TRANSIENT = "transient"
     DETERMINISTIC = "deterministic"
     CANCELLED = "cancelled"
+    UNKNOWN_OUTCOME = "unknown_outcome"
 
 
 class StepExecutionStatus(StrEnum):
@@ -60,6 +61,7 @@ class StepExecutionStatus(StrEnum):
     DETERMINISTIC_FAILURE = "deterministic_failure"
     WAITING_FOR_PERMISSION = "waiting_for_permission"
     CANCELLED = "cancelled"
+    UNKNOWN_OUTCOME = "unknown_outcome"
 
 
 def utc(value: datetime) -> datetime:

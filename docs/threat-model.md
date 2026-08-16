@@ -1,5 +1,9 @@
 # Phase 5 permission-boundary threat model
 
+> This phase history remains useful background. The current cross-phase threat
+> model and immutable v1 controls are authoritative in
+> [`security-constitution.md`](security-constitution.md).
+
 ## Assets and security goals
 
 JARVIS must protect user files, credentials, private sensor data, clipboard data,
@@ -96,8 +100,10 @@ and untrusted evidence label.
 9. Vision provider output to trusted semantic-first fusion: untrusted structured
    suggestions; it cannot directly access input adapters, the broker, or approvals.
 10. Application inventory/package provider to manager: provider results are
-    untrusted evidence, normalized and verified by trusted manager code. A package
-    provider may only execute its fixed executable plus validated argument array.
+    untrusted evidence, normalized and verified by trusted manager code. The target
+    contract requires a pinned executable plus validated argument array; the current
+    `winget` adapter is disabled because its executable identity/PATH boundary is not
+    yet pinned.
 11. Manager to process/package runtime: only a broker-authorized, immutable plan or
     freshly resolved inventory record crosses this boundary; executable strings,
     repository names, and package IDs cannot be supplied as raw OS commands.
@@ -146,8 +152,9 @@ entry point by convention and tests.
   `software_installation` class: fresh trusted approval is mandatory and may not be
   remembered. Approval summaries contain exact package identity/source/publisher/
   version from an immutable expiring plan, not model text.
-- Package-manager invocation is a fixed executable and independently validated
-  argument vector (`shell=False`); no model string becomes a command. An update must
+- Package-manager invocation uses an independently validated argument vector
+  (`shell=False`); no model string becomes a command. Production activation also
+  requires a pinned package-manager executable identity rather than PATH lookup. An update must
   be strictly newer than the installed normalized numeric version. Verification
   re-queries inventory and checks expected name/publisher/version plus launch
   capability. The managed runtime closes only its own tracked launch process.

@@ -22,6 +22,12 @@ from jarvis.improvement.models import (
     ProposedChangeSet,
     ProposedFileChange,
 )
+from jarvis.security import (
+    MutationAuthority,
+    MutationContext,
+    MutationPolicy,
+    MutationStage,
+)
 
 _MAX_GIT_OUTPUT = 16_384
 _PROTECTED_PATHS = frozenset(
@@ -152,10 +158,6 @@ class SubprocessGitWorktreeClient(GitWorktreeClient):  # pragma: no cover
         await self._run(
             production_root,
             (
-                "-c",
-                f"core.hooksPath={os.devnull}",
-                "-c",
-                "diff.external=",
                 "worktree",
                 "add",
                 "--detach",
@@ -174,17 +176,30 @@ class SubprocessGitWorktreeClient(GitWorktreeClient):  # pragma: no cover
         *,
         permit_empty: bool = False,
     ) -> str:
+        trusted_path = [os.fspath(self._git.parent)]
+        system_root = os.environ.get("SYSTEMROOT")
+        if system_root:
+            trusted_path.append(os.fspath(Path(system_root) / "System32"))
         environment = {
             "GIT_CONFIG_NOSYSTEM": "1",
             "GIT_CONFIG_GLOBAL": os.devnull,
             "GIT_TERMINAL_PROMPT": "0",
-            "PATH": os.environ.get("PATH", ""),
-            "SYSTEMROOT": os.environ.get("SYSTEMROOT", ""),
+            "PATH": os.pathsep.join(trusted_path),
+            "SYSTEMROOT": system_root or "",
         }
         process = await asyncio.create_subprocess_exec(
             os.fspath(self._git),
+            "--no-pager",
             "-C",
             os.fspath(repository),
+            "-c",
+            f"core.hooksPath={os.devnull}",
+            "-c",
+            "core.fsmonitor=false",
+            "-c",
+            "diff.external=",
+            "-c",
+            "core.pager=cat",
             *arguments,
             stdin=asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.PIPE,
@@ -373,6 +388,11 @@ class TrustedWorkspaceChangeApplier:
 
     def __init__(self, manager: GitWorktreeManager) -> None:
         self._manager = manager
+        self._mutation_policy = MutationPolicy()
+        self._proposal_context = MutationContext(
+            MutationAuthority.ROUTINE_IMPROVEMENT,
+            MutationStage.ISOLATED_PROPOSAL,
+        )
 
     async def apply(
         self,
@@ -433,6 +453,11 @@ class TrustedWorkspaceChangeApplier:
             raise WorkspaceSecurityError("Change path has an ambiguous filesystem alias")
         if _is_protected(canonical_relative):
             raise WorkspaceSecurityError("Trusted control paths cannot be modified")
+        mutation = self._mutation_policy.evaluate(canonical_relative, self._proposal_context)
+        if not mutation.allowed:
+            raise WorkspaceSecurityError(
+                f"Trusted mutation policy denied the change ({mutation.reason.value})"
+            )
         if not any(
             _path_matches_boundary(canonical_relative, boundary)
             for boundary in specification.likely_affected_paths

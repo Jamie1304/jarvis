@@ -1,3 +1,5 @@
+from pathlib import Path
+
 from jarvis.core.config import Settings
 from pytest import MonkeyPatch
 
@@ -59,3 +61,20 @@ def test_numeric_stt_device_becomes_device_id(monkeypatch: MonkeyPatch) -> None:
     settings = Settings(_env_file=None)
 
     assert settings.stt_device == 26
+
+
+def test_settings_do_not_load_dotenv_from_current_directory(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    (tmp_path / ".env").write_text(
+        "JARVIS_REMOTE_APPROVAL_ENABLED=true\nJARVIS_AI_ENDPOINT=http://192.0.2.1:11434\n",
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("JARVIS_REMOTE_APPROVAL_ENABLED", raising=False)
+    monkeypatch.delenv("JARVIS_AI_ENDPOINT", raising=False)
+
+    settings = Settings()
+
+    assert settings.remote_approval_enabled is False
+    assert settings.ai_endpoint == "http://127.0.0.1:11434"

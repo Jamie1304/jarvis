@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections import OrderedDict
 from collections.abc import Awaitable, Callable
 from dataclasses import replace
 from threading import Lock
@@ -35,6 +36,7 @@ class InMemoryEventBus:
         *,
         queue_size: int = 128,
         max_events_per_correlation: int = 256,
+        max_correlation_chains: int = 4_096,
         logger: logging.Logger | None = None,
         metrics: EventBusMetrics | None = None,
     ) -> None:
@@ -42,8 +44,15 @@ class InMemoryEventBus:
             raise ValueError("queue_size must be positive")
         if max_events_per_correlation < 1:
             raise ValueError("max_events_per_correlation must be positive")
+        if (
+            not isinstance(max_correlation_chains, int)
+            or isinstance(max_correlation_chains, bool)
+            or max_correlation_chains < 1
+        ):
+            raise ValueError("max_correlation_chains must be a positive integer")
         self._queue_size = queue_size
         self._max_events_per_correlation = max_events_per_correlation
+        self._max_correlation_chains = max_correlation_chains
         self._logger = logger or logging.getLogger("jarvis.events")
         self._metrics = metrics
         self._subscribers: dict[
@@ -53,17 +62,25 @@ class InMemoryEventBus:
         self._counter = 0
         self._lock = asyncio.Lock()
         self._sync_lock = Lock()
-        self._chain_counts: dict[UUID, int] = {}
+        self._chain_counts: OrderedDict[UUID, int] = OrderedDict()
 
     async def publish(self, event: EventEnvelope[EventPayload]) -> bool:
         if self._closed:
             return False
         with self._sync_lock:
+            if self._closed:
+                return False
             count = self._chain_counts.get(event.correlation_id, 0) + 1
             if count > self._max_events_per_correlation:
+                self._chain_counts.move_to_end(event.correlation_id)
                 self._metric("events.feedback_blocked")
                 return False
+            if event.correlation_id not in self._chain_counts:
+                if len(self._chain_counts) >= self._max_correlation_chains:
+                    self._chain_counts.popitem(last=False)
+                    self._metric("events.correlation_evicted")
             self._chain_counts[event.correlation_id] = count
+            self._chain_counts.move_to_end(event.correlation_id)
             self._counter += 1
             numbered = replace(event, sequence=self._counter)
         async with self._lock:
@@ -114,8 +131,10 @@ class InMemoryEventBus:
             await asyncio.gather(item[2], return_exceptions=True)
 
     async def close(self) -> None:
-        async with self._lock:
+        with self._sync_lock:
             self._closed = True
+            self._chain_counts.clear()
+        async with self._lock:
             items = tuple(self._subscribers.values())
             self._subscribers.clear()
         for _queue, _handler, task in items:
@@ -138,7 +157,7 @@ class InMemoryEventBus:
                     raise
                 except Exception:
                     self._metric("events.subscriber_failures")
-                    self._logger.exception("event subscriber failed: %s", subscription_id)
+                    self._logger.error("event subscriber failed: %s", subscription_id)
         except asyncio.CancelledError:
             return
 

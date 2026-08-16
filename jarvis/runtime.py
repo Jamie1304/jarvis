@@ -12,7 +12,7 @@ from pathlib import Path
 from jarvis.ai.providers.base import AIProvider
 from jarvis.bootstrap import create_ai_provider
 from jarvis.conversation.service import ConversationService
-from jarvis.core.config import Settings
+from jarvis.core.config import Settings, get_settings
 from jarvis.core.logging import configure_logging
 from jarvis.discovery.service import CandidateEvaluator, CapabilityGapDetector
 from jarvis.events import EventBus, InMemoryEventBus
@@ -25,7 +25,12 @@ from jarvis.memory.services import (
     ProjectSystemMemory,
 )
 from jarvis.memory.store import MemoryMigrationError, SQLiteMemoryStore
-from jarvis.permissions import AuditStoreError, PermissionBroker, PolicyEngine, SQLiteAuditSink
+from jarvis.permissions import (
+    AuditStoreError,
+    PermissionBroker,
+    PolicyEngine,
+    SQLiteAuditSink,
+)
 from jarvis.planning.engine import (
     BrokeredPlanningStepExecutor,
     CompletionCriteriaVerifier,
@@ -37,6 +42,14 @@ from jarvis.planning.engine import (
 from jarvis.planning.models import ReplanEvidence
 from jarvis.planning.store import PlanningStoreError, SQLitePlanningStore
 from jarvis.planning.validation import PlanValidator
+from jarvis.security import (
+    SECURITY_POLICY_VERSION,
+    SecurityViolation,
+    SecurityViolationCode,
+    StartupSecurityConfiguration,
+    StartupSecurityReport,
+    StartupSecurityValidator,
+)
 from jarvis.state import ApplicationStateMachine, SQLiteStateStore, StateStoreError
 from jarvis.task_controller import PlanningTaskController, TaskController
 from jarvis.tools.calculator import CalculatorTool
@@ -83,8 +96,47 @@ class RuntimePaths:
         )
 
     def ensure_directories(self) -> None:
+        self.validate_storage_layout()
         for path in (self.root, self.logs, self.config, self.cache, self.temporary, self.models):
             path.mkdir(parents=True, exist_ok=True)
+        self.validate_storage_layout()
+
+    def validate_storage_layout(self) -> None:
+        """Reject links, aliases, hard-linked DBs, and child escapes before I/O."""
+
+        canonical_root = self.root.resolve(strict=False)
+        if canonical_root != self.root or self.root.is_symlink() or self.root.is_junction():
+            raise OSError("Application-data root identity is unsafe")
+        directories = (self.root, self.logs, self.config, self.cache, self.temporary, self.models)
+        databases = (
+            self.state_database,
+            self.planning_database,
+            self.memory_database,
+            self.audit_database,
+        )
+        sidecars = tuple(
+            database.with_name(f"{database.name}{suffix}")
+            for database in databases
+            for suffix in ("-journal", "-shm", "-wal")
+        )
+        database_files = (*databases, *sidecars)
+        for path in (*directories, *database_files):
+            if path.is_symlink() or path.is_junction():
+                raise OSError("Application-data child uses a reparse point")
+            resolved = path.resolve(strict=False)
+            try:
+                resolved.relative_to(canonical_root)
+            except ValueError as error:
+                raise OSError("Application-data child escaped its root") from error
+            if resolved != path:
+                raise OSError("Application-data child identity is ambiguous")
+        for path in directories:
+            if path.exists() and not path.is_dir():
+                raise OSError("Application-data directory path is not a directory")
+        for path in database_files:
+            if path.exists():
+                if not path.is_file() or path.stat().st_nlink > 1:
+                    raise OSError("Application database path is not a private regular file")
 
 
 class SafeBuiltinPlanAdvisor(PlanAdvisor):
@@ -142,7 +194,7 @@ class SafeBuiltinPlanAdvisor(PlanAdvisor):
         raise ValueError(f"safe builtin planner cannot replan ({evidence.error.code})")
 
 
-@dataclass(slots=True)
+@dataclass(frozen=True, slots=True)
 class RuntimeContainer:
     """One owner for every enabled service instance and its shutdown lifecycle."""
 
@@ -190,29 +242,152 @@ class ApplicationRuntime:
     """Deterministic startup/readiness/shutdown owner; no legacy execution path."""
 
     def __init__(
-        self, container: RuntimeContainer | None, *, status: RuntimeStatus = RuntimeStatus.STARTING
+        self,
+        container: RuntimeContainer | None,
+        *,
+        status: RuntimeStatus = RuntimeStatus.STARTING,
+        error: str | None = None,
+        security_report: StartupSecurityReport | None = None,
     ) -> None:
-        self.container = container
-        self.status = status
-        self.error: str | None = None
+        self._container = container
+        self._status = status
+        self._error = error
+        self._security_report = security_report
+
+    @property
+    def container(self) -> RuntimeContainer | None:
+        return self._container
+
+    @property
+    def status(self) -> RuntimeStatus:
+        return self._status
+
+    @property
+    def error(self) -> str | None:
+        return self._error
+
+    @property
+    def security_report(self) -> StartupSecurityReport | None:
+        return self._security_report
+
+    @classmethod
+    def create_from_environment(cls, *, project_root: Path | None = None) -> ApplicationRuntime:
+        """Load explicit process settings and map malformed input to safe mode."""
+
+        try:
+            settings = get_settings()
+        except Exception:
+            report = StartupSecurityReport(
+                SECURITY_POLICY_VERSION,
+                (
+                    SecurityViolation(
+                        SecurityViolationCode.CONFIGURATION_INVALID,
+                        "Process configuration did not match the trusted schema",
+                    ),
+                ),
+            )
+            return cls(
+                None,
+                status=RuntimeStatus.SAFE_MODE,
+                error="security policy rejected startup: configuration_invalid",
+                security_report=report,
+            )
+        return cls.create(settings, project_root=project_root)
 
     @classmethod
     def create(cls, settings: Settings, *, project_root: Path | None = None) -> ApplicationRuntime:
-        paths = RuntimePaths.from_root(settings.app_data_dir)
+        trusted_project_root = project_root or Path(__file__).resolve().parents[1]
+        startup_config = StartupSecurityConfiguration(
+            policy_version=settings.security_policy_version,
+            app_data_dir=settings.app_data_dir,
+            project_root=trusted_project_root,
+            ai_provider=settings.ai_provider,
+            ai_endpoint=settings.ai_endpoint,
+            computer_enabled=settings.computer_enabled,
+            camera_enabled=settings.camera_enabled,
+            application_management_enabled=settings.application_management_enabled,
+            package_installation_enabled=settings.package_installation_enabled,
+            voice_enabled=settings.voice_enabled,
+            stt_enabled=settings.stt_enabled,
+            tts_enabled=settings.tts_enabled,
+            multi_agent_enabled=settings.multi_agent_enabled,
+            improvement_enabled=settings.improvement_enabled,
+            remote_approval_enabled=settings.remote_approval_enabled,
+            autonomous_scheduling_enabled=settings.autonomous_scheduling_enabled,
+        )
+        startup_validator = StartupSecurityValidator()
+        security_report = startup_validator.validate(startup_config)
+        if not security_report.valid:
+            reason = security_report.violations[0].code.value
+            return cls(
+                None,
+                status=RuntimeStatus.SAFE_MODE,
+                error=f"security policy rejected startup: {reason}",
+                security_report=security_report,
+            )
+        resolved_app_data_dir = security_report.resolved_app_data_dir
+        resolved_project_root = security_report.resolved_project_root
+        if resolved_app_data_dir is None or resolved_project_root is None:
+            return cls(
+                None,
+                status=RuntimeStatus.SAFE_MODE,
+                error="security policy rejected startup: app_data_path_unsafe",
+                security_report=cls._path_failure_report(security_report),
+            )
+        state_store: SQLiteStateStore | None = None
+        audit: SQLiteAuditSink | None = None
+        planning_store: SQLitePlanningStore | None = None
+        memory_store: SQLiteMemoryStore | None = None
         try:
+            paths = RuntimePaths.from_root(resolved_app_data_dir)
+            if paths.root != resolved_app_data_dir:
+                raise OSError("Application-data identity changed after security validation")
             paths.ensure_directories()
+            final_report = startup_validator.validate(startup_config)
+            final_app_data_dir = final_report.resolved_app_data_dir
+            final_project_root = final_report.resolved_project_root
+            if (
+                not final_report.valid
+                or final_app_data_dir is None
+                or final_project_root is None
+                or final_app_data_dir != paths.root
+                or final_project_root != resolved_project_root
+            ):
+                raise OSError("Application-data identity changed during directory creation")
+            security_report = final_report
+            resolved_project_root = final_project_root
+        except (OSError, RuntimeError) as error:
+            return cls(
+                None,
+                status=RuntimeStatus.SAFE_MODE,
+                error=f"trusted runtime path unavailable: {type(error).__name__}",
+                security_report=cls._path_failure_report(security_report),
+            )
+        try:
+            paths.validate_storage_layout()
             configure_logging(settings.log_level)
             events = InMemoryEventBus()
+            paths.validate_storage_layout()
             state_store = SQLiteStateStore(paths.state_database)
+            paths.validate_storage_layout()
             state_machine = ApplicationStateMachine(state_store, event_bus=events)
+            paths.validate_storage_layout()
             audit = SQLiteAuditSink(paths.audit_database)
+            paths.validate_storage_layout()
             policy = PolicyEngine()
-            broker = PermissionBroker(policy, audit_sink=audit, event_bus=events)
+            broker = PermissionBroker(
+                policy,
+                audit_sink=audit,
+                event_bus=events,
+            )
             registry = ToolRegistry(
                 (CalculatorTool(), LocalTimeTool(), UnavailableWeatherTool()),
                 permission_broker=broker,
             )
+            registry.seal()
+            paths.validate_storage_layout()
             planning_store = SQLitePlanningStore(paths.planning_database)
+            paths.validate_storage_layout()
             validator = PlanValidator(registry, max_steps=settings.agent_max_steps)
             engine = PlanningEngine(
                 store=planning_store,
@@ -232,8 +407,10 @@ class ApplicationRuntime:
                     task_state_for_status(task.status),
                     reason="reconciled from authoritative planning store",
                 )
+            paths.validate_storage_layout()
             memory_store = SQLiteMemoryStore(paths.memory_database)
-            root = project_root or Path(__file__).resolve().parents[1]
+            paths.validate_storage_layout()
+            root = resolved_project_root
             knowledge = KnowledgeStore.load(root / "knowledge" / "generated" / "project-index.json")
             provider = create_ai_provider(settings)
             conversation_memory = ConversationContextService()
@@ -274,22 +451,62 @@ class ApplicationRuntime:
             StateStoreError,
             sqlite3.DatabaseError,
         ) as error:
-            runtime = cls.__new__(cls)
-            runtime.container = None
-            runtime.status = RuntimeStatus.SAFE_MODE
-            runtime.error = f"persistence unavailable: {type(error).__name__}"
-            return runtime
+            cls._close_partial_stores(memory_store, planning_store, audit, state_store)
+            return cls(
+                None,
+                status=RuntimeStatus.SAFE_MODE,
+                error=f"persistence unavailable: {type(error).__name__}",
+                security_report=security_report,
+            )
         except Exception as error:
-            runtime = cls.__new__(cls)
-            runtime.container = None
-            runtime.status = RuntimeStatus.ERROR
-            runtime.error = f"startup failed: {type(error).__name__}"
-            return runtime
-        return cls(container, status=RuntimeStatus.READY)
+            cls._close_partial_stores(memory_store, planning_store, audit, state_store)
+            return cls(
+                None,
+                status=RuntimeStatus.ERROR,
+                error=f"startup failed: {type(error).__name__}",
+                security_report=security_report,
+            )
+        return cls(
+            container,
+            status=RuntimeStatus.READY,
+            security_report=security_report,
+        )
+
+    @staticmethod
+    def _path_failure_report(report: StartupSecurityReport) -> StartupSecurityReport:
+        if any(
+            violation.code is SecurityViolationCode.APP_DATA_PATH_UNSAFE
+            for violation in report.violations
+        ):
+            return report
+        return StartupSecurityReport(
+            report.policy_version,
+            (
+                *report.violations,
+                SecurityViolation(
+                    SecurityViolationCode.APP_DATA_PATH_UNSAFE,
+                    "The trusted runtime path could not be resolved safely",
+                ),
+            ),
+            None,
+            report.resolved_project_root,
+        )
+
+    @staticmethod
+    def _close_partial_stores(*stores: object | None) -> None:
+        """Best-effort cleanup after startup fails before a container owns resources."""
+
+        for store in stores:
+            close = getattr(store, "close", None)
+            if callable(close):
+                try:
+                    close()
+                except Exception:
+                    continue
 
     async def aclose(self) -> None:
         if self.status is RuntimeStatus.STOPPED:
             return
-        if self.container is not None:
-            await self.container.aclose()
-        self.status = RuntimeStatus.STOPPED
+        if self._container is not None:
+            await self._container.aclose()
+        self._status = RuntimeStatus.STOPPED

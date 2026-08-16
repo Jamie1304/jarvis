@@ -319,7 +319,7 @@ async def test_command_timeout_returns_captured_output(tmp_path: Path) -> None:
         },
     )
 
-    assert result.status is ToolResultStatus.TIMEOUT
+    assert result.status is ToolResultStatus.UNKNOWN_OUTCOME
     assert result.output is not None
     assert result.output.model_dump()["stdout"] == "partial stdout"
     assert adapter.calls[0][0].executable == "git.exe"

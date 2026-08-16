@@ -24,6 +24,7 @@ from jarvis.permissions.models import (
 from jarvis.tools.base import Tool
 from jarvis.tools.models import (
     SemanticVersion,
+    ToolEffectDisposition,
     ToolEvidence,
     ToolExecutionContext,
     ToolManifest,
@@ -957,6 +958,7 @@ class ControlledCommandTool(Tool[ControlledCommandInput, ControlledCommandOutput
                 ToolResultStatus.EXPECTED_FAILURE,
                 "command_start_failed",
                 "The trusted command could not be started",
+                effect_disposition=ToolEffectDisposition.NO_EFFECT,
             )
         output = ControlledCommandOutput(
             exit_code=execution.exit_code,
@@ -976,6 +978,7 @@ class ControlledCommandTool(Tool[ControlledCommandInput, ControlledCommandOutput
                 ToolResultStatus.EXPECTED_FAILURE,
                 "command_arguments_rejected",
                 "The trusted command does not permit those arguments",
+                effect_disposition=ToolEffectDisposition.NO_EFFECT,
             )
         if execution.timed_out:
             return ToolResult(

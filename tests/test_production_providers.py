@@ -55,6 +55,24 @@ async def test_local_ollama_vision_rejects_missing_or_malformed_artifacts() -> N
     await client.aclose()
 
 
+@pytest.mark.parametrize(
+    "endpoint",
+    (
+        "https://127.0.0.1:11434",
+        "http://localhost:11434",
+        "http://example.invalid:11434",
+        "http://127.0.0.1:11434/?token=secret",
+    ),
+)
+def test_local_ollama_vision_rejects_ambiguous_or_remote_endpoints(endpoint: str) -> None:
+    with pytest.raises(ValueError, match="configuration is invalid"):
+        OllamaVisionProvider(
+            model="llava:test",
+            screenshots=Loader(),
+            endpoint=endpoint,
+        )
+
+
 def test_local_energy_vad_is_bounded_and_deterministic() -> None:
     vad = EnergyVADProvider(speech_threshold=0.1, end_threshold=0.02)
     assert vad.is_speech(AudioFrame((0.2, -0.2), 16_000))
