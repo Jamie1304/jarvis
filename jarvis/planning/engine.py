@@ -11,6 +11,16 @@ from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
+from jarvis.events import (
+    EventBus,
+    EventEnvelope,
+    EventType,
+    PlanCreated,
+    PlanUpdated,
+    StepCompleted,
+    StepFailed,
+    StepStarted,
+)
 from jarvis.planning.models import (
     BudgetUsage,
     ExecutionBudgets,
@@ -79,8 +89,9 @@ class PlanningGoalVerifier(ABC):
 class BrokeredPlanningStepExecutor(PlanningStepExecutor):
     """Invoke an exact registry tool through its mandatory bound PermissionBroker."""
 
-    def __init__(self, registry: ToolRegistry) -> None:
+    def __init__(self, registry: ToolRegistry, *, event_bus: EventBus | None = None) -> None:
         self._registry = registry
+        self._event_bus = event_bus
 
     async def execute(
         self, task: PlanningTask, step: PlanningStep, cancellation: asyncio.Event
@@ -100,7 +111,9 @@ class BrokeredPlanningStepExecutor(PlanningStepExecutor):
                 error_code="malformed_owned_input",
                 error_message="Owned step input is not an object",
             )
-        result = await tool.invoke(context, raw_input, self._registry.permission_broker)
+        result = await tool.invoke(
+            context, raw_input, self._registry.permission_broker, event_bus=self._event_bus
+        )
         evidence = tuple(item.value for item in result.evidence)
         if result.status is ToolResultStatus.SUCCESS and result.output is not None:
             return StepExecutionResult(
@@ -210,6 +223,7 @@ class PlanningEngine:
         goal_verifier: PlanningGoalVerifier,
         clock: Callable[[], datetime] = _now,
         state_machine: ApplicationStateMachine | None = None,
+        event_bus: EventBus | None = None,
     ) -> None:
         self._store = store
         self._advisor = advisor
@@ -219,6 +233,7 @@ class PlanningEngine:
         self._goal_verifier = goal_verifier
         self._clock = clock
         self._state_machine = state_machine
+        self._event_bus = event_bus
         self._cancellations: dict[UUID, asyncio.Event] = {}
 
     async def create_task(
@@ -276,6 +291,16 @@ class PlanningEngine:
             updated_at=self._clock(),
         )
         self._save_state(task, plan)
+        if self._event_bus is not None:
+            self._event_bus.publish_nowait(
+                EventEnvelope.create(
+                    EventType.PLAN_CREATED,
+                    PlanCreated(plan.plan_id, len(plan.steps)),
+                    source="planning.engine",
+                    task_id=task.task_id,
+                    correlation_id=task.task_id,
+                )
+            )
         return task
 
     async def submit(
@@ -380,6 +405,7 @@ class PlanningEngine:
             if budget_error is not None:
                 return self._fail_budget(task, budget_error, plan=plan)
             task, plan, step = self._begin_step(task, plan, step)
+            self._emit_step(EventType.STEP_STARTED, task, step, "started")
             try:
                 execution = await self._executor.execute(task, step, cancellation)
             except Exception as adapter_error:
@@ -393,6 +419,9 @@ class PlanningEngine:
             if execution.status is StepExecutionStatus.WAITING_FOR_PERMISSION:
                 return self._pause(task, plan, step, execution.approval_request_ids)
             if execution.status is StepExecutionStatus.TRANSIENT_FAILURE:
+                self._emit_step(
+                    EventType.STEP_FAILED, task, step, execution.error_code or "transient_failure"
+                )
                 step_error = self._execution_error(execution, FailureKind.TRANSIENT)
                 if (
                     step.attempts <= step.max_retries
@@ -413,6 +442,12 @@ class PlanningEngine:
                     continue
                 return await self._replan_or_fail(task, plan, step, step_error, execution.evidence)
             if execution.status is StepExecutionStatus.DETERMINISTIC_FAILURE:
+                self._emit_step(
+                    EventType.STEP_FAILED,
+                    task,
+                    step,
+                    execution.error_code or "deterministic_failure",
+                )
                 step_error = self._execution_error(execution, FailureKind.DETERMINISTIC)
                 return await self._replan_or_fail(task, plan, step, step_error, execution.evidence)
 
@@ -432,6 +467,7 @@ class PlanningEngine:
                     f"Step verifier failed ({type(adapter_error).__name__})",
                 )
             if not verification.succeeded:
+                self._emit_step(EventType.STEP_FAILED, task, step, "step_verification_failed")
                 step_error = StepError(
                     "step_verification_failed",
                     verification.reason,
@@ -458,6 +494,7 @@ class PlanningEngine:
                 updated_at=self._clock(),
             )
             self._save_state(task, plan)
+            self._emit_step(EventType.STEP_COMPLETED, task, step, "succeeded")
 
     def _begin_step(
         self, task: PlanningTask, plan: OwnedPlan, step: PlanningStep
@@ -698,6 +735,38 @@ class PlanningEngine:
     def _save_state(self, task: PlanningTask, plan: OwnedPlan) -> None:
         self._publish_state(task, plan_revision=plan.version)
         self._store.save_state(task, plan)
+        if self._event_bus is not None:
+            self._event_bus.publish_nowait(
+                EventEnvelope.create(
+                    EventType.PLAN_UPDATED,
+                    PlanUpdated(plan.plan_id, plan.version),
+                    source="planning.engine",
+                    task_id=task.task_id,
+                    correlation_id=task.task_id,
+                )
+            )
+
+    def _emit_step(
+        self, event_type: EventType, task: PlanningTask, step: PlanningStep, detail: str
+    ) -> None:
+        if self._event_bus is None:
+            return
+        payload: StepStarted | StepCompleted | StepFailed
+        if event_type is EventType.STEP_STARTED:
+            payload = StepStarted(step.step_id, step.tool_id)
+        elif event_type is EventType.STEP_COMPLETED:
+            payload = StepCompleted(step.step_id, detail)
+        else:
+            payload = StepFailed(step.step_id, detail)
+        self._event_bus.publish_nowait(
+            EventEnvelope.create(
+                event_type,
+                payload,
+                source="planning.engine",
+                task_id=task.task_id,
+                correlation_id=task.task_id,
+            )
+        )
 
     def _save_task(self, task: PlanningTask) -> None:
         self._publish_state(task)

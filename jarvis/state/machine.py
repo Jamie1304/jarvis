@@ -9,6 +9,7 @@ from threading import RLock
 from types import MappingProxyType
 from uuid import UUID
 
+from jarvis.events import EventBus, EventEnvelope, EventType, TaskCreated, TaskStateChanged
 from jarvis.state.models import (
     ApplicationState,
     StateTransition,
@@ -202,8 +203,11 @@ TASK_TRANSITIONS = MappingProxyType(_TASK_TRANSITIONS)
 class ApplicationStateMachine:
     """Own global state and independent task snapshots under one transition table."""
 
-    def __init__(self, store: StateStore | None = None) -> None:
+    def __init__(
+        self, store: StateStore | None = None, *, event_bus: EventBus | None = None
+    ) -> None:
         self._store = store or InMemoryStateStore()
+        self._event_bus = event_bus
         self._application_state = ApplicationState.IDLE
         self._tasks: dict[UUID, TaskSnapshot] = {item.task_id: item for item in self._store.tasks()}
         self._history: list[StateTransition] = []
@@ -437,6 +441,34 @@ class ApplicationStateMachine:
     def _record(self, transition: StateTransition) -> None:
         self._history.append(transition)
         self._store.append_transition(transition)
+        if self._event_bus is None:
+            return
+        payload: TaskCreated | TaskStateChanged
+        if transition.scope == "task" and transition.event is TransitionEvent.TASK_CREATED:
+            payload = TaskCreated(transition.reason)
+            event_type = EventType.TASK_CREATED
+        elif transition.scope == "task":
+            payload = TaskStateChanged(
+                str(transition.from_state.value), str(transition.to_state.value), transition.reason
+            )
+            event_type = EventType.TASK_STATE_CHANGED
+        else:
+            # Application transitions are represented by the same bounded state event;
+            # task_id remains optional and no state authority moves into the bus.
+            payload = TaskStateChanged(
+                str(transition.from_state.value), str(transition.to_state.value), transition.reason
+            )
+            event_type = EventType.TASK_STATE_CHANGED
+        correlation_id = transition.task_id or UUID(int=0)
+        self._event_bus.publish_nowait(
+            EventEnvelope.create(
+                event_type,
+                payload,
+                source="state.machine",
+                task_id=transition.task_id,
+                correlation_id=correlation_id,
+            )
+        )
 
     @staticmethod
     def _ensure_allowed(

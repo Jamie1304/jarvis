@@ -16,6 +16,7 @@ from uuid import UUID, uuid4
 
 from jarvis.autonomy.models import Task, TaskStatus
 from jarvis.autonomy.orchestrator import AgentOrchestrator
+from jarvis.events import EventBus, EventEnvelope, EventType, VoiceStateChanged
 from jarvis.speech.stt import AudioData, SttProvider
 from jarvis.speech.tts import TextToSpeechService
 from jarvis.state import ApplicationStateMachine
@@ -187,6 +188,7 @@ class LocalVoiceController:
         tts: TextToSpeechService | None = None,
         config: VoiceConfig | None = None,
         state_machine: ApplicationStateMachine | None = None,
+        event_bus: EventBus | None = None,
     ) -> None:
         self._wake = wake_provider
         self._vad = vad
@@ -195,6 +197,7 @@ class LocalVoiceController:
         self._tts = tts
         self._config = config or VoiceConfig()
         self._state_machine = state_machine
+        self._event_bus = event_bus
         self._status = VoiceStatus(VoiceState.IDLE, True, None, "ready", datetime.now(UTC))
         self._history: list[VoiceStatus] = [self._status]
         self._session_id: UUID | None = None
@@ -345,6 +348,16 @@ class LocalVoiceController:
             state, state is VoiceState.IDLE, self._session_id, reason, datetime.now(UTC)
         )
         self._history.append(self._status)
+        if self._event_bus is not None:
+            self._event_bus.publish_nowait(
+                EventEnvelope.create(
+                    EventType.VOICE_STATE_CHANGED,
+                    VoiceStateChanged(state.value),
+                    source="voice.controller",
+                    task_id=self._task_handle.task_id if self._task_handle is not None else None,
+                    correlation_id=self._session_id or UUID(int=0),
+                )
+            )
 
     def _command(self, text: str) -> InterruptionCommand | None:
         normalized = " ".join(text.casefold().split())

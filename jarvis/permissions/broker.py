@@ -8,6 +8,14 @@ from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
+from jarvis.events import (
+    EventBus,
+    EventEnvelope,
+    EventType,
+    PermissionDenied,
+    PermissionGranted,
+    PermissionRequested,
+)
 from jarvis.permissions.audit import AuditSink, InMemoryAuditSink
 from jarvis.permissions.models import (
     ActionDescriptor,
@@ -45,6 +53,7 @@ class PermissionBroker:
         approval_ttl_seconds: int = 300,
         max_remembered_seconds: int = 3600,
         clock: Clock | None = None,
+        event_bus: EventBus | None = None,
     ) -> None:
         if approval_ttl_seconds <= 0 or max_remembered_seconds <= 0:
             raise ValueError("Approval and remembered-grant lifetimes must be positive")
@@ -53,6 +62,7 @@ class PermissionBroker:
         self._approval_ttl_seconds = approval_ttl_seconds
         self._max_remembered_seconds = max_remembered_seconds
         self._clock = clock or (lambda: datetime.now(UTC))
+        self._event_bus = event_bus
         self._registered_tools: dict[str, tuple[int, frozenset[Permission]]] = {}
         self._approvals: dict[UUID, ApprovalRequest] = {}
         self._grants: dict[UUID, RememberedGrant] = {}
@@ -194,6 +204,11 @@ class PermissionBroker:
         )
         denial = next((item for item in evaluations if item.decision is Decision.DENY), None)
         if denial is not None:
+            self._emit_event(
+                EventType.PERMISSION_DENIED,
+                PermissionDenied(None, denial.reason.value),
+                task_id,
+            )
             await self._audit_immediate(
                 task_id=task_id,
                 user_id=user_id,
@@ -264,6 +279,13 @@ class PermissionBroker:
                         expires_at=now + timedelta(seconds=self._approval_ttl_seconds),
                     )
                     self._approvals[pending.request_id] = pending
+                    self._emit_event(
+                        EventType.PERMISSION_REQUESTED,
+                        PermissionRequested(
+                            pending.request_id, permission.value, descriptor.risk.value
+                        ),
+                        task_id,
+                    )
                 approvals.append(pending)
                 missing.append(evaluation)
 
@@ -291,6 +313,12 @@ class PermissionBroker:
                     user_id=user_id,
                     authorized_at=now,
                 )
+                for approval in approvals:
+                    self._emit_event(
+                        EventType.PERMISSION_GRANTED,
+                        PermissionGranted(approval.request_id, approval.permission.value),
+                        task_id,
+                    )
                 return AuthorizationResult(
                     True,
                     DecisionReason.APPROVAL_APPROVED,
@@ -309,6 +337,21 @@ class PermissionBroker:
             outcome="approval_pending",
         )
         return AuthorizationResult(False, reason, approval_requests=pending_approvals)
+
+    def _emit_event(self, event_type: EventType, payload: object, task_id: UUID) -> None:
+        if self._event_bus is None:
+            return
+        if not isinstance(payload, PermissionRequested | PermissionGranted | PermissionDenied):
+            return
+        self._event_bus.publish_nowait(
+            EventEnvelope.create(
+                event_type,
+                payload,
+                source="permissions.broker",
+                task_id=task_id,
+                correlation_id=task_id,
+            )
+        )
 
     async def decide(
         self,

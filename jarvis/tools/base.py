@@ -9,6 +9,7 @@ from typing import Generic, TypeVar
 
 from pydantic import ValidationError
 
+from jarvis.events import EventBus, EventEnvelope, EventType, ToolCompleted, ToolFailed, ToolStarted
 from jarvis.permissions.broker import PermissionBroker
 from jarvis.permissions.models import ActionDescriptor, Risk
 from jarvis.tools.models import (
@@ -85,6 +86,8 @@ class Tool(ABC, Generic[InputModel, OutputModel]):
         context: ToolExecutionContext,
         raw_input: Mapping[str, object],
         broker: PermissionBroker,
+        *,
+        event_bus: EventBus | None = None,
     ) -> ToolResult:
         """Validate then authorize an exact action before private implementation execution."""
 
@@ -141,6 +144,16 @@ class Tool(ABC, Generic[InputModel, OutputModel]):
             normalized_arguments=validated_input.model_dump(mode="json"),
         )
         if not authorization.authorized or authorization.receipt is None:
+            if event_bus is not None:
+                event_bus.publish_nowait(
+                    EventEnvelope.create(
+                        EventType.TOOL_FAILED,
+                        ToolFailed(self.manifest.tool_id, authorization.reason.value),
+                        source="tool.invoke",
+                        task_id=context.task_id,
+                        correlation_id=context.correlation_id,
+                    )
+                )
             metadata = tuple(
                 ToolMetadata("approval_request_id", str(request.request_id))
                 for request in authorization.approval_requests
@@ -150,6 +163,16 @@ class Tool(ABC, Generic[InputModel, OutputModel]):
                 authorization.reason.value,
                 "Permission broker denied execution or requires trusted user approval",
                 metadata=metadata,
+            )
+        if event_bus is not None:
+            event_bus.publish_nowait(
+                EventEnvelope.create(
+                    EventType.TOOL_STARTED,
+                    ToolStarted(self.manifest.tool_id),
+                    source="tool.invoke",
+                    task_id=context.task_id,
+                    correlation_id=context.correlation_id,
+                )
             )
         authorized_context = replace(context, authorization=authorization.receipt)
         health = await self.health_check()
@@ -190,6 +213,27 @@ class Tool(ABC, Generic[InputModel, OutputModel]):
                 "Tool invocation was cancelled",
             )
         await broker.record_execution_outcome(authorization.receipt, result.status.value)
+        if event_bus is not None:
+            payload: ToolCompleted | ToolFailed
+            event_type: EventType
+            if result.succeeded:
+                payload = ToolCompleted(self.manifest.tool_id, result.status.value)
+                event_type = EventType.TOOL_COMPLETED
+            else:
+                payload = ToolFailed(
+                    self.manifest.tool_id,
+                    result.error.code if result.error is not None else result.status.value,
+                )
+                event_type = EventType.TOOL_FAILED
+            event_bus.publish_nowait(
+                EventEnvelope.create(
+                    event_type,
+                    payload,
+                    source="tool.invoke",
+                    task_id=context.task_id,
+                    correlation_id=context.correlation_id,
+                )
+            )
         return result
 
     async def _execute_or_cancel(
