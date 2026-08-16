@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import sqlite3
 from dataclasses import dataclass
 from decimal import Decimal
 from enum import StrEnum
@@ -23,19 +24,20 @@ from jarvis.memory.services import (
     MemoryRetrievalService,
     ProjectSystemMemory,
 )
-from jarvis.memory.store import SQLiteMemoryStore
-from jarvis.permissions import PermissionBroker, PolicyEngine, SQLiteAuditSink
+from jarvis.memory.store import MemoryMigrationError, SQLiteMemoryStore
+from jarvis.permissions import AuditStoreError, PermissionBroker, PolicyEngine, SQLiteAuditSink
 from jarvis.planning.engine import (
     BrokeredPlanningStepExecutor,
     CompletionCriteriaVerifier,
     EvidencePlanningStepVerifier,
     PlanAdvisor,
     PlanningEngine,
+    task_state_for_status,
 )
 from jarvis.planning.models import ReplanEvidence
-from jarvis.planning.store import SQLitePlanningStore
+from jarvis.planning.store import PlanningStoreError, SQLitePlanningStore
 from jarvis.planning.validation import PlanValidator
-from jarvis.state import ApplicationStateMachine, SQLiteStateStore
+from jarvis.state import ApplicationStateMachine, SQLiteStateStore, StateStoreError
 from jarvis.task_controller import PlanningTaskController, TaskController
 from jarvis.tools.calculator import CalculatorTool
 from jarvis.tools.local_time import LocalTimeTool
@@ -221,7 +223,15 @@ class ApplicationRuntime:
                 goal_verifier=CompletionCriteriaVerifier(),
                 state_machine=state_machine,
                 event_bus=events,
+                lifecycle_audit=audit,
             )
+            engine.reconcile_after_restart()
+            for task in engine.list_tasks():
+                state_machine.reconcile_projection(
+                    task.task_id,
+                    task_state_for_status(task.status),
+                    reason="reconciled from authoritative planning store",
+                )
             memory_store = SQLiteMemoryStore(paths.memory_database)
             root = project_root or Path(__file__).resolve().parents[1]
             knowledge = KnowledgeStore.load(root / "knowledge" / "generated" / "project-index.json")
@@ -257,6 +267,18 @@ class ApplicationRuntime:
                 discovery=CapabilityGapDetector(frozenset({"calculator", "local_time"})),
                 candidate_evaluator=CandidateEvaluator(),
             )
+        except (
+            AuditStoreError,
+            PlanningStoreError,
+            MemoryMigrationError,
+            StateStoreError,
+            sqlite3.DatabaseError,
+        ) as error:
+            runtime = cls.__new__(cls)
+            runtime.container = None
+            runtime.status = RuntimeStatus.SAFE_MODE
+            runtime.error = f"persistence unavailable: {type(error).__name__}"
+            return runtime
         except Exception as error:
             runtime = cls.__new__(cls)
             runtime.container = None

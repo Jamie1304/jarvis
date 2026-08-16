@@ -19,6 +19,10 @@ from jarvis.state.models import (
 )
 
 
+class StateStoreError(RuntimeError):
+    """Durable state projection is unavailable or malformed."""
+
+
 class StateStore(ABC):
     @abstractmethod
     def save_task(self, task: TaskSnapshot) -> None: ...
@@ -111,7 +115,11 @@ class SQLiteStateStore(StateStore):
             Path(self._path).parent.mkdir(parents=True, exist_ok=True)
         self._connection = sqlite3.connect(self._path, check_same_thread=False)
         self._connection.row_factory = sqlite3.Row
+        self._connection.execute("PRAGMA foreign_keys = ON")
+        self._connection.execute("PRAGMA busy_timeout = 5000")
+        self._connection.execute("PRAGMA journal_mode = WAL")
         self._lock = RLock()
+        self._integrity_check()
         self._migrate()
 
     def _migrate(self) -> None:
@@ -121,12 +129,22 @@ class SQLiteStateStore(StateStore):
                 0
             ]
             current = int(current or 0)
+            if current > len(self._MIGRATIONS) - 1:
+                raise StateStoreError("State database uses a future schema")
             for version, migration in enumerate(self._MIGRATIONS[1:], start=1):
                 if current < version:
                     self._connection.execute(migration)
                     self._connection.execute(
                         "INSERT INTO state_schema(version) VALUES (?)", (version,)
                     )
+
+    def _integrity_check(self) -> None:
+        try:
+            row = self._connection.execute("PRAGMA integrity_check").fetchone()
+        except sqlite3.DatabaseError as error:
+            raise StateStoreError("State database integrity check failed") from error
+        if row is None or str(row[0]).casefold() != "ok":
+            raise StateStoreError("State database is corrupt")
 
     def save_task(self, task: TaskSnapshot) -> None:
         with self._lock, self._connection:

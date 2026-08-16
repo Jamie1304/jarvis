@@ -20,6 +20,7 @@ class PlanningTaskStatus(StrEnum):
     WAITING_FOR_PERMISSION = "waiting_for_permission"
     VERIFYING = "verifying"
     REPLANNING = "replanning"
+    RECOVERING = "recovering"
     COMPLETED = "completed"
     FAILED = "failed"
     CANCELLED = "cancelled"

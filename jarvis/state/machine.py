@@ -357,6 +357,47 @@ class ApplicationStateMachine:
             task_id, TaskState.RECOVERING, TransitionEvent.RECOVERY_STARTED, reason=reason
         )
 
+    def reconcile_projection(
+        self,
+        task_id: UUID,
+        target: TaskState,
+        *,
+        reason: str,
+        plan_revision: int | None = None,
+    ) -> TaskSnapshot:
+        """Repair a non-authoritative state projection from durable planning truth."""
+
+        with self._lock:
+            current = self._tasks.get(task_id) or self._store.load_task(task_id)
+            if current is None:
+                self.create_task(task_id, reason="rebuild state projection")
+                current = self._tasks[task_id]
+            if current.state is target:
+                return current
+            now = datetime.now(UTC)
+            updated = replace(
+                current,
+                state=target,
+                updated_at=now,
+                plan_revision=plan_revision if plan_revision is not None else current.plan_revision,
+                recovery_count=current.recovery_count + 1,
+            )
+            self._tasks[task_id] = updated
+            self._store.save_task(updated)
+            self._record(
+                StateTransition(
+                    current.state,
+                    target,
+                    TransitionEvent.RECOVERY_STARTED,
+                    task_id,
+                    now,
+                    reason,
+                    {"projection": "reconciled"},
+                    "task",
+                )
+            )
+            return updated
+
     def _sync_application(
         self,
         task_state: TaskState,

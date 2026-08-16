@@ -16,7 +16,7 @@ from jarvis.state.models import (
     TaskState,
     TransitionEvent,
 )
-from jarvis.state.store import InMemoryStateStore, SQLiteStateStore, StateStore
+from jarvis.state.store import InMemoryStateStore, SQLiteStateStore, StateStore, StateStoreError
 
 __all__ = [
     "ApplicationState",
@@ -29,6 +29,7 @@ __all__ = [
     "StateEvent",
     "StateMachineError",
     "StateStore",
+    "StateStoreError",
     "StateTransition",
     "TASK_TRANSITIONS",
     "TaskSnapshot",

@@ -1,6 +1,6 @@
 """Deny-by-default permission broker public API."""
 
-from jarvis.permissions.audit import AuditSink, InMemoryAuditSink, SQLiteAuditSink
+from jarvis.permissions.audit import AuditSink, AuditStoreError, InMemoryAuditSink, SQLiteAuditSink
 from jarvis.permissions.broker import PermissionBroker
 from jarvis.permissions.models import (
     ActionDescriptor,
@@ -33,6 +33,7 @@ __all__ = [
     "ApprovalSource",
     "ApprovalStatus",
     "AuditSink",
+    "AuditStoreError",
     "AuthorizationReceipt",
     "Decision",
     "DecisionReason",

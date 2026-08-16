@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 from abc import ABC, abstractmethod
@@ -21,6 +22,7 @@ from jarvis.events import (
     StepFailed,
     StepStarted,
 )
+from jarvis.permissions.audit import SQLiteAuditSink
 from jarvis.planning.models import (
     BudgetUsage,
     ExecutionBudgets,
@@ -49,6 +51,25 @@ from jarvis.tools.models import (
     ToolResultStatus,
 )
 from jarvis.tools.registry import ToolRegistry
+
+
+def task_state_for_status(status: PlanningTaskStatus) -> TaskState:
+    """Map authoritative planning state to its rebuildable UI projection."""
+
+    return {
+        PlanningTaskStatus.CREATED: TaskState.CREATED,
+        PlanningTaskStatus.PLANNING: TaskState.PLANNING,
+        PlanningTaskStatus.READY: TaskState.WAITING,
+        PlanningTaskStatus.EXECUTING: TaskState.EXECUTING,
+        PlanningTaskStatus.WAITING_FOR_PERMISSION: TaskState.WAITING_FOR_PERMISSION,
+        PlanningTaskStatus.VERIFYING: TaskState.VERIFYING,
+        PlanningTaskStatus.REPLANNING: TaskState.THINKING,
+        PlanningTaskStatus.RECOVERING: TaskState.RECOVERING,
+        PlanningTaskStatus.COMPLETED: TaskState.COMPLETED,
+        PlanningTaskStatus.FAILED: TaskState.ERROR,
+        PlanningTaskStatus.CANCELLED: TaskState.CANCELLED,
+        PlanningTaskStatus.BUDGET_EXHAUSTED: TaskState.ERROR,
+    }[status]
 
 
 class PlanningEngineError(RuntimeError):
@@ -224,6 +245,7 @@ class PlanningEngine:
         clock: Callable[[], datetime] = _now,
         state_machine: ApplicationStateMachine | None = None,
         event_bus: EventBus | None = None,
+        lifecycle_audit: SQLiteAuditSink | None = None,
     ) -> None:
         self._store = store
         self._advisor = advisor
@@ -234,6 +256,7 @@ class PlanningEngine:
         self._clock = clock
         self._state_machine = state_machine
         self._event_bus = event_bus
+        self._lifecycle_audit = lifecycle_audit
         self._cancellations: dict[UUID, asyncio.Event] = {}
 
     async def create_task(
@@ -333,6 +356,68 @@ class PlanningEngine:
         """Return the current immutable plan snapshot without executing it."""
 
         return self._store.load_plan(task_id)
+
+    def reconcile_after_restart(self) -> tuple[PlanningTask, ...]:
+        """Make interrupted work explicit without replaying an unknown external effect.
+
+        Pending approvals are intentionally invalidated: a later run enters the
+        broker again and receives a fresh fingerprint-bound request.  A step that
+        was running or verifying at loss of process is moved to RECOVERING for
+        operator diagnosis, never replayed automatically.
+        """
+
+        reconciled: list[PlanningTask] = []
+        for task in self._store.list_tasks():
+            plan = self._store.load_plan(task.task_id)
+            if plan is None:
+                raise PlanningStoreError("Planning task has no matching current plan")
+            interrupted = task.status in {
+                PlanningTaskStatus.EXECUTING,
+                PlanningTaskStatus.VERIFYING,
+                PlanningTaskStatus.REPLANNING,
+            } or any(
+                step.status in {PlanningStepStatus.RUNNING, PlanningStepStatus.VERIFYING}
+                for step in plan.steps
+            )
+            if interrupted:
+                updated = replace(
+                    task,
+                    status=PlanningTaskStatus.RECOVERING,
+                    active_step_id=None,
+                    error=StepError(
+                        "unknown_operation_outcome",
+                        "Task was interrupted during an operation; operator resolution is required",
+                        FailureKind.DETERMINISTIC,
+                    ),
+                    updated_at=self._clock(),
+                )
+                self._save_state(updated, plan, reconciliation=True)
+                reconciled.append(updated)
+                continue
+            if task.status is PlanningTaskStatus.WAITING_FOR_PERMISSION:
+                refreshed_steps = tuple(
+                    replace(step, status=PlanningStepStatus.QUEUED)
+                    if step.status is PlanningStepStatus.WAITING_FOR_PERMISSION
+                    else step
+                    for step in plan.steps
+                )
+                updated_plan = replace(
+                    plan,
+                    status=OwnedPlanStatus.ACTIVE,
+                    steps=refreshed_steps,
+                    updated_at=self._clock(),
+                )
+                updated = replace(
+                    task,
+                    status=PlanningTaskStatus.READY,
+                    active_step_id=None,
+                    waiting_request_ids=(),
+                    error=None,
+                    updated_at=self._clock(),
+                )
+                self._save_state(updated, updated_plan, reconciliation=True)
+                reconciled.append(updated)
+        return tuple(reconciled)
 
     async def run(self, task_id: UUID) -> PlanningTask:
         if task_id in self._cancellations:
@@ -514,6 +599,13 @@ class PlanningEngine:
     def _begin_step(
         self, task: PlanningTask, plan: OwnedPlan, step: PlanningStep
     ) -> tuple[PlanningTask, OwnedPlan, PlanningStep]:
+        # A model cannot opt a privileged/external step out of idempotency by
+        # merely setting ``expensive_action`` false. Permissions are validated
+        # from the registered tool contract and form the durable-effect boundary.
+        if step.expensive_action or step.required_permissions:
+            fingerprint = hashlib.sha256(step.input_json.encode("utf-8")).hexdigest()
+            if not self._store.reserve_operation(task.task_id, str(step.step_id), fingerprint):
+                raise PlanningStoreError("Operation idempotency key was already reserved")
         usage = replace(
             task.usage,
             executed_steps=task.usage.executed_steps + 1,
@@ -747,9 +839,21 @@ class PlanningEngine:
             return "expensive_action_budget_exhausted"
         return None
 
-    def _save_state(self, task: PlanningTask, plan: OwnedPlan) -> None:
-        self._publish_state(task, plan_revision=plan.version)
+    def _save_state(
+        self, task: PlanningTask, plan: OwnedPlan, *, reconciliation: bool = False
+    ) -> None:
+        # Task/plan persistence is authoritative; projections follow a successful commit.
         self._store.save_state(task, plan)
+        self._record_lifecycle(task, plan.version)
+        if reconciliation and self._state_machine is not None:
+            self._state_machine.reconcile_projection(
+                task.task_id,
+                task_state_for_status(task.status),
+                reason="reconciled from authoritative planning store",
+                plan_revision=plan.version,
+            )
+        else:
+            self._publish_state(task, plan_revision=plan.version)
         if self._event_bus is not None:
             self._event_bus.publish_nowait(
                 EventEnvelope.create(
@@ -784,27 +888,29 @@ class PlanningEngine:
         )
 
     def _save_task(self, task: PlanningTask) -> None:
-        self._publish_state(task)
         self._store.save_task(task)
+        self._record_lifecycle(task, None)
+        self._publish_state(task)
+
+    def _record_lifecycle(self, task: PlanningTask, plan_version: int | None) -> None:
+        if self._lifecycle_audit is None:
+            return
+        self._lifecycle_audit.record_lifecycle(
+            "planning.task_persisted",
+            task_id=task.task_id,
+            detail={
+                "status": task.status.value,
+                "plan_id": str(task.plan_id) if task.plan_id is not None else "none",
+                "plan_version": str(plan_version) if plan_version is not None else "none",
+            },
+        )
 
     def _publish_state(self, task: PlanningTask, *, plan_revision: int | None = None) -> None:
         """Publish planner progress through the authoritative coordinator."""
 
         if self._state_machine is None:
             return
-        target = {
-            PlanningTaskStatus.CREATED: TaskState.CREATED,
-            PlanningTaskStatus.PLANNING: TaskState.PLANNING,
-            PlanningTaskStatus.READY: TaskState.WAITING,
-            PlanningTaskStatus.EXECUTING: TaskState.EXECUTING,
-            PlanningTaskStatus.WAITING_FOR_PERMISSION: TaskState.WAITING_FOR_PERMISSION,
-            PlanningTaskStatus.VERIFYING: TaskState.VERIFYING,
-            PlanningTaskStatus.REPLANNING: TaskState.THINKING,
-            PlanningTaskStatus.COMPLETED: TaskState.COMPLETED,
-            PlanningTaskStatus.FAILED: TaskState.ERROR,
-            PlanningTaskStatus.CANCELLED: TaskState.CANCELLED,
-            PlanningTaskStatus.BUDGET_EXHAUSTED: TaskState.ERROR,
-        }[task.status]
+        target = task_state_for_status(task.status)
         events = {
             TaskState.THINKING: TransitionEvent.REPLAN_REQUESTED,
             TaskState.PLANNING: TransitionEvent.PLAN_REQUESTED,
@@ -812,6 +918,7 @@ class PlanningEngine:
             TaskState.WAITING_FOR_PERMISSION: TransitionEvent.PERMISSION_REQUIRED,
             TaskState.EXECUTING: TransitionEvent.EXECUTION_STARTED,
             TaskState.VERIFYING: TransitionEvent.VERIFICATION_STARTED,
+            TaskState.RECOVERING: TransitionEvent.RECOVERY_STARTED,
             TaskState.COMPLETED: TransitionEvent.TASK_COMPLETED,
             TaskState.ERROR: TransitionEvent.TASK_FAILED,
             TaskState.CANCELLED: TransitionEvent.TASK_CANCELLED,

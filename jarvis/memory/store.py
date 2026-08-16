@@ -89,7 +89,11 @@ class SQLiteMemoryStore:
         database_path.parent.mkdir(parents=True, exist_ok=True)
         self._connection = sqlite3.connect(database_path, check_same_thread=False)
         self._connection.row_factory = sqlite3.Row
+        self._connection.execute("PRAGMA foreign_keys = ON")
+        self._connection.execute("PRAGMA busy_timeout = 5000")
+        self._connection.execute("PRAGMA journal_mode = WAL")
         self._lock = threading.RLock()
+        self._integrity_check()
         self.apply_migrations()
 
     @property
@@ -121,6 +125,8 @@ class SQLiteMemoryStore:
                         "SELECT version, name FROM memory_schema_migrations"
                     )
                 }
+                if any(version > len(self._migrations) for version in applied):
+                    raise MemoryMigrationError("Memory database uses a future schema")
                 for migration in self._migrations:
                     existing = applied.get(migration.version)
                     if existing is not None:
@@ -137,6 +143,14 @@ class SQLiteMemoryStore:
             except (sqlite3.DatabaseError, ValueError) as error:
                 self._connection.rollback()
                 raise MemoryMigrationError("Memory migration failed") from error
+
+    def _integrity_check(self) -> None:
+        try:
+            row = self._connection.execute("PRAGMA integrity_check").fetchone()
+        except sqlite3.DatabaseError as error:
+            raise MemoryMigrationError("Memory database integrity check failed") from error
+        if row is None or str(row[0]).casefold() != "ok":
+            raise MemoryMigrationError("Memory database is corrupt")
 
     def schema_version(self) -> int:
         with self._lock:

@@ -17,7 +17,7 @@
       ],
       "name": "ai",
       "provenance": {
-        "generated_at": "2026-08-16T09:51:13.651401+00:00",
+        "generated_at": "2026-08-16T10:16:30.723853+00:00",
         "revision": null,
         "source_files": [
           "jarvis/ai/__init__.py",
@@ -84,7 +84,7 @@
       ],
       "name": "applications",
       "provenance": {
-        "generated_at": "2026-08-16T09:51:13.651401+00:00",
+        "generated_at": "2026-08-16T10:16:30.723853+00:00",
         "revision": null,
         "source_files": [
           "jarvis/applications/__init__.py",
@@ -209,7 +209,7 @@
       ],
       "name": "autonomy",
       "provenance": {
-        "generated_at": "2026-08-16T09:51:13.651401+00:00",
+        "generated_at": "2026-08-16T10:16:30.723853+00:00",
         "revision": null,
         "source_files": [
           "jarvis/autonomy/__init__.py",
@@ -312,7 +312,7 @@
       ],
       "name": "camera",
       "provenance": {
-        "generated_at": "2026-08-16T09:51:13.651401+00:00",
+        "generated_at": "2026-08-16T10:16:30.723853+00:00",
         "revision": null,
         "source_files": [
           "jarvis/camera/__init__.py",
@@ -416,7 +416,7 @@
       ],
       "name": "computer",
       "provenance": {
-        "generated_at": "2026-08-16T09:51:13.651401+00:00",
+        "generated_at": "2026-08-16T10:16:30.723853+00:00",
         "revision": null,
         "source_files": [
           "jarvis/computer/__init__.py",
@@ -543,7 +543,7 @@
       ],
       "name": "conversation",
       "provenance": {
-        "generated_at": "2026-08-16T09:51:13.651401+00:00",
+        "generated_at": "2026-08-16T10:16:30.723853+00:00",
         "revision": null,
         "source_files": [
           "jarvis/conversation/__init__.py",
@@ -586,7 +586,7 @@
       ],
       "name": "core",
       "provenance": {
-        "generated_at": "2026-08-16T09:51:13.651401+00:00",
+        "generated_at": "2026-08-16T10:16:30.723853+00:00",
         "revision": null,
         "source_files": [
           "jarvis/core/__init__.py",
@@ -663,7 +663,7 @@
       ],
       "name": "discovery",
       "provenance": {
-        "generated_at": "2026-08-16T09:51:13.651401+00:00",
+        "generated_at": "2026-08-16T10:16:30.723853+00:00",
         "revision": null,
         "source_files": [
           "jarvis/discovery/__init__.py",
@@ -735,7 +735,7 @@
       ],
       "name": "events",
       "provenance": {
-        "generated_at": "2026-08-16T09:51:13.651401+00:00",
+        "generated_at": "2026-08-16T10:16:30.723853+00:00",
         "revision": null,
         "source_files": [
           "jarvis/events/__init__.py",
@@ -799,7 +799,7 @@
       ],
       "name": "frontend",
       "provenance": {
-        "generated_at": "2026-08-16T09:51:13.651401+00:00",
+        "generated_at": "2026-08-16T10:16:30.723853+00:00",
         "revision": null,
         "source_files": [
           "jarvis/frontend/__init__.py",
@@ -851,7 +851,7 @@
       ],
       "name": "improvement",
       "provenance": {
-        "generated_at": "2026-08-16T09:51:13.651401+00:00",
+        "generated_at": "2026-08-16T10:16:30.723853+00:00",
         "revision": null,
         "source_files": [
           "jarvis/improvement/__init__.py",
@@ -1006,7 +1006,7 @@
       ],
       "name": "knowledge",
       "provenance": {
-        "generated_at": "2026-08-16T09:51:13.651401+00:00",
+        "generated_at": "2026-08-16T10:16:30.723853+00:00",
         "revision": null,
         "source_files": [
           "jarvis/knowledge/__init__.py",
@@ -1069,7 +1069,7 @@
       ],
       "name": "memory",
       "provenance": {
-        "generated_at": "2026-08-16T09:51:13.651401+00:00",
+        "generated_at": "2026-08-16T10:16:30.723853+00:00",
         "revision": null,
         "source_files": [
           "jarvis/memory/__init__.py",
@@ -1083,7 +1083,7 @@
           "jarvis/memory/models.py": "241631bc5c7447b50b6deeb4019de6135358b998878142188167ac3d50298073",
           "jarvis/memory/policy.py": "1a875b9279a288d4c2b62a46d4672e4f55e1e19df505aaaec51193e2764e5663",
           "jarvis/memory/services.py": "f47821326ad313281bacc9f4d056b803322d0a632f49525a16f46fe91e66d3df",
-          "jarvis/memory/store.py": "aad58ae21afdf87813b9e17526b09522c438de7c965fdb785c0c5847c1cd975b"
+          "jarvis/memory/store.py": "1035db8157c1ed0c231b6360c2d1304a7af8d05b9235c35429e11a2904c687db"
         }
       },
       "public_interfaces": [
@@ -1165,7 +1165,7 @@
       ],
       "name": "multi_agent",
       "provenance": {
-        "generated_at": "2026-08-16T09:51:13.651401+00:00",
+        "generated_at": "2026-08-16T10:16:30.723853+00:00",
         "revision": null,
         "source_files": [
           "jarvis/multi_agent/__init__.py",
@@ -1257,12 +1257,13 @@
         "os",
         "pathlib",
         "sqlite3",
+        "threading",
         "urllib",
         "uuid"
       ],
       "name": "permissions",
       "provenance": {
-        "generated_at": "2026-08-16T09:51:13.651401+00:00",
+        "generated_at": "2026-08-16T10:16:30.723853+00:00",
         "revision": null,
         "source_files": [
           "jarvis/permissions/__init__.py",
@@ -1272,8 +1273,8 @@
           "jarvis/permissions/policy.py"
         ],
         "source_hashes": {
-          "jarvis/permissions/__init__.py": "37997697f0d1d8df4b3d582b25a5cb674ea6a3ccbaa0032895aeec05d758a708",
-          "jarvis/permissions/audit.py": "4b2610c9a8264534810782539189078e0fd1ba9a04864ccda2397e931140f46e",
+          "jarvis/permissions/__init__.py": "3f5e255648f3ec9edd8971ec3e823928947f6708613a959660e49ddaa715f73b",
+          "jarvis/permissions/audit.py": "14de093e7d4773029a2985e30cb6c058083e72e1f638fa26c3803d714404fa09",
           "jarvis/permissions/broker.py": "24d19a37322804386f207754fe962af6cf5ced26be9f866443d03a11c7004339",
           "jarvis/permissions/models.py": "4efc726f2d763cc4a450f78f73afac82fb1ff3c369ef6f9c1dfa6795c894591f",
           "jarvis/permissions/policy.py": "5a3e3f9d5aad38a3e62fe8aebab15803707bcd5e6eec4b59788e3d4147024794"
@@ -1290,6 +1291,7 @@
         "ApprovalStatus",
         "AuditRecord",
         "AuditSink",
+        "AuditStoreError",
         "AuthorizationReceipt",
         "AuthorizationResult",
         "Decision",
@@ -1319,12 +1321,14 @@
         "evaluate",
         "fingerprint",
         "get_approval",
+        "lifecycle_entries",
         "normalize_constraint",
         "normalize_path",
         "normalize_scope",
         "path_is_within",
         "pending_approvals",
         "record_execution_outcome",
+        "record_lifecycle",
         "records",
         "register_tool",
         "unregister_tool"
@@ -1348,6 +1352,7 @@
         "dataclasses",
         "datetime",
         "enum",
+        "hashlib",
         "jarvis",
         "json",
         "logging",
@@ -1361,7 +1366,7 @@
       ],
       "name": "planning",
       "provenance": {
-        "generated_at": "2026-08-16T09:51:13.651401+00:00",
+        "generated_at": "2026-08-16T10:16:30.723853+00:00",
         "revision": null,
         "source_files": [
           "jarvis/planning/__init__.py",
@@ -1372,9 +1377,9 @@
         ],
         "source_hashes": {
           "jarvis/planning/__init__.py": "c9b412df955c221fcca9ae1fecef1f548e5ba08f73e0b19e51316b6ccf7a78ab",
-          "jarvis/planning/engine.py": "867979fc40411857db4237ff48f4664d16ed3e76a7bd1bb2ecdcde7eb054af61",
-          "jarvis/planning/models.py": "3c1b4bba83e84b91b71a4ddefaafc10a4f7baecb3b5856b3ef087efd4ef878c7",
-          "jarvis/planning/store.py": "ec131fb3e720fac80de59f8a468c1130278185628f1b535d8a7a743ac3362efb",
+          "jarvis/planning/engine.py": "830204355dd59d4e5b0b013f0a2dcef6569cbda56e7a67f01118a076c79f2169",
+          "jarvis/planning/models.py": "74d1a8dcf3f8a4d66d84fec9f9464073e506dc6b4b9fb4739d6c7f2fa00136af",
+          "jarvis/planning/store.py": "7d7e4cba31f0ce63de8c81c5bd8519ce0637020bf66370928d8d6d6f65c017ab",
           "jarvis/planning/validation.py": "8349deae4479a07441e47f9658f9933693756b8b1bc041d9864058b9088ee610"
         }
       },
@@ -1425,7 +1430,9 @@
         "load_plan",
         "load_task",
         "propose",
+        "reconcile_after_restart",
         "replan",
+        "reserve_operation",
         "resume",
         "run",
         "save_state",
@@ -1450,7 +1457,7 @@
       "dependencies": [],
       "name": "security",
       "provenance": {
-        "generated_at": "2026-08-16T09:51:13.651401+00:00",
+        "generated_at": "2026-08-16T10:16:30.723853+00:00",
         "revision": null,
         "source_files": [
           "jarvis/security/__init__.py"
@@ -1482,7 +1489,7 @@
       ],
       "name": "speech",
       "provenance": {
-        "generated_at": "2026-08-16T09:51:13.651401+00:00",
+        "generated_at": "2026-08-16T10:16:30.723853+00:00",
         "revision": null,
         "source_files": [
           "jarvis/speech/__init__.py",
@@ -1546,7 +1553,7 @@
       ],
       "name": "state",
       "provenance": {
-        "generated_at": "2026-08-16T09:51:13.651401+00:00",
+        "generated_at": "2026-08-16T10:16:30.723853+00:00",
         "revision": null,
         "source_files": [
           "jarvis/state/__init__.py",
@@ -1555,10 +1562,10 @@
           "jarvis/state/store.py"
         ],
         "source_hashes": {
-          "jarvis/state/__init__.py": "e82e24dbd5732dd217e6cd3d8a774b1a1bda8d2af97dc07ccc0a57f1083d52f6",
-          "jarvis/state/machine.py": "f129419f5d3a172e4c5963c3775c922bb8f1bbfdff84bb5cfe254c6f92e2843e",
+          "jarvis/state/__init__.py": "d2dd5bbade7bfb86b4faf3fcdceb421f9022067d1c0ff8a24ad99dc14b6c5cb4",
+          "jarvis/state/machine.py": "25feacd7ea765c120d7e01f700a3a0db2e853c24c6d9222763773261dbf04da6",
           "jarvis/state/models.py": "44140cf004df5a3847ffa09a90cef0adec4f26fcf537fda9b4cd8d716a3f5dc1",
-          "jarvis/state/store.py": "e1a18c8ad6b6dba0eb7f193c2510d27619ef492f38a9875313edc40ba838a63f"
+          "jarvis/state/store.py": "1fc85b6bebb9b55d58402fbe7b326236f52a7bc8c7aec7be081b41a329026aec"
         }
       },
       "public_interfaces": [
@@ -1570,6 +1577,7 @@
         "StateConcurrencyError",
         "StateMachineError",
         "StateStore",
+        "StateStoreError",
         "StateTransition",
         "TaskSnapshot",
         "TaskState",
@@ -1584,6 +1592,7 @@
         "foreground_task_id",
         "history",
         "load_task",
+        "reconcile_projection",
         "recover",
         "save_task",
         "set_foreground_task",
@@ -1629,7 +1638,7 @@
       ],
       "name": "testing",
       "provenance": {
-        "generated_at": "2026-08-16T09:51:13.651401+00:00",
+        "generated_at": "2026-08-16T10:16:30.723853+00:00",
         "revision": null,
         "source_files": [
           "jarvis/testing/__init__.py",
@@ -1741,7 +1750,7 @@
       ],
       "name": "tools",
       "provenance": {
-        "generated_at": "2026-08-16T09:51:13.651401+00:00",
+        "generated_at": "2026-08-16T10:16:30.723853+00:00",
         "revision": null,
         "source_files": [
           "jarvis/tools/__init__.py",
@@ -1854,7 +1863,7 @@
       ],
       "name": "vision",
       "provenance": {
-        "generated_at": "2026-08-16T09:51:13.651401+00:00",
+        "generated_at": "2026-08-16T10:16:30.723853+00:00",
         "revision": null,
         "source_files": [
           "jarvis/vision/__init__.py",
@@ -1944,7 +1953,7 @@
       ],
       "name": "voice",
       "provenance": {
-        "generated_at": "2026-08-16T09:51:13.651401+00:00",
+        "generated_at": "2026-08-16T10:16:30.723853+00:00",
         "revision": null,
         "source_files": [
           "jarvis/voice/__init__.py",
@@ -1991,7 +2000,7 @@
       ]
     }
   ],
-  "generated_at": "2026-08-16T09:51:13.651401+00:00",
+  "generated_at": "2026-08-16T10:16:30.723853+00:00",
   "items": [
     {
       "authority": "generated",
@@ -2002,7 +2011,7 @@
         "layer": "provider"
       },
       "provenance": {
-        "generated_at": "2026-08-16T09:51:13.651401+00:00",
+        "generated_at": "2026-08-16T10:16:30.723853+00:00",
         "revision": null,
         "source_files": [
           "jarvis/ai/__init__.py",
@@ -2031,7 +2040,7 @@
         "layer": "controlled-capability"
       },
       "provenance": {
-        "generated_at": "2026-08-16T09:51:13.651401+00:00",
+        "generated_at": "2026-08-16T10:16:30.723853+00:00",
         "revision": null,
         "source_files": [
           "jarvis/applications/__init__.py",
@@ -2068,7 +2077,7 @@
         "layer": "orchestration"
       },
       "provenance": {
-        "generated_at": "2026-08-16T09:51:13.651401+00:00",
+        "generated_at": "2026-08-16T10:16:30.723853+00:00",
         "revision": null,
         "source_files": [
           "jarvis/autonomy/__init__.py",
@@ -2101,7 +2110,7 @@
         "layer": "controlled-capability"
       },
       "provenance": {
-        "generated_at": "2026-08-16T09:51:13.651401+00:00",
+        "generated_at": "2026-08-16T10:16:30.723853+00:00",
         "revision": null,
         "source_files": [
           "jarvis/camera/__init__.py",
@@ -2136,7 +2145,7 @@
         "layer": "controlled-capability"
       },
       "provenance": {
-        "generated_at": "2026-08-16T09:51:13.651401+00:00",
+        "generated_at": "2026-08-16T10:16:30.723853+00:00",
         "revision": null,
         "source_files": [
           "jarvis/computer/__init__.py",
@@ -2173,7 +2182,7 @@
         "layer": "application-service"
       },
       "provenance": {
-        "generated_at": "2026-08-16T09:51:13.651401+00:00",
+        "generated_at": "2026-08-16T10:16:30.723853+00:00",
         "revision": null,
         "source_files": [
           "jarvis/conversation/__init__.py",
@@ -2196,7 +2205,7 @@
         "layer": "cross-cutting"
       },
       "provenance": {
-        "generated_at": "2026-08-16T09:51:13.651401+00:00",
+        "generated_at": "2026-08-16T10:16:30.723853+00:00",
         "revision": null,
         "source_files": [
           "jarvis/core/__init__.py",
@@ -2225,7 +2234,7 @@
         "layer": "advisory-capability"
       },
       "provenance": {
-        "generated_at": "2026-08-16T09:51:13.651401+00:00",
+        "generated_at": "2026-08-16T10:16:30.723853+00:00",
         "revision": null,
         "source_files": [
           "jarvis/discovery/__init__.py",
@@ -2252,7 +2261,7 @@
         "layer": "domain"
       },
       "provenance": {
-        "generated_at": "2026-08-16T09:51:13.651401+00:00",
+        "generated_at": "2026-08-16T10:16:30.723853+00:00",
         "revision": null,
         "source_files": [
           "jarvis/events/__init__.py",
@@ -2277,7 +2286,7 @@
         "layer": "presentation"
       },
       "provenance": {
-        "generated_at": "2026-08-16T09:51:13.651401+00:00",
+        "generated_at": "2026-08-16T10:16:30.723853+00:00",
         "revision": null,
         "source_files": [
           "jarvis/frontend/__init__.py",
@@ -2300,7 +2309,7 @@
         "layer": "proposal-only-improvement"
       },
       "provenance": {
-        "generated_at": "2026-08-16T09:51:13.651401+00:00",
+        "generated_at": "2026-08-16T10:16:30.723853+00:00",
         "revision": null,
         "source_files": [
           "jarvis/improvement/__init__.py",
@@ -2335,7 +2344,7 @@
         "layer": "domain"
       },
       "provenance": {
-        "generated_at": "2026-08-16T09:51:13.651401+00:00",
+        "generated_at": "2026-08-16T10:16:30.723853+00:00",
         "revision": null,
         "source_files": [
           "jarvis/knowledge/__init__.py",
@@ -2362,7 +2371,7 @@
         "layer": "durable-memory"
       },
       "provenance": {
-        "generated_at": "2026-08-16T09:51:13.651401+00:00",
+        "generated_at": "2026-08-16T10:16:30.723853+00:00",
         "revision": null,
         "source_files": [
           "jarvis/memory/__init__.py",
@@ -2376,7 +2385,7 @@
           "jarvis/memory/models.py": "241631bc5c7447b50b6deeb4019de6135358b998878142188167ac3d50298073",
           "jarvis/memory/policy.py": "1a875b9279a288d4c2b62a46d4672e4f55e1e19df505aaaec51193e2764e5663",
           "jarvis/memory/services.py": "f47821326ad313281bacc9f4d056b803322d0a632f49525a16f46fe91e66d3df",
-          "jarvis/memory/store.py": "aad58ae21afdf87813b9e17526b09522c438de7c965fdb785c0c5847c1cd975b"
+          "jarvis/memory/store.py": "1035db8157c1ed0c231b6360c2d1304a7af8d05b9235c35429e11a2904c687db"
         }
       },
       "summary": "Privacy-aware context, durable user/episode, and project-memory boundaries.",
@@ -2391,7 +2400,7 @@
         "layer": "optional-control-plane"
       },
       "provenance": {
-        "generated_at": "2026-08-16T09:51:13.651401+00:00",
+        "generated_at": "2026-08-16T10:16:30.723853+00:00",
         "revision": null,
         "source_files": [
           "jarvis/multi_agent/__init__.py",
@@ -2413,14 +2422,14 @@
     },
     {
       "authority": "generated",
-      "content": "Deny-by-default permission broker public API. Layer: security-boundary. Interfaces: ActionDescriptor, ApprovalActorKind, ApprovalChoice, ApprovalDecisionResult, ApprovalIdentity, ApprovalRequest, ApprovalSource, ApprovalStatus, AuditRecord, AuditSink, AuthorizationReceipt, AuthorizationResult, Decision, DecisionReason, InMemoryAuditSink, Permission, PermissionBroker, PermissionRequest, PermissionScope, PolicyEngine, PolicyEvaluation, PolicyRule, RememberedGrant, Risk, SQLiteAuditSink, SafeArgument, SafetyClass, ScopeConstraint, ScopeNormalizationError, append, audit_sink, authorize, cancel_request, cancel_task, close, decide, evaluate, fingerprint, get_approval, normalize_constraint, normalize_path, normalize_scope, path_is_within, pending_approvals, record_execution_outcome, records, register_tool, unregister_tool. Dependencies: abc, asyncio, collections, dataclasses, datetime, enum, hashlib, jarvis, json, os, pathlib, sqlite3, urllib, uuid.",
+      "content": "Deny-by-default permission broker public API. Layer: security-boundary. Interfaces: ActionDescriptor, ApprovalActorKind, ApprovalChoice, ApprovalDecisionResult, ApprovalIdentity, ApprovalRequest, ApprovalSource, ApprovalStatus, AuditRecord, AuditSink, AuditStoreError, AuthorizationReceipt, AuthorizationResult, Decision, DecisionReason, InMemoryAuditSink, Permission, PermissionBroker, PermissionRequest, PermissionScope, PolicyEngine, PolicyEvaluation, PolicyRule, RememberedGrant, Risk, SQLiteAuditSink, SafeArgument, SafetyClass, ScopeConstraint, ScopeNormalizationError, append, audit_sink, authorize, cancel_request, cancel_task, close, decide, evaluate, fingerprint, get_approval, lifecycle_entries, normalize_constraint, normalize_path, normalize_scope, path_is_within, pending_approvals, record_execution_outcome, record_lifecycle, records, register_tool, unregister_tool. Dependencies: abc, asyncio, collections, dataclasses, datetime, enum, hashlib, jarvis, json, os, pathlib, sqlite3, threading, urllib, uuid.",
       "id": "component:permissions",
       "kind": "component",
       "metadata": {
         "layer": "security-boundary"
       },
       "provenance": {
-        "generated_at": "2026-08-16T09:51:13.651401+00:00",
+        "generated_at": "2026-08-16T10:16:30.723853+00:00",
         "revision": null,
         "source_files": [
           "jarvis/permissions/__init__.py",
@@ -2430,8 +2439,8 @@
           "jarvis/permissions/policy.py"
         ],
         "source_hashes": {
-          "jarvis/permissions/__init__.py": "37997697f0d1d8df4b3d582b25a5cb674ea6a3ccbaa0032895aeec05d758a708",
-          "jarvis/permissions/audit.py": "4b2610c9a8264534810782539189078e0fd1ba9a04864ccda2397e931140f46e",
+          "jarvis/permissions/__init__.py": "3f5e255648f3ec9edd8971ec3e823928947f6708613a959660e49ddaa715f73b",
+          "jarvis/permissions/audit.py": "14de093e7d4773029a2985e30cb6c058083e72e1f638fa26c3803d714404fa09",
           "jarvis/permissions/broker.py": "24d19a37322804386f207754fe962af6cf5ced26be9f866443d03a11c7004339",
           "jarvis/permissions/models.py": "4efc726f2d763cc4a450f78f73afac82fb1ff3c369ef6f9c1dfa6795c894591f",
           "jarvis/permissions/policy.py": "5a3e3f9d5aad38a3e62fe8aebab15803707bcd5e6eec4b59788e3d4147024794"
@@ -2442,14 +2451,14 @@
     },
     {
       "authority": "generated",
-      "content": "Durable single-agent planning and DAG execution control plane. Layer: control-plane. Interfaces: BrokeredPlanningStepExecutor, BudgetUsage, CompletionCriteriaVerifier, EvidencePlanningStepVerifier, ExecutionBudgets, FailureKind, GoalVerification, OwnedPlan, OwnedPlanStatus, PlanAdvisor, PlanProposal, PlanValidationError, PlanValidator, PlanningEngine, PlanningEngineError, PlanningGoalVerifier, PlanningMigration, PlanningStep, PlanningStepExecutor, PlanningStepStatus, PlanningStepVerifier, PlanningStore, PlanningStoreError, PlanningTask, PlanningTaskStatus, ProposedStep, ReplanEvidence, SQLitePlanningStore, StepError, StepExecutionResult, StepExecutionStatus, StepResult, StepVerification, apply_migrations, cancel, canonical_json, close, create_task, database_path, execute, get_task, inspect_plan, list_tasks, load_plan, load_task, propose, replan, resume, run, save_state, save_task, submit, utc, validate, verify, visit. Dependencies: __future__, abc, asyncio, collections, dataclasses, datetime, enum, jarvis, json, logging, math, pathlib, pydantic, sqlite3, threading, typing, uuid.",
+      "content": "Durable single-agent planning and DAG execution control plane. Layer: control-plane. Interfaces: BrokeredPlanningStepExecutor, BudgetUsage, CompletionCriteriaVerifier, EvidencePlanningStepVerifier, ExecutionBudgets, FailureKind, GoalVerification, OwnedPlan, OwnedPlanStatus, PlanAdvisor, PlanProposal, PlanValidationError, PlanValidator, PlanningEngine, PlanningEngineError, PlanningGoalVerifier, PlanningMigration, PlanningStep, PlanningStepExecutor, PlanningStepStatus, PlanningStepVerifier, PlanningStore, PlanningStoreError, PlanningTask, PlanningTaskStatus, ProposedStep, ReplanEvidence, SQLitePlanningStore, StepError, StepExecutionResult, StepExecutionStatus, StepResult, StepVerification, apply_migrations, cancel, canonical_json, close, create_task, database_path, execute, get_task, inspect_plan, list_tasks, load_plan, load_task, propose, reconcile_after_restart, replan, reserve_operation, resume, run, save_state, save_task, submit, utc, validate, verify, visit. Dependencies: __future__, abc, asyncio, collections, dataclasses, datetime, enum, hashlib, jarvis, json, logging, math, pathlib, pydantic, sqlite3, threading, typing, uuid.",
       "id": "component:planning",
       "kind": "component",
       "metadata": {
         "layer": "control-plane"
       },
       "provenance": {
-        "generated_at": "2026-08-16T09:51:13.651401+00:00",
+        "generated_at": "2026-08-16T10:16:30.723853+00:00",
         "revision": null,
         "source_files": [
           "jarvis/planning/__init__.py",
@@ -2460,9 +2469,9 @@
         ],
         "source_hashes": {
           "jarvis/planning/__init__.py": "c9b412df955c221fcca9ae1fecef1f548e5ba08f73e0b19e51316b6ccf7a78ab",
-          "jarvis/planning/engine.py": "867979fc40411857db4237ff48f4664d16ed3e76a7bd1bb2ecdcde7eb054af61",
-          "jarvis/planning/models.py": "3c1b4bba83e84b91b71a4ddefaafc10a4f7baecb3b5856b3ef087efd4ef878c7",
-          "jarvis/planning/store.py": "ec131fb3e720fac80de59f8a468c1130278185628f1b535d8a7a743ac3362efb",
+          "jarvis/planning/engine.py": "830204355dd59d4e5b0b013f0a2dcef6569cbda56e7a67f01118a076c79f2169",
+          "jarvis/planning/models.py": "74d1a8dcf3f8a4d66d84fec9f9464073e506dc6b4b9fb4739d6c7f2fa00136af",
+          "jarvis/planning/store.py": "7d7e4cba31f0ce63de8c81c5bd8519ce0637020bf66370928d8d6d6f65c017ab",
           "jarvis/planning/validation.py": "8349deae4479a07441e47f9658f9933693756b8b1bc041d9864058b9088ee610"
         }
       },
@@ -2478,7 +2487,7 @@
         "layer": "security-boundary"
       },
       "provenance": {
-        "generated_at": "2026-08-16T09:51:13.651401+00:00",
+        "generated_at": "2026-08-16T10:16:30.723853+00:00",
         "revision": null,
         "source_files": [
           "jarvis/security/__init__.py"
@@ -2499,7 +2508,7 @@
         "layer": "provider"
       },
       "provenance": {
-        "generated_at": "2026-08-16T09:51:13.651401+00:00",
+        "generated_at": "2026-08-16T10:16:30.723853+00:00",
         "revision": null,
         "source_files": [
           "jarvis/speech/__init__.py",
@@ -2517,14 +2526,14 @@
     },
     {
       "authority": "generated",
-      "content": "Authoritative application and task lifecycle state coordination. Layer: core-control-plane. Interfaces: ApplicationState, ApplicationStateMachine, InMemoryStateStore, InvalidStateTransition, SQLiteStateStore, StateConcurrencyError, StateMachineError, StateStore, StateTransition, TaskSnapshot, TaskState, TransitionEvent, allowed_application_transitions, allowed_task_transitions, append_transition, application_state, cancel_task, close, create_task, foreground_task_id, history, load_task, recover, save_task, set_foreground_task, task, tasks, transition_application, transition_task, transitions, utc. Dependencies: __future__, abc, collections, dataclasses, datetime, enum, jarvis, json, pathlib, sqlite3, threading, types, uuid.",
+      "content": "Authoritative application and task lifecycle state coordination. Layer: core-control-plane. Interfaces: ApplicationState, ApplicationStateMachine, InMemoryStateStore, InvalidStateTransition, SQLiteStateStore, StateConcurrencyError, StateMachineError, StateStore, StateStoreError, StateTransition, TaskSnapshot, TaskState, TransitionEvent, allowed_application_transitions, allowed_task_transitions, append_transition, application_state, cancel_task, close, create_task, foreground_task_id, history, load_task, reconcile_projection, recover, save_task, set_foreground_task, task, tasks, transition_application, transition_task, transitions, utc. Dependencies: __future__, abc, collections, dataclasses, datetime, enum, jarvis, json, pathlib, sqlite3, threading, types, uuid.",
       "id": "component:state",
       "kind": "component",
       "metadata": {
         "layer": "core-control-plane"
       },
       "provenance": {
-        "generated_at": "2026-08-16T09:51:13.651401+00:00",
+        "generated_at": "2026-08-16T10:16:30.723853+00:00",
         "revision": null,
         "source_files": [
           "jarvis/state/__init__.py",
@@ -2533,10 +2542,10 @@
           "jarvis/state/store.py"
         ],
         "source_hashes": {
-          "jarvis/state/__init__.py": "e82e24dbd5732dd217e6cd3d8a774b1a1bda8d2af97dc07ccc0a57f1083d52f6",
-          "jarvis/state/machine.py": "f129419f5d3a172e4c5963c3775c922bb8f1bbfdff84bb5cfe254c6f92e2843e",
+          "jarvis/state/__init__.py": "d2dd5bbade7bfb86b4faf3fcdceb421f9022067d1c0ff8a24ad99dc14b6c5cb4",
+          "jarvis/state/machine.py": "25feacd7ea765c120d7e01f700a3a0db2e853c24c6d9222763773261dbf04da6",
           "jarvis/state/models.py": "44140cf004df5a3847ffa09a90cef0adec4f26fcf537fda9b4cd8d716a3f5dc1",
-          "jarvis/state/store.py": "e1a18c8ad6b6dba0eb7f193c2510d27619ef492f38a9875313edc40ba838a63f"
+          "jarvis/state/store.py": "1fc85b6bebb9b55d58402fbe7b326236f52a7bc8c7aec7be081b41a329026aec"
         }
       },
       "summary": "Authoritative application and task lifecycle state coordination.",
@@ -2551,7 +2560,7 @@
         "layer": "domain"
       },
       "provenance": {
-        "generated_at": "2026-08-16T09:51:13.651401+00:00",
+        "generated_at": "2026-08-16T10:16:30.723853+00:00",
         "revision": null,
         "source_files": [
           "jarvis/testing/__init__.py",
@@ -2586,7 +2595,7 @@
         "layer": "capability-boundary"
       },
       "provenance": {
-        "generated_at": "2026-08-16T09:51:13.651401+00:00",
+        "generated_at": "2026-08-16T10:16:30.723853+00:00",
         "revision": null,
         "source_files": [
           "jarvis/tools/__init__.py",
@@ -2623,7 +2632,7 @@
         "layer": "controlled-capability"
       },
       "provenance": {
-        "generated_at": "2026-08-16T09:51:13.651401+00:00",
+        "generated_at": "2026-08-16T10:16:30.723853+00:00",
         "revision": null,
         "source_files": [
           "jarvis/vision/__init__.py",
@@ -2654,7 +2663,7 @@
         "layer": "local-input"
       },
       "provenance": {
-        "generated_at": "2026-08-16T09:51:13.651401+00:00",
+        "generated_at": "2026-08-16T10:16:30.723853+00:00",
         "revision": null,
         "source_files": [
           "jarvis/voice/__init__.py",
@@ -2677,7 +2686,7 @@
         "path": "docs/decisions/0001-phase-0-boundaries.md"
       },
       "provenance": {
-        "generated_at": "2026-08-16T09:51:13.651401+00:00",
+        "generated_at": "2026-08-16T10:16:30.723853+00:00",
         "revision": null,
         "source_files": [
           "docs/decisions/0001-phase-0-boundaries.md"
@@ -2698,7 +2707,7 @@
         "path": "docs/decisions/0002-local-conversation-and-speech.md"
       },
       "provenance": {
-        "generated_at": "2026-08-16T09:51:13.651401+00:00",
+        "generated_at": "2026-08-16T10:16:30.723853+00:00",
         "revision": null,
         "source_files": [
           "docs/decisions/0002-local-conversation-and-speech.md"
@@ -2719,7 +2728,7 @@
         "path": "docs/decisions/0003-bounded-single-agent-orchestration.md"
       },
       "provenance": {
-        "generated_at": "2026-08-16T09:51:13.651401+00:00",
+        "generated_at": "2026-08-16T10:16:30.723853+00:00",
         "revision": null,
         "source_files": [
           "docs/decisions/0003-bounded-single-agent-orchestration.md"
@@ -2740,7 +2749,7 @@
         "path": "docs/decisions/0004-versioned-tool-contract.md"
       },
       "provenance": {
-        "generated_at": "2026-08-16T09:51:13.651401+00:00",
+        "generated_at": "2026-08-16T10:16:30.723853+00:00",
         "revision": null,
         "source_files": [
           "docs/decisions/0004-versioned-tool-contract.md"
@@ -2761,7 +2770,7 @@
         "path": "docs/decisions/0005-central-tool-registry.md"
       },
       "provenance": {
-        "generated_at": "2026-08-16T09:51:13.651401+00:00",
+        "generated_at": "2026-08-16T10:16:30.723853+00:00",
         "revision": null,
         "source_files": [
           "docs/decisions/0005-central-tool-registry.md"
@@ -2782,7 +2791,7 @@
         "path": "docs/decisions/0006-permission-broker.md"
       },
       "provenance": {
-        "generated_at": "2026-08-16T09:51:13.651401+00:00",
+        "generated_at": "2026-08-16T10:16:30.723853+00:00",
         "revision": null,
         "source_files": [
           "docs/decisions/0006-permission-broker.md"
@@ -2803,7 +2812,7 @@
         "path": "docs/decisions/0007-controlled-windows-computer-capabilities.md"
       },
       "provenance": {
-        "generated_at": "2026-08-16T09:51:13.651401+00:00",
+        "generated_at": "2026-08-16T10:16:30.723853+00:00",
         "revision": null,
         "source_files": [
           "docs/decisions/0007-controlled-windows-computer-capabilities.md"
@@ -2824,7 +2833,7 @@
         "path": "docs/decisions/0008-visual-grounding-and-verification.md"
       },
       "provenance": {
-        "generated_at": "2026-08-16T09:51:13.651401+00:00",
+        "generated_at": "2026-08-16T10:16:30.723853+00:00",
         "revision": null,
         "source_files": [
           "docs/decisions/0008-visual-grounding-and-verification.md"
@@ -2845,7 +2854,7 @@
         "path": "docs/decisions/0009-controlled-camera-support.md"
       },
       "provenance": {
-        "generated_at": "2026-08-16T09:51:13.651401+00:00",
+        "generated_at": "2026-08-16T10:16:30.723853+00:00",
         "revision": null,
         "source_files": [
           "docs/decisions/0009-controlled-camera-support.md"
@@ -2866,7 +2875,7 @@
         "path": "docs/decisions/0010-controlled-application-manager.md"
       },
       "provenance": {
-        "generated_at": "2026-08-16T09:51:13.651401+00:00",
+        "generated_at": "2026-08-16T10:16:30.723853+00:00",
         "revision": null,
         "source_files": [
           "docs/decisions/0010-controlled-application-manager.md"
@@ -2887,7 +2896,7 @@
         "path": "docs/decisions/0011-advisory-capability-discovery.md"
       },
       "provenance": {
-        "generated_at": "2026-08-16T09:51:13.651401+00:00",
+        "generated_at": "2026-08-16T10:16:30.723853+00:00",
         "revision": null,
         "source_files": [
           "docs/decisions/0011-advisory-capability-discovery.md"
@@ -2908,7 +2917,7 @@
         "path": "docs/decisions/0012-propose-and-test-improvement-engine.md"
       },
       "provenance": {
-        "generated_at": "2026-08-16T09:51:13.651401+00:00",
+        "generated_at": "2026-08-16T10:16:30.723853+00:00",
         "revision": null,
         "source_files": [
           "docs/decisions/0012-propose-and-test-improvement-engine.md"
@@ -2929,7 +2938,7 @@
         "path": "docs/decisions/0013-controlled-system-self-testing.md"
       },
       "provenance": {
-        "generated_at": "2026-08-16T09:51:13.651401+00:00",
+        "generated_at": "2026-08-16T10:16:30.723853+00:00",
         "revision": null,
         "source_files": [
           "docs/decisions/0013-controlled-system-self-testing.md"
@@ -2950,7 +2959,7 @@
         "path": "docs/decisions/0014-separated-memory-domains.md"
       },
       "provenance": {
-        "generated_at": "2026-08-16T09:51:13.651401+00:00",
+        "generated_at": "2026-08-16T10:16:30.723853+00:00",
         "revision": null,
         "source_files": [
           "docs/decisions/0014-separated-memory-domains.md"
@@ -2971,7 +2980,7 @@
         "path": "docs/decisions/0015-deterministic-durable-planning.md"
       },
       "provenance": {
-        "generated_at": "2026-08-16T09:51:13.651401+00:00",
+        "generated_at": "2026-08-16T10:16:30.723853+00:00",
         "revision": null,
         "source_files": [
           "docs/decisions/0015-deterministic-durable-planning.md"
@@ -2992,7 +3001,7 @@
         "path": "docs/decisions/0016-optional-bounded-multi-agent.md"
       },
       "provenance": {
-        "generated_at": "2026-08-16T09:51:13.651401+00:00",
+        "generated_at": "2026-08-16T10:16:30.723853+00:00",
         "revision": null,
         "source_files": [
           "docs/decisions/0016-optional-bounded-multi-agent.md"
@@ -3013,7 +3022,7 @@
         "path": "CONTRIBUTING.md"
       },
       "provenance": {
-        "generated_at": "2026-08-16T09:51:13.651401+00:00",
+        "generated_at": "2026-08-16T10:16:30.723853+00:00",
         "revision": null,
         "source_files": [
           "CONTRIBUTING.md"
@@ -3034,7 +3043,7 @@
         "path": "README.md"
       },
       "provenance": {
-        "generated_at": "2026-08-16T09:51:13.651401+00:00",
+        "generated_at": "2026-08-16T10:16:30.723853+00:00",
         "revision": null,
         "source_files": [
           "README.md"
@@ -3048,6 +3057,27 @@
     },
     {
       "authority": "authoritative",
+      "content": "# ADR: Persistence and crash consistency\n\n## Decision\n\nJARVIS uses model A: `SQLitePlanningStore` is the authoritative durable source for\ncanonical task, plan, step, budget, and operation-idempotency state. The\n`ApplicationStateMachine` is a durable but rebuildable projection for UI and\ndiagnostic transition history. It must never advance before the planning task/plan\ntransaction commits. The audit record follows the authoritative planning commit;\nthe state projection and events follow it as non-authoritative observations.\n\nMemory, knowledge, and audit remain separate stores because they have different\nretention and authority boundaries. They do not decide task completion. EventBus is\nin-process only and is never a persistence or authorization source.\n\n## Transaction model\n\nPlanning task/plan versions are written atomically in one SQLite transaction. The\nengine writes that unit first, records lifecycle audit evidence, then updates the\nstate projection and emits events. A failed planning write therefore cannot produce\na later audit/state/event claim. A projection write failure leaves planning truth intact;\nstartup rebuilds the projection from the planning store.\n\nSQLite stores enable foreign keys, WAL, a bounded busy timeout, ordered migrations,\nfuture-schema refusal, and `PRAGMA integrity_check`. Corrupt or future persistence\nopens place `ApplicationRuntime` in `SAFE_MODE`; no task is guessed, replayed, or\nsilently repaired.\n\n## Restart semantics\n\nAt startup, the runtime reconciles every planning task into the state projection.\nTasks interrupted while executing, verifying, or replanning, or containing a\nrunning/verifying step, become `RECOVERING` with an `unknown_operation_outcome`\nerror. They require explicit operator diagnosis and are not replayed.\n\nTasks waiting for permission have their in-memory approval references invalidated.\nTheir waiting step is requeued and a future run must enter `PermissionBroker` again,\ncreating a fresh request bound to the exact current task, action, fingerprint,\npermission, scope, and expiry. No approval, receipt, remembered grant, or model\nclaim is restored from a process restart.\n\n## Audit and idempotency\n\n`SQLiteAuditSink` stores secret-safe permission records and planning lifecycle\nrecords. Broker records contain only names, fingerprints, normalized scopes,\ndecisions, trusted approval identity/source, and outcomes\u2014not raw arguments,\nprompts, credentials, clipboard values, or camera data.\n\nThe planning store reserves a task/step idempotency key before an expensive action.\nThe key is bound to a SHA-256 input fingerprint. A duplicate key with a different\nfingerprint fails closed; a duplicate exact reservation is never automatically\nexecuted again. This is a local crash barrier, not proof that a remote external\neffect did or did not occur; unknown external outcomes remain in recovery.\n\n## Consequences\n\nThis avoids an unsafe dual authority between plan status and application state while\npreserving inspectable state history. It does not provide distributed transactions,\ncross-process locks, encrypted SQLite, or provider-specific exactly-once effects.\nThose require capability-specific adapters and remain explicit future work.\n",
+      "id": "docs:adr:persistence-and-consistency",
+      "kind": "documentation",
+      "metadata": {
+        "path": "docs/adr/persistence-and-consistency.md"
+      },
+      "provenance": {
+        "generated_at": "2026-08-16T10:16:30.723853+00:00",
+        "revision": null,
+        "source_files": [
+          "docs/adr/persistence-and-consistency.md"
+        ],
+        "source_hashes": {
+          "docs/adr/persistence-and-consistency.md": "050bdf0b08f39bca23036b15c7744025ed8f7f1aeaf6b6dbfbb5a4efd3482b1c"
+        }
+      },
+      "summary": "JARVIS uses model A: `SQLitePlanningStore` is the authoritative durable source for canonical task, plan, step, budget, and operation-idempotency state. The `ApplicationStateMachine` is a durable but rebuildable projection for UI and diagnostic transition history. It must never advance before the planning task/plan transaction commits. The audit record follows the authoritative planning commit; the",
+      "title": "ADR: Persistence and crash consistency"
+    },
+    {
+      "authority": "authoritative",
       "content": "# Controlled application manager\n\n## Boundary\n\nThe application manager is optional and is never added to the default tool catalog.\nIts required path is:\n\n`AI/planner -> typed application tool -> PermissionBroker -> policy + trusted approval -> immutable plan -> provider/runtime -> Windows`\n\nThe model may request a semantic name, stable inventory ID, or opaque plan ID. It\ncannot provide an executable path, a package-manager shell command, a package source,\npermission state, or approval claim. Inventory and package results are provider\nevidence; only trusted composition creates providers and only the manager creates\nplans.\n\n## Discovery, launch, and close\n\n`WindowsRegistryInventoryProvider` reads standard uninstall registry locations and\nnormalizes records to stable IDs, display name/version/publisher, source, status, and\nan executable only when a direct display-icon path resolves to an existing `.exe`.\nRegistry data is not sufficient authority to run a path. The manager resolves a fresh\nrecord, checks `ApplicationRuntime.can_launch`, and passes that record\u2014not caller\ntext\u2014to `WindowsApplicationRuntime`. The runtime uses `Popen([executable],\nshell=False)` with standard handles disabled. It tracks started processes and refuses\nto close a PID it did not launch; close may terminate unsaved work and is high risk.\n\nInventory status `broken` means no safely verified executable was found. A valid\nalready-installed record is returned from `plan_install` rather than reinstalled.\n\n## Package plans and winget\n\n`PackageProvider` is a provider abstraction, not an OBS integration. The optional\n`WingetPackageProvider` receives a trusted composition-owned candidate catalog and\nconstructs fixed argument arrays for `winget.exe install` or `winget.exe upgrade`.\nIt does not accept a raw shell string and does not dynamically execute provider search\ntext. An `InstallationCandidate` contains exact ID/source/publisher/version,\nrequested permission, selection reason/confidence, and expected verification data.\n\n`application.plan_install` creates an expiring, immutable, one-use plan. It has no\npackage side effect. `application.install` and `application.update` need\n`application.install` scoped to that exact package ID and always require a fresh\ntrusted-user approval because they use `software_installation`. Approval may not be\nremembered. Update planning is separate, requires a strictly newer normalized numeric\nversion, and does not silently downgrade.\n\nAfter a provider operation, the manager re-queries inventory, checks expected\nname/publisher/version and executable status, then verifies launch capability. It\nreturns failure rather than claiming installation success if any evidence disagrees.\n\n## Configuration\n\nThere is intentionally no generic configuration tool. `ApplicationConfigurationAdapter`\nand `ConfigurationRegistry` exist only for future reviewed, application-specific\nadapters with a strict setting schema and a reliable documented API/config contract.\nAn unknown application has no configuration capability.\n\n## Windows manual test\n\nDo this only on a disposable Windows test machine and only after composing an explicit\n`WindowsRegistryInventoryProvider`, `WingetPackageProvider`, `WindowsApplicationRuntime`,\napplication-tool catalog, PermissionBroker policy, and trusted approval UI.\n\n1. Verify `application.find` detects a known installed application without launching it.\n2. Create an install plan for a disposable approved package and inspect exact package\n   ID, source, publisher, and version in the trusted approval UI.\n3. Deny approval and confirm no `winget.exe` process is created.\n4. Approve once, execute the same plan, and confirm it cannot be replayed.\n5. Confirm the manager reports success only after an inventory re-query and launch\n   capability check.\n6. Plan an update with a newer version; verify an equal/older target is rejected.\n7. Launch the managed app, then attempt close with an untracked PID and confirm denial.\n\nNo Windows registry, winget, installation, update, or application launch is exercised\nby normal CI.\n",
       "id": "docs:application-manager",
       "kind": "documentation",
@@ -3055,7 +3085,7 @@
         "path": "docs/application-manager.md"
       },
       "provenance": {
-        "generated_at": "2026-08-16T09:51:13.651401+00:00",
+        "generated_at": "2026-08-16T10:16:30.723853+00:00",
         "revision": null,
         "source_files": [
           "docs/application-manager.md"
@@ -3076,7 +3106,7 @@
         "path": "docs/architecture.md"
       },
       "provenance": {
-        "generated_at": "2026-08-16T09:51:13.651401+00:00",
+        "generated_at": "2026-08-16T10:16:30.723853+00:00",
         "revision": null,
         "source_files": [
           "docs/architecture.md"
@@ -3097,7 +3127,7 @@
         "path": "docs/autonomous-improvement.md"
       },
       "provenance": {
-        "generated_at": "2026-08-16T09:51:13.651401+00:00",
+        "generated_at": "2026-08-16T10:16:30.723853+00:00",
         "revision": null,
         "source_files": [
           "docs/autonomous-improvement.md"
@@ -3118,7 +3148,7 @@
         "path": "docs/camera-support.md"
       },
       "provenance": {
-        "generated_at": "2026-08-16T09:51:13.651401+00:00",
+        "generated_at": "2026-08-16T10:16:30.723853+00:00",
         "revision": null,
         "source_files": [
           "docs/camera-support.md"
@@ -3139,7 +3169,7 @@
         "path": "docs/capability-discovery.md"
       },
       "provenance": {
-        "generated_at": "2026-08-16T09:51:13.651401+00:00",
+        "generated_at": "2026-08-16T10:16:30.723853+00:00",
         "revision": null,
         "source_files": [
           "docs/capability-discovery.md"
@@ -3160,7 +3190,7 @@
         "path": "docs/computer-capabilities.md"
       },
       "provenance": {
-        "generated_at": "2026-08-16T09:51:13.651401+00:00",
+        "generated_at": "2026-08-16T10:16:30.723853+00:00",
         "revision": null,
         "source_files": [
           "docs/computer-capabilities.md"
@@ -3181,7 +3211,7 @@
         "path": "docs/development.md"
       },
       "provenance": {
-        "generated_at": "2026-08-16T09:51:13.651401+00:00",
+        "generated_at": "2026-08-16T10:16:30.723853+00:00",
         "revision": null,
         "source_files": [
           "docs/development.md"
@@ -3202,7 +3232,7 @@
         "path": "docs/events.md"
       },
       "provenance": {
-        "generated_at": "2026-08-16T09:51:13.651401+00:00",
+        "generated_at": "2026-08-16T10:16:30.723853+00:00",
         "revision": null,
         "source_files": [
           "docs/events.md"
@@ -3223,7 +3253,7 @@
         "path": "docs/memory.md"
       },
       "provenance": {
-        "generated_at": "2026-08-16T09:51:13.651401+00:00",
+        "generated_at": "2026-08-16T10:16:30.723853+00:00",
         "revision": null,
         "source_files": [
           "docs/memory.md"
@@ -3244,7 +3274,7 @@
         "path": "docs/multi-agent-orchestration.md"
       },
       "provenance": {
-        "generated_at": "2026-08-16T09:51:13.651401+00:00",
+        "generated_at": "2026-08-16T10:16:30.723853+00:00",
         "revision": null,
         "source_files": [
           "docs/multi-agent-orchestration.md"
@@ -3265,7 +3295,7 @@
         "path": "docs/permission-model.md"
       },
       "provenance": {
-        "generated_at": "2026-08-16T09:51:13.651401+00:00",
+        "generated_at": "2026-08-16T10:16:30.723853+00:00",
         "revision": null,
         "source_files": [
           "docs/permission-model.md"
@@ -3286,7 +3316,7 @@
         "path": "docs/planning-engine.md"
       },
       "provenance": {
-        "generated_at": "2026-08-16T09:51:13.651401+00:00",
+        "generated_at": "2026-08-16T10:16:30.723853+00:00",
         "revision": null,
         "source_files": [
           "docs/planning-engine.md"
@@ -3307,7 +3337,7 @@
         "path": "docs/security-principles.md"
       },
       "provenance": {
-        "generated_at": "2026-08-16T09:51:13.651401+00:00",
+        "generated_at": "2026-08-16T10:16:30.723853+00:00",
         "revision": null,
         "source_files": [
           "docs/security-principles.md"
@@ -3328,7 +3358,7 @@
         "path": "docs/state-machine.md"
       },
       "provenance": {
-        "generated_at": "2026-08-16T09:51:13.651401+00:00",
+        "generated_at": "2026-08-16T10:16:30.723853+00:00",
         "revision": null,
         "source_files": [
           "docs/state-machine.md"
@@ -3349,7 +3379,7 @@
         "path": "docs/system-testing.md"
       },
       "provenance": {
-        "generated_at": "2026-08-16T09:51:13.651401+00:00",
+        "generated_at": "2026-08-16T10:16:30.723853+00:00",
         "revision": null,
         "source_files": [
           "docs/system-testing.md"
@@ -3370,7 +3400,7 @@
         "path": "docs/testing.md"
       },
       "provenance": {
-        "generated_at": "2026-08-16T09:51:13.651401+00:00",
+        "generated_at": "2026-08-16T10:16:30.723853+00:00",
         "revision": null,
         "source_files": [
           "docs/testing.md"
@@ -3391,7 +3421,7 @@
         "path": "docs/threat-model.md"
       },
       "provenance": {
-        "generated_at": "2026-08-16T09:51:13.651401+00:00",
+        "generated_at": "2026-08-16T10:16:30.723853+00:00",
         "revision": null,
         "source_files": [
           "docs/threat-model.md"
@@ -3412,7 +3442,7 @@
         "path": "docs/tools.md"
       },
       "provenance": {
-        "generated_at": "2026-08-16T09:51:13.651401+00:00",
+        "generated_at": "2026-08-16T10:16:30.723853+00:00",
         "revision": null,
         "source_files": [
           "docs/tools.md"
@@ -3433,7 +3463,7 @@
         "path": "docs/v1-current-state-audit.md"
       },
       "provenance": {
-        "generated_at": "2026-08-16T09:51:13.651401+00:00",
+        "generated_at": "2026-08-16T10:16:30.723853+00:00",
         "revision": null,
         "source_files": [
           "docs/v1-current-state-audit.md"
@@ -3454,7 +3484,7 @@
         "path": "docs/visual-understanding.md"
       },
       "provenance": {
-        "generated_at": "2026-08-16T09:51:13.651401+00:00",
+        "generated_at": "2026-08-16T10:16:30.723853+00:00",
         "revision": null,
         "source_files": [
           "docs/visual-understanding.md"
@@ -3475,7 +3505,7 @@
         "path": "docs/voice-activation.md"
       },
       "provenance": {
-        "generated_at": "2026-08-16T09:51:13.651401+00:00",
+        "generated_at": "2026-08-16T10:16:30.723853+00:00",
         "revision": null,
         "source_files": [
           "docs/voice-activation.md"
@@ -3494,7 +3524,7 @@
       "kind": "permission",
       "metadata": {},
       "provenance": {
-        "generated_at": "2026-08-16T09:51:13.651401+00:00",
+        "generated_at": "2026-08-16T10:16:30.723853+00:00",
         "revision": null,
         "source_files": [
           "jarvis/permissions/models.py"
@@ -3513,7 +3543,7 @@
       "kind": "permission",
       "metadata": {},
       "provenance": {
-        "generated_at": "2026-08-16T09:51:13.651401+00:00",
+        "generated_at": "2026-08-16T10:16:30.723853+00:00",
         "revision": null,
         "source_files": [
           "jarvis/permissions/models.py"
@@ -3532,7 +3562,7 @@
       "kind": "permission",
       "metadata": {},
       "provenance": {
-        "generated_at": "2026-08-16T09:51:13.651401+00:00",
+        "generated_at": "2026-08-16T10:16:30.723853+00:00",
         "revision": null,
         "source_files": [
           "jarvis/permissions/models.py"
@@ -3551,7 +3581,7 @@
       "kind": "permission",
       "metadata": {},
       "provenance": {
-        "generated_at": "2026-08-16T09:51:13.651401+00:00",
+        "generated_at": "2026-08-16T10:16:30.723853+00:00",
         "revision": null,
         "source_files": [
           "jarvis/permissions/models.py"
@@ -3570,7 +3600,7 @@
       "kind": "permission",
       "metadata": {},
       "provenance": {
-        "generated_at": "2026-08-16T09:51:13.651401+00:00",
+        "generated_at": "2026-08-16T10:16:30.723853+00:00",
         "revision": null,
         "source_files": [
           "jarvis/permissions/models.py"
@@ -3589,7 +3619,7 @@
       "kind": "permission",
       "metadata": {},
       "provenance": {
-        "generated_at": "2026-08-16T09:51:13.651401+00:00",
+        "generated_at": "2026-08-16T10:16:30.723853+00:00",
         "revision": null,
         "source_files": [
           "jarvis/permissions/models.py"
@@ -3608,7 +3638,7 @@
       "kind": "permission",
       "metadata": {},
       "provenance": {
-        "generated_at": "2026-08-16T09:51:13.651401+00:00",
+        "generated_at": "2026-08-16T10:16:30.723853+00:00",
         "revision": null,
         "source_files": [
           "jarvis/permissions/models.py"
@@ -3627,7 +3657,7 @@
       "kind": "permission",
       "metadata": {},
       "provenance": {
-        "generated_at": "2026-08-16T09:51:13.651401+00:00",
+        "generated_at": "2026-08-16T10:16:30.723853+00:00",
         "revision": null,
         "source_files": [
           "jarvis/permissions/models.py"
@@ -3646,7 +3676,7 @@
       "kind": "permission",
       "metadata": {},
       "provenance": {
-        "generated_at": "2026-08-16T09:51:13.651401+00:00",
+        "generated_at": "2026-08-16T10:16:30.723853+00:00",
         "revision": null,
         "source_files": [
           "jarvis/permissions/models.py"
@@ -3665,7 +3695,7 @@
       "kind": "permission",
       "metadata": {},
       "provenance": {
-        "generated_at": "2026-08-16T09:51:13.651401+00:00",
+        "generated_at": "2026-08-16T10:16:30.723853+00:00",
         "revision": null,
         "source_files": [
           "jarvis/permissions/models.py"
@@ -3684,7 +3714,7 @@
       "kind": "permission",
       "metadata": {},
       "provenance": {
-        "generated_at": "2026-08-16T09:51:13.651401+00:00",
+        "generated_at": "2026-08-16T10:16:30.723853+00:00",
         "revision": null,
         "source_files": [
           "jarvis/permissions/models.py"
@@ -3703,7 +3733,7 @@
       "kind": "permission",
       "metadata": {},
       "provenance": {
-        "generated_at": "2026-08-16T09:51:13.651401+00:00",
+        "generated_at": "2026-08-16T10:16:30.723853+00:00",
         "revision": null,
         "source_files": [
           "jarvis/permissions/models.py"
@@ -3722,7 +3752,7 @@
       "kind": "permission",
       "metadata": {},
       "provenance": {
-        "generated_at": "2026-08-16T09:51:13.651401+00:00",
+        "generated_at": "2026-08-16T10:16:30.723853+00:00",
         "revision": null,
         "source_files": [
           "jarvis/permissions/models.py"
@@ -3741,7 +3771,7 @@
       "kind": "permission",
       "metadata": {},
       "provenance": {
-        "generated_at": "2026-08-16T09:51:13.651401+00:00",
+        "generated_at": "2026-08-16T10:16:30.723853+00:00",
         "revision": null,
         "source_files": [
           "jarvis/permissions/models.py"
@@ -3755,12 +3785,12 @@
     },
     {
       "authority": "generated",
-      "content": ".github/ISSUE_TEMPLATE/bug_report.md\n.github/ISSUE_TEMPLATE/feature_request.md\n.github/dependabot.yml\n.github/pull_request_template.md\n.github/workflows/ci.yml\nCONTRIBUTING.md\nREADME.md\ndocs/application-manager.md\ndocs/architecture.md\ndocs/autonomous-improvement.md\ndocs/camera-support.md\ndocs/capability-discovery.md\ndocs/computer-capabilities.md\ndocs/decisions/0001-phase-0-boundaries.md\ndocs/decisions/0002-local-conversation-and-speech.md\ndocs/decisions/0003-bounded-single-agent-orchestration.md\ndocs/decisions/0004-versioned-tool-contract.md\ndocs/decisions/0005-central-tool-registry.md\ndocs/decisions/0006-permission-broker.md\ndocs/decisions/0007-controlled-windows-computer-capabilities.md\ndocs/decisions/0008-visual-grounding-and-verification.md\ndocs/decisions/0009-controlled-camera-support.md\ndocs/decisions/0010-controlled-application-manager.md\ndocs/decisions/0011-advisory-capability-discovery.md\ndocs/decisions/0012-propose-and-test-improvement-engine.md\ndocs/decisions/0013-controlled-system-self-testing.md\ndocs/decisions/0014-separated-memory-domains.md\ndocs/decisions/0015-deterministic-durable-planning.md\ndocs/decisions/0016-optional-bounded-multi-agent.md\ndocs/development.md\ndocs/events.md\ndocs/memory.md\ndocs/multi-agent-orchestration.md\ndocs/permission-model.md\ndocs/planning-engine.md\ndocs/security-principles.md\ndocs/state-machine.md\ndocs/system-testing.md\ndocs/testing.md\ndocs/threat-model.md\ndocs/tools.md\ndocs/v1-current-state-audit.md\ndocs/visual-understanding.md\ndocs/voice-activation.md\njarvis/__init__.py\njarvis/ai/__init__.py\njarvis/ai/models.py\njarvis/ai/providers/__init__.py\njarvis/ai/providers/base.py\njarvis/ai/providers/ollama.py\njarvis/api.py\njarvis/application.py\njarvis/applications/__init__.py\njarvis/applications/catalog.py\njarvis/applications/configuration.py\njarvis/applications/manager.py\njarvis/applications/models.py\njarvis/applications/plans.py\njarvis/applications/providers.py\njarvis/applications/runtime.py\njarvis/applications/tools.py\njarvis/autonomy/__init__.py\njarvis/autonomy/execution.py\njarvis/autonomy/models.py\njarvis/autonomy/orchestrator.py\njarvis/autonomy/planning.py\njarvis/autonomy/response.py\njarvis/autonomy/store.py\njarvis/bootstrap.py\njarvis/camera/__init__.py\njarvis/camera/catalog.py\njarvis/camera/controller.py\njarvis/camera/models.py\njarvis/camera/provider.py\njarvis/camera/store.py\njarvis/camera/tools.py\njarvis/camera/vision.py\njarvis/computer/__init__.py\njarvis/computer/accessibility.py\njarvis/computer/adapters.py\njarvis/computer/artifacts.py\njarvis/computer/catalog.py\njarvis/computer/filesystem.py\njarvis/computer/models.py\njarvis/computer/terminal.py\njarvis/computer/tools.py\njarvis/conversation/__init__.py\njarvis/conversation/service.py\njarvis/core/__init__.py\njarvis/core/config.py\njarvis/core/errors.py\njarvis/core/health.py\njarvis/core/logging.py\njarvis/desktop.py\njarvis/discovery/__init__.py\njarvis/discovery/models.py\njarvis/discovery/providers.py\njarvis/discovery/service.py\njarvis/events/__init__.py\njarvis/events/bus.py\njarvis/events/models.py\njarvis/frontend/__init__.py\njarvis/frontend/desktop.py\njarvis/improvement/__init__.py\njarvis/improvement/adapters.py\njarvis/improvement/analysis.py\njarvis/improvement/dependencies.py\njarvis/improvement/engine.py\njarvis/improvement/integrity.py\njarvis/improvement/models.py\njarvis/improvement/workspace.py\njarvis/knowledge/__init__.py\njarvis/knowledge/indexer.py\njarvis/knowledge/models.py\njarvis/knowledge/store.py\njarvis/memory/__init__.py\njarvis/memory/models.py\njarvis/memory/policy.py\njarvis/memory/services.py\njarvis/memory/store.py\njarvis/multi_agent/__init__.py\njarvis/multi_agent/engine.py\njarvis/multi_agent/models.py\njarvis/multi_agent/registry.py\njarvis/multi_agent/validation.py\njarvis/permissions/__init__.py\njarvis/permissions/audit.py\njarvis/permissions/broker.py\njarvis/permissions/models.py\njarvis/permissions/policy.py\njarvis/planning/__init__.py\njarvis/planning/engine.py\njarvis/planning/models.py\njarvis/planning/store.py\njarvis/planning/validation.py\njarvis/runtime.py\njarvis/security/__init__.py\njarvis/speech/__init__.py\njarvis/speech/stt.py\njarvis/speech/tts.py\njarvis/state/__init__.py\njarvis/state/machine.py\njarvis/state/models.py\njarvis/state/store.py\njarvis/task_controller.py\njarvis/testing/__init__.py\njarvis/testing/catalog.py\njarvis/testing/diagnosis.py\njarvis/testing/models.py\njarvis/testing/regressions.py\njarvis/testing/runner.py\njarvis/testing/smoke.py\njarvis/testing/workflows.py\njarvis/tools/__init__.py\njarvis/tools/base.py\njarvis/tools/calculator.py\njarvis/tools/catalog.py\njarvis/tools/harness.py\njarvis/tools/local_time.py\njarvis/tools/models.py\njarvis/tools/registry.py\njarvis/tools/weather.py\njarvis/vision/__init__.py\njarvis/vision/fusion.py\njarvis/vision/gateway.py\njarvis/vision/interaction.py\njarvis/vision/models.py\njarvis/vision/providers.py\njarvis/voice/__init__.py\njarvis/voice/activation.py\npyproject.toml\nscripts/__init__.py\nscripts/quality.py\nscripts/refresh_knowledge.py\nscripts/run_system_tests.py\ntests/__init__.py\ntests/fakes.py\ntests/fixtures/desktop_observations.json\ntests/fixtures/regressions/calculator-workflow.json\ntests/fixtures/regressions/permission-pause.json\ntests/test_application.py\ntests/test_applications.py\ntests/test_bootstrap.py\ntests/test_camera.py\ntests/test_computer.py\ntests/test_config.py\ntests/test_conversation.py\ntests/test_discovery.py\ntests/test_events.py\ntests/test_health.py\ntests/test_improvement.py\ntests/test_memory.py\ntests/test_multi_agent.py\ntests/test_ollama_provider.py\ntests/test_orchestrator.py\ntests/test_planning_engine.py\ntests/test_runtime.py\ntests/test_speech.py\ntests/test_state.py\ntests/test_system_testing.py\ntests/test_tool_registry.py\ntests/test_tools.py\ntests/test_vision.py\ntests/test_voice.py\ntests/test_windows_integration.py",
+      "content": ".github/ISSUE_TEMPLATE/bug_report.md\n.github/ISSUE_TEMPLATE/feature_request.md\n.github/dependabot.yml\n.github/pull_request_template.md\n.github/workflows/ci.yml\nCONTRIBUTING.md\nREADME.md\ndocs/adr/persistence-and-consistency.md\ndocs/application-manager.md\ndocs/architecture.md\ndocs/autonomous-improvement.md\ndocs/camera-support.md\ndocs/capability-discovery.md\ndocs/computer-capabilities.md\ndocs/decisions/0001-phase-0-boundaries.md\ndocs/decisions/0002-local-conversation-and-speech.md\ndocs/decisions/0003-bounded-single-agent-orchestration.md\ndocs/decisions/0004-versioned-tool-contract.md\ndocs/decisions/0005-central-tool-registry.md\ndocs/decisions/0006-permission-broker.md\ndocs/decisions/0007-controlled-windows-computer-capabilities.md\ndocs/decisions/0008-visual-grounding-and-verification.md\ndocs/decisions/0009-controlled-camera-support.md\ndocs/decisions/0010-controlled-application-manager.md\ndocs/decisions/0011-advisory-capability-discovery.md\ndocs/decisions/0012-propose-and-test-improvement-engine.md\ndocs/decisions/0013-controlled-system-self-testing.md\ndocs/decisions/0014-separated-memory-domains.md\ndocs/decisions/0015-deterministic-durable-planning.md\ndocs/decisions/0016-optional-bounded-multi-agent.md\ndocs/development.md\ndocs/events.md\ndocs/memory.md\ndocs/multi-agent-orchestration.md\ndocs/permission-model.md\ndocs/planning-engine.md\ndocs/security-principles.md\ndocs/state-machine.md\ndocs/system-testing.md\ndocs/testing.md\ndocs/threat-model.md\ndocs/tools.md\ndocs/v1-current-state-audit.md\ndocs/visual-understanding.md\ndocs/voice-activation.md\njarvis/__init__.py\njarvis/ai/__init__.py\njarvis/ai/models.py\njarvis/ai/providers/__init__.py\njarvis/ai/providers/base.py\njarvis/ai/providers/ollama.py\njarvis/api.py\njarvis/application.py\njarvis/applications/__init__.py\njarvis/applications/catalog.py\njarvis/applications/configuration.py\njarvis/applications/manager.py\njarvis/applications/models.py\njarvis/applications/plans.py\njarvis/applications/providers.py\njarvis/applications/runtime.py\njarvis/applications/tools.py\njarvis/autonomy/__init__.py\njarvis/autonomy/execution.py\njarvis/autonomy/models.py\njarvis/autonomy/orchestrator.py\njarvis/autonomy/planning.py\njarvis/autonomy/response.py\njarvis/autonomy/store.py\njarvis/bootstrap.py\njarvis/camera/__init__.py\njarvis/camera/catalog.py\njarvis/camera/controller.py\njarvis/camera/models.py\njarvis/camera/provider.py\njarvis/camera/store.py\njarvis/camera/tools.py\njarvis/camera/vision.py\njarvis/computer/__init__.py\njarvis/computer/accessibility.py\njarvis/computer/adapters.py\njarvis/computer/artifacts.py\njarvis/computer/catalog.py\njarvis/computer/filesystem.py\njarvis/computer/models.py\njarvis/computer/terminal.py\njarvis/computer/tools.py\njarvis/conversation/__init__.py\njarvis/conversation/service.py\njarvis/core/__init__.py\njarvis/core/config.py\njarvis/core/errors.py\njarvis/core/health.py\njarvis/core/logging.py\njarvis/desktop.py\njarvis/discovery/__init__.py\njarvis/discovery/models.py\njarvis/discovery/providers.py\njarvis/discovery/service.py\njarvis/events/__init__.py\njarvis/events/bus.py\njarvis/events/models.py\njarvis/frontend/__init__.py\njarvis/frontend/desktop.py\njarvis/improvement/__init__.py\njarvis/improvement/adapters.py\njarvis/improvement/analysis.py\njarvis/improvement/dependencies.py\njarvis/improvement/engine.py\njarvis/improvement/integrity.py\njarvis/improvement/models.py\njarvis/improvement/workspace.py\njarvis/knowledge/__init__.py\njarvis/knowledge/indexer.py\njarvis/knowledge/models.py\njarvis/knowledge/store.py\njarvis/memory/__init__.py\njarvis/memory/models.py\njarvis/memory/policy.py\njarvis/memory/services.py\njarvis/memory/store.py\njarvis/multi_agent/__init__.py\njarvis/multi_agent/engine.py\njarvis/multi_agent/models.py\njarvis/multi_agent/registry.py\njarvis/multi_agent/validation.py\njarvis/permissions/__init__.py\njarvis/permissions/audit.py\njarvis/permissions/broker.py\njarvis/permissions/models.py\njarvis/permissions/policy.py\njarvis/planning/__init__.py\njarvis/planning/engine.py\njarvis/planning/models.py\njarvis/planning/store.py\njarvis/planning/validation.py\njarvis/runtime.py\njarvis/security/__init__.py\njarvis/speech/__init__.py\njarvis/speech/stt.py\njarvis/speech/tts.py\njarvis/state/__init__.py\njarvis/state/machine.py\njarvis/state/models.py\njarvis/state/store.py\njarvis/task_controller.py\njarvis/testing/__init__.py\njarvis/testing/catalog.py\njarvis/testing/diagnosis.py\njarvis/testing/models.py\njarvis/testing/regressions.py\njarvis/testing/runner.py\njarvis/testing/smoke.py\njarvis/testing/workflows.py\njarvis/tools/__init__.py\njarvis/tools/base.py\njarvis/tools/calculator.py\njarvis/tools/catalog.py\njarvis/tools/harness.py\njarvis/tools/local_time.py\njarvis/tools/models.py\njarvis/tools/registry.py\njarvis/tools/weather.py\njarvis/vision/__init__.py\njarvis/vision/fusion.py\njarvis/vision/gateway.py\njarvis/vision/interaction.py\njarvis/vision/models.py\njarvis/vision/providers.py\njarvis/voice/__init__.py\njarvis/voice/activation.py\npyproject.toml\nscripts/__init__.py\nscripts/quality.py\nscripts/refresh_knowledge.py\nscripts/run_system_tests.py\ntests/__init__.py\ntests/fakes.py\ntests/fixtures/desktop_observations.json\ntests/fixtures/regressions/calculator-workflow.json\ntests/fixtures/regressions/permission-pause.json\ntests/test_application.py\ntests/test_applications.py\ntests/test_bootstrap.py\ntests/test_camera.py\ntests/test_computer.py\ntests/test_config.py\ntests/test_conversation.py\ntests/test_discovery.py\ntests/test_events.py\ntests/test_health.py\ntests/test_improvement.py\ntests/test_memory.py\ntests/test_multi_agent.py\ntests/test_ollama_provider.py\ntests/test_orchestrator.py\ntests/test_persistence.py\ntests/test_planning_engine.py\ntests/test_runtime.py\ntests/test_speech.py\ntests/test_state.py\ntests/test_system_testing.py\ntests/test_tool_registry.py\ntests/test_tools.py\ntests/test_vision.py\ntests/test_voice.py\ntests/test_windows_integration.py",
       "id": "project-tree",
       "kind": "project-tree",
       "metadata": {},
       "provenance": {
-        "generated_at": "2026-08-16T09:51:13.651401+00:00",
+        "generated_at": "2026-08-16T10:16:30.723853+00:00",
         "revision": null,
         "source_files": [
           ".github/ISSUE_TEMPLATE/bug_report.md",
@@ -3770,6 +3800,7 @@
           ".github/workflows/ci.yml",
           "CONTRIBUTING.md",
           "README.md",
+          "docs/adr/persistence-and-consistency.md",
           "docs/application-manager.md",
           "docs/architecture.md",
           "docs/autonomous-improvement.md",
@@ -3958,6 +3989,7 @@
           "tests/test_multi_agent.py",
           "tests/test_ollama_provider.py",
           "tests/test_orchestrator.py",
+          "tests/test_persistence.py",
           "tests/test_planning_engine.py",
           "tests/test_runtime.py",
           "tests/test_speech.py",
@@ -3977,6 +4009,7 @@
           ".github/workflows/ci.yml": "044808bfe848a1d9c2c686dd8001aaf9d6aa7e6a428b747731449a3febb95e6d",
           "CONTRIBUTING.md": "2dc37801fd094593c4c9bceaf2d8003a49d6409d3f85026ffe410af47a2063f6",
           "README.md": "3961f33d09c72e2ff02fcce447f08609aecfc2a12c51033788eb7189db9169a3",
+          "docs/adr/persistence-and-consistency.md": "050bdf0b08f39bca23036b15c7744025ed8f7f1aeaf6b6dbfbb5a4efd3482b1c",
           "docs/application-manager.md": "77a2a902c3e2974cd04c8d109be86aea5f50c154c4d8630c0a15857d87f0fc3f",
           "docs/architecture.md": "48e635fdba6b4877cf8f5f15a1dc5f6612c2ad0fded12ff2a4407b0acce81bba",
           "docs/autonomous-improvement.md": "9ec26d533ad61a37551145781e889fd3ebfc9c40dde1115a09cb07c091b6d363",
@@ -4089,31 +4122,31 @@
           "jarvis/memory/models.py": "241631bc5c7447b50b6deeb4019de6135358b998878142188167ac3d50298073",
           "jarvis/memory/policy.py": "1a875b9279a288d4c2b62a46d4672e4f55e1e19df505aaaec51193e2764e5663",
           "jarvis/memory/services.py": "f47821326ad313281bacc9f4d056b803322d0a632f49525a16f46fe91e66d3df",
-          "jarvis/memory/store.py": "aad58ae21afdf87813b9e17526b09522c438de7c965fdb785c0c5847c1cd975b",
+          "jarvis/memory/store.py": "1035db8157c1ed0c231b6360c2d1304a7af8d05b9235c35429e11a2904c687db",
           "jarvis/multi_agent/__init__.py": "0b024fb3f5ee21db6f4160c5e641afed86c942344f2283ff0f4f33f51987de62",
           "jarvis/multi_agent/engine.py": "ce090b2cff61eb7bcf77caa2db77c3f9addb0beaa799a8e6a529e66b0d4d8385",
           "jarvis/multi_agent/models.py": "22b3274d0db5e8faab086ed2d82f42b71795f6834b86784d81de6b77d5b6956d",
           "jarvis/multi_agent/registry.py": "8d1fcf314733a0ab58c876e431070f60e532e6ad6a435b221116685eeb5bf9f6",
           "jarvis/multi_agent/validation.py": "b78193f03bb91184fde89c4dd9616da847237e93ef12756407e11dc642075eda",
-          "jarvis/permissions/__init__.py": "37997697f0d1d8df4b3d582b25a5cb674ea6a3ccbaa0032895aeec05d758a708",
-          "jarvis/permissions/audit.py": "4b2610c9a8264534810782539189078e0fd1ba9a04864ccda2397e931140f46e",
+          "jarvis/permissions/__init__.py": "3f5e255648f3ec9edd8971ec3e823928947f6708613a959660e49ddaa715f73b",
+          "jarvis/permissions/audit.py": "14de093e7d4773029a2985e30cb6c058083e72e1f638fa26c3803d714404fa09",
           "jarvis/permissions/broker.py": "24d19a37322804386f207754fe962af6cf5ced26be9f866443d03a11c7004339",
           "jarvis/permissions/models.py": "4efc726f2d763cc4a450f78f73afac82fb1ff3c369ef6f9c1dfa6795c894591f",
           "jarvis/permissions/policy.py": "5a3e3f9d5aad38a3e62fe8aebab15803707bcd5e6eec4b59788e3d4147024794",
           "jarvis/planning/__init__.py": "c9b412df955c221fcca9ae1fecef1f548e5ba08f73e0b19e51316b6ccf7a78ab",
-          "jarvis/planning/engine.py": "867979fc40411857db4237ff48f4664d16ed3e76a7bd1bb2ecdcde7eb054af61",
-          "jarvis/planning/models.py": "3c1b4bba83e84b91b71a4ddefaafc10a4f7baecb3b5856b3ef087efd4ef878c7",
-          "jarvis/planning/store.py": "ec131fb3e720fac80de59f8a468c1130278185628f1b535d8a7a743ac3362efb",
+          "jarvis/planning/engine.py": "830204355dd59d4e5b0b013f0a2dcef6569cbda56e7a67f01118a076c79f2169",
+          "jarvis/planning/models.py": "74d1a8dcf3f8a4d66d84fec9f9464073e506dc6b4b9fb4739d6c7f2fa00136af",
+          "jarvis/planning/store.py": "7d7e4cba31f0ce63de8c81c5bd8519ce0637020bf66370928d8d6d6f65c017ab",
           "jarvis/planning/validation.py": "8349deae4479a07441e47f9658f9933693756b8b1bc041d9864058b9088ee610",
-          "jarvis/runtime.py": "ca2e42da98ca9fa59f0acfc949c587d26bf49162e4003c9ee67e53399158d347",
+          "jarvis/runtime.py": "b793dc2ec4373f8a07b5db1ea9f0d3bb6b6e56f63cffd236fb5b872054e9d3aa",
           "jarvis/security/__init__.py": "1070448195a94901d3eae269d5027096f8f7677381ac7851ee484f7fa21282f4",
           "jarvis/speech/__init__.py": "623e1d4e37bc60ee4ba96a91021b49f9e11a3b5bb004ac47a1d4148c14f7435c",
           "jarvis/speech/stt.py": "679f1a26faf261807de0e85668386ba3639f349de02c6bcc6826b2174c34960c",
           "jarvis/speech/tts.py": "1bf1b516fc854b941c4696c8c3428495a66da2b38c42384e5eb7e57779e7a5a4",
-          "jarvis/state/__init__.py": "e82e24dbd5732dd217e6cd3d8a774b1a1bda8d2af97dc07ccc0a57f1083d52f6",
-          "jarvis/state/machine.py": "f129419f5d3a172e4c5963c3775c922bb8f1bbfdff84bb5cfe254c6f92e2843e",
+          "jarvis/state/__init__.py": "d2dd5bbade7bfb86b4faf3fcdceb421f9022067d1c0ff8a24ad99dc14b6c5cb4",
+          "jarvis/state/machine.py": "25feacd7ea765c120d7e01f700a3a0db2e853c24c6d9222763773261dbf04da6",
           "jarvis/state/models.py": "44140cf004df5a3847ffa09a90cef0adec4f26fcf537fda9b4cd8d716a3f5dc1",
-          "jarvis/state/store.py": "e1a18c8ad6b6dba0eb7f193c2510d27619ef492f38a9875313edc40ba838a63f",
+          "jarvis/state/store.py": "1fc85b6bebb9b55d58402fbe7b326236f52a7bc8c7aec7be081b41a329026aec",
           "jarvis/task_controller.py": "c7560522782c7de4d14c0de3efacf922172a02e5bf511fe9a2e6302b502d63a3",
           "jarvis/testing/__init__.py": "5ccb77424795d1734a4de5e01f5402b427d4dc33bf1c709ff6e71cb5724fefdb",
           "jarvis/testing/catalog.py": "b9d986de4acaa50ec5f3945359a14d2dfa3bfe5a200bc77481d8f44821fd3b12",
@@ -4165,8 +4198,9 @@
           "tests/test_multi_agent.py": "dae7a36fa83ca62ba7c0d32d23f382153e87e1fbf96f973c67809f48526fed12",
           "tests/test_ollama_provider.py": "63b20975083b035b4ee6614475c4a579e743947ab28894480a18cf4c70cd1758",
           "tests/test_orchestrator.py": "d68370205f3ef4320e0d993b617d4feb702f2cadb09579b9200f5feb6ba641fd",
+          "tests/test_persistence.py": "185a3fb0015e97f9f1a7c74ef5b305f8112ca96a2441544e8f25f30a0199ca81",
           "tests/test_planning_engine.py": "55fe7c846243f9cc4cf14a59e36b9811011b37f45906b9ce094c976e2552999f",
-          "tests/test_runtime.py": "5fe5c3968982d0b00ec00a643a3d8a8eff4a11f9dadb6e9ecbea13e5e649aefb",
+          "tests/test_runtime.py": "38916457aa28be00508b2a64bb6ecb7e9dd5ac49e402bc1325a225d04ccf6aa1",
           "tests/test_speech.py": "675b76efb0c3a61f8286fffd201835fe59efb9179f6a34de2cc00e30847be712",
           "tests/test_state.py": "a09ad9c268cf1ca62a53a476db73edebdadeebf43a6a621b52566e955304d722",
           "tests/test_system_testing.py": "81fc36e41107c2f00bcfaf9152a68cbcea6dbe58c55e1ad41ab38eaf1db2862f",
@@ -4189,7 +4223,7 @@
         "tool_id": "calculator"
       },
       "provenance": {
-        "generated_at": "2026-08-16T09:51:13.651401+00:00",
+        "generated_at": "2026-08-16T10:16:30.723853+00:00",
         "revision": null,
         "source_files": [
           "jarvis/tools/calculator.py",
@@ -4212,7 +4246,7 @@
         "tool_id": "local_time"
       },
       "provenance": {
-        "generated_at": "2026-08-16T09:51:13.651401+00:00",
+        "generated_at": "2026-08-16T10:16:30.723853+00:00",
         "revision": null,
         "source_files": [
           "jarvis/tools/local_time.py",
@@ -4235,7 +4269,7 @@
         "tool_id": "weather"
       },
       "provenance": {
-        "generated_at": "2026-08-16T09:51:13.651401+00:00",
+        "generated_at": "2026-08-16T10:16:30.723853+00:00",
         "revision": null,
         "source_files": [
           "jarvis/tools/registry.py",
@@ -4286,7 +4320,7 @@
         "windows"
       ],
       "provenance": {
-        "generated_at": "2026-08-16T09:51:13.651401+00:00",
+        "generated_at": "2026-08-16T10:16:30.723853+00:00",
         "revision": null,
         "source_files": [
           "jarvis/tools/calculator.py",
@@ -4318,7 +4352,7 @@
         "windows"
       ],
       "provenance": {
-        "generated_at": "2026-08-16T09:51:13.651401+00:00",
+        "generated_at": "2026-08-16T10:16:30.723853+00:00",
         "revision": null,
         "source_files": [
           "jarvis/tools/local_time.py",
@@ -4349,7 +4383,7 @@
         "windows"
       ],
       "provenance": {
-        "generated_at": "2026-08-16T09:51:13.651401+00:00",
+        "generated_at": "2026-08-16T10:16:30.723853+00:00",
         "revision": null,
         "source_files": [
           "jarvis/tools/registry.py",

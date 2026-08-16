@@ -66,6 +66,20 @@ DEFAULT_PLANNING_MIGRATIONS = (
         CREATE INDEX planning_current_plan ON planning_plans(task_id, current);
         """,
     ),
+    PlanningMigration(
+        2,
+        "create_operation_idempotency",
+        """
+        CREATE TABLE planning_operations (
+            task_id TEXT NOT NULL,
+            operation_key TEXT NOT NULL,
+            fingerprint TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            PRIMARY KEY(task_id, operation_key),
+            FOREIGN KEY(task_id) REFERENCES planning_tasks(task_id)
+        );
+        """,
+    ),
 )
 
 
@@ -90,6 +104,11 @@ class PlanningStore(ABC):
 
         return ()
 
+    def reserve_operation(self, task_id: UUID, operation_key: str, fingerprint: str) -> bool:
+        """Reserve an irreversible-effect key; false means an exact prior reservation."""
+
+        return True
+
 
 def _now() -> datetime:
     return datetime.now(UTC)
@@ -113,7 +132,10 @@ class SQLitePlanningStore(PlanningStore):
         self._connection = sqlite3.connect(database_path, check_same_thread=False)
         self._connection.row_factory = sqlite3.Row
         self._connection.execute("PRAGMA foreign_keys = ON")
+        self._connection.execute("PRAGMA busy_timeout = 5000")
+        self._connection.execute("PRAGMA journal_mode = WAL")
         self._lock = threading.RLock()
+        self._integrity_check()
         self.apply_migrations()
 
     @property
@@ -155,10 +177,20 @@ class SQLitePlanningStore(PlanningStore):
                         "VALUES (?, ?, ?)",
                         (migration.version, migration.name, _iso(self._clock())),
                     )
+                if any(version > len(self._migrations) for version in applied):
+                    raise PlanningStoreError("Planning database uses a future schema")
                 self._connection.commit()
             except (sqlite3.DatabaseError, ValueError) as error:
                 self._connection.rollback()
                 raise PlanningStoreError("Planning migration failed") from error
+
+    def _integrity_check(self) -> None:
+        try:
+            row = self._connection.execute("PRAGMA integrity_check").fetchone()
+        except sqlite3.DatabaseError as error:
+            raise PlanningStoreError("Planning database integrity check failed") from error
+        if row is None or str(row[0]).casefold() != "ok":
+            raise PlanningStoreError("Planning database is corrupt")
 
     def create_task(self, task: PlanningTask) -> None:
         payload = json.dumps(_task_dict(task), sort_keys=True, separators=(",", ":"))
@@ -196,6 +228,32 @@ class SQLitePlanningStore(PlanningStore):
             )
         except (KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
             raise PlanningStoreError("Stored planning task is malformed") from error
+
+    def reserve_operation(self, task_id: UUID, operation_key: str, fingerprint: str) -> bool:
+        if not operation_key or len(operation_key) > 128 or len(fingerprint) != 64:
+            raise PlanningStoreError("Operation idempotency key is malformed")
+        with self._lock:
+            try:
+                existing = self._connection.execute(
+                    "SELECT fingerprint FROM planning_operations "
+                    "WHERE task_id = ? AND operation_key = ?",
+                    (str(task_id), operation_key),
+                ).fetchone()
+                if existing is not None:
+                    if str(existing["fingerprint"]) != fingerprint:
+                        raise PlanningStoreError("Operation idempotency key fingerprint mismatch")
+                    return False
+                self._connection.execute(
+                    "INSERT INTO planning_operations("
+                    "task_id, operation_key, fingerprint, created_at) "
+                    "VALUES (?, ?, ?, ?)",
+                    (str(task_id), operation_key, fingerprint, _iso(self._clock())),
+                )
+                self._connection.commit()
+                return True
+            except sqlite3.DatabaseError as error:
+                self._connection.rollback()
+                raise PlanningStoreError("Operation idempotency reservation failed") from error
 
     def load_plan(self, task_id: UUID) -> OwnedPlan | None:
         with self._lock:
