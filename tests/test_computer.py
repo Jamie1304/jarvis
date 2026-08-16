@@ -1,4 +1,5 @@
 import asyncio
+import sys
 from datetime import UTC, datetime
 from pathlib import Path
 from uuid import UUID
@@ -16,7 +17,11 @@ from jarvis.computer.models import (
     MouseActionState,
     WindowInfo,
 )
-from jarvis.computer.terminal import CommandAdapter, ControlledCommandService
+from jarvis.computer.terminal import (
+    CommandAdapter,
+    ControlledCommandService,
+    SubprocessCommandAdapter,
+)
 from jarvis.computer.tools import (
     CaptureScreenTool,
     ControlledCommandTool,
@@ -318,6 +323,27 @@ async def test_command_timeout_returns_captured_output(tmp_path: Path) -> None:
     assert result.output is not None
     assert result.output.model_dump()["stdout"] == "partial stdout"
     assert adapter.calls[0][0].executable == "git.exe"
+
+
+@pytest.mark.asyncio
+async def test_real_no_shell_command_adapter_preserves_argument_boundaries(tmp_path: Path) -> None:
+    command = CommandDefinition(
+        "python-echo",
+        sys.executable,
+        "python.echo",
+        frozenset({("-c", "import sys; print(sys.argv[1])", "argument with spaces")}),
+        SafetyClass.ORDINARY,
+    )
+    result = await SubprocessCommandAdapter().execute(
+        command,
+        ("-c", "import sys; print(sys.argv[1])", "argument with spaces"),
+        str(tmp_path),
+        5,
+        asyncio.Event(),
+    )
+
+    assert result.exit_code == 0
+    assert result.stdout.strip() == "argument with spaces"
 
 
 @pytest.mark.asyncio

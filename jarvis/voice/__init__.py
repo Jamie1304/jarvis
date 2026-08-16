@@ -16,13 +16,17 @@ from jarvis.voice.activation import (
     WakeDetection,
     WakeWordProvider,
 )
+from jarvis.voice.providers import EnergyVADProvider, OpenWakeWordProvider, SoundDeviceAudioSource
 
 __all__ = [
     "AudioFrame",
     "AudioSource",
+    "EnergyVADProvider",
     "InterruptionCommand",
     "LocalVoiceController",
     "OrchestratorVoiceTaskRunner",
+    "OpenWakeWordProvider",
+    "SoundDeviceAudioSource",
     "VADProvider",
     "VoiceConfig",
     "VoiceState",

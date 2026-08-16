@@ -69,10 +69,13 @@ class CameraProvider(ABC):
 class OpenCvCameraProvider(CameraProvider):  # pragma: no cover
     """Optional Windows-first OpenCV provider; hardware tests remain opt-in."""
 
-    def __init__(self, *, probe_count: int = 4) -> None:
+    def __init__(
+        self, *, probe_count: int = 4, allowed_device_ids: frozenset[str] | None = None
+    ) -> None:
         if probe_count < 1 or probe_count > 16:
             raise ValueError("Camera probe count must be between one and sixteen")
         self._probe_count = probe_count
+        self._allowed_device_ids = allowed_device_ids
 
     async def enumerate_devices(self) -> tuple[CameraDevice, ...]:
         return await asyncio.to_thread(self._enumerate_devices)
@@ -126,7 +129,11 @@ class OpenCvCameraProvider(CameraProvider):  # pragma: no cover
             raise CameraDeviceNotFoundError(
                 "Camera device is not in the trusted catalog"
             ) from error
-        if index < 0 or index >= self._probe_count:
+        if (
+            index < 0
+            or index >= self._probe_count
+            or (self._allowed_device_ids is not None and device_id not in self._allowed_device_ids)
+        ):
             raise CameraDeviceNotFoundError("Camera device is not in the trusted catalog")
         capture = cv2.VideoCapture(index, cv2.CAP_DSHOW)
         if not capture.isOpened():
@@ -149,10 +156,25 @@ class _OpenCvCameraSession(CameraSession):  # pragma: no cover
     async def capture_frame(
         self, timeout_seconds: float, cancellation: asyncio.Event
     ) -> CameraFrame:
-        del timeout_seconds
         if cancellation.is_set():
             raise asyncio.CancelledError
-        success, frame = await asyncio.to_thread(self._capture.read)
+        read_task = asyncio.create_task(asyncio.to_thread(self._capture.read))
+        cancelled_task = asyncio.create_task(cancellation.wait())
+        try:
+            done, _ = await asyncio.wait(
+                {read_task, cancelled_task},
+                timeout=timeout_seconds,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if cancelled_task in done:
+                raise asyncio.CancelledError
+            if read_task not in done:
+                raise CameraCaptureTimeoutError("Camera did not return a frame in time")
+            success, frame = await read_task
+        finally:
+            if not cancelled_task.done():
+                cancelled_task.cancel()
+            await asyncio.gather(cancelled_task, return_exceptions=True)
         if cancellation.is_set():
             raise asyncio.CancelledError
         if not success:

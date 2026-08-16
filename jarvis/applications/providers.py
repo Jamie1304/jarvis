@@ -7,6 +7,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import sys
 from abc import ABC, abstractmethod
 from collections.abc import Iterable
@@ -99,6 +100,8 @@ class WindowsRegistryInventoryProvider(ApplicationInventoryProvider):  # pragma:
                                 "DisplayVersion",
                                 "Publisher",
                                 "DisplayIcon",
+                                "InstallLocation",
+                                "UninstallString",
                             )
                         }
                     name = values["DisplayName"]
@@ -107,8 +110,10 @@ class WindowsRegistryInventoryProvider(ApplicationInventoryProvider):  # pragma:
                     digest_input = f"{hive}:{view}:{key_path}:{subkey_name}"
                     digest = hashlib.sha256(digest_input.encode()).hexdigest()
                     stable = f"registry:{digest[:24]}"
-                    executable = WindowsRegistryInventoryProvider._safe_executable(
-                        values["DisplayIcon"]
+                    executable = WindowsRegistryInventoryProvider._launch_evidence(
+                        values["DisplayIcon"],
+                        values["InstallLocation"],
+                        values["UninstallString"],
                     )
                     status = (
                         ApplicationStatus.INSTALLED
@@ -154,6 +159,34 @@ class WindowsRegistryInventoryProvider(ApplicationInventoryProvider):  # pragma:
             return None
         return os.path.normcase(os.fspath(path))
 
+    @classmethod
+    def _launch_evidence(
+        cls,
+        display_icon: str | None,
+        install_location: str | None,
+        uninstall_string: str | None,
+    ) -> str | None:
+        """Use read-only registry evidence; never infer a path from a display name."""
+
+        for candidate in (display_icon, uninstall_string):
+            executable = cls._safe_executable(candidate)
+            if executable is not None:
+                return executable
+        if not install_location:
+            return None
+        try:
+            location = Path(install_location).resolve(strict=True)
+        except OSError:
+            return None
+        if not location.is_dir():
+            return None
+        # A lone root executable is evidence; selecting among multiple files would
+        # be an unsafe guess and remains BROKEN until a reviewed catalog resolves it.
+        executables = tuple(location.glob("*.exe"))
+        if len(executables) != 1:
+            return None
+        return cls._safe_executable(str(executables[0]))
+
 
 class WingetPackageProvider(PackageProvider):  # pragma: no cover
     """Optional package provider with a trusted candidate catalog and no shell strings."""
@@ -164,6 +197,15 @@ class WingetPackageProvider(PackageProvider):  # pragma: no cover
             if candidate.source.casefold() != "winget":
                 raise ValueError("Winget provider candidates must use the winget source")
             self._validate_candidate(candidate)
+
+    @staticmethod
+    async def available() -> bool:
+        """Read-only availability check; it does not query, install, or update packages."""
+
+        return (
+            sys.platform == "win32"
+            and await asyncio.to_thread(shutil.which, "winget.exe") is not None
+        )
 
     async def search(self, semantic_name: str) -> tuple[InstallationCandidate, ...]:
         query = semantic_name.casefold().strip()
