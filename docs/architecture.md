@@ -202,6 +202,14 @@ password values are redacted, and cross-origin semantic data is not exposed.
 Navigation, mutation, and tab-close events are observational only. See
 `docs/browser-semantic-bridge.md`.
 
+Credentials have a separate sole authority: `CredentialVault` stores metadata in
+its own database and secret bytes only through an explicitly selected secure
+backend. The production Windows backend is Credential Manager; unsupported
+hosts fail closed. Models and ordinary services receive opaque references, while
+trusted authenticated-request proxies perform scoped use. Generic authentication
+providers cannot grant permission or become a second secret authority. See
+`docs/credential-vault.md` and `docs/authoritative-state-map.md`.
+
 Phase 11 adds a high-risk, proposal-and-test improvement boundary:
 
 `observe -> identify -> specify -> assess risk -> isolate -> modify -> gate -> evaluate -> propose`

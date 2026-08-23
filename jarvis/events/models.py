@@ -38,6 +38,7 @@ class EventType(StrEnum):
     BROWSER_NAVIGATED = "browser.navigated"
     BROWSER_MUTATED = "browser.mutated"
     BROWSER_TAB_CLOSED = "browser.tab_closed"
+    CREDENTIAL_CHANGED = "credential.changed"
     SYSTEM_ERROR = "system.error"
     ARTIFACT_CREATED = "artifact.created"
 
@@ -310,6 +311,19 @@ class BrowserTabClosed(EventPayload):
 
 
 @dataclass(frozen=True, slots=True)
+class CredentialChanged(EventPayload):
+    credential_id: UUID
+    status: str
+    operation: str
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.credential_id, UUID):
+            raise ValueError("invalid credential id")
+        _text(self.status)
+        _text(self.operation)
+
+
+@dataclass(frozen=True, slots=True)
 class SystemError(EventPayload):
     code: str
     summary: str
@@ -344,6 +358,7 @@ _PAYLOAD_TYPES: dict[EventType, type[EventPayload]] = {
     EventType.BROWSER_NAVIGATED: BrowserNavigated,
     EventType.BROWSER_MUTATED: BrowserMutated,
     EventType.BROWSER_TAB_CLOSED: BrowserTabClosed,
+    EventType.CREDENTIAL_CHANGED: CredentialChanged,
     EventType.SYSTEM_ERROR: SystemError,
     EventType.ARTIFACT_CREATED: ArtifactCreated,
 }

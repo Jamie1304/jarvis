@@ -21,6 +21,7 @@ Payloads currently cover:
 - runtime, health, and automation state changes
 - voice and camera state changes
 - capability/integration changes and bounded system errors
+- credential status changes containing only credential ID, status, and operation
 
 Payload schemas permit only bounded summaries and identifiers and enforce the
 `EventType`/payload pairing. Every producer is responsible for redaction: generic

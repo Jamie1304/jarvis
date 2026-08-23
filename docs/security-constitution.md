@@ -268,11 +268,13 @@ used to bypass `PermissionBroker`.
 ### Trusted Core protected boundaries
 
 The following remain inside the trusted security boundary: trusted identity and
-approval authentication, `PermissionBroker`, root policy, the future
-`CredentialVault` boundary, audit integrity, sandbox/update/recovery gates, and
-mutation authorization. JARVIS v1 deliberately has no credential vault;
-credential-like data is rejected from ordinary stores and a future vault needs a
-separate owner, interface, migration, and security ADR before it exists.
+approval authentication, `PermissionBroker`, root policy, the `CredentialVault`
+boundary, audit integrity, sandbox/update/recovery gates, and mutation
+authorization. `CredentialVault` is the sole secret authority. It stores only
+credential metadata in its app-owned database and delegates secret bytes to an
+explicit secure backend; unsupported hosts fail closed. Credential-like data is
+still rejected from ordinary stores, and generic authentication providers do
+not receive trusted policy or authority.
 
 Generated or unreviewed code is data and may be stored only as inert, bounded
 artifacts. It is not imported, dynamically loaded, or executed inside the trusted
