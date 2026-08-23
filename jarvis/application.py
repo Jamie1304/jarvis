@@ -7,6 +7,17 @@ from enum import StrEnum
 from uuid import UUID
 
 from jarvis.ai.models import ProviderHealth
+from jarvis.control_center import (
+    ControlCenterSection,
+    ControlCenterService,
+    ControlCenterSnapshot,
+    OutputMedium,
+    OutputMediumProfile,
+    OutputMediumProfileRegistry,
+    SemanticActionMetadata,
+    TrustedPermissionPrompt,
+    TrustedPermissionSurface,
+)
 from jarvis.conversation.service import ConversationService
 from jarvis.core.errors import ConversationError, ServiceUnavailableError, SpeechDisabledError
 from jarvis.desktop_shell import (
@@ -20,6 +31,7 @@ from jarvis.desktop_shell import (
     TestDriveReport,
     WarmupResult,
 )
+from jarvis.permissions.models import ActionDescriptor, ApprovalRequest, PermissionRequest
 from jarvis.planning.models import PlanningTask
 from jarvis.setup_conductor import SetupContext
 from jarvis.speech.stt import SpeechToTextService, Transcription
@@ -77,6 +89,9 @@ class JarvisAssistantService:
         test_drive: TestDriveRegistry | None = None,
         startup_warmup: StartupWarmupRegistry | None = None,
         launch_profiles: LaunchProfileRegistry | None = None,
+        control_center: ControlCenterService | None = None,
+        permission_surface: TrustedPermissionSurface | None = None,
+        output_profiles: OutputMediumProfileRegistry | None = None,
     ) -> None:
         self._conversation = conversation
         self._normalizer = normalizer or InputNormalizer()
@@ -90,6 +105,9 @@ class JarvisAssistantService:
         self._test_drive = test_drive
         self._startup_warmup = startup_warmup
         self._launch_profiles = launch_profiles or LaunchProfileRegistry()
+        self._control_center = control_center
+        self._permission_surface = permission_surface or TrustedPermissionSurface()
+        self._output_profiles = output_profiles or OutputMediumProfileRegistry()
 
     @property
     def launch_profiles(self) -> LaunchProfileRegistry:
@@ -99,6 +117,42 @@ class JarvisAssistantService:
 
     def select_launch_profile(self, profile: LaunchProfile) -> LaunchProfileSelection:
         return self._launch_profiles.select(profile)
+
+    @property
+    def control_center(self) -> ControlCenterService:
+        if self._control_center is None:
+            raise ServiceUnavailableError("Control center is not configured")
+        return self._control_center
+
+    async def refresh_control_center(
+        self, section: ControlCenterSection | None = None
+    ) -> ControlCenterSnapshot:
+        return await self.control_center.refresh(section)
+
+    async def refresh_semantic_actions(
+        self, section: ControlCenterSection | None = None
+    ) -> tuple[SemanticActionMetadata, ...]:
+        """Return trusted action metadata for voice or desktop discovery."""
+
+        snapshot = await self.refresh_control_center(section)
+        views = snapshot.sections if section is None else (snapshot.section(section),)
+        actions = tuple(action for view in views for item in view.items for action in item.actions)
+        return actions
+
+    def output_profile(self, medium: OutputMedium) -> OutputMediumProfile:
+        return self._output_profiles.get(medium)
+
+    def format_for_medium(self, text: str, medium: OutputMedium) -> str:
+        return self.output_profile(medium).format(text)
+
+    def render_permission_prompt(
+        self,
+        request: ApprovalRequest | PermissionRequest,
+        operation: ActionDescriptor | None = None,
+    ) -> TrustedPermissionPrompt:
+        """Render one trusted permission object for desktop and voice surfaces."""
+
+        return self._permission_surface.present(request, operation)
 
     async def run_onboarding(
         self,
@@ -218,10 +272,17 @@ class JarvisAssistantService:
 
         return await self._require_task_controller().cancel_task(task_id)
 
-    async def stream_text(self, conversation_id: UUID, text: str) -> AsyncIterator[AssistantEvent]:
+    async def stream_text(
+        self,
+        conversation_id: UUID,
+        text: str,
+        *,
+        medium: OutputMedium = OutputMedium.DESKTOP,
+    ) -> AsyncIterator[AssistantEvent]:
         """Stream text and begin TTS as soon as a safe sentence is available."""
 
         normalized = self._normalizer.normalize(text)
+        profile = self.output_profile(medium)
         yield AssistantEvent(AssistantEventKind.STREAMING, "Assistant is responding")
         response = ""
         tts_queue: asyncio.Queue[str | None] | None = None
@@ -244,9 +305,14 @@ class JarvisAssistantService:
         try:
             async for update in self._conversation.stream_reply(conversation_id, normalized):
                 response += update.content
+                formatted_content = profile.format(update.content)
                 if tts_queue is not None:
-                    await tts_queue.put(update.content)
-                yield AssistantEvent(AssistantEventKind.TEXT, update.content, done=update.done)
+                    await tts_queue.put(formatted_content)
+                yield AssistantEvent(
+                    AssistantEventKind.TEXT,
+                    formatted_content,
+                    done=update.done,
+                )
             if tts_queue is not None:
                 await tts_queue.put(None)
             if tts_task is not None:

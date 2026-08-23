@@ -130,6 +130,14 @@ Launch profiles are presentation/startup preferences, never permission or
 security-policy switches. See `docs/desktop-shell.md` and
 `docs/onboarding-test-drive.md`.
 
+The generic Control Center is a refreshable application projection over explicit
+capability, tool, skill, agent, MCP, model, planning, memory, knowledge,
+permission, audit, health, and recovery services. Its semantic action metadata
+is discovered dynamically and is not a hard-coded voice command tree. Desktop
+and voice use `OutputMediumProfile` for formatting only and receive the same
+trusted permission presentation object; neither channel can create authority.
+See `docs/control-center.md`.
+
 Phase 6 adds a controlled computer capability layer without changing that boundary:
 
 `AI/planner -> typed computer tool -> PermissionBroker -> policy/approval -> adapter -> Windows`

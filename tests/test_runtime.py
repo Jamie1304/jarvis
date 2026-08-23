@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 from jarvis import application
+from jarvis.control_center import ControlCenterSection
 from jarvis.core.config import Settings
 from jarvis.planning.models import PlanningTaskStatus
 from jarvis.runtime import ApplicationRuntime, RuntimeStatus
@@ -36,6 +37,15 @@ async def test_canonical_runtime_calculates_and_recovers_persisted_task(tmp_path
     }
     warmup = runtime.container.startup_warmup.start()
     assert (await warmup)[0].component_id == "default-model"
+    center = await runtime.container.control_center.refresh()
+    assert center.section(ControlCenterSection.TOOLS).items
+    assert any(
+        item.item_id == "calculator" for item in center.section(ControlCenterSection.TOOLS).items
+    )
+    assert any(
+        item.item_id == "settings" for item in center.section(ControlCenterSection.SYSTEM).items
+    )
+    assert center.section(ControlCenterSection.AUTOMATIONS).status.value == "not_available"
 
     task = await runtime.container.task_controller.submit_task("calculate 25% of 800")
     assert task.status is PlanningTaskStatus.COMPLETED

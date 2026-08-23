@@ -18,6 +18,17 @@ from jarvis.ai.providers.base import AIProvider
 from jarvis.ai.sessions import AgentSessionStore
 from jarvis.artifacts import ArtifactStore
 from jarvis.bootstrap import create_ai_provider
+from jarvis.capabilities import CapabilityRegistry
+from jarvis.control_center import (
+    ControlCenterContribution,
+    ControlCenterItem,
+    ControlCenterSection,
+    ControlCenterService,
+    ControlCenterStatus,
+    SemanticActionMetadata,
+    static_provider,
+    unavailable_item,
+)
 from jarvis.conversation.service import ConversationService
 from jarvis.core.config import Settings, get_settings
 from jarvis.core.logging import configure_logging
@@ -42,6 +53,7 @@ from jarvis.memory.services import (
     ProjectSystemMemory,
 )
 from jarvis.memory.store import MemoryMigrationError, SQLiteMemoryStore
+from jarvis.multi_agent.registry import AgentRegistry
 from jarvis.permissions import (
     AuditStoreError,
     PermissionBroker,
@@ -68,6 +80,7 @@ from jarvis.security import (
     StartupSecurityReport,
     StartupSecurityValidator,
 )
+from jarvis.skills import SkillRegistry
 from jarvis.state import ApplicationStateMachine, SQLiteStateStore, StateStoreError
 from jarvis.task_controller import PlanningTaskController, TaskController
 from jarvis.tools.calculator import CalculatorTool
@@ -272,6 +285,10 @@ class RuntimeContainer:
     launch_profiles: LaunchProfileRegistry = field(default_factory=LaunchProfileRegistry)
     test_drive: TestDriveRegistry = field(default_factory=TestDriveRegistry)
     startup_warmup: StartupWarmupRegistry = field(default_factory=StartupWarmupRegistry)
+    capability_registry: CapabilityRegistry = field(default_factory=CapabilityRegistry)
+    skill_registry: SkillRegistry = field(default_factory=SkillRegistry)
+    agent_registry: AgentRegistry = field(default_factory=AgentRegistry)
+    control_center: ControlCenterService = field(default_factory=ControlCenterService)
     computer: object | None = None
     vision: object | None = None
     camera: object | None = None
@@ -290,6 +307,7 @@ class RuntimeContainer:
             resources = (
                 self.event_bus,
                 self.startup_warmup,
+                self.control_center,
                 self.conversation,
                 self.session_store,
                 self.planning_store,
@@ -515,6 +533,333 @@ class ApplicationRuntime:
             provider = create_ai_provider(settings)
             conversation_memory = ConversationContextService()
             system_memory = ProjectSystemMemory(knowledge, root)
+            capability_registry = CapabilityRegistry()
+            skill_registry = SkillRegistry()
+            agent_registry = AgentRegistry()
+            control_center = ControlCenterService()
+
+            def tool_projection() -> tuple[ControlCenterItem, ...]:
+                items: list[ControlCenterItem] = []
+                for manifest in registry.manifests():
+                    record = registry.inspect(manifest.tool_id)
+                    status = (
+                        ControlCenterStatus.AVAILABLE
+                        if record.usable
+                        else ControlCenterStatus.DEGRADED
+                    )
+                    action = SemanticActionMetadata(
+                        f"tool.{manifest.tool_id}.invoke",
+                        f"Use {manifest.name}",
+                        "Submit through the brokered application task service",
+                        "task.submit",
+                        tuple(sorted(manifest.declared_permissions, key=lambda item: item.value)),
+                        tuple(sorted(record.tool.input_model.model_fields)),
+                    )
+                    items.append(
+                        ControlCenterItem(
+                            manifest.tool_id,
+                            manifest.name,
+                            status,
+                            record.health.detail,
+                            (action,),
+                            (
+                                ("version", str(manifest.version)),
+                                ("health", record.health.status.value),
+                            ),
+                        )
+                    )
+                return tuple(items)
+
+            def capability_projection() -> tuple[ControlCenterItem, ...]:
+                items = [
+                    ControlCenterItem(
+                        manifest.capability_id,
+                        manifest.name,
+                        (
+                            ControlCenterStatus.AVAILABLE
+                            if manifest.health.status.value == "available"
+                            else ControlCenterStatus.DEGRADED
+                        ),
+                        manifest.health.detail,
+                        (
+                            SemanticActionMetadata(
+                                f"capability.{manifest.capability_id}.inspect",
+                                f"Inspect {manifest.name}",
+                                "Inspect capability metadata through the application service",
+                                "capability.inspect",
+                            ),
+                        ),
+                        (("version", str(manifest.version)),),
+                    )
+                    for manifest in capability_registry.manifests()
+                ]
+                for manifest in registry.manifests():
+                    record = registry.inspect(manifest.tool_id)
+                    status = (
+                        ControlCenterStatus.AVAILABLE
+                        if record.usable
+                        else ControlCenterStatus.DEGRADED
+                    )
+                    for index, capability in enumerate(sorted(manifest.capabilities)):
+                        items.append(
+                            ControlCenterItem(
+                                f"tool-capability.{manifest.tool_id}.{index}",
+                                manifest.name,
+                                status,
+                                f"Executable capability tag: {capability}",
+                                (
+                                    SemanticActionMetadata(
+                                        f"tool.{manifest.tool_id}.invoke",
+                                        f"Use {manifest.name}",
+                                        "Submit through the brokered application task service",
+                                        "task.submit",
+                                        tuple(
+                                            sorted(
+                                                manifest.declared_permissions,
+                                                key=lambda item: item.value,
+                                            )
+                                        ),
+                                        tuple(sorted(record.tool.input_model.model_fields)),
+                                    ),
+                                ),
+                                (("capability", capability), ("tool_id", manifest.tool_id)),
+                            )
+                        )
+                return tuple(items)
+
+            def skill_projection() -> tuple[ControlCenterItem, ...]:
+                return tuple(
+                    ControlCenterItem(
+                        manifest.skill_id,
+                        manifest.skill_id,
+                        ControlCenterStatus.AVAILABLE,
+                        "Skill is registered and scope-checked at use",
+                        (
+                            SemanticActionMetadata(
+                                f"skill.{manifest.skill_id}.inspect",
+                                f"Inspect {manifest.skill_id}",
+                                "Inspect skill metadata through the application service",
+                                "skill.inspect",
+                            ),
+                        ),
+                    )
+                    for manifest in skill_registry.manifests()
+                )
+
+            def agent_projection() -> tuple[ControlCenterItem, ...]:
+                return tuple(
+                    ControlCenterItem(
+                        contract.agent_id,
+                        contract.agent_id,
+                        (
+                            ControlCenterStatus.AVAILABLE
+                            if contract.available
+                            else ControlCenterStatus.DEGRADED
+                        ),
+                        "Delegated worker; execution remains application-owned",
+                        (
+                            SemanticActionMetadata(
+                                f"agent.{contract.agent_id}.inspect",
+                                f"Inspect {contract.agent_id}",
+                                "Inspect agent contract through the application service",
+                                "agent.inspect",
+                            ),
+                        ),
+                    )
+                    for contract in agent_registry.list_contracts()
+                )
+
+            def integration_projection() -> tuple[ControlCenterItem, ...]:
+                return tuple(
+                    ControlCenterItem(
+                        status.extension_id,
+                        status.extension_id,
+                        (
+                            ControlCenterStatus.AVAILABLE
+                            if status.state.value == "healthy"
+                            else ControlCenterStatus.DEGRADED
+                        ),
+                        status.detail,
+                        (
+                            SemanticActionMetadata(
+                                f"integration.{status.extension_id}.inspect",
+                                f"Inspect {status.extension_id}",
+                                "Inspect integration status through the application service",
+                                "integration.inspect",
+                            ),
+                        ),
+                    )
+                    for status in mcp_manager.statuses()
+                )
+
+            async def permission_projection() -> tuple[ControlCenterItem, ...]:
+                pending = await broker.pending_approvals()
+                return tuple(
+                    ControlCenterItem(
+                        f"request.{request.request_id}",
+                        "Pending permission request",
+                        ControlCenterStatus.AVAILABLE,
+                        request.permission.value,
+                        (
+                            SemanticActionMetadata(
+                                f"permission.{request.request_id}.present",
+                                "Review permission request",
+                                "Render the trusted permission object for a local channel",
+                                "permission.present",
+                                (request.permission,),
+                            ),
+                        ),
+                        (("request_id", str(request.request_id)),),
+                    )
+                    for request in pending
+                )
+
+            async def health_projection() -> tuple[ControlCenterItem, ...]:
+                health = await provider.health_check()
+                return (
+                    ControlCenterItem(
+                        "default-provider",
+                        "Configured model provider",
+                        (
+                            ControlCenterStatus.AVAILABLE
+                            if health.available
+                            else ControlCenterStatus.DEGRADED
+                        ),
+                        health.detail,
+                    ),
+                )
+
+            def audit_projection() -> tuple[ControlCenterItem, ...]:
+                return (
+                    ControlCenterItem(
+                        "audit-store",
+                        "Audit store",
+                        ControlCenterStatus.AVAILABLE,
+                        "Trusted audit records are application-owned",
+                        metadata=(("lifecycle_record_count", str(len(audit.lifecycle_entries()))),),
+                    ),
+                )
+
+            control_center.register(
+                ControlCenterSection.SYSTEM,
+                "runtime",
+                lambda: (
+                    ControlCenterItem(
+                        "runtime",
+                        "JARVIS runtime",
+                        ControlCenterStatus.AVAILABLE,
+                        "Composition root is active",
+                    ),
+                    ControlCenterItem(
+                        "settings",
+                        "Runtime settings",
+                        ControlCenterStatus.AVAILABLE,
+                        "Settings are application-owned; secrets remain in the Vault",
+                        (
+                            SemanticActionMetadata(
+                                "settings.inspect",
+                                "Inspect settings",
+                                "Inspect non-secret settings through the application service",
+                                "settings.inspect",
+                            ),
+                        ),
+                    ),
+                ),
+            )
+            control_center.register(
+                ControlCenterSection.CAPABILITIES, "registry", capability_projection
+            )
+            control_center.register(ControlCenterSection.TOOLS, "registry", tool_projection)
+            control_center.register(ControlCenterSection.SKILLS, "registry", skill_projection)
+            control_center.register(ControlCenterSection.AGENTS, "registry", agent_projection)
+            control_center.register(
+                ControlCenterSection.INTEGRATIONS, "mcp", integration_projection
+            )
+            control_center.register(
+                ControlCenterSection.MODELS,
+                "configured",
+                lambda: (
+                    ControlCenterItem(
+                        "configured-model",
+                        "Configured model",
+                        ControlCenterStatus.AVAILABLE,
+                        "Model selection remains provider-owned",
+                        metadata=(("provider", settings.ai_provider), ("model", settings.ai_model)),
+                    ),
+                ),
+            )
+            control_center.register(
+                ControlCenterSection.PERMISSIONS, "broker", permission_projection
+            )
+            control_center.register(
+                ControlCenterSection.MEMORY,
+                "store",
+                lambda: (
+                    ControlCenterItem(
+                        "memory-store",
+                        "Memory store",
+                        ControlCenterStatus.AVAILABLE,
+                        "Memory remains scoped by its authoritative store",
+                    ),
+                ),
+            )
+            control_center.register(
+                ControlCenterSection.KNOWLEDGE,
+                "store",
+                lambda: (
+                    ControlCenterItem(
+                        "knowledge-store",
+                        "Knowledge library",
+                        ControlCenterStatus.AVAILABLE,
+                        "Generated knowledge is read as bounded context",
+                        metadata=(("item_count", str(len(knowledge.snapshot.items))),),
+                    ),
+                ),
+            )
+            control_center.register(
+                ControlCenterSection.GOALS,
+                "planning",
+                lambda: tuple(
+                    ControlCenterItem(
+                        f"task.{task.task_id}",
+                        "Planning task",
+                        ControlCenterStatus.AVAILABLE,
+                        task.status.value,
+                    )
+                    for task in engine.list_tasks()
+                ),
+            )
+            control_center.register(
+                ControlCenterSection.AUTOMATIONS,
+                "scheduler",
+                lambda: ControlCenterContribution(
+                    ControlCenterStatus.NOT_AVAILABLE,
+                    (
+                        unavailable_item(
+                            "scheduler",
+                            "Automation scheduler",
+                            "No production scheduler is enabled",
+                        ),
+                    ),
+                    "No production scheduler is enabled",
+                ),
+            )
+            control_center.register(ControlCenterSection.AUDIT, "store", audit_projection)
+            control_center.register(ControlCenterSection.HEALTH, "provider", health_projection)
+            control_center.register(
+                ControlCenterSection.RECOVERY,
+                "store",
+                static_provider(
+                    (
+                        ControlCenterItem(
+                            "recovery-store",
+                            "Recovery store",
+                            ControlCenterStatus.AVAILABLE,
+                            "Snapshots and Safe Mode remain trusted runtime services",
+                        ),
+                    )
+                ),
+            )
 
             async def test_provider() -> TestDriveStepResult:
                 health = await provider.health_check()
@@ -586,6 +931,10 @@ class ApplicationRuntime:
                 launch_profiles=LaunchProfileRegistry(),
                 test_drive=test_drive,
                 startup_warmup=startup_warmup,
+                capability_registry=capability_registry,
+                skill_registry=skill_registry,
+                agent_registry=agent_registry,
+                control_center=control_center,
             )
             snapshot = recovery.create_snapshot(
                 transaction_id=transaction_id,

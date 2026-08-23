@@ -23,3 +23,9 @@ application-service data. UI code cannot bypass those services.
 does not grant capabilities, alter permission policy, change goal semantics,
 or create a second runtime constitution. Actual Safe Mode remains a trusted
 runtime state.
+
+The shell's generic surfaces may consume the refreshable Control Center
+projection and semantic action metadata through `JarvisAssistantService`.
+Channel formatting is selected with `OutputMediumProfile`; see
+`docs/control-center.md`. No product-specific page or hard-coded voice command
+tree is part of the shell.
