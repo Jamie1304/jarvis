@@ -86,9 +86,11 @@ them.
    trusted workspace write port, and Phase 11 exposes no merge/deploy operation.
 10. A future scheduler/background job confers no authority. At firing time it must
     submit through `TaskController` and current policy under the original principal.
-11. Integration code has no ambient authority. Until OS/process confinement exists,
-    executable Python providers remain owner-reviewed `PRODUCTION_CORE`, not
-    routine-mutable `INTEGRATION`.
+11. Integration code has no ambient authority. Generated integration code is never
+    imported into Trusted Core and may cross only the `SandboxProcess` typed IPC
+    boundary. The current Windows Job Object boundary owns processes and resources
+    but is not a complete filesystem/network/AppContainer sandbox; unreviewed code
+    is not certified merely because it is out of process.
 12. An interrupted externally visible or irreversible operation with unknown
     outcome is recoverable evidence, never an instruction to replay blindly.
 13. Remote approval is disabled in v1. A future implementation must authenticate
@@ -115,6 +117,8 @@ truth. The important Trusted Core regions are:
   capability requests;
 - `jarvis/recovery.py`: snapshot, restore-point, startup-marker, and Safe Mode
   gates;
+- `jarvis/sandbox.py`: generated-integration process ownership, bounded typed IPC,
+  and native Windows Job Object lifecycle;
 - `jarvis/improvement/**`: isolated mutation, supply-chain, gate, evaluation, and
   proposal integrity boundaries;
 - `.github/workflows/**`, `scripts/quality.py`, `pyproject.toml`, dependency

@@ -52,9 +52,11 @@ quality script, and do not reinterpret generated prose as a path, command, polic
 gate definition, dependency exception, or approval.
 
 Executable gates require host-owned absolute executables, fixed argument arrays,
-timeouts, full process-tree cancellation, and a concrete `SandboxedProcessAdapter`
-that enforces every attested property. The repository intentionally has no permissive
-in-process implementation. Fake adapters are appropriate for deterministic unit
+timeouts, full process-tree cancellation, and a concrete sandbox adapter. The native
+`SandboxProcess` supplies bounded JSON IPC, dedicated paths, sanitized environment,
+and Windows Job Object process/resource ownership. It is not a complete filesystem
+or network sandbox; the repository intentionally has no permissive in-process
+implementation. Fake adapters are appropriate for deterministic unit
 tests but must never be used to justify a real proposal. A production security gate
 should compose deeper static/dependency scanning in addition to the built-in minimum
 preflight.

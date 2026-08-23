@@ -63,6 +63,14 @@ typed adapter. MCP descriptions/results are data only; every invocation still
 uses `ToolRegistry -> PermissionBroker -> Policy`, and no broker, vault, or
 trusted-core object is passed into the MCP process. See `docs/mcp.md`.
 
+Generated integration code is never imported into Trusted Core. The native
+`SandboxProcess` owns a separate child process, dedicated work/data directories,
+sanitized startup environment, bounded JSON-over-stdio IPC, and Windows Job
+Object process-tree/resource cleanup. It passes no broker, policy, Vault,
+approval, audit, mutation, or runtime-container object. Job Objects are not a
+complete filesystem/network sandbox; see `docs/sandbox-isolation.md` for the
+actual guarantees and remaining AppContainer/restricted-token boundary.
+
 Phase 6 adds a controlled computer capability layer without changing that boundary:
 
 `AI/planner -> typed computer tool -> PermissionBroker -> policy/approval -> adapter -> Windows`

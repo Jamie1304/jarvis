@@ -111,9 +111,11 @@ and untrusted evidence label.
     untrusted candidate evidence. Trusted service code validates candidate shape,
     retains provenance, scores explicit factors, and emits advisory output only.
 
-Python does not provide an in-process security sandbox. The boundary assumes
-registered tool code and the application process are trusted and reviewed; a
-malicious Python module running in-process can call operating-system APIs directly.
+Python does not provide an in-process security sandbox. Generated integration
+code is therefore kept out of Trusted Core and uses `SandboxProcess`, which
+provides typed bounded IPC and Windows Job Object process-tree ownership. A Job
+Object is not a filesystem, network, token, or AppContainer boundary: a child
+with the same user identity may still access user-readable paths and OS APIs.
 The registry therefore prohibits dynamic discovery, and privileged implementation
 methods are deliberately private and reachable only through the brokered tool
 entry point by convention and tests.
@@ -244,9 +246,10 @@ bypass these interfaces; dynamic loading remains prohibited.
 
 Git worktrees share repository object metadata. Trusted worktree creation necessarily
 touches that metadata, while coding and gate processes must not receive access to it.
-The concrete sandbox must additionally enforce CPU, memory, disk, process, handle,
-network, and secret isolation; the Phase 11 interface and deterministic mocks cannot
-prove those Windows/container controls. The built-in static pattern checker is only
+`SandboxProcess` enforces bounded IPC, timeout/cancellation, process-tree cleanup,
+and Windows active-process/per-process-memory Job Object controls. It does not yet
+enforce disk, network, handle, token, or filesystem ACL isolation; deterministic
+tests cannot prove those missing Windows/container controls. The built-in static checker is only
 a minimum preflight and does not replace deeper scanning or human review. See the
 explicit threat/control/residual-risk table in `docs/autonomous-improvement.md`.
 
@@ -293,8 +296,9 @@ silently replaying a potentially irreversible action.
 
 Residual assumptions are that trusted composition supplies honest clocks, verifiers,
 brokers, tool manifests, and a protected single-user SQLite path. SQLite is not an
-authentication boundary or distributed scheduler, and in-process Python adapters are
-not sandboxed from each other. Tool-specific cross-process idempotency and distributed
+authentication boundary or distributed scheduler. The native sandbox is not yet a
+complete same-user filesystem/network isolation boundary, and production must not
+activate hostile code on that assumption. Tool-specific cross-process idempotency and distributed
 execution leases are not claimed in Phase 15.
 
 ## Phase 16 multi-agent extension
