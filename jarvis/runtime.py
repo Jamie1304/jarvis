@@ -91,6 +91,7 @@ from jarvis.tools.calculator import CalculatorTool
 from jarvis.tools.local_time import LocalTimeTool
 from jarvis.tools.registry import ToolRegistry
 from jarvis.tools.weather import UnavailableWeatherTool
+from jarvis.user_model import UserModelMigrationError, UserModelStore
 
 
 class RuntimeStatus(StrEnum):
@@ -107,6 +108,7 @@ class RuntimePaths:
     state_database: Path
     planning_database: Path
     memory_database: Path
+    user_model_database: Path
     sessions_database: Path
     audit_database: Path
     artifacts: Path
@@ -125,6 +127,7 @@ class RuntimePaths:
             base / "state.sqlite3",
             base / "planning.sqlite3",
             base / "memory.sqlite3",
+            base / "user-model.sqlite3",
             base / "sessions.sqlite3",
             base / "audit.sqlite3",
             base / "artifacts",
@@ -170,6 +173,7 @@ class RuntimePaths:
             self.state_database,
             self.planning_database,
             self.memory_database,
+            self.user_model_database,
             self.sessions_database,
             self.audit_database,
             self.artifacts / "artifacts.sqlite3",
@@ -278,6 +282,7 @@ class RuntimeContainer:
     planning_engine: PlanningEngine
     task_controller: TaskController
     memory_store: SQLiteMemoryStore
+    user_model_store: UserModelStore
     session_store: AgentSessionStore
     conversation_memory: ConversationContextService
     long_term_memory: LongTermMemoryService
@@ -320,6 +325,7 @@ class RuntimeContainer:
                 self.session_store,
                 self.planning_store,
                 self.memory_store,
+                self.user_model_store,
                 self.state_store,
                 self.audit_sink,
                 self.artifact_store,
@@ -455,6 +461,7 @@ class ApplicationRuntime:
         audit: SQLiteAuditSink | None = None
         planning_store: SQLitePlanningStore | None = None
         memory_store: SQLiteMemoryStore | None = None
+        user_model_store: UserModelStore | None = None
         recovery: RecoveryStore | None = None
         artifact_store: ArtifactStore | None = None
         transaction_id = str(uuid4())
@@ -533,6 +540,7 @@ class ApplicationRuntime:
                 )
             paths.validate_storage_layout()
             memory_store = SQLiteMemoryStore(paths.memory_database)
+            user_model_store = UserModelStore(paths.user_model_database)
             session_store = AgentSessionStore(paths.sessions_database)
             paths.validate_storage_layout()
             artifact_store = ArtifactStore(paths.artifacts, event_bus=events)
@@ -941,6 +949,7 @@ class ApplicationRuntime:
                 planning_engine=engine,
                 task_controller=PlanningTaskController(engine, broker),
                 memory_store=memory_store,
+                user_model_store=user_model_store,
                 session_store=session_store,
                 conversation_memory=conversation_memory,
                 long_term_memory=LongTermMemoryService(memory_store),
@@ -979,6 +988,7 @@ class ApplicationRuntime:
                     "state": "validated",
                     "planning": "validated",
                     "memory": "validated",
+                    "user_model": "validated",
                     "audit": "validated",
                     "artifacts": "validated",
                 },
@@ -990,6 +1000,7 @@ class ApplicationRuntime:
             AuditStoreError,
             PlanningStoreError,
             MemoryMigrationError,
+            UserModelMigrationError,
             StateStoreError,
             sqlite3.DatabaseError,
         ) as error:
@@ -1005,7 +1016,7 @@ class ApplicationRuntime:
                     )
                 )
             cls._close_partial_stores(
-                artifact_store, memory_store, planning_store, audit, state_store
+                artifact_store, memory_store, user_model_store, planning_store, audit, state_store
             )
             return cls(
                 None,
@@ -1026,7 +1037,7 @@ class ApplicationRuntime:
                     )
                 )
             cls._close_partial_stores(
-                artifact_store, memory_store, planning_store, audit, state_store
+                artifact_store, memory_store, user_model_store, planning_store, audit, state_store
             )
             return cls(
                 None,

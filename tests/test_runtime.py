@@ -23,6 +23,9 @@ async def test_canonical_runtime_calculates_and_recovers_persisted_task(tmp_path
     assert initial_status is RuntimeStatus.READY
     assert runtime.container is not None
     assert isinstance(runtime.container.task_controller, PlanningTaskController)
+    assert runtime.container.user_model_store.database_path == (
+        runtime.container.paths.user_model_database
+    )
     assert {step.step_id for step in runtime.container.test_drive.steps()} == {
         "system-health",
         "model-provider",
