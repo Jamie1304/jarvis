@@ -5,10 +5,14 @@ import os
 import subprocess
 import sys
 from abc import ABC, abstractmethod
-from pathlib import Path
 
 from jarvis.applications.models import ApplicationManagerError, ApplicationRecord
 from jarvis.computer.models import LaunchInfo
+from jarvis.computer.process import (
+    ProcessIdentityError,
+    resolve_trusted_executable,
+    trusted_process_environment,
+)
 
 
 class ApplicationRuntime(ABC):
@@ -48,6 +52,7 @@ class WindowsApplicationRuntime(ApplicationRuntime):  # pragma: no cover
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
+                env=trusted_process_environment(),
             )
         except OSError as error:
             raise ApplicationManagerError("Managed application could not be launched") from error
@@ -72,13 +77,16 @@ class WindowsApplicationRuntime(ApplicationRuntime):  # pragma: no cover
         if value is None:
             return False
         try:
-            path = Path(value).resolve(strict=True)
-        except OSError:
+            path = resolve_trusted_executable(value)
+        except (OSError, ProcessIdentityError):
             return False
-        return path.is_file() and path.suffix.casefold() == ".exe"
+        return path.is_file()
 
     def _resolved_executable(self, record: ApplicationRecord) -> str:
         if not self._valid_executable(record.executable_path):
             raise ApplicationManagerError("Managed application executable is unavailable")
         assert record.executable_path is not None
-        return os.fspath(Path(record.executable_path).resolve(strict=True))
+        try:
+            return os.fspath(resolve_trusted_executable(record.executable_path))
+        except ProcessIdentityError as error:
+            raise ApplicationManagerError("Managed application executable is ambiguous") from error

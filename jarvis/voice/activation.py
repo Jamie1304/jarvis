@@ -7,7 +7,8 @@ provider, task, or durable storage is touched until a wake is accepted.
 import asyncio
 import re
 from abc import ABC, abstractmethod
-from collections.abc import AsyncIterator
+from collections import deque
+from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import StrEnum
@@ -33,6 +34,14 @@ class InterruptionCommand(StrEnum):
     WAIT = "wait"
 
 
+class MicrophoneMode(StrEnum):
+    """Capture policy; it never changes permission or approval policy."""
+
+    PUSH_TO_TALK = "push_to_talk"
+    WAKE_WORD = "wake_word"
+    OPEN_MIC = "open_mic"
+
+
 @dataclass(frozen=True, slots=True)
 class VoiceConfig:
     """Bounded voice behavior; idle wake processing remains local by contract."""
@@ -43,6 +52,11 @@ class VoiceConfig:
     max_utterance_seconds: float = 15.0
     speech_timeout_seconds: float = 5.0
     interruption_commands: tuple[str, ...] = ("stop", "cancel", "wait")
+    microphone_mode: MicrophoneMode = MicrophoneMode.WAKE_WORD
+    preroll_frames: int = 3
+    speech_start_frames: int = 2
+    min_speech_frames: int = 2
+    post_speech_tail_frames: int = 2
 
     def __post_init__(self) -> None:
         word = " ".join(self.wake_word.split()).strip()
@@ -54,6 +68,20 @@ class VoiceConfig:
             raise ValueError("voice timing limits are invalid")
         if self.speech_timeout_seconds <= 0:
             raise ValueError("speech_timeout_seconds must be positive")
+        if not isinstance(self.microphone_mode, MicrophoneMode):
+            raise ValueError("microphone_mode is invalid")
+        if (
+            min(
+                self.preroll_frames,
+                self.speech_start_frames,
+                self.min_speech_frames,
+                self.post_speech_tail_frames,
+            )
+            < 0
+            or self.speech_start_frames < 1
+            or self.min_speech_frames < 1
+        ):
+            raise ValueError("voice capture frame bounds are invalid")
         commands = tuple(" ".join(item.casefold().split()) for item in self.interruption_commands)
         if not commands or any(not item for item in commands):
             raise ValueError("interruption_commands must not contain empty values")
@@ -152,6 +180,45 @@ class VoiceTaskRunner(Protocol):
         """Delegate cancellation to the central task controller."""
 
 
+class PushToTalkController:
+    """Edge-triggered PTT adapter; repeated key-down events are ignored."""
+
+    def __init__(
+        self,
+        on_pressed: Callable[[], Awaitable[None]],
+        on_released: Callable[[], Awaitable[None]],
+    ) -> None:
+        self._on_pressed = on_pressed
+        self._on_released = on_released
+        self._held = False
+
+    @property
+    def held(self) -> bool:
+        return self._held
+
+    async def key_down(self) -> bool:
+        if self._held:
+            return False
+        self._held = True
+        try:
+            await self._on_pressed()
+        except BaseException:
+            self._held = False
+            raise
+        return True
+
+    async def key_up(self) -> bool:
+        if not self._held:
+            return False
+        self._held = False
+        await self._on_released()
+        return True
+
+    async def reset(self) -> None:
+        if self._held:
+            await self.key_up()
+
+
 class OrchestratorVoiceTaskRunner:
     """Deprecated compatibility adapter; production must use PlanningVoiceTaskRunner."""
 
@@ -212,6 +279,7 @@ class LocalVoiceController:
         *,
         task_runner: VoiceTaskRunner | None = None,
         tts: TextToSpeechService | None = None,
+        response_canceller: Callable[[], Awaitable[None]] | None = None,
         config: VoiceConfig | None = None,
         state_machine: ApplicationStateMachine | None = None,
         event_bus: EventBus | None = None,
@@ -221,14 +289,20 @@ class LocalVoiceController:
         self._stt = stt
         self._runner = task_runner
         self._tts = tts
+        self._response_canceller = response_canceller
         self._config = config or VoiceConfig()
+        self._microphone_mode = self._config.microphone_mode
         self._state_machine = state_machine
         self._event_bus = event_bus
         self._status = VoiceStatus(VoiceState.IDLE, True, None, "ready", datetime.now(UTC))
         self._history: list[VoiceStatus] = [self._status]
         self._session_id: UUID | None = None
         self._frames: list[AudioFrame] = []
+        self._pre_roll: deque[AudioFrame] = deque(maxlen=self._config.preroll_frames)
+        self._speech_candidate: list[AudioFrame] = []
         self._speech_seen = False
+        self._speech_frames = 0
+        self._tail_remaining = 0
         self._task_handle: VoiceTaskHandle | None = None
         self._cooldown_until = 0.0
         self._listening_started = 0.0
@@ -242,14 +316,36 @@ class LocalVoiceController:
     def history(self) -> tuple[VoiceStatus, ...]:
         return tuple(self._history)
 
+    @property
+    def microphone_mode(self) -> MicrophoneMode:
+        return self._microphone_mode
+
+    def set_microphone_mode(self, mode: MicrophoneMode) -> None:
+        """Change capture behavior only; broker policy is deliberately untouched."""
+
+        if not isinstance(mode, MicrophoneMode):
+            raise ValueError("microphone mode is invalid")
+        self._microphone_mode = mode
+
     async def handle_frame(self, frame: AudioFrame) -> VoiceTaskOutcome | None:
         """Process exactly one frame; callers own source lifecycle and scheduling."""
 
         now = asyncio.get_running_loop().time()
+        if self._status.state is VoiceState.SPEAKING and self._vad.is_speech(frame):
+            await self._barge_in("speech detected during response")
+            self._session_id = uuid4()
+            self._listening_started = now
+            self._last_speech_at = now
+            self._transition(VoiceState.LISTENING, "barge-in accepted")
         if self._status.state is VoiceState.IDLE:
             if now < self._cooldown_until:
                 return None
-            detection = await self._wake.detect(frame, self._config.wake_word)
+            try:
+                detection = await self._wake.detect(frame, self._config.wake_word)
+            except Exception:
+                self._microphone_mode = MicrophoneMode.PUSH_TO_TALK
+                self._transition(VoiceState.ERROR, "wake-word provider unavailable")
+                return None
             if (
                 detection.detected
                 and detection.confidence >= self._config.wake_confidence_threshold
@@ -269,14 +365,37 @@ class LocalVoiceController:
             self._transition(VoiceState.IDLE, "utterance limit reached")
             self._cooldown_until = now + self._config.cooldown_seconds
             return None
-        if self._vad.is_speech(frame):
-            self._frames.append(frame)
-            self._speech_seen = True
+        speech = self._vad.is_speech(frame)
+        end = self._vad.is_end(frame)
+        if speech:
+            if not self._speech_seen:
+                self._speech_candidate.append(frame)
+                if len(self._speech_candidate) < self._config.speech_start_frames:
+                    return None
+                self._frames.extend(self._pre_roll)
+                self._frames.extend(self._speech_candidate)
+                self._speech_candidate.clear()
+                self._speech_seen = True
+                self._speech_frames = self._config.speech_start_frames
+            else:
+                self._frames.append(frame)
+                self._speech_frames += 1
+            self._tail_remaining = self._config.post_speech_tail_frames
             self._last_speech_at = now
-        elif self._speech_seen and now - self._last_speech_at > self._config.speech_timeout_seconds:
-            return await self._finish_capture()
-        if self._vad.is_end(frame) and self._speech_seen:
-            return await self._finish_capture()
+        elif self._speech_seen:
+            if self._tail_remaining > 0:
+                self._frames.append(frame)
+                self._tail_remaining -= 1
+            if (
+                self._tail_remaining == 0
+                or now - self._last_speech_at > self._config.speech_timeout_seconds
+            ):
+                return await self._finish_capture()
+        else:
+            self._pre_roll.append(frame)
+            self._speech_candidate.clear()
+            if end:
+                self._pre_roll.clear()
         return None
 
     async def interrupt(self, text: str) -> InterruptionCommand | None:
@@ -289,10 +408,9 @@ class LocalVoiceController:
             InterruptionCommand.STOP,
             InterruptionCommand.CANCEL,
         }:
+            await self._barge_in(f"{command.value} requested")
             if self._runner is not None:
                 await self._runner.cancel(self._task_handle.task_id)
-            if self._tts is not None:
-                await self._tts.stop()
             self._transition(VoiceState.IDLE, f"{command.value} requested")
             self._cooldown_until = asyncio.get_running_loop().time() + self._config.cooldown_seconds
         elif command is InterruptionCommand.WAIT:
@@ -302,13 +420,26 @@ class LocalVoiceController:
                 self._transition(VoiceState.IDLE, "wait requested")
         return command
 
+    async def _barge_in(self, reason: str) -> None:
+        if self._response_canceller is not None:
+            await self._response_canceller()
+        if self._tts is not None:
+            await self._tts.stop()
+
     async def run(self, source: AudioSource) -> None:
         """Run a source until exhaustion, always closing the microphone."""
 
-        await source.start()
+        try:
+            await source.start()
+        except Exception:
+            self._microphone_mode = MicrophoneMode.PUSH_TO_TALK
+            self._transition(VoiceState.ERROR, "microphone unavailable; PTT remains available")
+            return
         try:
             async for frame in source.frames():
                 await self.handle_frame(frame)
+        except Exception:
+            self._transition(VoiceState.ERROR, "microphone stream failed")
         finally:
             await source.stop()
 
@@ -323,8 +454,16 @@ class LocalVoiceController:
 
     async def _finish_capture(self) -> VoiceTaskOutcome | None:
         frames, session_id = tuple(self._frames), self._session_id
+        speech_frames = self._speech_frames
         self._frames = []
+        self._pre_roll.clear()
+        self._speech_candidate.clear()
         self._speech_seen = False
+        self._speech_frames = 0
+        self._tail_remaining = 0
+        if len(frames) == 0 or speech_frames < self._config.min_speech_frames:
+            self._transition(VoiceState.IDLE, "ultrashort noise rejected")
+            return None
         if session_id is None:
             self._transition(VoiceState.IDLE, "capture without session")
             return None

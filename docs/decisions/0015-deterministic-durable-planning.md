@@ -9,6 +9,14 @@ step at a time through the exact broker-bound tool, require step and goal verifi
 and fail closed for ambiguous restart state. Replanning must retain the original goal,
 assumptions, and constraints and consume observed failure evidence.
 
+Expose this execution through exactly one application-facing `TaskController`,
+owned by the canonical runtime composition root. The controller delegates task
+creation, inspection, execution, resume, cancellation, permission interaction,
+status, and result/evidence retrieval to `PlanningEngine`; the legacy
+`AgentOrchestrator` is compatibility-only and is not a production authority.
+The ownership boundary and future-domain rule are maintained in
+[`authoritative-state-map.md`](../authoritative-state-map.md).
+
 ## Consequences
 
 Long-running work can pause for permission and survive restart without allowing a

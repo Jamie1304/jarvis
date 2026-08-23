@@ -23,6 +23,7 @@ from jarvis.security import (
     IntegrityClass,
     IntegrityClassificationError,
     MutationAuthority,
+    MutationAuthorization,
     MutationAuthorizationSource,
     MutationAuthorizer,
     MutationContext,
@@ -249,6 +250,74 @@ def test_mutation_authorization_binds_every_release_and_gate_field() -> None:
     for tampered in tampered_contexts:
         assert not policy.evaluate("jarvis/planning/engine.py", tampered).allowed
     assert policy.evaluate("jarvis/planning/engine.py", context).allowed
+
+
+def test_mutation_authorization_binds_owner_identity_and_source() -> None:
+    authorizer = MutationAuthorizer(
+        "update-service",
+        MutationAuthorizationSource.TRUSTED_UPDATE_SERVICE,
+        clock=lambda: _MUTATION_NOW,
+    )
+    policy = MutationPolicy(authorizer)
+    context = _controlled_mutation_context(authorizer)
+    assert context.authorization is not None
+
+    forged_identity = replace(context.authorization, identity_id="forged-owner")
+    forged_source = replace(
+        context.authorization,
+        source=MutationAuthorizationSource.OWNER_LOCAL_RELEASE,
+    )
+
+    assert not policy.evaluate(
+        "jarvis/planning/engine.py",
+        replace(context, authorization=forged_identity),
+    ).allowed
+    assert not policy.evaluate(
+        "jarvis/planning/engine.py",
+        replace(context, authorization=forged_source),
+    ).allowed
+    assert policy.evaluate("jarvis/planning/engine.py", context).allowed
+
+
+def test_malformed_mutation_metadata_fails_closed() -> None:
+    def make_authorization(**changes: object) -> MutationAuthorization:
+        values: dict[str, object] = {
+            "authorization_id": uuid4(),
+            "authority": MutationAuthority.CONTROLLED_UPDATE,
+            "path": "jarvis/planning/engine.py",
+            "task_id": uuid4(),
+            "base_revision": _BASE_REVISION,
+            "candidate_revision": _CANDIDATE_REVISION,
+            "diff_digest": _DIFF_DIGEST,
+            "gate_report_digest": _GATE_REPORT_DIGEST,
+            "identity_id": "owner-1",
+            "source": MutationAuthorizationSource.TRUSTED_UPDATE_SERVICE,
+            "issued_at": _MUTATION_NOW,
+            "expires_at": _MUTATION_NOW + timedelta(minutes=1),
+            "authentication_tag": "0" * 64,
+        }
+        values.update(changes)
+        return MutationAuthorization(**values)  # type: ignore[arg-type]
+
+    with pytest.raises(ValueError, match="metadata is malformed"):
+        make_authorization(identity_id="owner\nforged")
+    with pytest.raises(ValueError, match="metadata is malformed"):
+        make_authorization(path="../jarvis/planning/engine.py")
+
+    authorizer = MutationAuthorizer(
+        "update-service",
+        MutationAuthorizationSource.TRUSTED_UPDATE_SERVICE,
+        clock=lambda: _MUTATION_NOW,
+    )
+    context = _controlled_mutation_context(authorizer)
+    assert (
+        not MutationPolicy(authorizer)
+        .evaluate(
+            "jarvis/planning/engine.py",
+            replace(context, authorization=object()),  # type: ignore[arg-type]
+        )
+        .allowed
+    )
 
 
 def test_mutation_authorization_rejects_forged_record_without_consuming_original() -> None:

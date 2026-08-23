@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import StrEnum
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from uuid import UUID
 
 
@@ -119,6 +119,27 @@ class MutationAuthorization:
     expires_at: datetime
     authentication_tag: str = field(repr=False)
 
+    def __post_init__(self) -> None:
+        if (
+            not isinstance(self.authorization_id, UUID)
+            or not isinstance(self.authority, MutationAuthority)
+            or not isinstance(self.task_id, UUID)
+            or not isinstance(self.source, MutationAuthorizationSource)
+            or not _repository_path(self.path)
+            or not _trusted_identity(self.identity_id)
+            or not _revision(self.base_revision)
+            or not _revision(self.candidate_revision)
+            or not _digest(self.diff_digest)
+            or not _digest(self.gate_report_digest)
+            or not _digest(self.authentication_tag)
+            or not isinstance(self.issued_at, datetime)
+            or self.issued_at.tzinfo is None
+            or not isinstance(self.expires_at, datetime)
+            or self.expires_at.tzinfo is None
+            or self.expires_at <= self.issued_at
+        ):
+            raise ValueError("Mutation authorization metadata is malformed")
+
 
 @dataclass(frozen=True, slots=True)
 class MutationDecision:
@@ -143,3 +164,78 @@ class StartupSecurityReport:
     @property
     def valid(self) -> bool:
         return not self.violations
+
+
+def _trusted_identity(value: object) -> bool:
+    return (
+        type(value) is str
+        and bool(value)
+        and value == value.strip()
+        and len(value) <= 256
+        and all(character.isprintable() for character in value)
+        and not any(
+            character in value
+            for character in (
+                "\u061c",
+                "\u200e",
+                "\u200f",
+                "\u202a",
+                "\u202b",
+                "\u202c",
+                "\u202d",
+                "\u202e",
+                "\u2066",
+                "\u2067",
+                "\u2068",
+                "\u2069",
+            )
+        )
+    )
+
+
+def _repository_path(value: object) -> bool:
+    if (
+        type(value) is not str
+        or not value
+        or value != value.strip()
+        or len(value) > 1_024
+        or any(
+            character in value
+            for character in (
+                "\x00",
+                "\n",
+                "\r",
+                "\\",
+                ":",
+                "<",
+                ">",
+                '"',
+                "|",
+                "?",
+                "*",
+            )
+        )
+    ):
+        return False
+    path = PurePosixPath(value)
+    return (
+        not path.is_absolute()
+        and path.as_posix() == value
+        and all(part not in {"", ".", ".."} for part in path.parts)
+    )
+
+
+def _revision(value: object) -> bool:
+    return (
+        type(value) is str
+        and len(value) in {40, 64}
+        and all(character in "0123456789abcdef" for character in value)
+    )
+
+
+def _digest(value: object) -> bool:
+    return (
+        type(value) is str
+        and len(value) == 64
+        and all(character in "0123456789abcdef" for character in value)
+    )

@@ -1,6 +1,7 @@
-"""UI-facing application service for the limited Phase 1 conversation flow."""
+"""UI-facing application service for bounded conversational flows."""
 
-from collections.abc import AsyncIterator
+import asyncio
+from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
 from enum import StrEnum
 from uuid import UUID
@@ -10,7 +11,7 @@ from jarvis.conversation.service import ConversationService
 from jarvis.core.errors import ConversationError, ServiceUnavailableError, SpeechDisabledError
 from jarvis.planning.models import PlanningTask
 from jarvis.speech.stt import SpeechToTextService, Transcription
-from jarvis.speech.tts import TextToSpeechService
+from jarvis.speech.tts import SpeakableChunker, TextToSpeechService
 from jarvis.state import ApplicationStateMachine
 from jarvis.state.models import ApplicationState
 from jarvis.task_controller import TaskController
@@ -59,6 +60,7 @@ class JarvisAssistantService:
         task_controller: TaskController | None = None,
         voice: LocalVoiceController | None = None,
         state_machine: ApplicationStateMachine | None = None,
+        response_session_rebuilder: Callable[[], Awaitable[None]] | None = None,
     ) -> None:
         self._conversation = conversation
         self._normalizer = normalizer or InputNormalizer()
@@ -67,6 +69,7 @@ class JarvisAssistantService:
         self._task_controller = task_controller
         self._voice = voice
         self._state_machine = state_machine
+        self._response_session_rebuilder = response_session_rebuilder
 
     def create_conversation(self, system_prompt: str | None = None) -> UUID:
         """Create a UI conversation with optional system context."""
@@ -162,19 +165,55 @@ class JarvisAssistantService:
         return await self._require_task_controller().cancel_task(task_id)
 
     async def stream_text(self, conversation_id: UUID, text: str) -> AsyncIterator[AssistantEvent]:
-        """Normalize text and stream a response, optionally speaking after completion."""
+        """Stream text and begin TTS as soon as a safe sentence is available."""
 
         normalized = self._normalizer.normalize(text)
         yield AssistantEvent(AssistantEventKind.STREAMING, "Assistant is responding")
         response = ""
-        async for update in self._conversation.stream_reply(conversation_id, normalized):
-            response += update.content
-            yield AssistantEvent(AssistantEventKind.TEXT, update.content, done=update.done)
-        if self._tts is not None and self._tts.enabled and response:
-            yield AssistantEvent(AssistantEventKind.TTS, "Speaking response")
-            await self._tts.speak(response)
-            yield AssistantEvent(AssistantEventKind.TTS, "TTS idle", done=True)
-        yield AssistantEvent(AssistantEventKind.STREAMING, "Assistant ready", done=True)
+        tts_queue: asyncio.Queue[str | None] | None = None
+        tts_task: asyncio.Task[None] | None = None
+        if self._tts is not None and self._tts.enabled:
+            tts_queue = asyncio.Queue(maxsize=8)
+
+            async def speakable_chunks() -> AsyncIterator[str]:
+                chunker = SpeakableChunker()
+                while True:
+                    item = await tts_queue.get()
+                    if item is None:
+                        for chunk in chunker.finish():
+                            yield chunk
+                        return
+                    for chunk in chunker.feed(item):
+                        yield chunk
+
+            tts_task = self._tts.start_incremental(speakable_chunks())
+        try:
+            async for update in self._conversation.stream_reply(conversation_id, normalized):
+                response += update.content
+                if tts_queue is not None:
+                    await tts_queue.put(update.content)
+                yield AssistantEvent(AssistantEventKind.TEXT, update.content, done=update.done)
+            if tts_queue is not None:
+                await tts_queue.put(None)
+            if tts_task is not None:
+                await tts_task
+            if response and self._tts is not None and self._tts.available:
+                yield AssistantEvent(AssistantEventKind.TTS, "Speaking response")
+                yield AssistantEvent(AssistantEventKind.TTS, "TTS idle", done=True)
+            yield AssistantEvent(AssistantEventKind.STREAMING, "Assistant ready", done=True)
+        except BaseException:
+            if self._tts is not None:
+                await self._tts.stop()
+            raise
+
+    async def barge_in(self, conversation_id: UUID) -> None:
+        """Stop output and invalidate the current response generation."""
+
+        self._conversation.cancel(conversation_id)
+        if self._tts is not None:
+            await self._tts.stop()
+        if self._response_session_rebuilder is not None:
+            await self._response_session_rebuilder()
 
     async def aclose(self) -> None:
         """Release local speech resources when the UI exits."""

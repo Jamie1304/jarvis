@@ -17,6 +17,11 @@ from jarvis.computer.models import (
     MouseActionState,
     WindowInfo,
 )
+from jarvis.computer.process import (
+    ProcessIdentityError,
+    resolve_trusted_executable,
+    trusted_process_environment,
+)
 
 
 class ComputerAdapterError(RuntimeError):
@@ -136,14 +141,16 @@ class WindowsUiAutomationAdapter(ComputerAdapter):  # pragma: no cover
                 "Application is not in the trusted launch catalog"
             ) from error
         try:
+            executable = resolve_trusted_executable(application.executable)
             process = subprocess.Popen(
-                [application.executable, *application.default_arguments],
+                [str(executable), *application.default_arguments],
                 shell=False,
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
+                env=trusted_process_environment(),
             )
-        except OSError as error:
+        except (OSError, ProcessIdentityError) as error:
             raise ComputerAdapterError("Application could not be launched") from error
         return LaunchInfo(application.application_id, process.pid)
 

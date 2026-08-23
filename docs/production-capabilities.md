@@ -39,3 +39,8 @@ narrow policies. `winget` detection is read-only; no CI test installs software.
 OpenCV devices must be both provider-accepted and controller-allowed. Local voice
 providers process transient host audio only; neither idle frames nor camera frames
 are persisted by these adapters.
+
+Generic process launches use absolute catalogued executable identities, argument
+arrays, `shell=False`, and a minimal child environment. Real owned-process and
+interactive desktop checks remain opt-in; skipped hardware/manual checks are not
+evidence of execution.

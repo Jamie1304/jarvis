@@ -3,14 +3,17 @@
 import asyncio
 import os
 import subprocess
+import sys
 from hashlib import sha256
+from pathlib import Path
 
 import pytest
 from jarvis.camera.controller import CameraController
 from jarvis.camera.provider import OpenCvCameraProvider
 from jarvis.computer.accessibility import WindowsAccessibilityAdapter
 from jarvis.computer.adapters import ComputerAdapterError, WindowsUiAutomationAdapter
-from jarvis.computer.models import ApplicationDefinition, WindowInfo
+from jarvis.computer.models import ApplicationDefinition, CommandDefinition, WindowInfo
+from jarvis.computer.terminal import SubprocessCommandAdapter
 
 pytestmark = pytest.mark.windows_integration
 
@@ -24,8 +27,21 @@ async def test_real_notepad_semantic_computer_acceptance() -> None:
 
     pytest.importorskip("pywinauto")
     pytest.importorskip("PIL")
+    executable = next(
+        (
+            candidate
+            for candidate in (
+                Path(os.environ.get("WINDIR", r"C:\Windows")) / "System32" / "notepad.exe",
+                Path(os.environ.get("WINDIR", r"C:\Windows")) / "notepad.exe",
+            )
+            if candidate.is_file()
+        ),
+        None,
+    )
+    if executable is None:
+        pytest.skip("No trusted Notepad executable was found")
     adapter = WindowsUiAutomationAdapter(
-        {"notepad": ApplicationDefinition("notepad", "notepad.exe")}
+        {"notepad": ApplicationDefinition("notepad", str(executable))}
     )
     process_id: int | None = None
     try:
@@ -72,6 +88,30 @@ async def test_real_notepad_semantic_computer_acceptance() -> None:
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
             )
+
+
+@pytest.mark.skipif(
+    os.environ.get("JARVIS_WINDOWS_INTEGRATION") != "true",
+    reason="Set JARVIS_WINDOWS_INTEGRATION=true to enable owned-process checks",
+)
+@pytest.mark.asyncio
+async def test_real_owned_process_uses_exact_identity_and_bounded_environment() -> None:
+    executable = Path(sys.executable).resolve(strict=True)
+    command = CommandDefinition(
+        "owned-python",
+        str(executable),
+        "owned-test",
+        frozenset({("-c", "print('jarvis-owned-process')")}),
+    )
+    result = await SubprocessCommandAdapter().execute(
+        command,
+        ("-c", "print('jarvis-owned-process')"),
+        str(executable.parent),
+        5,
+        asyncio.Event(),
+    )
+    assert result.exit_code == 0
+    assert result.stdout.strip() == "jarvis-owned-process"
 
 
 @pytest.mark.skipif(

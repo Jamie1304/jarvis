@@ -2,13 +2,18 @@
 
 from __future__ import annotations
 
+import asyncio
+import inspect
 import re
 import sqlite3
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from decimal import Decimal
 from enum import StrEnum
 from pathlib import Path
+from uuid import uuid4
 
+from jarvis.agent_runtime import AgentLoop
 from jarvis.ai.providers.base import AIProvider
 from jarvis.bootstrap import create_ai_provider
 from jarvis.conversation.service import ConversationService
@@ -42,6 +47,7 @@ from jarvis.planning.engine import (
 from jarvis.planning.models import ReplanEvidence
 from jarvis.planning.store import PlanningStoreError, SQLitePlanningStore
 from jarvis.planning.validation import PlanValidator
+from jarvis.recovery import RecoveryEvidence, RecoveryPhase, RecoveryStore
 from jarvis.security import (
     SECURITY_POLICY_VERSION,
     SecurityViolation,
@@ -78,6 +84,7 @@ class RuntimePaths:
     cache: Path
     temporary: Path
     models: Path
+    recovery: Path
 
     @classmethod
     def from_root(cls, root: Path) -> RuntimePaths:
@@ -93,11 +100,20 @@ class RuntimePaths:
             base / "cache",
             base / "tmp",
             base / "models",
+            base / "recovery",
         )
 
     def ensure_directories(self) -> None:
         self.validate_storage_layout()
-        for path in (self.root, self.logs, self.config, self.cache, self.temporary, self.models):
+        for path in (
+            self.root,
+            self.logs,
+            self.config,
+            self.cache,
+            self.temporary,
+            self.models,
+            self.recovery,
+        ):
             path.mkdir(parents=True, exist_ok=True)
         self.validate_storage_layout()
 
@@ -107,7 +123,15 @@ class RuntimePaths:
         canonical_root = self.root.resolve(strict=False)
         if canonical_root != self.root or self.root.is_symlink() or self.root.is_junction():
             raise OSError("Application-data root identity is unsafe")
-        directories = (self.root, self.logs, self.config, self.cache, self.temporary, self.models)
+        directories = (
+            self.root,
+            self.logs,
+            self.config,
+            self.cache,
+            self.temporary,
+            self.models,
+            self.recovery,
+        )
         databases = (
             self.state_database,
             self.planning_database,
@@ -221,6 +245,8 @@ class RuntimeContainer:
     system_memory: ProjectSystemMemory
     discovery: CapabilityGapDetector
     candidate_evaluator: CandidateEvaluator
+    recovery: RecoveryStore
+    agent_loop: AgentLoop
     computer: object | None = None
     vision: object | None = None
     camera: object | None = None
@@ -228,14 +254,48 @@ class RuntimeContainer:
     voice: object | None = None
     multi_agent: object | None = None
     improvement: object | None = None
+    _close_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False, repr=False)
+    _closed: bool = field(default=False, init=False, repr=False)
 
     async def aclose(self) -> None:
-        await self.event_bus.close()
-        await self.conversation.aclose()
-        self.planning_store.close()
-        self.memory_store.close()
-        self.state_store.close()
-        self.audit_sink.close()
+        async with self._close_lock:
+            if self._closed:
+                return
+            object.__setattr__(self, "_closed", True)
+            resources = (
+                self.event_bus,
+                self.conversation,
+                self.planning_store,
+                self.memory_store,
+                self.state_store,
+                self.audit_sink,
+                self.voice,
+                self.camera,
+                self.application_manager,
+                self.computer,
+                self.vision,
+                self.multi_agent,
+                self.improvement,
+            )
+            closed: set[int] = set()
+            first_error: BaseException | None = None
+            for resource in resources:
+                if resource is None or id(resource) in closed:
+                    continue
+                closed.add(id(resource))
+                try:
+                    close = getattr(resource, "aclose", None) or getattr(resource, "close", None)
+                    if callable(close):
+                        result = close()
+                        if inspect.isawaitable(result):
+                            await result
+                except BaseException as error:
+                    if isinstance(error, asyncio.CancelledError):
+                        raise
+                    if first_error is None:
+                        first_error = error
+            if first_error is not None:
+                raise first_error
 
 
 class ApplicationRuntime:
@@ -253,6 +313,8 @@ class ApplicationRuntime:
         self._status = status
         self._error = error
         self._security_report = security_report
+        self._close_lock = asyncio.Lock()
+        self._closed = False
 
     @property
     def container(self) -> RuntimeContainer | None:
@@ -338,6 +400,8 @@ class ApplicationRuntime:
         audit: SQLiteAuditSink | None = None
         planning_store: SQLitePlanningStore | None = None
         memory_store: SQLiteMemoryStore | None = None
+        recovery: RecoveryStore | None = None
+        transaction_id = str(uuid4())
         try:
             paths = RuntimePaths.from_root(resolved_app_data_dir)
             if paths.root != resolved_app_data_dir:
@@ -366,6 +430,8 @@ class ApplicationRuntime:
         try:
             paths.validate_storage_layout()
             configure_logging(settings.log_level)
+            recovery = RecoveryStore(paths.recovery)
+            recovery.begin_start(transaction_id)
             events = InMemoryEventBus()
             paths.validate_storage_layout()
             state_store = SQLiteStateStore(paths.state_database)
@@ -443,7 +509,32 @@ class ApplicationRuntime:
                 system_memory=system_memory,
                 discovery=CapabilityGapDetector(frozenset({"calculator", "local_time"})),
                 candidate_evaluator=CandidateEvaluator(),
+                recovery=recovery,
+                agent_loop=AgentLoop(
+                    provider,
+                    registry,
+                    model=settings.ai_model,
+                    context_limit=settings.ai_context_limit,
+                ),
             )
+            snapshot = recovery.create_snapshot(
+                transaction_id=transaction_id,
+                app_revision=settings.version,
+                configuration={
+                    "environment": settings.environment,
+                    "ai_provider": settings.ai_provider,
+                    "security_policy_version": settings.security_policy_version,
+                },
+                database_schema={
+                    "state": "validated",
+                    "planning": "validated",
+                    "memory": "validated",
+                    "audit": "validated",
+                },
+                integration_versions={},
+                generated_package_state={"activation": "disabled"},
+            )
+            recovery.commit_start(transaction_id, snapshot.snapshot_id)
         except (
             AuditStoreError,
             PlanningStoreError,
@@ -451,6 +542,17 @@ class ApplicationRuntime:
             StateStoreError,
             sqlite3.DatabaseError,
         ) as error:
+            if recovery is not None:
+                recovery.record(
+                    RecoveryEvidence(
+                        transaction_id,
+                        RecoveryPhase.FAIL,
+                        "startup_failure",
+                        type(error).__name__,
+                        None,
+                        datetime.now(UTC).isoformat(),
+                    )
+                )
             cls._close_partial_stores(memory_store, planning_store, audit, state_store)
             return cls(
                 None,
@@ -459,6 +561,17 @@ class ApplicationRuntime:
                 security_report=security_report,
             )
         except Exception as error:
+            if recovery is not None:
+                recovery.record(
+                    RecoveryEvidence(
+                        transaction_id,
+                        RecoveryPhase.FAIL,
+                        "startup_failure",
+                        type(error).__name__,
+                        None,
+                        datetime.now(UTC).isoformat(),
+                    )
+                )
             cls._close_partial_stores(memory_store, planning_store, audit, state_store)
             return cls(
                 None,
@@ -505,8 +618,12 @@ class ApplicationRuntime:
                     continue
 
     async def aclose(self) -> None:
-        if self.status is RuntimeStatus.STOPPED:
-            return
-        if self._container is not None:
-            await self._container.aclose()
-        self._status = RuntimeStatus.STOPPED
+        async with self._close_lock:
+            if self._closed:
+                return
+            self._closed = True
+            container = self._container
+            self._container = None
+            if container is not None:
+                await container.aclose()
+            self._status = RuntimeStatus.STOPPED

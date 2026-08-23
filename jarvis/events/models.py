@@ -16,6 +16,7 @@ from uuid import UUID, uuid4
 class EventType(StrEnum):
     TASK_CREATED = "task.created"
     TASK_STATE_CHANGED = "task.state_changed"
+    GOAL_CREATED = "goal.created"
     PLAN_CREATED = "plan.created"
     PLAN_UPDATED = "plan.updated"
     STEP_STARTED = "step.started"
@@ -30,6 +31,10 @@ class EventType(StrEnum):
     CAMERA_STATE_CHANGED = "camera.state_changed"
     VOICE_STATE_CHANGED = "voice.state_changed"
     CAPABILITY_CHANGED = "capability.changed"
+    INTEGRATION_CHANGED = "integration.changed"
+    RUNTIME_STATE_CHANGED = "runtime.state_changed"
+    HEALTH_CHANGED = "health.changed"
+    AUTOMATION_STATE_CHANGED = "automation.state_changed"
     SYSTEM_ERROR = "system.error"
 
 
@@ -61,6 +66,14 @@ class TaskStateChanged(EventPayload):
         _text(self.from_state)
         _text(self.to_state)
         _text(self.reason)
+
+
+@dataclass(frozen=True, slots=True)
+class GoalCreated(EventPayload):
+    goal: str
+
+    def __post_init__(self) -> None:
+        _text(self.goal, limit=512)
 
 
 @dataclass(frozen=True, slots=True)
@@ -207,6 +220,45 @@ class CapabilityChanged(EventPayload):
 
 
 @dataclass(frozen=True, slots=True)
+class IntegrationChanged(EventPayload):
+    integration: str
+    state: str
+
+    def __post_init__(self) -> None:
+        _text(self.integration)
+        _text(self.state)
+
+
+@dataclass(frozen=True, slots=True)
+class RuntimeStateChanged(EventPayload):
+    state: str
+
+    def __post_init__(self) -> None:
+        _text(self.state)
+
+
+@dataclass(frozen=True, slots=True)
+class HealthChanged(EventPayload):
+    component: str
+    status: str
+
+    def __post_init__(self) -> None:
+        _text(self.component)
+        _text(self.status)
+
+
+@dataclass(frozen=True, slots=True)
+class AutomationStateChanged(EventPayload):
+    automation_id: UUID
+    state: str
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.automation_id, UUID):
+            raise ValueError("invalid automation id")
+        _text(self.state)
+
+
+@dataclass(frozen=True, slots=True)
 class SystemError(EventPayload):
     code: str
     summary: str
@@ -219,6 +271,7 @@ class SystemError(EventPayload):
 _PAYLOAD_TYPES: dict[EventType, type[EventPayload]] = {
     EventType.TASK_CREATED: TaskCreated,
     EventType.TASK_STATE_CHANGED: TaskStateChanged,
+    EventType.GOAL_CREATED: GoalCreated,
     EventType.PLAN_CREATED: PlanCreated,
     EventType.PLAN_UPDATED: PlanUpdated,
     EventType.STEP_STARTED: StepStarted,
@@ -233,6 +286,10 @@ _PAYLOAD_TYPES: dict[EventType, type[EventPayload]] = {
     EventType.CAMERA_STATE_CHANGED: CameraStateChanged,
     EventType.VOICE_STATE_CHANGED: VoiceStateChanged,
     EventType.CAPABILITY_CHANGED: CapabilityChanged,
+    EventType.INTEGRATION_CHANGED: IntegrationChanged,
+    EventType.RUNTIME_STATE_CHANGED: RuntimeStateChanged,
+    EventType.HEALTH_CHANGED: HealthChanged,
+    EventType.AUTOMATION_STATE_CHANGED: AutomationStateChanged,
     EventType.SYSTEM_ERROR: SystemError,
 }
 
@@ -257,10 +314,11 @@ class EventEnvelope(Generic[PayloadT]):
         if (
             not isinstance(self.event_id, UUID)
             or not isinstance(self.event_type, EventType)
+            or type(self.schema_version) is not int
             or self.schema_version != 1
         ):
             raise ValueError("unsupported event envelope")
-        if self.timestamp.tzinfo is None:
+        if not isinstance(self.timestamp, datetime) or self.timestamp.tzinfo is None:
             raise ValueError("event timestamp must be timezone-aware")
         _text(self.source)
         if (
@@ -268,7 +326,7 @@ class EventEnvelope(Generic[PayloadT]):
             or (self.task_id is not None and not isinstance(self.task_id, UUID))
             or (self.causation_id is not None and not isinstance(self.causation_id, UUID))
             or type(self.payload) is not _PAYLOAD_TYPES[self.event_type]
-            or not isinstance(self.sequence, int)
+            or type(self.sequence) is not int
             or self.sequence < 0
         ):
             raise ValueError("event metadata/payload is not trusted")

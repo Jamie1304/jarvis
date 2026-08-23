@@ -5,7 +5,9 @@ from jarvis.voice.activation import (
     AudioSource,
     InterruptionCommand,
     LocalVoiceController,
+    MicrophoneMode,
     OrchestratorVoiceTaskRunner,
+    PushToTalkController,
     VADProvider,
     VoiceConfig,
     VoiceState,
@@ -17,6 +19,7 @@ from jarvis.voice.activation import (
     WakeWordProvider,
 )
 from jarvis.voice.providers import EnergyVADProvider, OpenWakeWordProvider, SoundDeviceAudioSource
+from jarvis.voice.warmup import VoiceWarmup, WarmupResult
 
 __all__ = [
     "AudioFrame",
@@ -24,8 +27,10 @@ __all__ = [
     "EnergyVADProvider",
     "InterruptionCommand",
     "LocalVoiceController",
+    "MicrophoneMode",
     "OrchestratorVoiceTaskRunner",
     "OpenWakeWordProvider",
+    "PushToTalkController",
     "SoundDeviceAudioSource",
     "VADProvider",
     "VoiceConfig",
@@ -36,4 +41,6 @@ __all__ = [
     "VoiceTaskHandle",
     "VoiceTaskOutcome",
     "VoiceTaskRunner",
+    "VoiceWarmup",
+    "WarmupResult",
 ]

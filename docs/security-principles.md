@@ -13,6 +13,8 @@
 - Phase 2 registers no operating-system, filesystem, shell, computer-control, camera, or network-action tools. Future capabilities must be explicitly registered and mediated by permissions.
 - Tool arguments are untrusted model output. The tool boundary rejects unknown fields and invalid types before a tool implementation executes.
 - Tools receive only explicit execution context, not the application container. Unexpected implementation exceptions are logged and mapped to structured failures.
+- Integrity classes are explicit: `TRUSTED_CORE`, `PRODUCTION_CORE`, `INTEGRATION`, `GENERATED`, `USER_CONFIG`, and `DATA`. Generated/unreviewed code remains inert data and is never imported or executed in the trusted process.
+- Permission descriptions come only from the trusted `TrustedActionNarrator` and are rendered from one immutable authority object by `ExactOperationRenderer`; model wording, voice text, events, and UI fields cannot create approval.
 
 Phase 3 retains the deny-by-default boundary: only registered, non-privileged capabilities are available, and calculator/local-time declare no permissions.
 

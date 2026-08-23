@@ -98,6 +98,15 @@ transition records. Planner, legacy orchestrator, and optional voice adapters
 can publish progress through it without allowing UI/model code to mutate state.
 See `docs/state-machine.md`.
 
+The typed `jarvis.events` bus is the bounded observational coordination channel
+for task, goal/plan/step, tool, permission, runtime, voice, camera,
+capability/integration, health, automation, and error facts. Event envelopes are
+strictly typed and carry correlation/causation metadata, but events never grant
+authority or replace the owning state, planning, permission, or audit store.
+Subscriber queues and correlation ledgers are bounded; slow/failing subscribers
+are isolated, and shutdown cancels consumers. External/model content remains
+untrusted event data.
+
 ## Canonical runtime composition
 
 `ApplicationRuntime` is the only production composition owner. It creates one
@@ -108,6 +117,13 @@ broker with a deny-all approval verifier, tool registry, `PlanningEngine`,
 is:
 
 `Application/UI -> TaskController -> PlanningEngine -> ToolRegistry -> Tool -> PermissionBroker -> verification -> durable state/audit/event`
+
+`TaskController` is the only application-facing task API. It delegates creation,
+submission, inspection, execution, resume, cancellation, permission decisions,
+status, and result/evidence retrieval to the runtime-owned `PlanningEngine` and
+its stores. UI adapters do not construct an orchestrator or select an execution
+engine. `AgentOrchestrator` remains compatibility-only and is not part of the
+production composition.
 
 Approval will eventually use a separate trusted-local path:
 

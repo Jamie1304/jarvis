@@ -17,6 +17,11 @@ from jarvis.computer.models import (
     MouseActionState,
     WindowInfo,
 )
+from jarvis.computer.process import (
+    ProcessIdentityError,
+    resolve_trusted_executable,
+    trusted_process_environment,
+)
 from jarvis.computer.terminal import (
     CommandAdapter,
     ControlledCommandService,
@@ -46,6 +51,25 @@ from jarvis.permissions import (
 from jarvis.tools.harness import ToolHarness
 from jarvis.tools.models import ToolEvidence, ToolResultStatus
 from jarvis.tools.registry import ToolRegistry
+
+
+def test_process_identity_requires_absolute_regular_file_and_minimal_environment(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    executable = tmp_path / "owned.exe"
+    executable.write_bytes(b"owned test file")
+
+    assert resolve_trusted_executable(str(executable)) == executable
+    with pytest.raises(ProcessIdentityError):
+        resolve_trusted_executable("owned.exe")
+
+    monkeypatch.setenv("PATH", "hostile-path")
+    monkeypatch.setenv("JARVIS_TEST_SECRET", "must-not-inherit")
+    environment = trusted_process_environment()
+    assert "PATH" not in environment
+    assert "JARVIS_TEST_SECRET" not in environment
+    assert environment["PYTHONUTF8"] == "1"
 
 
 class FakeComputerAdapter(ComputerAdapter):

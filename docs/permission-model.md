@@ -38,6 +38,17 @@ Trusted display values and normalized scopes reject C0/C1 controls, ANSI escapes
 non-printing Unicode, and bidi override/isolate characters so provider metadata cannot
 spoof the action shown to the user.
 
+The native presentation contract is `TrustedActionNarrator` plus
+`ExactOperationRenderer`. The narrator accepts the broker's typed request (or a
+trusted `PermissionRequest` paired with its exact `ActionDescriptor`) and creates
+one immutable `TrustedPermissionPresentation` with the short explanation, exact
+details, target, scope, effect, risk, and permission requested. The renderer is
+pure and receives that same object; desktop and future voice surfaces must not
+ask the model to restate the permission. Voice labels are fixed `YES`, `NO`, and
+`DETAILS` choices for presentation only. They never represent a broker decision,
+and conditional or ambiguous speech must be rejected by a future authenticated
+voice ingress.
+
 A trusted human may approve or deny once, cancel a pending request, or create a
 limited remembered grant. One-time approval is bound to the exact canonical
 keyed argument fingerprint and a separate keyed action/resource fingerprint over

@@ -25,10 +25,12 @@ pause persists the broker-issued request IDs and the entire task/plan snapshot. 
 does not grant approval: it invokes the same exact tool input through the broker again,
 which consumes a valid trusted approval or pauses/denies again.
 
-`SQLitePlanningStore` stores task snapshots and versioned current plans atomically and
-uses ordered, identity-checked migrations. On restart, queued and permission-paused
-work can continue. A persisted running or verifying step has an unknown external
-outcome, so the engine fails closed instead of replaying it.
+`SQLitePlanningStore` stores task snapshots, versioned current plans, and operation
+reservations atomically and uses ordered, identity-checked migrations. A pre-effect
+permission pause rolls back attempt, executed-step, and expensive-action accounting;
+approval waiting therefore does not consume execution budget. On restart, queued and
+permission-paused work can continue. A persisted running or verifying step has an
+unknown external outcome, so the engine fails closed instead of replaying it.
 
 ## Execution, verification, and replanning
 
@@ -39,7 +41,10 @@ Successful tool output is only evidence. The step verifier must accept the decla
 rule, and after every step succeeds the goal verifier must independently accept all
 goal completion criteria before the task can complete.
 
-Transient failures retry only within both the per-step and task retry budgets.
+Only explicitly pre-effect or safe-to-retry outcomes replay, and reservations are
+released only for those outcomes. Confirmed effects and unknown outcomes retain their
+reservations; unknown outcomes transition to `RECOVERING` and are never blindly
+replayed. Transient failures retry only within both the per-step and task retry budgets.
 Deterministic or exhausted failures may request a new proposal, but the replan request
 contains the actual structured failure/evidence and the validator requires the
 original goal, assumptions, and constraints unchanged. Prior plan versions remain in
@@ -65,8 +70,8 @@ or parallel action execution is implemented in this phase.
   secret storage. Production composition must protect the database path and user/task
   ownership boundary.
 - A process crash can leave an external action's outcome unknown. The engine refuses
-  silent replay; future idempotency/evidence adapters may provide a narrower recovery
-  policy for individual tools.
+  silent replay. The final goal verification is still run after the final permitted
+  execution step; execution budgets apply to execution attempts, not that verification.
 
 The deterministic meeting-preparation evaluation uses fake calendar, notes, and focus
 tools. Calendar and notes are independent DAG nodes; focus depends on both. It sends no

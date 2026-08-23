@@ -7,6 +7,11 @@ from collections.abc import Mapping
 from pathlib import Path
 
 from jarvis.computer.models import CommandDefinition, CommandExecution
+from jarvis.computer.process import (
+    ProcessIdentityError,
+    resolve_trusted_executable,
+    trusted_process_environment,
+)
 
 _MAX_OUTPUT_CHARACTERS = 16_384
 
@@ -36,18 +41,13 @@ class SubprocessCommandAdapter(CommandAdapter):
         cancellation: asyncio.Event,
     ) -> CommandExecution:
         try:
-            executable = Path(command.executable)
+            trusted_executable = resolve_trusted_executable(command.executable)
             working_root = Path(working_directory).resolve(strict=True)
-            trusted_executable = executable.resolve(strict=True)
-        except (OSError, RuntimeError):
+        except (OSError, RuntimeError, ProcessIdentityError):
             return CommandExecution(
                 None, "", "Trusted command identity is unavailable", rejected=True
             )
-        if (
-            not executable.is_absolute()
-            or not trusted_executable.is_file()
-            or not working_root.is_dir()
-        ):
+        if not trusted_executable.is_file() or not working_root.is_dir():
             return CommandExecution(None, "", "Trusted command identity is invalid", rejected=True)
         process = await asyncio.create_subprocess_exec(
             os.fspath(trusted_executable),
@@ -56,7 +56,7 @@ class SubprocessCommandAdapter(CommandAdapter):
             stdin=asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
-            env=_trusted_subprocess_environment(),
+            env=trusted_process_environment(),
         )
         communication = asyncio.create_task(process.communicate())
         cancellation_wait = asyncio.create_task(cancellation.wait())
@@ -154,13 +154,3 @@ class ControlledCommandService:
             timeout_seconds,
             cancellation,
         )
-
-
-def _trusted_subprocess_environment() -> dict[str, str]:
-    """Pass only OS process essentials; never ambient credentials or Python hooks."""
-
-    allowed = ("SYSTEMROOT", "WINDIR", "TEMP", "TMP")
-    environment = {name: os.environ[name] for name in allowed if name in os.environ}
-    environment["PYTHONIOENCODING"] = "utf-8"
-    environment["PYTHONUTF8"] = "1"
-    return environment

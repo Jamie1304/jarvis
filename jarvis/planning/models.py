@@ -64,6 +64,15 @@ class StepExecutionStatus(StrEnum):
     UNKNOWN_OUTCOME = "unknown_outcome"
 
 
+class EffectOutcome(StrEnum):
+    """Trusted classification of an operation across its effect boundary."""
+
+    PRE_EFFECT_FAILURE = "pre_effect_failure"
+    SAFE_TO_RETRY = "safe_to_retry"
+    EFFECT_CONFIRMED = "effect_confirmed"
+    UNKNOWN_OUTCOME = "unknown_outcome"
+
+
 def utc(value: datetime) -> datetime:
     if value.tzinfo is None:
         return value.replace(tzinfo=UTC)
@@ -290,10 +299,23 @@ class StepExecutionResult:
     error_code: str | None = None
     error_message: str | None = None
     approval_request_ids: tuple[UUID, ...] = ()
+    effect_outcome: EffectOutcome | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.status, StepExecutionStatus):
             raise ValueError("Execution status must be recognized")
+        if self.effect_outcome is not None and not isinstance(self.effect_outcome, EffectOutcome):
+            raise ValueError("Effect outcome must be recognized")
+        if self.effect_outcome is None:
+            default_outcome = {
+                StepExecutionStatus.SUCCEEDED: EffectOutcome.EFFECT_CONFIRMED,
+                StepExecutionStatus.TRANSIENT_FAILURE: EffectOutcome.SAFE_TO_RETRY,
+                StepExecutionStatus.WAITING_FOR_PERMISSION: EffectOutcome.PRE_EFFECT_FAILURE,
+                StepExecutionStatus.DETERMINISTIC_FAILURE: EffectOutcome.PRE_EFFECT_FAILURE,
+                StepExecutionStatus.CANCELLED: EffectOutcome.UNKNOWN_OUTCOME,
+                StepExecutionStatus.UNKNOWN_OUTCOME: EffectOutcome.UNKNOWN_OUTCOME,
+            }[self.status]
+            object.__setattr__(self, "effect_outcome", default_outcome)
         try:
             json.loads(self.output_json)
         except json.JSONDecodeError as error:

@@ -9,16 +9,21 @@ from uuid import UUID, uuid4
 
 import pytest
 from jarvis.events import (
+    AutomationStateChanged,
     CameraStateChanged,
     CapabilityChanged,
     EventEnvelope,
     EventType,
+    GoalCreated,
+    HealthChanged,
     InMemoryEventBus,
+    IntegrationChanged,
     PermissionDenied,
     PermissionGranted,
     PermissionRequested,
     PlanCreated,
     PlanUpdated,
+    RuntimeStateChanged,
     StepCompleted,
     StepFailed,
     StepStarted,
@@ -197,6 +202,7 @@ def test_payloads_are_typed_and_do_not_contain_sensitive_arguments() -> None:
 def test_all_payload_contracts_are_bounded_and_typed() -> None:
     identifier = uuid4()
     assert TaskCreated("goal").goal == "goal"
+    assert GoalCreated("goal").goal == "goal"
     assert TaskStateChanged("a", "b", "reason").to_state == "b"
     assert PlanCreated(identifier, 2).step_count == 2
     assert PlanUpdated(identifier, 3).revision == 3
@@ -212,6 +218,10 @@ def test_all_payload_contracts_are_bounded_and_typed() -> None:
     assert CameraStateChanged("camera-1", "active").state == "active"
     assert VoiceStateChanged("listening").state == "listening"
     assert CapabilityChanged("camera.capture", True).available
+    assert IntegrationChanged("local-model", "available").state == "available"
+    assert RuntimeStateChanged("ready").state == "ready"
+    assert HealthChanged("runtime", "healthy").status == "healthy"
+    assert AutomationStateChanged(identifier, "idle").state == "idle"
 
 
 @pytest.mark.asyncio
@@ -271,6 +281,30 @@ def test_payload_rejects_invalid_identifiers_and_envelope_metadata() -> None:
             2,
             EventType.SYSTEM_ERROR,
             __import__("datetime").datetime.now(),
+            "tests",
+            None,
+            identifier,
+            None,
+            SystemError("code", "summary"),
+        )
+    with pytest.raises(ValueError):
+        EventEnvelope(
+            identifier,
+            True,
+            EventType.SYSTEM_ERROR,
+            __import__("datetime").datetime.now(__import__("datetime").UTC),
+            "tests",
+            None,
+            identifier,
+            None,
+            SystemError("code", "summary"),
+        )
+    with pytest.raises(ValueError):
+        EventEnvelope(
+            identifier,
+            1,
+            EventType.SYSTEM_ERROR,
+            "not-a-timestamp",  # type: ignore[arg-type]
             "tests",
             None,
             identifier,

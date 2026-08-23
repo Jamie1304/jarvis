@@ -29,6 +29,16 @@ from jarvis.permissions.models import (
     ScopeConstraint,
 )
 from jarvis.permissions.policy import PolicyEngine, normalize_path, path_is_within
+from jarvis.permissions.presentation import (
+    ExactOperationRenderer,
+    SpokenApprovalResult,
+    TrustedActionNarrator,
+    TrustedOperation,
+    TrustedPermissionPresentation,
+    VoiceApprovalChoice,
+    approval_choice_from_spoken,
+    parse_spoken_approval,
+)
 
 __all__ = [
     "ActionDescriptor",
@@ -45,6 +55,7 @@ __all__ = [
     "AuthorizationReceipt",
     "Decision",
     "DecisionReason",
+    "ExactOperationRenderer",
     "InMemoryAuditSink",
     "SQLiteAuditSink",
     "Permission",
@@ -59,6 +70,13 @@ __all__ = [
     "ScopeConstraint",
     "TrustedApprovalAuthenticator",
     "TrustedApprovalContext",
+    "TrustedActionNarrator",
+    "TrustedOperation",
+    "TrustedPermissionPresentation",
+    "VoiceApprovalChoice",
+    "SpokenApprovalResult",
+    "approval_choice_from_spoken",
+    "parse_spoken_approval",
     "normalize_path",
     "path_is_within",
 ]

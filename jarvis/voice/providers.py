@@ -19,11 +19,22 @@ from jarvis.voice.activation import (
 class EnergyVADProvider(VADProvider):
     """Deterministic local VAD suitable as a conservative fallback, not transcription."""
 
-    def __init__(self, *, speech_threshold: float = 0.02, end_threshold: float = 0.005) -> None:
-        if not 0 <= end_threshold <= speech_threshold <= 1:
+    def __init__(
+        self,
+        *,
+        speech_threshold: float = 0.02,
+        silence_threshold: float | None = None,
+        end_threshold: float | None = None,
+    ) -> None:
+        if silence_threshold is not None and end_threshold is not None:
+            raise ValueError("configure only one silence threshold")
+        resolved_silence = silence_threshold if silence_threshold is not None else end_threshold
+        if resolved_silence is None:
+            resolved_silence = 0.005
+        if not 0 <= resolved_silence <= speech_threshold <= 1:
             raise ValueError("VAD thresholds must be ordered values in [0, 1]")
         self._speech_threshold = speech_threshold
-        self._end_threshold = end_threshold
+        self._silence_threshold = resolved_silence
 
     @staticmethod
     def _energy(frame: AudioFrame) -> float:
@@ -33,7 +44,7 @@ class EnergyVADProvider(VADProvider):
         return self._energy(frame) >= self._speech_threshold
 
     def is_end(self, frame: AudioFrame) -> bool:
-        return bool(frame.samples) and self._energy(frame) <= self._end_threshold
+        return bool(frame.samples) and self._energy(frame) <= self._silence_threshold
 
 
 class OpenWakeWordProvider(WakeWordProvider):  # pragma: no cover
@@ -70,10 +81,14 @@ class SoundDeviceAudioSource(AudioSource):  # pragma: no cover
         self._queue: asyncio.Queue[AudioFrame | None] = asyncio.Queue(maxsize=8)
         self._stream: Any | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
+        self._generation = 0
 
     async def start(self) -> None:
         if self._stream is not None:
             return
+        self._generation += 1
+        generation = self._generation
+        self._drain_queue()
         self._loop = asyncio.get_running_loop()
         try:
             sounddevice = import_module("sounddevice")
@@ -83,19 +98,21 @@ class SoundDeviceAudioSource(AudioSource):  # pragma: no cover
             channels=1,
             samplerate=self._sample_rate,
             blocksize=self._frame_samples,
-            callback=self._callback,
+            callback=lambda indata, frames, time_info, status: self._callback(
+                generation, indata, frames, time_info, status
+            ),
         )
         self._stream.start()
 
-    def _callback(self, indata: Any, _: int, __: Any, status: Any) -> None:
-        if status or self._loop is None:
+    def _callback(self, generation: int, indata: Any, _: int, __: Any, status: Any) -> None:
+        if status or self._loop is None or generation != self._generation:
             return
         samples = tuple(float(value) for value in indata[:, 0])
         frame = AudioFrame(samples, self._sample_rate)
-        self._loop.call_soon_threadsafe(self._offer, frame)
+        self._loop.call_soon_threadsafe(self._offer, generation, frame)
 
-    def _offer(self, frame: AudioFrame) -> None:
-        if not self._queue.full():
+    def _offer(self, generation: int, frame: AudioFrame) -> None:
+        if generation == self._generation and self._stream is not None and not self._queue.full():
             self._queue.put_nowait(frame)
 
     async def frames(self) -> AsyncIterator[AudioFrame]:
@@ -106,9 +123,14 @@ class SoundDeviceAudioSource(AudioSource):  # pragma: no cover
             yield frame
 
     async def stop(self) -> None:
+        self._generation += 1
         stream, self._stream = self._stream, None
         if stream is not None:
             await asyncio.to_thread(stream.stop)
             await asyncio.to_thread(stream.close)
-        if not self._queue.full():
-            self._queue.put_nowait(None)
+        self._drain_queue()
+        self._queue.put_nowait(None)
+
+    def _drain_queue(self) -> None:
+        while not self._queue.empty():
+            self._queue.get_nowait()

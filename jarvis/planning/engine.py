@@ -25,6 +25,7 @@ from jarvis.events import (
 from jarvis.permissions.audit import SQLiteAuditSink
 from jarvis.planning.models import (
     BudgetUsage,
+    EffectOutcome,
     ExecutionBudgets,
     FailureKind,
     GoalVerification,
@@ -47,6 +48,7 @@ from jarvis.state import ApplicationStateMachine
 from jarvis.state.models import TaskState, TransitionEvent
 from jarvis.tools.models import (
     ToolCaller,
+    ToolEffectDisposition,
     ToolExecutionContext,
     ToolResultStatus,
 )
@@ -172,6 +174,32 @@ class BrokeredPlanningStepExecutor(PlanningStepExecutor):
                     result.error.message
                     if result.error is not None
                     else "The external effect outcome is unknown"
+                ),
+                effect_outcome=EffectOutcome.UNKNOWN_OUTCOME,
+            )
+        if result.effect_disposition is ToolEffectDisposition.NO_EFFECT and result.status in {
+            ToolResultStatus.TIMEOUT,
+            ToolResultStatus.UNAVAILABLE,
+            ToolResultStatus.INTERNAL_FAILURE,
+        }:
+            return StepExecutionResult(
+                StepExecutionStatus.TRANSIENT_FAILURE,
+                error_code=result.error.code if result.error else result.status.value,
+                error_message=result.error.message if result.error else "Tool had no effect",
+                effect_outcome=EffectOutcome.SAFE_TO_RETRY,
+            )
+        if tool.manifest.declared_permissions and result.effect_disposition in {
+            ToolEffectDisposition.CONFIRMED_EFFECT,
+            ToolEffectDisposition.UNKNOWN,
+        }:
+            return StepExecutionResult(
+                StepExecutionStatus.UNKNOWN_OUTCOME,
+                error_code="tool_execution_outcome_unknown",
+                error_message="A tool effect cannot be safely replayed",
+                effect_outcome=(
+                    EffectOutcome.EFFECT_CONFIRMED
+                    if result.effect_disposition is ToolEffectDisposition.CONFIRMED_EFFECT
+                    else EffectOutcome.UNKNOWN_OUTCOME
                 ),
             )
         error_code = result.error.code if result.error else result.status.value
@@ -508,14 +536,14 @@ class PlanningEngine:
         while True:
             if cancellation.is_set() or task.cancellation_requested:
                 return self._cancelled(task, plan)
-            budget_error = self._budget_error(task, None)
-            if budget_error is not None:
-                return self._fail_budget(task, budget_error, plan=plan)
             step = self._next_step(plan)
             if step is None:
                 if all(item.status is PlanningStepStatus.SUCCEEDED for item in plan.steps):
                     return await self._verify_goal(task, plan)
                 return self._fail(task, "task_graph_blocked", "No executable DAG node", plan=plan)
+            budget_error = self._budget_error(task, None)
+            if budget_error is not None:
+                return self._fail_budget(task, budget_error, plan=plan)
             budget_error = self._budget_error(task, step)
             if budget_error is not None:
                 return self._fail_budget(task, budget_error, plan=plan)
@@ -539,6 +567,11 @@ class PlanningEngine:
             if execution.status is StepExecutionStatus.WAITING_FOR_PERMISSION:
                 return self._pause(task, plan, step, execution.approval_request_ids)
             if execution.status is StepExecutionStatus.TRANSIENT_FAILURE:
+                if execution.effect_outcome not in {
+                    EffectOutcome.PRE_EFFECT_FAILURE,
+                    EffectOutcome.SAFE_TO_RETRY,
+                }:
+                    return self._recover_unknown_outcome(task, plan, step, execution)
                 self._emit_step(
                     EventType.STEP_FAILED, task, step, execution.error_code or "transient_failure"
                 )
@@ -547,6 +580,7 @@ class PlanningEngine:
                     step.attempts <= step.max_retries
                     and task.usage.retries < task.budgets.max_retries
                 ):
+                    self._release_retry_reservation(task, step, execution)
                     task = replace(
                         task,
                         usage=replace(task.usage, retries=task.usage.retries + 1),
@@ -781,19 +815,16 @@ class PlanningEngine:
         step: PlanningStep,
         request_ids: tuple[UUID, ...],
     ) -> PlanningTask:
-        if step.expensive_action or step.required_permissions:
-            if not self._store.release_operation(
-                task.task_id,
-                str(step.step_id),
-                self._operation_fingerprint(step),
-            ):
-                raise PlanningStoreError("Pre-effect operation reservation was not present")
+        self._release_operation_if_reserved(task, step)
         now = self._clock()
         plan = self._replace_step(
             replace(plan, status=OwnedPlanStatus.WAITING_FOR_PERMISSION),
             replace(
                 step,
                 status=PlanningStepStatus.WAITING_FOR_PERMISSION,
+                # A broker permission decision happens before the external
+                # effect, so it is not an execution attempt. Other typed
+                # executors may pause after doing work and retain the attempt.
                 attempts=max(0, step.attempts - 1),
             ),
         )
@@ -818,6 +849,24 @@ class PlanningEngine:
     @staticmethod
     def _operation_fingerprint(step: PlanningStep) -> str:
         return hashlib.sha256(step.input_json.encode("utf-8")).hexdigest()
+
+    def _release_operation_if_reserved(self, task: PlanningTask, step: PlanningStep) -> None:
+        if not (step.expensive_action or step.required_permissions):
+            return
+        if not self._store.release_operation(
+            task.task_id, str(step.step_id), self._operation_fingerprint(step)
+        ):
+            raise PlanningStoreError("Pre-effect operation reservation was not present")
+
+    def _release_retry_reservation(
+        self, task: PlanningTask, step: PlanningStep, execution: StepExecutionResult
+    ) -> None:
+        if execution.effect_outcome not in {
+            EffectOutcome.PRE_EFFECT_FAILURE,
+            EffectOutcome.SAFE_TO_RETRY,
+        }:
+            return
+        self._release_operation_if_reserved(task, step)
 
     def _cancelled(self, task: PlanningTask, plan: OwnedPlan) -> PlanningTask:
         steps = tuple(

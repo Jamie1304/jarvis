@@ -59,6 +59,14 @@ Production composition must not instantiate it from model data. Windows-specific
 dependencies are optional (`.[windows]`) and integration tests require explicit
 operator opt-in.
 
+Application and command executable identities must be absolute, existing regular
+files. Launch paths reject symlinks/junctions and path aliases where the resolved
+identity differs. Child processes receive a minimal environment and are launched
+with argument vectors; `PATH`, shell expansion, Python hooks, and ambient
+credentials are not inherited. These checks narrow identity confusion but cannot
+eliminate all Windows TOCTOU races or prove signer/code identity; use a trusted
+fixed-volume catalog and future OS-level isolation for hostile integrations.
+
 Adapters return structured facts—window details, process ID, control state, cursor
 action, or captured screen metadata—to let later verification inspect what happened.
 They must not report success when a platform call failed or was not attempted.

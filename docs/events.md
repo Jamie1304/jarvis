@@ -14,12 +14,13 @@ event metadata as observation and reconcile it against the owning service.
 
 Payloads currently cover:
 
-- task: created and state changed
+- tasks and goals: created and state changed
 - plans and steps: created, updated, started, completed, failed
 - permissions: requested, granted, denied
 - tools: started, completed, failed
-- camera and voice state changes
-- capability changes and bounded system errors
+- runtime, health, and automation state changes
+- voice and camera state changes
+- capability/integration changes and bounded system errors
 
 Payload schemas permit only bounded summaries and identifiers and enforce the
 `EventType`/payload pairing. Every producer is responsible for redaction: generic

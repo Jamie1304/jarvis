@@ -39,6 +39,7 @@ _TRUSTED_CORE_FILES = frozenset(
         "jarvis/core/config.py",
         "jarvis/core/health.py",
         "jarvis/runtime.py",
+        "jarvis/recovery.py",
         "jarvis/task_controller.py",
         "jarvis/tools/__init__.py",
         "jarvis/tools/base.py",
@@ -198,10 +199,28 @@ class MutationAuthorizer:
         clock: Clock | None = None,
     ) -> None:
         if (
-            not isinstance(identity_id, str)
+            type(identity_id) is not str
             or not identity_id
             or identity_id != identity_id.strip()
             or len(identity_id) > 256
+            or not all(character.isprintable() for character in identity_id)
+            or any(
+                character in identity_id
+                for character in (
+                    "\u061c",
+                    "\u200e",
+                    "\u200f",
+                    "\u202a",
+                    "\u202b",
+                    "\u202c",
+                    "\u202d",
+                    "\u202e",
+                    "\u2066",
+                    "\u2067",
+                    "\u2068",
+                    "\u2069",
+                )
+            )
             or not isinstance(source, MutationAuthorizationSource)
             or isinstance(ttl_seconds, bool)
             or not 1 <= ttl_seconds <= 600
@@ -262,6 +281,8 @@ class MutationAuthorizer:
             gate_report_digest,
             issued_at,
             expires_at,
+            self._identity_id,
+            self._source,
         )
         authorization = MutationAuthorization(
             authorization_id=authorization_id,
@@ -288,7 +309,9 @@ class MutationAuthorizer:
         path: str,
     ) -> bool:
         if (
-            authorization is None
+            type(authorization) is not MutationAuthorization
+            or type(context) is not MutationContext
+            or type(path) is not str
             or self._issued.get(authorization.authorization_id) != authorization
         ):
             return False
@@ -303,6 +326,8 @@ class MutationAuthorizer:
             authorization.gate_report_digest,
             authorization.issued_at,
             authorization.expires_at,
+            authorization.identity_id,
+            authorization.source,
         )
         valid = (
             hmac.compare_digest(authorization.authentication_tag, expected_tag)
@@ -332,6 +357,8 @@ class MutationAuthorizer:
         gate_report_digest: str,
         issued_at: datetime,
         expires_at: datetime,
+        identity_id: str,
+        source: MutationAuthorizationSource,
     ) -> str:
         payload = json.dumps(
             {
@@ -342,8 +369,10 @@ class MutationAuthorizer:
                 "diff_digest": diff_digest,
                 "expires_at": expires_at.isoformat(),
                 "gate_report_digest": gate_report_digest,
+                "identity_id": identity_id,
                 "issued_at": issued_at.isoformat(),
                 "path": path,
+                "source": source.value,
                 "task_id": str(task_id),
             },
             sort_keys=True,
@@ -382,6 +411,8 @@ class MutationPolicy:
             or not isinstance(context.authority, MutationAuthority)
             or not isinstance(context.stage, MutationStage)
             or not isinstance(context.full_gates_passed, bool)
+            or context.authorization is not None
+            and type(context.authorization) is not MutationAuthorization
         ):
             return MutationDecision(False, MutationReason.MALFORMED_CONTEXT, classified)
 

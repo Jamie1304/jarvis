@@ -148,7 +148,13 @@ class CameraController:
         timeout_seconds: float,
         cancellation: asyncio.Event,
     ) -> CameraFrame:
-        capture_task = asyncio.create_task(session.capture_frame(timeout_seconds, cancellation))
+        # The controller owns the session until the provider returns. A native
+        # read may not be force-cancellable, so cancellation is signalled to the
+        # provider and the read is awaited before the caller can release it.
+        capture_cancellation = asyncio.Event()
+        capture_task = asyncio.create_task(
+            session.capture_frame(timeout_seconds, capture_cancellation)
+        )
         cancellation_task = asyncio.create_task(cancellation.wait())
         try:
             done, _ = await asyncio.wait(
@@ -157,14 +163,18 @@ class CameraController:
                 return_when=asyncio.FIRST_COMPLETED,
             )
             if cancellation_task in done:
-                capture_task.cancel()
+                capture_cancellation.set()
                 await asyncio.gather(capture_task, return_exceptions=True)
                 raise asyncio.CancelledError
             if capture_task not in done:
-                capture_task.cancel()
+                capture_cancellation.set()
                 await asyncio.gather(capture_task, return_exceptions=True)
                 raise TimeoutError
             return await capture_task
+        except asyncio.CancelledError:
+            capture_cancellation.set()
+            await asyncio.shield(capture_task)
+            raise
         finally:
             if not cancellation_task.done():
                 cancellation_task.cancel()

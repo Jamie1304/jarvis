@@ -14,15 +14,19 @@ from jarvis.voice import (
     AudioSource,
     InterruptionCommand,
     LocalVoiceController,
+    MicrophoneMode,
+    PushToTalkController,
     VADProvider,
     VoiceConfig,
     VoiceState,
     VoiceTaskHandle,
     VoiceTaskOutcome,
     VoiceTaskRunner,
+    VoiceWarmup,
     WakeDetection,
     WakeWordProvider,
 )
+from jarvis.voice.providers import SoundDeviceAudioSource
 
 
 def frame(marker: float, offset: int = 0) -> AudioFrame:
@@ -62,6 +66,16 @@ class FakeStt(SttProvider):
         return Transcription(self.text)
 
 
+class RecordingStt(FakeStt):
+    def __init__(self, text: str = "request") -> None:
+        super().__init__(text)
+        self.audio: AudioData | None = None
+
+    async def transcribe(self, audio: AudioData) -> Transcription:
+        self.audio = audio
+        return await super().transcribe(audio)
+
+
 class FakeRunner(VoiceTaskRunner):
     def __init__(self, outcome: VoiceTaskOutcome | None = None) -> None:
         self.started: list[str] = []
@@ -98,6 +112,8 @@ class FakeTts(TtsProvider):
 async def drive(controller: LocalVoiceController) -> None:
     await controller.handle_frame(frame(0.9))
     await controller.handle_frame(frame(0.5))
+    await controller.handle_frame(frame(0.5))
+    await controller.handle_frame(frame(-0.5))
     await controller.handle_frame(frame(-0.5))
 
 
@@ -132,6 +148,8 @@ async def test_wake_speech_task_response_state_loop() -> None:
 async def drive_and_get(controller: LocalVoiceController) -> VoiceTaskOutcome | None:
     await controller.handle_frame(frame(0.9))
     await controller.handle_frame(frame(0.5))
+    await controller.handle_frame(frame(0.5))
+    await controller.handle_frame(frame(-0.5))
     return await controller.handle_frame(frame(-0.5))
 
 
@@ -145,6 +163,70 @@ async def test_no_wake_and_false_trigger_stay_idle_without_stt() -> None:
     await controller.handle_frame(frame(0.9))
     assert controller.status.state.name == VoiceState.IDLE.name
     assert stt.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_capture_preroll_tail_and_noise_rejection() -> None:
+    stt = RecordingStt()
+    controller = LocalVoiceController(
+        FakeWake(),
+        FakeVad(),
+        stt,
+        config=VoiceConfig(
+            cooldown_seconds=0,
+            preroll_frames=2,
+            speech_start_frames=2,
+            min_speech_frames=2,
+            post_speech_tail_frames=2,
+        ),
+    )
+    await controller.handle_frame(frame(0.9))
+    await controller.handle_frame(frame(0.1))
+    await controller.handle_frame(frame(0.5))
+    await controller.handle_frame(frame(0.5))
+    await controller.handle_frame(frame(-0.5))
+    await controller.handle_frame(frame(-0.5))
+
+    assert stt.audio is not None
+    assert stt.audio.samples == (0.1, 0.5, 0.5, -0.5, -0.5)
+
+    noise_stt = RecordingStt()
+    noise = LocalVoiceController(
+        FakeWake(),
+        FakeVad(),
+        noise_stt,
+        config=VoiceConfig(cooldown_seconds=0, speech_start_frames=1, min_speech_frames=2),
+    )
+    await noise.handle_frame(frame(0.9))
+    await noise.handle_frame(frame(0.5))
+    await noise.handle_frame(frame(-0.5))
+    await noise.handle_frame(frame(-0.5))
+    assert noise_stt.audio is None
+
+
+@pytest.mark.asyncio
+async def test_ptt_key_repeat_is_edge_triggered() -> None:
+    presses: list[str] = []
+    ptt = PushToTalkController(
+        lambda: _record(presses, "down"),
+        lambda: _record(presses, "up"),
+    )
+
+    assert await ptt.key_down() is True
+    assert await ptt.key_down() is False
+    assert await ptt.key_up() is True
+    assert await ptt.key_up() is False
+    assert presses == ["down", "up"]
+    assert ptt.held is False
+
+
+async def _record(values: list[str], value: str) -> None:
+    values.append(value)
+
+
+def test_microphone_modes_are_explicit_and_not_authority_modes() -> None:
+    config = VoiceConfig(microphone_mode=MicrophoneMode.PUSH_TO_TALK)
+    assert config.microphone_mode is MicrophoneMode.PUSH_TO_TALK
 
 
 @pytest.mark.asyncio
@@ -207,6 +289,85 @@ async def test_microphone_source_is_closed_on_exhaustion() -> None:
     controller = LocalVoiceController(FakeWake(), FakeVad(), FakeStt("unused"))
     await controller.run(source)
     assert source.started and source.stopped
+
+
+@pytest.mark.asyncio
+async def test_open_mic_failure_degrades_to_ptt() -> None:
+    class BrokenSource(AudioSource):
+        async def start(self) -> None:
+            raise RuntimeError("no microphone")
+
+        def frames(self) -> AsyncIterator[AudioFrame]:
+            return iter(())  # type: ignore[return-value]
+
+        async def stop(self) -> None:
+            raise AssertionError("failed source must not be stopped as active")
+
+    controller = LocalVoiceController(FakeWake(), FakeVad(), FakeStt("unused"))
+    await controller.run(BrokenSource())
+    assert controller.microphone_mode is MicrophoneMode.PUSH_TO_TALK
+    assert controller.status.state is VoiceState.ERROR
+
+
+@pytest.mark.asyncio
+async def test_voice_warmup_is_non_blocking_and_best_effort() -> None:
+    called: list[str] = []
+
+    async def microphone() -> None:
+        called.append("microphone")
+
+    async def broken() -> None:
+        raise RuntimeError("wake model unavailable")
+
+    warmup = VoiceWarmup((("microphone", microphone), ("wake", broken)))
+    results = await warmup.start()
+    await warmup.aclose()
+    assert called == ["microphone"]
+    assert results[0].ready is True
+    assert results[1].ready is False
+
+
+@pytest.mark.asyncio
+async def test_sounddevice_stop_terminates_frames_when_queue_is_full() -> None:
+    source = SoundDeviceAudioSource()
+
+    class Stream:
+        def stop(self) -> None:
+            pass
+
+        def close(self) -> None:
+            pass
+
+    source._stream = Stream()
+    for _ in range(8):
+        source._queue.put_nowait(frame(0.0))
+
+    iterator = source.frames()
+    await source.stop()
+
+    with pytest.raises(StopAsyncIteration):
+        await iterator.__anext__()
+
+
+@pytest.mark.asyncio
+async def test_sounddevice_stale_callback_cannot_resurrect_after_stop() -> None:
+    source = SoundDeviceAudioSource()
+
+    class Stream:
+        def stop(self) -> None:
+            pass
+
+        def close(self) -> None:
+            pass
+
+    source._stream = Stream()
+    old_generation = source._generation
+    await source.stop()
+    source._stream = object()
+    source._drain_queue()
+    source._offer(old_generation, frame(0.9))
+
+    assert source._queue.empty()
 
 
 @pytest.mark.asyncio

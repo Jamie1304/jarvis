@@ -1668,14 +1668,25 @@ async def test_audit_records_decision_identity_fingerprint_and_outcome_without_s
     assert "top-secret-value" not in repr(records)
 
 
+@pytest.mark.parametrize(
+    "untrusted_input",
+    (
+        "deny_once",
+        "YES if the path is safe",
+        "maybe approve and also remember it",
+    ),
+)
 @pytest.mark.asyncio
-async def test_unknown_approval_choice_fails_closed_instead_of_approving(tmp_path: Path) -> None:
+async def test_unknown_or_ambiguous_approval_input_fails_closed_instead_of_approving(
+    tmp_path: Path,
+    untrusted_input: str,
+) -> None:
     tool, broker, harness = make_harness(tmp_path)
     arguments = {"path": str(tmp_path / "file.txt"), "secret": "hidden"}
     await harness.invoke(tool, arguments)
     await require_one_approval(broker)
 
-    decision = await broker.decide(cast(TrustedApprovalContext, "deny_once"))
+    decision = await broker.decide(cast(TrustedApprovalContext, untrusted_input))
 
     assert not decision.accepted
     assert decision.reason is DecisionReason.MALFORMED_APPROVAL_DECISION

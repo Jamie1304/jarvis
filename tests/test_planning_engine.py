@@ -580,7 +580,8 @@ async def test_permission_pause_persists_and_resumes_after_restart(tmp_path: Pat
     resumed = await resumed_engine.resume(paused.task_id)
 
     assert resumed.status is PlanningTaskStatus.COMPLETED
-    assert reopened.load_plan(paused.task_id).steps[0].attempts == 2  # type: ignore[union-attr]
+    # Waiting for a pre-effect approval is not an execution attempt.
+    assert reopened.load_plan(paused.task_id).steps[0].attempts == 1  # type: ignore[union-attr]
     reopened.close()
 
 
@@ -631,6 +632,34 @@ async def test_transient_failure_retries_with_explicit_bounds(tmp_path: Path) ->
     assert task.status is PlanningTaskStatus.COMPLETED
     assert task.usage.retries == 1
     assert task.usage.executed_steps == 2
+
+
+@pytest.mark.asyncio
+async def test_safe_retry_releases_only_the_reserved_no_effect_operation(
+    tmp_path: Path,
+) -> None:
+    proposal = _plan(_step("prepare", retries=1, expensive=True))
+    executor = _Executor(
+        (
+            StepExecutionResult(
+                StepExecutionStatus.TRANSIENT_FAILURE,
+                error_code="temporary_no_effect",
+                error_message="The provider failed before the effect boundary",
+            ),
+            _result("prepare-ready"),
+        )
+    )
+    harness = _harness(tmp_path, (proposal,), (), executor=executor)
+
+    task = await harness.engine.submit(
+        "Prepare my system for a meeting",
+        budgets=ExecutionBudgets(max_steps=2, max_retries=1),
+    )
+
+    assert task.status is PlanningTaskStatus.COMPLETED
+    assert task.usage.retries == 1
+    assert task.usage.executed_steps == 2
+    assert executor.calls == ["prepare", "prepare"]
 
 
 @pytest.mark.asyncio

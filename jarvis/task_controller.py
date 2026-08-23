@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import dataclass
 from typing import Protocol
 from uuid import UUID
 
@@ -13,7 +14,24 @@ from jarvis.permissions.models import (
     ApprovalRequest,
 )
 from jarvis.planning.engine import PlanningEngine
-from jarvis.planning.models import ExecutionBudgets, OwnedPlan, PlanningTask
+from jarvis.planning.models import (
+    ExecutionBudgets,
+    OwnedPlan,
+    PlanningTask,
+    PlanningTaskStatus,
+    StepError,
+)
+
+
+@dataclass(frozen=True, slots=True)
+class TaskResult:
+    """Read-only result view assembled from authoritative planning records."""
+
+    task_id: UUID
+    status: PlanningTaskStatus
+    evidence: tuple[str, ...]
+    plan: OwnedPlan | None
+    error: StepError | None
 
 
 class TaskController(Protocol):
@@ -26,7 +44,9 @@ class TaskController(Protocol):
     async def run_task(self, task_id: UUID) -> PlanningTask: ...
     def get_task(self, task_id: UUID) -> PlanningTask | None: ...
     def list_tasks(self) -> tuple[PlanningTask, ...]: ...
+    def get_status(self, task_id: UUID) -> PlanningTaskStatus | None: ...
     def inspect_plan(self, task_id: UUID) -> OwnedPlan | None: ...
+    def get_result(self, task_id: UUID) -> TaskResult | None: ...
     async def resume_task(self, task_id: UUID) -> PlanningTask: ...
     async def cancel_task(self, task_id: UUID) -> PlanningTask: ...
     async def pending_approvals(
@@ -64,8 +84,30 @@ class PlanningTaskController:
     def list_tasks(self) -> tuple[PlanningTask, ...]:
         return self._engine.list_tasks()
 
+    def get_status(self, task_id: UUID) -> PlanningTaskStatus | None:
+        task = self._engine.get_task(task_id)
+        return task.status if task is not None else None
+
     def inspect_plan(self, task_id: UUID) -> OwnedPlan | None:
         return self._engine.inspect_plan(task_id)
+
+    def get_result(self, task_id: UUID) -> TaskResult | None:
+        task = self._engine.get_task(task_id)
+        if task is None:
+            return None
+        plan = self._engine.inspect_plan(task_id)
+        if task.result_evidence:
+            evidence = task.result_evidence
+        elif task.error is not None:
+            evidence = task.error.evidence
+        else:
+            evidence = tuple(
+                item
+                for step in (plan.steps if plan is not None else ())
+                if step.result is not None
+                for item in step.result.evidence
+            )
+        return TaskResult(task.task_id, task.status, evidence, plan, task.error)
 
     async def resume_task(self, task_id: UUID) -> PlanningTask:
         return await self._engine.resume(task_id)

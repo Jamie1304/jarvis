@@ -13,6 +13,7 @@ from jarvis.planning.engine import (
 )
 from jarvis.planning.models import (
     BudgetUsage,
+    EffectOutcome,
     ExecutionBudgets,
     FailureKind,
     GoalVerification,
@@ -39,6 +40,7 @@ from jarvis.planning.validation import PlanProposal, PlanValidationError, PlanVa
 
 __all__ = [
     "BudgetUsage",
+    "EffectOutcome",
     "BrokeredPlanningStepExecutor",
     "CompletionCriteriaVerifier",
     "ExecutionBudgets",

@@ -113,6 +113,8 @@ truth. The important Trusted Core regions are:
 - `jarvis/{runtime,bootstrap,api,task_controller}.py` and
   `jarvis/core/{config,health}.py`: canonical composition, readiness, and
   capability requests;
+- `jarvis/recovery.py`: snapshot, restore-point, startup-marker, and Safe Mode
+  gates;
 - `jarvis/improvement/**`: isolated mutation, supply-chain, gate, evaluation, and
   proposal integrity boundaries;
 - `.github/workflows/**`, `scripts/quality.py`, `pyproject.toml`, dependency
@@ -240,6 +242,49 @@ itself healthy independently of Trusted Core startup.
   planner persists `RECOVERING` without retry or replan.
 - `PermissionRequested`/`Granted`/`Denied` events are redacted observations. They
   do not alter broker state and cannot be presented as approval receipts.
+
+### Trusted permission presentation
+
+Permission narration is a trusted application concern, not a model capability.
+`TrustedActionNarrator` accepts only a broker-created `ApprovalRequest`, or a
+typed `PermissionRequest` paired with the exact trusted `ActionDescriptor` that
+declared it. It deterministically creates one immutable
+`TrustedPermissionPresentation` containing the short explanation, exact action
+details, target, normalized scope, effect, risk, and requested permission.
+There is no parameter for model-provided wording, a policy decision, an owner
+identity, or an approval claim.
+
+`ExactOperationRenderer` renders that same immutable presentation object. Desktop
+and voice surfaces must consume the object rather than independently describing
+the operation. `VoiceApprovalChoice.YES`, `NO`, and `DETAILS` are fixed display
+labels only: they do not mint or carry approval, and a future voice ingress must
+accept only an authenticated trusted-channel context. Conditional, ambiguous,
+or model-generated speech is never a trusted approval decision.
+
+The current runtime has no approval authenticator and therefore remains
+deny-all. The presentation contract does not change that state and cannot be
+used to bypass `PermissionBroker`.
+
+### Trusted Core protected boundaries
+
+The following remain inside the trusted security boundary: trusted identity and
+approval authentication, `PermissionBroker`, root policy, the future
+`CredentialVault` boundary, audit integrity, sandbox/update/recovery gates, and
+mutation authorization. JARVIS v1 deliberately has no credential vault;
+credential-like data is rejected from ordinary stores and a future vault needs a
+separate owner, interface, migration, and security ADR before it exists.
+
+Generated or unreviewed code is data and may be stored only as inert, bounded
+artifacts. It is not imported, dynamically loaded, or executed inside the trusted
+JARVIS process. A discovery result, generated index, model response, or event
+cannot disable any of these mechanisms.
+
+`MutationAuthorization` binds the owner identity and authenticated source to the
+exact authority, task, canonical path, base revision, candidate revision,
+diff fingerprint, gate-report fingerprint, issue time, and expiry. Its
+single-use HMAC record is consumed only when the matching trusted mutation
+context passes the required gates. Malformed metadata, changed identity/source,
+path, revision, candidate, diff, gate, or expiry fails closed.
 
 Remote approval remains forbidden. The canonical runtime has no context-minting
 capability and configures its broker with a deny-all verifier. The tested authenticator

@@ -22,7 +22,12 @@ from jarvis.camera.models import (
 
 
 class CameraSession(ABC):
-    """One opened device; close is required and must be idempotent."""
+    """One opened device; close is required and must be idempotent.
+
+    ``capture_frame`` owns the native read until it returns. Providers must not
+    return early merely because the asyncio caller was cancelled: many native
+    reads cannot be force-cancelled safely.
+    """
 
     @property
     @abstractmethod
@@ -167,8 +172,13 @@ class _OpenCvCameraSession(CameraSession):  # pragma: no cover
                 return_when=asyncio.FIRST_COMPLETED,
             )
             if cancelled_task in done:
+                # A native read running in a worker thread cannot be safely
+                # force-cancelled. Wait for ownership to return before the
+                # controller is allowed to close the device.
+                await read_task
                 raise asyncio.CancelledError
             if read_task not in done:
+                await read_task
                 raise CameraCaptureTimeoutError("Camera did not return a frame in time")
             success, frame = await read_task
         finally:
