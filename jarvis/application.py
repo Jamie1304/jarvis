@@ -31,6 +31,15 @@ from jarvis.desktop_shell import (
     TestDriveReport,
     WarmupResult,
 )
+from jarvis.memory.control import (
+    MemoryControlEntry,
+    MemoryControlQuery,
+    MemoryControlReference,
+    MemoryControlService,
+    MemoryCorrection,
+    MemoryVerificationRequestView,
+)
+from jarvis.memory.models import RetentionPolicy
 from jarvis.permissions.models import ActionDescriptor, ApprovalRequest, PermissionRequest
 from jarvis.planning.editing import PlanEdit, PlanInspection, PlanRevision
 from jarvis.planning.models import OwnedPlan, PlanningTask
@@ -93,6 +102,7 @@ class JarvisAssistantService:
         control_center: ControlCenterService | None = None,
         permission_surface: TrustedPermissionSurface | None = None,
         output_profiles: OutputMediumProfileRegistry | None = None,
+        memory_control: MemoryControlService | None = None,
     ) -> None:
         self._conversation = conversation
         self._normalizer = normalizer or InputNormalizer()
@@ -109,6 +119,7 @@ class JarvisAssistantService:
         self._control_center = control_center
         self._permission_surface = permission_surface or TrustedPermissionSurface()
         self._output_profiles = output_profiles or OutputMediumProfileRegistry()
+        self._memory_control = memory_control
 
     @property
     def launch_profiles(self) -> LaunchProfileRegistry:
@@ -139,6 +150,51 @@ class JarvisAssistantService:
         views = snapshot.sections if section is None else (snapshot.section(section),)
         actions = tuple(action for view in views for item in view.items for action in item.actions)
         return actions
+
+    @property
+    def memory_control(self) -> MemoryControlService:
+        """Return the trusted application memory facade used by UI adapters."""
+
+        if self._memory_control is None:
+            raise ServiceUnavailableError("Memory controls are not configured")
+        return self._memory_control
+
+    def inspect_memory(
+        self, query: MemoryControlQuery | None = None
+    ) -> tuple[MemoryControlEntry, ...]:
+        return self.memory_control.inspect(query)
+
+    def correct_memory(
+        self, reference: MemoryControlReference, correction: MemoryCorrection
+    ) -> MemoryControlEntry:
+        return self.memory_control.correct(reference, correction)
+
+    def delete_memory(self, reference: MemoryControlReference) -> bool:
+        return self.memory_control.delete(reference)
+
+    def forget_memory_category(self, category: str, *, workspace_id: str | None = None) -> int:
+        return self.memory_control.forget_category(category, workspace_id=workspace_id)
+
+    def export_memory(
+        self, query: MemoryControlQuery | None = None
+    ) -> tuple[dict[str, object], ...]:
+        return self.memory_control.export(query)
+
+    def change_memory_retention(
+        self, reference: MemoryControlReference, retention: RetentionPolicy
+    ) -> MemoryControlEntry:
+        return self.memory_control.change_retention(reference, retention)
+
+    def pause_memory_learning(self, paused: bool) -> bool:
+        return self.memory_control.pause_learning(paused)
+
+    def mark_memory_explicit(self, reference: MemoryControlReference) -> MemoryControlEntry:
+        return self.memory_control.mark_explicit(reference)
+
+    def request_memory_reverification(
+        self, reference: MemoryControlReference, *, reason: str = "user requested re-verification"
+    ) -> MemoryVerificationRequestView:
+        return self.memory_control.request_reverification(reference, reason=reason)
 
     def output_profile(self, medium: OutputMedium) -> OutputMediumProfile:
         return self._output_profiles.get(medium)

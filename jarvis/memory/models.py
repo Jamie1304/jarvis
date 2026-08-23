@@ -74,6 +74,14 @@ class MemoryConflictStatus(StrEnum):
     DISMISSED = "dismissed"
 
 
+class MemoryVerificationStatus(StrEnum):
+    """Lifecycle for a user-requested memory re-verification."""
+
+    PENDING = "pending"
+    COMPLETED = "completed"
+    CANCELLED = "cancelled"
+
+
 def utc(value: datetime) -> datetime:
     """Normalize all durable timestamps to UTC."""
 
@@ -340,6 +348,25 @@ class MemoryConfidenceEvent:
         for value in self.evidence:
             _bounded(value, "Confidence event evidence", 512)
         object.__setattr__(self, "occurred_at", utc(self.occurred_at))
+
+
+@dataclass(frozen=True, slots=True)
+class MemoryVerificationRequest:
+    """A bounded request for later trusted re-verification, not evidence itself."""
+
+    request_id: UUID
+    record_id: UUID
+    requested_at: datetime
+    reason: str
+    status: MemoryVerificationStatus = MemoryVerificationStatus.PENDING
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.request_id, UUID) or not isinstance(self.record_id, UUID):
+            raise ValueError("Memory verification request IDs must be UUIDs")
+        _bounded(self.reason, "Memory verification reason", 512)
+        if not isinstance(self.status, MemoryVerificationStatus):
+            raise ValueError("Memory verification status must be recognized")
+        object.__setattr__(self, "requested_at", utc(self.requested_at))
 
 
 @dataclass(frozen=True, slots=True)

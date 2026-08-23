@@ -72,12 +72,14 @@ context for an AI provider or UI.
 
 ## User privacy controls
 
-Trusted application/UI code must authenticate the requesting user before exposing the
-store, then may call `get`/`list` to inspect, `delete` for one record,
-`delete_category` for a durable category, `ConversationContextService.clear` for a
-conversation, and `cleanup_expired` for scheduled retention cleanup. No model text
-can directly call these methods in the agent tool path; a future UI/API must add its
-own authenticated ownership checks before multi-user use.
+Trusted application/UI code must authenticate the requesting user before exposing
+the store. The typed `MemoryControlService` is the UI/application boundary for
+inspection and user actions; it supports bounded filters, safe explanations,
+correction, deletion, category forgetting, export, retention, learning pause,
+explicit marking, and re-verification requests. It delegates to the authoritative
+durable-memory and User Model stores rather than introducing a competing authority.
+No model text can directly call these methods in the agent tool path. See
+[`memory-controls.md`](memory-controls.md) for the contract and security rules.
 
 ## Updating and testing
 

@@ -1,5 +1,15 @@
 """Privacy-aware context, durable user/episode, and project-memory boundaries."""
 
+from jarvis.memory.control import (
+    MemoryControlDomain,
+    MemoryControlEntry,
+    MemoryControlQuery,
+    MemoryControlReference,
+    MemoryControlService,
+    MemoryCorrection,
+    MemoryVerificationRequestView,
+    MemoryVerificationViewStatus,
+)
 from jarvis.memory.models import (
     ConversationEntry,
     DurableMemoryHit,
@@ -16,6 +26,8 @@ from jarvis.memory.models import (
     MemoryRevalidation,
     MemorySource,
     MemoryType,
+    MemoryVerificationRequest,
+    MemoryVerificationStatus,
     RetentionDecision,
     RetentionPolicy,
     Sensitivity,
@@ -54,6 +66,12 @@ __all__ = [
     "MemoryConflictKind",
     "MemoryConflictRecord",
     "MemoryConflictStatus",
+    "MemoryControlDomain",
+    "MemoryControlEntry",
+    "MemoryControlQuery",
+    "MemoryControlReference",
+    "MemoryControlService",
+    "MemoryCorrection",
     "MemoryConsistencyService",
     "MemoryMigration",
     "MemoryMigrationError",
@@ -64,6 +82,10 @@ __all__ = [
     "MemoryRetrievalService",
     "MemorySource",
     "MemoryType",
+    "MemoryVerificationRequest",
+    "MemoryVerificationRequestView",
+    "MemoryVerificationStatus",
+    "MemoryVerificationViewStatus",
     "ProjectSystemMemory",
     "RetentionDecision",
     "RetentionPolicy",

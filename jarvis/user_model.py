@@ -21,7 +21,12 @@ from pathlib import Path
 from typing import Final, Protocol
 from uuid import UUID, uuid4
 
-from jarvis.memory.models import RetentionPolicy, Sensitivity
+from jarvis.memory.models import (
+    MemoryVerificationRequest,
+    MemoryVerificationStatus,
+    RetentionPolicy,
+    Sensitivity,
+)
 from jarvis.memory.policy import contains_prompt_injection, contains_secret
 
 
@@ -54,6 +59,7 @@ class UserModelAuditAction(StrEnum):
     PURGED = "purged"
     CONSOLIDATED = "consolidated"
     SUPERSEDED = "superseded"
+    RETENTION_CHANGED = "retention_changed"
 
 
 class ConsolidationDecision(StrEnum):
@@ -621,6 +627,26 @@ DEFAULT_USER_MODEL_MIGRATIONS: tuple[UserModelMigration, ...] = (
         ALTER TABLE user_model_audit ADD COLUMN related_record_ids_json TEXT NOT NULL DEFAULT '[]';
         """,
     ),
+    UserModelMigration(
+        3,
+        "user_model_controls",
+        """
+        CREATE TABLE user_model_control_settings (
+            setting_key TEXT PRIMARY KEY,
+            setting_value TEXT NOT NULL
+        );
+        CREATE TABLE user_model_verification_requests (
+            request_id TEXT PRIMARY KEY,
+            record_id TEXT NOT NULL,
+            requested_at TEXT NOT NULL,
+            reason TEXT NOT NULL,
+            status TEXT NOT NULL,
+            FOREIGN KEY(record_id) REFERENCES user_model_records(record_id)
+        );
+        CREATE INDEX user_model_verification_by_record
+            ON user_model_verification_requests(record_id, requested_at);
+        """,
+    ),
 )
 
 
@@ -687,6 +713,10 @@ class UserModelStore:
                         "SELECT version, name FROM user_model_schema_migrations"
                     )
                 }
+                for migration in self._migrations:
+                    existing = applied.get(migration.version)
+                    if existing is not None and existing != migration.name:
+                        raise UserModelMigrationError("User-model migration identity mismatch")
                 if any(version > len(self._migrations) for version in applied):
                     raise UserModelMigrationError("User-model database uses a future schema")
                 for migration in self._migrations:
@@ -713,6 +743,8 @@ class UserModelStore:
 
         self._ensure_open()
         self._validate_record(record)
+        if self.learning_paused() and record.source is not UserModelSource.USER:
+            raise PermissionError("User-model learning is paused")
         with self._lock:
             try:
                 self._connection.execute(
@@ -930,6 +962,45 @@ class UserModelStore:
             self._connection.commit()
         return updated
 
+    def change_retention(
+        self,
+        record_id: UUID,
+        retention: RetentionPolicy,
+        *,
+        now: datetime | None = None,
+    ) -> UserModelRecord:
+        """Change retention without changing the user-model value or provenance."""
+
+        self._ensure_open()
+        if not isinstance(record_id, UUID) or not isinstance(retention, RetentionPolicy):
+            raise ValueError("User-model retention change is invalid")
+        current = self.get(record_id)
+        if current is None:
+            raise KeyError("Unknown or deleted user-model record")
+        timestamp = _utc(now or self._clock())
+        updated = replace(
+            current,
+            retention=retention,
+            updated_at=timestamp,
+        )
+        if updated.expires_at is not None and updated.expires_at <= timestamp:
+            raise ValueError("New user-model retention would expire immediately")
+        self._validate_record(updated)
+        with self._lock:
+            self._connection.execute(
+                "UPDATE user_model_records SET retention=?, updated_at=? WHERE record_id=?",
+                (retention.value, self._iso(timestamp), str(record_id)),
+            )
+            self._audit_locked(
+                updated,
+                UserModelAuditAction.RETENTION_CHANGED,
+                actor=UserModelSource.USER.value,
+                reason="retention changed by user",
+                old_value=current,
+            )
+            self._connection.commit()
+        return updated
+
     def delete(self, record_id: UUID, *, reason: str = "user deletion") -> bool:
         self._ensure_open()
         _text(reason, "User-model deletion reason", 512)
@@ -953,18 +1024,56 @@ class UserModelStore:
             self._connection.commit()
         return True
 
+    def delete_category(
+        self,
+        category: str,
+        *,
+        workspace_id: str | None = None,
+        reason: str = "user forgot category",
+    ) -> int:
+        """Deactivate all active records in one category inside one workspace scope."""
+
+        self._ensure_open()
+        _text(category, "User-model category", 128)
+        _text(reason, "User-model category deletion reason", 512)
+        if workspace_id is not None:
+            _workspace(workspace_id)
+        records = tuple(
+            record
+            for record in self.list(workspace_id=workspace_id, include_global=False)
+            if record.category == category
+        )
+        timestamp = _utc(self._clock())
+        with self._lock:
+            for current in records:
+                deleted = replace(current, active=False, updated_at=timestamp)
+                self._connection.execute(
+                    "UPDATE user_model_records SET active=0, updated_at=? WHERE record_id=?",
+                    (self._iso(timestamp), str(current.record_id)),
+                )
+                self._audit_locked(
+                    deleted,
+                    UserModelAuditAction.DELETED,
+                    actor=UserModelSource.USER.value,
+                    reason=reason,
+                    old_value=current,
+                )
+            self._connection.commit()
+        return len(records)
+
     def list(
         self,
         *,
         workspace_id: str | None = None,
         include_global: bool = True,
         include_inferred: bool = True,
+        include_deleted: bool = False,
     ) -> tuple[UserModelRecord, ...]:
         self._ensure_open()
         if workspace_id is not None:
             _workspace(workspace_id)
         self.cleanup_expired()
-        clauses = ["active = 1"]
+        clauses: list[str] = [] if include_deleted else ["active = 1"]
         params: list[object] = []
         if workspace_id is not None:
             if include_global:
@@ -1015,6 +1124,101 @@ class UserModelStore:
 
     def context_for(self, policy: UserModelContextPolicy) -> UserModelContext:
         return UserModelContext(policy.workspace_id, self.query(policy), policy.allow_cloud)
+
+    def learning_paused(self) -> bool:
+        """Return the durable user-controlled inferred-learning pause state."""
+
+        self._ensure_open()
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT setting_value FROM user_model_control_settings WHERE setting_key = ?",
+                ("learning_paused",),
+            ).fetchone()
+        return row is not None and str(row["setting_value"]) == "1"
+
+    def set_learning_paused(self, paused: bool) -> None:
+        self._ensure_open()
+        if type(paused) is not bool:
+            raise ValueError("Learning pause must be boolean")
+        with self._lock:
+            self._connection.execute(
+                "INSERT INTO user_model_control_settings(setting_key, setting_value) VALUES (?, ?) "
+                "ON CONFLICT(setting_key) DO UPDATE SET setting_value=excluded.setting_value",
+                ("learning_paused", "1" if paused else "0"),
+            )
+            self._connection.commit()
+
+    def request_reverification(
+        self,
+        request: MemoryVerificationRequest,
+    ) -> MemoryVerificationRequest:
+        self._ensure_open()
+        if not isinstance(request, MemoryVerificationRequest):
+            raise ValueError("User-model verification request must be typed")
+        if contains_secret(request.reason):
+            raise PermissionError("User-model verification reason cannot contain credentials")
+        with self._lock:
+            if (
+                self._connection.execute(
+                    "SELECT 1 FROM user_model_records WHERE record_id = ?",
+                    (str(request.record_id),),
+                ).fetchone()
+                is None
+            ):
+                raise KeyError("User-model record does not exist")
+            try:
+                self._connection.execute(
+                    "INSERT INTO user_model_verification_requests "
+                    "(request_id, record_id, requested_at, reason, status) VALUES (?, ?, ?, ?, ?)",
+                    (
+                        str(request.request_id),
+                        str(request.record_id),
+                        self._iso(request.requested_at),
+                        request.reason,
+                        request.status.value,
+                    ),
+                )
+                self._connection.commit()
+            except sqlite3.IntegrityError as error:
+                self._connection.rollback()
+                raise ValueError("User-model verification request ID already exists") from error
+        return request
+
+    def verification_requests(
+        self,
+        record_id: UUID | None = None,
+        *,
+        status: MemoryVerificationStatus | None = None,
+    ) -> tuple[MemoryVerificationRequest, ...]:
+        self._ensure_open()
+        if record_id is not None and not isinstance(record_id, UUID):
+            raise ValueError("User-model verification filter ID must be a UUID")
+        if status is not None and not isinstance(status, MemoryVerificationStatus):
+            raise ValueError("Memory verification status must be recognized")
+        query = "SELECT * FROM user_model_verification_requests"
+        clauses: list[str] = []
+        params: list[str] = []
+        if record_id is not None:
+            clauses.append("record_id = ?")
+            params.append(str(record_id))
+        if status is not None:
+            clauses.append("status = ?")
+            params.append(status.value)
+        if clauses:
+            query += " WHERE " + " AND ".join(clauses)
+        query += " ORDER BY requested_at, request_id"
+        with self._lock:
+            rows = tuple(self._connection.execute(query, tuple(params)))
+        return tuple(
+            MemoryVerificationRequest(
+                request_id=UUID(str(row["request_id"])),
+                record_id=UUID(str(row["record_id"])),
+                requested_at=datetime.fromisoformat(str(row["requested_at"])),
+                reason=str(row["reason"]),
+                status=MemoryVerificationStatus(str(row["status"])),
+            )
+            for row in rows
+        )
 
     def semantic_retrieve(
         self,

@@ -23,6 +23,8 @@ from jarvis.memory.models import (
     MemoryRevalidation,
     MemorySource,
     MemoryType,
+    MemoryVerificationRequest,
+    MemoryVerificationStatus,
     RetentionPolicy,
     Sensitivity,
 )
@@ -105,6 +107,25 @@ DEFAULT_MIGRATIONS: tuple[MemoryMigration, ...] = (
             ON memory_confidence_events(memory_id, occurred_at);
         """,
     ),
+    MemoryMigration(
+        3,
+        "memory_user_controls",
+        """
+        CREATE TABLE memory_control_settings (
+            setting_key TEXT PRIMARY KEY,
+            setting_value TEXT NOT NULL
+        );
+        CREATE TABLE memory_verification_requests (
+            request_id TEXT PRIMARY KEY,
+            memory_id TEXT NOT NULL,
+            requested_at TEXT NOT NULL,
+            reason TEXT NOT NULL,
+            status TEXT NOT NULL
+        );
+        CREATE INDEX memory_verification_by_memory
+            ON memory_verification_requests(memory_id, requested_at);
+        """,
+    ),
 )
 
 
@@ -165,6 +186,10 @@ class SQLiteMemoryStore:
                         "SELECT version, name FROM memory_schema_migrations"
                     )
                 }
+                for migration in self._migrations:
+                    existing = applied.get(migration.version)
+                    if existing is not None and existing != migration.name:
+                        raise MemoryMigrationError("Migration version/name mismatch")
                 if any(version > len(self._migrations) for version in applied):
                     raise MemoryMigrationError("Memory database uses a future schema")
                 for migration in self._migrations:
@@ -581,6 +606,129 @@ class SQLiteMemoryStore:
             self._connection.commit()
         return cursor.rowcount
 
+    def change_retention(
+        self,
+        memory_id: UUID,
+        retention: RetentionPolicy,
+        *,
+        now: datetime | None = None,
+    ) -> MemoryRecord:
+        """Change retention through the authoritative store, without replacing content."""
+
+        if not isinstance(memory_id, UUID) or not isinstance(retention, RetentionPolicy):
+            raise ValueError("Memory retention change is invalid")
+        timestamp = now or self._clock()
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT * FROM memories WHERE memory_id = ?", (str(memory_id),)
+            ).fetchone()
+            if row is None:
+                raise KeyError("Memory record does not exist")
+            current = self._record(row)
+            if current.superseded_by is not None:
+                raise ValueError("Superseded memory cannot change retention")
+            updated = replace(
+                current,
+                retention=retention,
+                expires_at=retention.expiry(current.created_at),
+                updated_at=timestamp,
+            )
+            if updated.expires_at is not None and updated.expires_at <= timestamp:
+                raise ValueError("New memory retention would expire immediately")
+            self._update_record_locked(updated)
+            self._connection.commit()
+            return updated
+
+    def learning_paused(self) -> bool:
+        """Return the durable user-controlled learning pause state."""
+
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT setting_value FROM memory_control_settings WHERE setting_key = ?",
+                ("learning_paused",),
+            ).fetchone()
+        return row is not None and str(row["setting_value"]) == "1"
+
+    def set_learning_paused(self, paused: bool) -> None:
+        if type(paused) is not bool:
+            raise ValueError("Learning pause must be boolean")
+        with self._lock:
+            self._connection.execute(
+                "INSERT INTO memory_control_settings(setting_key, setting_value) VALUES (?, ?) "
+                "ON CONFLICT(setting_key) DO UPDATE SET setting_value=excluded.setting_value",
+                ("learning_paused", "1" if paused else "0"),
+            )
+            self._connection.commit()
+
+    def request_reverification(
+        self,
+        request: MemoryVerificationRequest,
+    ) -> MemoryVerificationRequest:
+        if not isinstance(request, MemoryVerificationRequest):
+            raise ValueError("Memory verification request must be typed")
+        if contains_secret(request.reason):
+            raise PermissionError("Memory verification reason cannot contain credentials")
+        with self._lock:
+            if (
+                self._connection.execute(
+                    "SELECT 1 FROM memories WHERE memory_id = ?", (str(request.record_id),)
+                ).fetchone()
+                is None
+            ):
+                raise KeyError("Memory record does not exist")
+            try:
+                self._connection.execute(
+                    "INSERT INTO memory_verification_requests "
+                    "(request_id, memory_id, requested_at, reason, status) VALUES (?, ?, ?, ?, ?)",
+                    (
+                        str(request.request_id),
+                        str(request.record_id),
+                        self._iso(request.requested_at),
+                        request.reason,
+                        request.status.value,
+                    ),
+                )
+                self._connection.commit()
+            except sqlite3.IntegrityError as error:
+                self._connection.rollback()
+                raise ValueError("Memory verification request ID already exists") from error
+        return request
+
+    def verification_requests(
+        self,
+        memory_id: UUID | None = None,
+        *,
+        status: MemoryVerificationStatus | None = None,
+    ) -> tuple[MemoryVerificationRequest, ...]:
+        if memory_id is not None and not isinstance(memory_id, UUID):
+            raise ValueError("Memory verification filter ID must be a UUID")
+        if status is not None and not isinstance(status, MemoryVerificationStatus):
+            raise ValueError("Memory verification status must be recognized")
+        query = "SELECT * FROM memory_verification_requests"
+        clauses: list[str] = []
+        params: list[str] = []
+        if memory_id is not None:
+            clauses.append("memory_id = ?")
+            params.append(str(memory_id))
+        if status is not None:
+            clauses.append("status = ?")
+            params.append(status.value)
+        if clauses:
+            query += " WHERE " + " AND ".join(clauses)
+        query += " ORDER BY requested_at, request_id"
+        with self._lock:
+            rows = tuple(self._connection.execute(query, tuple(params)))
+        return tuple(
+            MemoryVerificationRequest(
+                request_id=UUID(str(row["request_id"])),
+                record_id=UUID(str(row["memory_id"])),
+                requested_at=datetime.fromisoformat(str(row["requested_at"])),
+                reason=str(row["reason"]),
+                status=MemoryVerificationStatus(str(row["status"])),
+            )
+            for row in rows
+        )
+
     def cleanup_expired(self) -> int:
         with self._lock:
             cursor = self._connection.execute(
@@ -619,11 +767,14 @@ class SQLiteMemoryStore:
 
     def _update_record_locked(self, record: MemoryRecord) -> None:
         self._connection.execute(
-            "UPDATE memories SET confidence=?, updated_at=?, last_accessed_at=?, "
+            "UPDATE memories SET confidence=?, retention=?, expires_at=?, updated_at=?, "
+            "last_accessed_at=?, "
             "last_revalidated_at=?, quarantined=?, quarantine_reason=?, quarantined_at=?, "
             "superseded_by=? WHERE memory_id=?",
             (
                 record.confidence,
+                record.retention.value,
+                self._iso(record.expires_at) if record.expires_at else None,
                 self._iso(record.updated_at),
                 self._iso(record.last_accessed_at) if record.last_accessed_at else None,
                 self._iso(record.last_revalidated_at) if record.last_revalidated_at else None,

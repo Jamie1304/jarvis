@@ -141,4 +141,5 @@ def create_assistant_from_runtime(runtime: ApplicationRuntime) -> JarvisAssistan
         startup_warmup=container.startup_warmup,
         launch_profiles=container.launch_profiles,
         control_center=container.control_center,
+        memory_control=container.memory_control,
     )

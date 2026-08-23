@@ -48,6 +48,7 @@ from jarvis.discovery.service import CandidateEvaluator, CapabilityGapDetector
 from jarvis.events import EventBus, InMemoryEventBus
 from jarvis.knowledge.store import KnowledgeStore
 from jarvis.mcp.manager import MCPExtensionManager
+from jarvis.memory.control import MemoryControlService
 from jarvis.memory.services import (
     ConversationContextService,
     EpisodicMemoryService,
@@ -289,6 +290,7 @@ class RuntimeContainer:
     long_term_memory: LongTermMemoryService
     episodic_memory: EpisodicMemoryService
     memory_consistency: MemoryConsistencyService
+    memory_control: MemoryControlService
     memory_retrieval: MemoryRetrievalService
     knowledge: KnowledgeStore
     system_memory: ProjectSystemMemory
@@ -574,6 +576,12 @@ class ApplicationRuntime:
             capability_registry = CapabilityRegistry()
             skill_registry = SkillRegistry()
             agent_registry = AgentRegistry()
+            memory_consistency = MemoryConsistencyService(memory_store)
+            memory_control = MemoryControlService(
+                memory_store,
+                user_model_store,
+                consistency=memory_consistency,
+            )
             control_center = ControlCenterService()
 
             def tool_projection() -> tuple[ControlCenterItem, ...]:
@@ -778,6 +786,20 @@ class ApplicationRuntime:
                     ),
                 )
 
+            def memory_projection() -> tuple[ControlCenterItem, ...]:
+                return (
+                    ControlCenterItem(
+                        "memory-store",
+                        "Memory controls",
+                        ControlCenterStatus.AVAILABLE,
+                        "Inspect and change memory through the trusted application service",
+                        metadata=(
+                            ("learning_paused", str(memory_control.learning_paused()).lower()),
+                            ("vault_secrets", "never exposed"),
+                        ),
+                    ),
+                )
+
             control_center.register(
                 ControlCenterSection.SYSTEM,
                 "runtime",
@@ -832,14 +854,7 @@ class ApplicationRuntime:
             control_center.register(
                 ControlCenterSection.MEMORY,
                 "store",
-                lambda: (
-                    ControlCenterItem(
-                        "memory-store",
-                        "Memory store",
-                        ControlCenterStatus.AVAILABLE,
-                        "Memory remains scoped by its authoritative store",
-                    ),
-                ),
+                memory_projection,
             )
             control_center.register(
                 ControlCenterSection.KNOWLEDGE,
@@ -956,7 +971,8 @@ class ApplicationRuntime:
                 conversation_memory=conversation_memory,
                 long_term_memory=LongTermMemoryService(memory_store),
                 episodic_memory=EpisodicMemoryService(memory_store),
-                memory_consistency=MemoryConsistencyService(memory_store),
+                memory_consistency=memory_consistency,
+                memory_control=memory_control,
                 memory_retrieval=MemoryRetrievalService(
                     memory_store, conversation_memory, system_memory
                 ),

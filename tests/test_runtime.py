@@ -10,6 +10,7 @@ import pytest
 from jarvis import application
 from jarvis.control_center import ControlCenterSection
 from jarvis.core.config import Settings
+from jarvis.memory.control import MemoryControlService
 from jarvis.memory.services import MemoryConsistencyService
 from jarvis.planning.models import PlanningTaskStatus
 from jarvis.runtime import ApplicationRuntime, RuntimeStatus
@@ -25,6 +26,7 @@ async def test_canonical_runtime_calculates_and_recovers_persisted_task(tmp_path
     assert runtime.container is not None
     assert isinstance(runtime.container.task_controller, PlanningTaskController)
     assert isinstance(runtime.container.memory_consistency, MemoryConsistencyService)
+    assert isinstance(runtime.container.memory_control, MemoryControlService)
     assert runtime.container.user_model_store.database_path == (
         runtime.container.paths.user_model_database
     )

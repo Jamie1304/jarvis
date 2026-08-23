@@ -120,6 +120,8 @@ class LongTermMemoryService:
         return self._policy.evaluate(candidate)
 
     def persist(self, candidate: LongTermMemoryCandidate) -> MemoryRecord:
+        if self._store.learning_paused():
+            raise PermissionError("Long-term memory learning is paused")
         decision = self.evaluate(candidate)
         if decision.decision is not RetentionDecision.ALLOW:
             raise PermissionError(f"Long-term memory denied: {decision.reason_code}")
