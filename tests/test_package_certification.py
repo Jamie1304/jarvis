@@ -175,10 +175,13 @@ def test_privileged_package_requires_trusted_authority_reference() -> None:
     assert failure.value.stage is CertificationStage.AUTHORITY_DECISION
 
 
-def test_ui_harness_requirement_is_conditional_and_fail_closed() -> None:
+def test_ui_harness_requirement_is_mandatory_and_fail_closed() -> None:
     item, source = package()
     ui_item = replace(item, profiles=("desktop",))
     cert_hooks = replace(hooks([]), build=lambda built: BuiltPackage(built, (source,)))
+    with pytest.raises(CertificationFailure) as unavailable:
+        PackageCertifier().certify(request(ui_item), cert_hooks)
+    assert unavailable.value.stage is CertificationStage.VERIFICATION
     with pytest.raises(CertificationFailure) as failure:
         PackageCertifier().certify(
             replace(request(ui_item), ui_simulation_harness_available=True),

@@ -45,6 +45,9 @@ adapts a valid record to the existing hot-load gate, while
 atomic registration, Shadow/Canary gates, and active registration. No package
 is active merely because it is certified.
 
-UI-bearing packages remain subject to the later UI simulation-harness
-requirement when that harness is available; this certifier does not invent
-unexecuted UI evidence.
+UI-bearing packages are not certifiable without evidence from the native
+`UISimulationHarness`. The harness must render declared states, validate
+bindings and safe assets, inspect semantic controls, and prove zero simulated
+external effects. A caller-provided string is evidence metadata only; the
+trusted composition root must obtain it from the harness run. This certifier
+does not invent unexecuted UI evidence.

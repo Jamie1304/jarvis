@@ -329,17 +329,21 @@ class PackageCertifier:
             package,
             evidence,
         )
-        if (
-            request.ui_simulation_harness_available
-            and (package.ui_assets or package.profiles)
-            and not request.ui_simulation_evidence
-        ):
-            self._record_or_fail(
-                CertificationStage.VERIFICATION,
-                False,
-                ("UI-bearing package lacks required simulation-harness evidence",),
-                evidence,
-            )
+        if package.ui_assets or package.profiles:
+            if not request.ui_simulation_harness_available:
+                self._record_or_fail(
+                    CertificationStage.VERIFICATION,
+                    False,
+                    ("UI-bearing package requires the native simulation harness",),
+                    evidence,
+                )
+            if not request.ui_simulation_evidence:
+                self._record_or_fail(
+                    CertificationStage.VERIFICATION,
+                    False,
+                    ("UI-bearing package lacks required simulation-harness evidence",),
+                    evidence,
+                )
         final = CertificationStageEvidence(
             CertificationStage.CERTIFIED,
             True,

@@ -402,3 +402,18 @@ bypass the normal TaskController, PlanningEngine, Tool, or PermissionBroker
 paths. Gesture/camera control remains a future self-built capability candidate,
 not a core feature or donor runtime. See
 `docs/presence-and-presentation.md`.
+
+Phase 18 adds deterministic pre-activation UI evidence:
+
+`declarative package UI -> UISimulationHarness -> semantic checks/render artifact -> certification evidence`
+
+`UISimulationHarness` loads only a validated package-matching manifest. It
+renders built-in and manifest-declared safe states, exposes fake capability
+endpoints, and has no real Tool, broker, process, network, or authority path.
+Each shot records deterministic semantic view/control-tree fingerprints,
+binding and asset checks, approval-spoof checks, layout success, and zero
+external effects. `ArtifactStore` may retain the bounded render/screenshot
+artifact. Semantic/control-tree evidence is primary; pixel equality is never the
+sole acceptance criterion. UI-bearing packages must supply this evidence to
+`PackageCertifier` before certification and cannot treat it as activation. See
+`docs/ui-simulation-harness.md`.
