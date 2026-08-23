@@ -35,6 +35,9 @@ class EventType(StrEnum):
     RUNTIME_STATE_CHANGED = "runtime.state_changed"
     HEALTH_CHANGED = "health.changed"
     AUTOMATION_STATE_CHANGED = "automation.state_changed"
+    BROWSER_NAVIGATED = "browser.navigated"
+    BROWSER_MUTATED = "browser.mutated"
+    BROWSER_TAB_CLOSED = "browser.tab_closed"
     SYSTEM_ERROR = "system.error"
     ARTIFACT_CREATED = "artifact.created"
 
@@ -273,6 +276,40 @@ class AutomationStateChanged(EventPayload):
 
 
 @dataclass(frozen=True, slots=True)
+class BrowserNavigated(EventPayload):
+    tab_id: str
+    origin: str
+    document_generation: int
+
+    def __post_init__(self) -> None:
+        _text(self.tab_id)
+        _text(self.origin)
+        if self.document_generation < 1:
+            raise ValueError("invalid browser document generation")
+
+
+@dataclass(frozen=True, slots=True)
+class BrowserMutated(EventPayload):
+    tab_id: str
+    origin: str
+    document_generation: int
+
+    def __post_init__(self) -> None:
+        _text(self.tab_id)
+        _text(self.origin)
+        if self.document_generation < 1:
+            raise ValueError("invalid browser document generation")
+
+
+@dataclass(frozen=True, slots=True)
+class BrowserTabClosed(EventPayload):
+    tab_id: str
+
+    def __post_init__(self) -> None:
+        _text(self.tab_id)
+
+
+@dataclass(frozen=True, slots=True)
 class SystemError(EventPayload):
     code: str
     summary: str
@@ -304,6 +341,9 @@ _PAYLOAD_TYPES: dict[EventType, type[EventPayload]] = {
     EventType.RUNTIME_STATE_CHANGED: RuntimeStateChanged,
     EventType.HEALTH_CHANGED: HealthChanged,
     EventType.AUTOMATION_STATE_CHANGED: AutomationStateChanged,
+    EventType.BROWSER_NAVIGATED: BrowserNavigated,
+    EventType.BROWSER_MUTATED: BrowserMutated,
+    EventType.BROWSER_TAB_CLOSED: BrowserTabClosed,
     EventType.SYSTEM_ERROR: SystemError,
     EventType.ARTIFACT_CREATED: ArtifactCreated,
 }

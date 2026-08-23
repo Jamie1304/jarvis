@@ -193,6 +193,15 @@ privileges, maintenance, compatibility, reversibility, and testability with stab
 factor explanations. A future tool adapter can be proposed only as a data-only
 specification; generated source is neither written, imported, nor executed.
 
+The native browser boundary is a provider-neutral semantic bridge. It exposes
+only bounded tab/document observations and stable references, with API/protocol,
+semantic DOM/accessibility, OS accessibility, vision, and coordinate fallbacks
+owned by the adapter. Every browser operation remains behind the normal
+`Tool -> PermissionBroker -> Policy` boundary; page content is untrusted data,
+password values are redacted, and cross-origin semantic data is not exposed.
+Navigation, mutation, and tab-close events are observational only. See
+`docs/browser-semantic-bridge.md`.
+
 Phase 11 adds a high-risk, proposal-and-test improvement boundary:
 
 `observe -> identify -> specify -> assess risk -> isolate -> modify -> gate -> evaluate -> propose`
