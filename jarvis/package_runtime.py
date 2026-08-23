@@ -193,6 +193,20 @@ class HotLoadManager:
                 raise HotLoadError("Cannot restart an inactive package") from error
             return self._load_locked(active.package, active.certification, allow_same_version=True)
 
+    def rollback_to(
+        self,
+        package: IntegrationPackage,
+        certification: PackageCertification,
+    ) -> ActivePackage:
+        """Restore an older certified version at the trusted lifecycle boundary."""
+
+        return self._load(
+            package,
+            certification,
+            allow_same_version=True,
+            allow_rollback=True,
+        )
+
     def active(self, package_id: str) -> ActivePackage:
         with self._lock:
             try:
@@ -220,9 +234,15 @@ class HotLoadManager:
         certification: PackageCertification,
         *,
         allow_same_version: bool,
+        allow_rollback: bool = False,
     ) -> ActivePackage:
         with self._lock:
-            return self._load_locked(package, certification, allow_same_version=allow_same_version)
+            return self._load_locked(
+                package,
+                certification,
+                allow_same_version=allow_same_version,
+                allow_rollback=allow_rollback,
+            )
 
     def _load_locked(
         self,
@@ -230,12 +250,15 @@ class HotLoadManager:
         certification: PackageCertification,
         *,
         allow_same_version: bool,
+        allow_rollback: bool = False,
     ) -> ActivePackage:
         self._validate_certification(package, certification)
         previous = self._active.get(package.package_id)
         if previous is not None:
             comparison = compare_package_versions(package.version, previous.package.version)
-            if comparison < 0 or (comparison == 0 and not allow_same_version):
+            if (comparison < 0 and not allow_rollback) or (
+                comparison == 0 and not allow_same_version
+            ):
                 raise HotLoadError("Package version is not newer than the active version")
             if comparison == 0 and package.package_hash != previous.package.package_hash:
                 raise HotLoadError("Changed package content needs a new version")

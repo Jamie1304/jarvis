@@ -34,8 +34,10 @@ Before staged activation, a generated package must complete the native
 [`package-certification.md`](package-certification.md). Certification binds
 the exact package/source/dependency/manifest hashes, test and audit evidence,
 permissions, trusted authority decision, install/health/verification evidence,
-and rollback target. `CERTIFIED` is not `ACTIVE`; activation remains owned by
-the hot-load manager and its Shadow/Canary/runtime gates.
+and rollback target. `CERTIFIED` is not `ACTIVE`; `PackageActivationService`
+owns the trusted version lifecycle and gates Shadow, bounded Canary, promotion,
+quarantine, and rollback before the serialized hot-load manager registers a
+runtime. Generated package code cannot self-promote.
 
 Paths are portable relative paths with no traversal, absolute path, drive,
 reparse-style ambiguity, empty segment, or arbitrary asset loading. UI assets

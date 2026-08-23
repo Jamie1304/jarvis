@@ -7,6 +7,10 @@ execution engine.
 ```text
 package change
   -> validate exact package/version/hash/provenance
+  -> PackageActivationService: CERTIFIED
+  -> zero-effect Shadow
+  -> bounded Canary
+  -> trusted promotion decision
   -> prepare sandbox runtime
   -> health check
   -> atomic registration swap
@@ -14,11 +18,14 @@ package change
   -> drain old runtime
 ```
 
-`HotLoadManager` supports a watcher abstraction and explicit manual refresh.
-The watcher only reports changes; it cannot activate a package by itself.
-Every new version must provide fresh certification, permission-diff approval,
-Shadow evidence, and Canary evidence. A new version never inherits ACTIVE
-status, approvals, identity, or runtime state implicitly.
+`HotLoadManager` supports a watcher abstraction and explicit manual refresh,
+but it is the serialized runtime swap boundary, not the staged lifecycle
+authority. Production composition routes activation through
+`PackageActivationService`; the watcher only reports changes and cannot
+promote a package by itself. Every new version must provide fresh
+certification, permission-diff approval, Shadow evidence, and Canary evidence.
+A new version never inherits ACTIVE status, approvals, identity, or runtime
+state implicitly. See [package activation](package-activation.md).
 
 Failed preparation or health leaves the old runtime active. A failed atomic
 swap invokes an idempotent rollback surface and drains the prepared runtime.
@@ -30,6 +37,10 @@ Restart prepares the same certified version again and transfers only the
 runtime’s explicit external state snapshot. It does not transfer approvals,
 credentials, or authority. Removal and stale cleanup remove registrations and
 drain runtimes; they do not delete user configuration or package data.
+
+Trusted activation rollback may re-prepare a previously certified version
+through the same runtime health and atomic registration gates. It never blindly
+reuses a drained runtime object.
 
 The registration surface is responsible for refreshing capability, tool,
 Skill, profile, UI, and event projections atomically with registration. Those

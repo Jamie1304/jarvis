@@ -93,8 +93,10 @@ Before staged activation, `PackageCertifier` runs BUILD, static audit, unit and
 sandbox integration tests, permission diff, trusted authority decision,
 install, healthcheck, and verification. Its immutable `CertificationRecord`
 binds exact package/source/dependency/manifest hashes and evidence. CERTIFIED
-is not ACTIVE; hot-load registration remains a separate Shadow/Canary-gated
-runtime operation. See `docs/package-certification.md`.
+is not ACTIVE; `PackageActivationService` owns the separate
+CERTIFIED/SHADOW/CANARY/ACTIVE/DEGRADED/QUARANTINED/ROLLED_BACK lifecycle and
+hot-load registration remains a broker-gated runtime operation. See
+`docs/package-certification.md` and `docs/package-activation.md`.
 
 Generic provisioning uses the same boundary through typed
 `ProvisioningPlan`/`ProvisioningAction` records. Providers inspect reality
