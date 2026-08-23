@@ -71,6 +71,15 @@ approval, audit, mutation, or runtime-container object. Job Objects are not a
 complete filesystem/network sandbox; see `docs/sandbox-isolation.md` for the
 actual guarantees and remaining AppContainer/restricted-token boundary.
 
+Sandbox host access is available only through the trusted-side typed
+`HostProxy`. Its manifest binds exact integration/package identity, declared
+capability/action, roots, origins, credential bindings, and bounds before the
+normal `Tool -> PermissionBroker -> Policy -> approval` path. Network defaults
+to deny; filesystem requests name only package-data or explicitly approved user
+roots; credentials remain opaque and are resolved by `CredentialVault` on the
+trusted side; process/device operations are typed declarations rather than
+arbitrary spawn. See `docs/sandbox-host-proxies.md`.
+
 Phase 6 adds a controlled computer capability layer without changing that boundary:
 
 `AI/planner -> typed computer tool -> PermissionBroker -> policy/approval -> adapter -> Windows`

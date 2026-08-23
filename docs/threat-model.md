@@ -120,6 +120,16 @@ The registry therefore prohibits dynamic discovery, and privileged implementatio
 methods are deliberately private and reachable only through the brokered tool
 entry point by convention and tests.
 
+The trusted host bridge is narrower than ambient child access: `HostProxy` accepts
+only exact package-bound requests for manifest-declared origins, package-data or
+approved-user roots, opaque credential bindings, and typed process/device
+actions. Every accepted request uses the normal broker receipt. Redirects,
+private addresses, reparse paths, protected source/.git/Trusted Core paths,
+undeclared actions, forged identity, and oversized data fail closed. DNS and
+same-user filesystem TOCTOU races remain platform limitations, not silently
+claimed isolation guarantees; hostile-code certification still needs a stronger
+OS boundary.
+
 ## Fail-closed invariants
 
 - Unknown/malformed permissions, unknown tools/actions, malformed scopes, missing

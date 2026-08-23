@@ -21,6 +21,13 @@ monkeypatch methods, instantiate adapters, and call the operating system. Theref
 unreviewed integrations are not loaded in the production process. A future hostile
 plugin boundary requires a lower-privilege process plus typed broker-owned IPC.
 
+When sandbox integrations need host access, the trusted-side `HostProxy` is the
+only supported bridge. It validates exact package/integration identity, manifest
+capability/action, operation scope, and the normal broker receipt. Its network,
+filesystem, credential, process, and device contracts are narrow and deny by
+default; a sandbox cannot submit an approval or permission claim. Raw Vault
+secrets never cross the bridge. See [`sandbox-host-proxies.md`](sandbox-host-proxies.md).
+
 ## Authoritative runtime boundary
 
 ```mermaid
