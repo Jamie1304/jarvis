@@ -80,6 +80,15 @@ roots; credentials remain opaque and are resolved by `CredentialVault` on the
 trusted side; process/device operations are typed declarations rather than
 arbitrary spawn. See `docs/sandbox-host-proxies.md`.
 
+Generated packages also pass through the data-only `GeneratedPackageReviewer`.
+It verifies manifest/provenance/source hashes and statically rejects unsafe
+execution, deserialization, process/network bypasses, path traversal, secret
+logging, and approval spoofing. Missing source, binaries, migrations, unknown
+network destinations, and elevated permissions require manual review. The
+reviewer cannot execute a package or modify reviewer, policy, broker, or
+approval authority; a passing result does not replace certification or runtime
+sandbox and broker gates. See `docs/generated-package-review.md`.
+
 Generic provisioning uses the same boundary through typed
 `ProvisioningPlan`/`ProvisioningAction` records. Providers inspect reality
 before every effect, never receive arbitrary shell scripts, and return bounded

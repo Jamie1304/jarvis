@@ -41,3 +41,9 @@ read-only diagnostic probes, safe repair declarations, and fallback hints.
 Probes must be read-only. Repairs must declare permissions and cannot disable
 approval. Run 25B may execute these declarations only after trusted policy
 validation; package metadata itself does not authorize repair.
+
+Generated package source and security surfaces are reviewed by the native
+data-only `GeneratedPackageReviewer`; see
+[`generated-package-review.md`](generated-package-review.md). A `PASS` result
+does not activate a package or replace sandbox, host-proxy, broker, audit,
+certification, Shadow, or Canary gates.
