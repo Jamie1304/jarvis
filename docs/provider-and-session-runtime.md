@@ -7,6 +7,13 @@ not spread through application services as `if/elif` trees. The current local
 Ollama adapter is registered through this path and remains local-only by
 policy.
 
+`ModelMetadata` is descriptive rather than a download or execution request. It
+can identify model roles, family/version/quantization, runtime/source,
+modalities, context, resource requirements, license, compatibility tags, and
+evidence provenance. `ModelPlanner` can combine models for different roles
+under measured hardware and concurrency limits; an unknown capacity produces an
+unknown fit, never an optimistic fit. See `docs/hardware-and-models.md`.
+
 `AgentSessionStore` is the authoritative store for execution-session identity
 and lifecycle metadata only. It is not a task/goal store, user-model store, or
 conversation-memory store. A session records its type, provider/model,

@@ -465,3 +465,21 @@ artifact. Semantic/control-tree evidence is primary; pixel equality is never the
 sole acceptance criterion. UI-bearing packages must supply this evidence to
 `PackageCertifier` before certification and cannot treat it as activation. See
 `docs/ui-simulation-harness.md`.
+
+Phase 19 adds empirical hardware/model inventory without adding authority:
+
+`trusted hardware probe -> measured HardwareProfile -> ModelPlanner -> compatible model combination`
+
+`HardwareInventoryService` records CPU, RAM, GPU/VRAM, driver/runtime, disk, OS,
+and scheduling-concurrency facts only when a trusted probe establishes them.
+Unavailable values stay unknown. `ModelMetadata` tracks all supported model
+roles plus family/version/quantization, runtime/source, modalities, context,
+resource requirements, license, compatibility, and provenance. Published and
+community claims remain distinct from timestamped `MEASURED_ON_THIS_MACHINE`
+results. `ModelPlanner` is a bounded descriptive selector: it checks role
+coverage, exact compatibility tags, aggregate or peak memory, disk, VRAM, and
+concurrency for combinations, and returns `UNKNOWN` when required capacity is
+not measured. It does not download, load, activate, authorize, or claim that a
+model works on a different machine. CI uses fake hardware/model fixtures; real
+hardware and model measurements remain explicitly unexecuted unless separately
+run. See `docs/hardware-and-models.md`.
