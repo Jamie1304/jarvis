@@ -8,6 +8,12 @@ from jarvis.permissions.models import Permission, Risk
 
 
 class DiscoverySource(StrEnum):
+    WINDOWS_LOCAL = "windows_local"
+    USB = "usb"
+    BLUETOOTH_BLE = "bluetooth_ble"
+    MDNS_DNS_SD = "mdns_dns_sd"
+    SSDP = "ssdp"
+    SAFE_ADVERTISEMENT = "safe_advertisement"
     INTERNAL_TOOL_CATALOG = "internal_tool_catalog"
     PLUGIN_CATALOG = "plugin_catalog"
     INTEGRATION_CATALOG = "integration_catalog"

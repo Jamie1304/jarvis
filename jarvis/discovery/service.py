@@ -106,14 +106,18 @@ class CandidateEvaluator:
 
     @staticmethod
     def _trust_score(candidate: DiscoveryCandidate) -> int:
-        base = {
+        base: dict[str, int] = {
             "internal_tool_catalog": 100,
             "plugin_catalog": 75,
             "integration_catalog": 75,
             "software_catalog": 70,
             "controlled_web_research": 30,
-        }[candidate.source.value]
-        return min(100, base + (10 if candidate.provenance.owner_verified else 0))
+        }
+        return min(
+            100,
+            base.get(candidate.source.value, 25)
+            + (10 if candidate.provenance.owner_verified else 0),
+        )
 
     @staticmethod
     def _trust_reason(candidate: DiscoveryCandidate) -> str:
