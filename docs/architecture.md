@@ -403,6 +403,18 @@ paths. Gesture/camera control remains a future self-built capability candidate,
 not a core feature or donor runtime. See
 `docs/presence-and-presentation.md`.
 
+Execution is not proof of the requested outcome. The typed
+`jarvis.verification.VerificationEngine` evaluates a trusted
+`VerificationPlan` against bounded `EvidenceRecord` observations and returns a
+separate verification level/disposition. Model claims are never evidence;
+stale or contradictory observations cannot complete a goal. A failed
+verification preserves the original goal and returns diagnosis/replan or an
+explicit user-confirmation request when the physical result cannot be observed.
+`PresentationSurface.query_state()` can supply screen evidence, but the
+queried state—not the presentation request—is authoritative for that
+observation. Verification does not execute, authorize, or replace
+`PlanningEngine`.
+
 Phase 18 adds deterministic pre-activation UI evidence:
 
 `declarative package UI -> UISimulationHarness -> semantic checks/render artifact -> certification evidence`
