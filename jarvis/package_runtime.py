@@ -8,7 +8,7 @@ Shadow, and Canary gates have all passed.
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import StrEnum
 from threading import RLock
 from typing import Protocol, TypeVar
@@ -37,7 +37,7 @@ class PackageCertification:
     permission_diff_approved: bool
     shadow_passed: bool
     canary_passed: bool
-    record: CertificationRecord | None = None
+    record: CertificationRecord | None = field(default=None, kw_only=True)
 
     @classmethod
     def from_record(cls, record: CertificationRecord) -> PackageCertification:
@@ -51,7 +51,7 @@ class PackageCertification:
             True,
             record.shadow_eligible,
             record.canary_eligible,
-            record,
+            record=record,
         )
 
 

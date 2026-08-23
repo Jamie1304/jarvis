@@ -57,7 +57,15 @@ def certification(item: IntegrationPackage, **changes: bool) -> PackageCertifica
         "canary_passed": True,
     }
     values.update(changes)
-    return PackageCertification(item.package_id, item.version, item.package_hash, **values)
+    return PackageCertification(
+        item.package_id,
+        item.version,
+        item.package_hash,
+        certified=values["certified"],
+        permission_diff_approved=values["permission_diff_approved"],
+        shadow_passed=values["shadow_passed"],
+        canary_passed=values["canary_passed"],
+    )
 
 
 @dataclass
