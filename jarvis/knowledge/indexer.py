@@ -20,9 +20,21 @@ from jarvis.knowledge.models import (
     ToolPermissionRecord,
 )
 from jarvis.permissions.models import Permission
+from jarvis.resources import (
+    ReservationReleaseReason,
+    ResourceBudget,
+    ResourceGovernor,
+    ResourcePriority,
+)
 from jarvis.tools.registry import ToolRegistry
 
 Clock = Callable[[], datetime]
+
+
+class KnowledgeIndexDeferred(RuntimeError):
+    """Indexing was safely deferred by the system-wide resource governor."""
+
+
 _SECRET_PATH = re.compile(r"(^|[._-])(env|secret|credential|password|token)([._-]|$)", re.I)
 _SECRET_VALUE = re.compile(
     r"(?:api[_-]?key|access[_-]?token|client[_-]?secret|password|secret)"
@@ -57,11 +69,40 @@ _LAYER = {
 class ProjectKnowledgeBuilder:
     """Build a deterministic generated index while preserving human-authored docs."""
 
-    def __init__(self, project_root: Path, *, clock: Clock | None = None) -> None:
+    def __init__(
+        self,
+        project_root: Path,
+        *,
+        clock: Clock | None = None,
+        resource_governor: ResourceGovernor | None = None,
+    ) -> None:
         self.project_root = project_root.resolve()
         self._clock = clock or (lambda: datetime.now(UTC))
+        self._resource_governor = resource_governor
 
     def build(self, *, registry: ToolRegistry | None = None) -> KnowledgeSnapshot:
+        reservation_id = None
+        governor = self._resource_governor
+        if governor is not None:
+            decision = governor.reserve(
+                "knowledge.index",
+                ResourcePriority.INDEXING,
+                ResourceBudget(concurrency=1, duration_seconds=300),
+            )
+            if not decision.allowed or decision.reservation_id is None:
+                raise KnowledgeIndexDeferred(decision.reason)
+            reservation_id = decision.reservation_id
+        try:
+            return self._build(registry=registry)
+        except BaseException:
+            if reservation_id is not None and governor is not None:
+                governor.release(reservation_id, ReservationReleaseReason.CRASH)
+            raise
+        else:
+            if reservation_id is not None and governor is not None:
+                governor.release(reservation_id, ReservationReleaseReason.COMPLETE)
+
+    def _build(self, *, registry: ToolRegistry | None = None) -> KnowledgeSnapshot:
         generated_at = self._clock().astimezone(UTC)
         revision = self._git_revision()
         components = self._components(generated_at, revision)

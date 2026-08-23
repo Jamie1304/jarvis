@@ -48,6 +48,7 @@ from jarvis.multi_agent import (
     WorkerProfile,
 )
 from jarvis.permissions.models import Permission
+from jarvis.resources import ResourceGovernor, ResourceSnapshot
 from pydantic import BaseModel, ConfigDict
 
 
@@ -325,6 +326,7 @@ def _coordinator(
     enabled: bool = True,
     concurrency: int = 3,
     total_budget: ResourceBudget | None = None,
+    resource_governor: ResourceGovernor | None = None,
 ) -> tuple[MultiAgentCoordinator, _Fallback, DelegationValidator]:
     registry = AgentRegistry(workers)
     validator = DelegationValidator(
@@ -343,10 +345,43 @@ def _coordinator(
             validator=validator,
             single_agent=fallback,
             goal_verifier=EvidenceMultiAgentGoalVerifier(),
+            resource_governor=resource_governor,
         ),
         fallback,
         validator,
     )
+
+
+@pytest.mark.asyncio
+async def test_scheduler_releases_shared_resource_reservation() -> None:
+    class Telemetry:
+        def snapshot(self) -> ResourceSnapshot:
+            return ResourceSnapshot(
+                datetime.now(UTC),
+                cpu_cores=8,
+                ram_total_bytes=16_000,
+                ram_available_bytes=12_000,
+                disk_free_bytes=10_000_000_000,
+            )
+
+    governor = ResourceGovernor(Telemetry())
+    coordinator, _fallback, _validator = _coordinator(
+        (
+            _Worker("research", AgentType.RESEARCH),
+            _Worker("coding", AgentType.CODING, capabilities=frozenset({"modify"})),
+        ),
+        resource_governor=governor,
+    )
+    result = await coordinator.execute(
+        _request(completion_evidence=("research-evidence", "coding-evidence")),
+        _proposal(
+            _node("research", "research", evidence=["architecture"]),
+            _node("coding", "coding", capabilities=["modify"], evidence=["test-report"]),
+        ),
+    )
+    assert result.status is OrchestrationStatus.COMPLETED
+    assert governor.reservations()
+    assert all(item.status.value == "completed" for item in governor.reservations())
 
 
 @pytest.mark.asyncio

@@ -130,6 +130,14 @@ Launch profiles are presentation/startup preferences, never permission or
 security-policy switches. See `docs/desktop-shell.md` and
 `docs/onboarding-test-drive.md`.
 
+The composition root also owns one `ResourceGovernor` and passes it to
+resource-consuming services. It observes available host telemetry without
+fabricating unsupported GPU, battery, idle, or foreground-workload facts.
+Priority-aware decisions can defer background/indexing/benchmark work, reduce
+concurrency, or select a smaller acceptable model; they never grant
+PermissionBroker authority or unnecessarily cancel an important foreground
+task. See `docs/resource-governor.md`.
+
 The generic Control Center is a refreshable application projection over explicit
 capability, tool, skill, agent, MCP, model, planning, memory, knowledge,
 permission, audit, health, and recovery services. Its semantic action metadata

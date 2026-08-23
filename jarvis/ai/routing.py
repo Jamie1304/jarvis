@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from enum import StrEnum
 
@@ -16,6 +16,13 @@ from jarvis.ai.providers.registry import (
     VoiceProviderKind,
 )
 from jarvis.hardware import FitStatus, HardwareProfile
+from jarvis.resources import (
+    ResourceBudget,
+    ResourceDecision,
+    ResourceDecisionStatus,
+    ResourceGovernor,
+    ResourcePriority,
+)
 from jarvis.speech.stt import AudioData, SttProvider, Transcription
 from jarvis.speech.tts import TextToSpeechService, TtsProvider
 
@@ -102,6 +109,7 @@ class RouteRequest:
     no_llm: bool = False
     benchmarks: tuple[RouteBenchmark, ...] = ()
     provider_health: tuple[ProviderHealthSnapshot, ...] = ()
+    priority: ResourcePriority = ResourcePriority.USER_REQUESTED
 
     def __post_init__(self) -> None:
         for name, value, limit in (
@@ -149,6 +157,8 @@ class RouteRequest:
             not isinstance(item, ProviderHealthSnapshot) for item in self.provider_health
         ):
             raise ValueError("Route health snapshots are invalid")
+        if not isinstance(self.priority, ResourcePriority):
+            raise ValueError("Route resource priority is invalid")
 
 
 @dataclass(frozen=True, slots=True)
@@ -194,19 +204,35 @@ class RouteDecision:
     primary: RouteCandidate | None
     fallbacks: tuple[RouteCandidate, ...] = ()
     reasons: tuple[str, ...] = ()
+    resource_decision: ResourceDecision | None = None
 
 
 class ProviderRouter:
     """Select configured providers without provider-specific conditionals."""
 
-    def __init__(self, registry: ProviderRegistry) -> None:
+    def __init__(
+        self, registry: ProviderRegistry, resource_governor: ResourceGovernor | None = None
+    ) -> None:
         self._registry = registry
+        self._resource_governor = resource_governor
 
     def route(self, request: RouteRequest) -> RouteDecision:
         if not isinstance(request, RouteRequest):
             raise ValueError("Route request is malformed")
         if request.no_llm:
             return self._no_llm(request, "caller disabled model inference")
+        request, resource_decision = self._resource_gate(request)
+        if resource_decision is not None and not resource_decision.allowed:
+            if request.allow_no_llm:
+                return self._no_llm(
+                    request, resource_decision.reason, resource_decision=resource_decision
+                )
+            status = (
+                RouteStatus.UNKNOWN
+                if resource_decision.status is ResourceDecisionStatus.DEFER
+                else RouteStatus.UNAVAILABLE
+            )
+            return RouteDecision(status, None, (), (resource_decision.reason,), resource_decision)
         candidates = [
             RouteCandidate(
                 provider_id,
@@ -218,13 +244,25 @@ class ProviderRouter:
             for provider_id, definition in self._registry.definitions()
             for model in definition.models
         ]
-        return self._select(candidates, request)
+        return self._select(candidates, request, resource_decision)
 
     def route_voice(self, kind: VoiceProviderKind, request: RouteRequest) -> RouteDecision:
         if not isinstance(kind, VoiceProviderKind):
             raise ValueError("Voice provider kind is invalid")
         if request.no_llm:
             return self._no_llm(request, "caller disabled voice inference")
+        request, resource_decision = self._resource_gate(request)
+        if resource_decision is not None and not resource_decision.allowed:
+            if request.allow_no_llm:
+                return self._no_llm(
+                    request, resource_decision.reason, resource_decision=resource_decision
+                )
+            status = (
+                RouteStatus.UNKNOWN
+                if resource_decision.status is ResourceDecisionStatus.DEFER
+                else RouteStatus.UNAVAILABLE
+            )
+            return RouteDecision(status, None, (), (resource_decision.reason,), resource_decision)
         candidates = [
             RouteCandidate(
                 provider_id,
@@ -237,7 +275,21 @@ class ProviderRouter:
             for provider_id, definition in self._registry.voice_definitions(kind)
             for model in definition.models
         ]
-        return self._select(candidates, request)
+        return self._select(candidates, request, resource_decision)
+
+    def _resource_gate(self, request: RouteRequest) -> tuple[RouteRequest, ResourceDecision | None]:
+        if self._resource_governor is None:
+            return request, None
+        decision = self._resource_governor.decide(
+            f"model-router.{request.profile}",
+            request.priority,
+            ResourceBudget(concurrency=request.concurrency, duration_seconds=120),
+        )
+        if not decision.allowed:
+            return request, decision
+        if decision.effective_budget.concurrency != request.concurrency:
+            request = replace(request, concurrency=decision.effective_budget.concurrency)
+        return request, decision
 
     def create_voice_provider(
         self, decision: RouteDecision, configuration: Mapping[str, object]
@@ -298,7 +350,12 @@ class ProviderRouter:
         candidates = (() if decision.primary is None else (decision.primary,)) + decision.fallbacks
         return tuple(candidate for candidate in candidates if candidate.voice_kind is kind)
 
-    def _select(self, candidates: list[RouteCandidate], request: RouteRequest) -> RouteDecision:
+    def _select(
+        self,
+        candidates: list[RouteCandidate],
+        request: RouteRequest,
+        resource_decision: ResourceDecision | None = None,
+    ) -> RouteDecision:
         viable: list[RouteCandidate] = []
         unknown: list[str] = []
         rejected: list[str] = []
@@ -325,7 +382,17 @@ class ProviderRouter:
                 rejected.append(f"{candidate.provider_id}/{candidate.model_id}: {reason}")
         if viable:
             viable.sort(key=lambda item: self._sort_key(item, request))
-            return RouteDecision(RouteStatus.SELECTED, viable[0], tuple(viable[1:]), ())
+            if resource_decision is not None and resource_decision.choose_smaller_model:
+                viable.sort(
+                    key=lambda item: (self._resource_size(item), self._sort_key(item, request))
+                )
+            return RouteDecision(
+                RouteStatus.SELECTED,
+                viable[0],
+                tuple(viable[1:]),
+                (),
+                resource_decision,
+            )
         if request.allow_no_llm:
             return self._no_llm(request, *(unknown or rejected or ("no compatible provider",)))
         return RouteDecision(
@@ -333,6 +400,17 @@ class ProviderRouter:
             None,
             (),
             tuple((unknown or rejected or ["no compatible provider"])[:8]),
+            resource_decision,
+        )
+
+    @staticmethod
+    def _resource_size(candidate: RouteCandidate) -> tuple[float, float, float]:
+        return (
+            candidate.model.ram_bytes if candidate.model.ram_bytes is not None else math.inf,
+            candidate.model.vram_bytes if candidate.model.vram_bytes is not None else math.inf,
+            candidate.model.storage_bytes
+            if candidate.model.storage_bytes is not None
+            else math.inf,
         )
 
     def _eligibility(
@@ -411,9 +489,13 @@ class ProviderRouter:
         return preferred, local, quality, latency
 
     @staticmethod
-    def _no_llm(request: RouteRequest, *reasons: str) -> RouteDecision:
+    def _no_llm(
+        request: RouteRequest,
+        *reasons: str,
+        resource_decision: ResourceDecision | None = None,
+    ) -> RouteDecision:
         del request
-        return RouteDecision(RouteStatus.NO_LLM, None, (), tuple(reasons))
+        return RouteDecision(RouteStatus.NO_LLM, None, (), tuple(reasons), resource_decision)
 
 
 class FailoverSttProvider(SttProvider):

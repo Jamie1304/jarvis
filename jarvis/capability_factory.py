@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Protocol
@@ -17,6 +17,14 @@ from jarvis.capabilities import (
 )
 from jarvis.discovery.models import CapabilityGap
 from jarvis.integration_package import IntegrationPackage, PackageLifecycle
+from jarvis.resources import (
+    ReservationReleaseReason,
+    ResourceBudget,
+    ResourceDecision,
+    ResourceDecisionStatus,
+    ResourceGovernor,
+    ResourcePriority,
+)
 from jarvis.setup_conductor import (
     AdoptionCandidate as SetupAdoptionCandidate,
 )
@@ -213,6 +221,7 @@ class CapabilityFactoryResult:
     setup_run: SetupRun | None = None
     trace: tuple[FactoryLifecycle, ...] = ()
     reason: str = ""
+    resource_decision: ResourceDecision | None = None
 
 
 class CapabilityFactory:
@@ -225,6 +234,7 @@ class CapabilityFactory:
         generator: CapabilityGenerator,
         *,
         clock: Callable[[], datetime] | None = None,
+        resource_governor: ResourceGovernor | None = None,
     ) -> None:
         if not isinstance(registry, CapabilityRegistry):
             raise CapabilityFactoryValidationError("Capability registry is malformed")
@@ -232,6 +242,7 @@ class CapabilityFactory:
         self._setup = setup_conductor
         self._generator = generator
         self._clock = clock or (lambda: datetime.now(UTC))
+        self._resource_governor = resource_governor
 
     async def acquire(
         self,
@@ -248,6 +259,67 @@ class CapabilityFactory:
             gap, solution, adoption_candidates, workspace, environment, preferences
         )
         run_id = run_id or uuid4()
+        reservation_id = None
+        resource_decision = None
+        governor = self._resource_governor
+        if governor is not None:
+            resource_decision = governor.reserve(
+                "capability-factory",
+                ResourcePriority.USER_REQUESTED,
+                ResourceBudget(concurrency=1, duration_seconds=900),
+            )
+            if not resource_decision.allowed:
+                lifecycle = (
+                    FactoryLifecycle.DISCOVERING
+                    if resource_decision.status is ResourceDecisionStatus.DEFER
+                    else FactoryLifecycle.DECLINED
+                )
+                return CapabilityFactoryResult(
+                    run_id,
+                    gap,
+                    lifecycle,
+                    None,
+                    None,
+                    trace=(FactoryLifecycle.GAP_DETECTED, FactoryLifecycle.DISCOVERING),
+                    reason=resource_decision.reason,
+                    resource_decision=resource_decision,
+                )
+            reservation_id = resource_decision.reservation_id
+        try:
+            result = await self._acquire(
+                gap,
+                solution,
+                adoption_candidates,
+                workspace,
+                environment,
+                preferences,
+                run_id=run_id,
+            )
+            if resource_decision is not None:
+                result = replace(result, resource_decision=resource_decision)
+            return result
+        except BaseException:
+            if reservation_id is not None and governor is not None:
+                governor.release(reservation_id, ReservationReleaseReason.CRASH)
+            raise
+        else:
+            if reservation_id is not None and governor is not None:
+                governor.release(reservation_id, ReservationReleaseReason.COMPLETE)
+
+    async def _acquire(
+        self,
+        gap: CapabilityGap,
+        solution: SolutionReport,
+        adoption_candidates: AdoptionCandidates,
+        workspace: WorkspaceContext,
+        environment: EnvironmentGraph,
+        preferences: Mapping[str, object],
+        *,
+        run_id: UUID,
+    ) -> CapabilityFactoryResult:
+        self._validate_inputs(
+            gap, solution, adoption_candidates, workspace, environment, preferences
+        )
         trace = [FactoryLifecycle.GAP_DETECTED, FactoryLifecycle.DISCOVERING]
         existing = self._reuse_jarvis(gap, workspace)
         if existing is not None:

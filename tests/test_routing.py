@@ -23,6 +23,12 @@ from jarvis.ai.routing import (
     RoutingPolicy,
 )
 from jarvis.core.errors import SpeechError
+from jarvis.resources import (
+    ResourceGovernor,
+    ResourcePolicy,
+    ResourcePriority,
+    ResourceSnapshot,
+)
 from jarvis.speech.stt import AudioData, SttProvider, Transcription
 from jarvis.speech.tts import TtsProvider
 
@@ -128,6 +134,43 @@ def test_routing_respects_health_concurrency_resources_and_unknown_capacity() ->
     assert unhealthy.primary is not None and unhealthy.primary.provider_id == "remote"
     denied = router.route(request(concurrency=5))
     assert denied.status is RouteStatus.UNAVAILABLE
+
+
+def test_router_uses_one_governor_for_priority_and_model_degradation() -> None:
+    class Telemetry:
+        def snapshot(self) -> ResourceSnapshot:
+            return ResourceSnapshot(
+                datetime.now(UTC),
+                cpu_utilization=0.99,
+                cpu_cores=8,
+                ram_total_bytes=100,
+                ram_available_bytes=10,
+                disk_free_bytes=10_000_000_000,
+            )
+
+    governor = ResourceGovernor(
+        Telemetry(), policy=ResourcePolicy(low_disk_bytes=0, pressure_concurrency=1)
+    )
+    router = ProviderRouter(registry(), governor)
+    reduced = router.route(request(concurrency=2))
+    assert reduced.status is RouteStatus.SELECTED
+    assert reduced.resource_decision is not None
+    assert reduced.resource_decision.effective_budget.concurrency == 1
+    assert reduced.primary is not None and reduced.primary.provider_id == "local"
+    deferred = router.route(request(priority=ResourcePriority.BACKGROUND))
+    assert deferred.status is RouteStatus.UNKNOWN
+
+
+def test_router_resource_denial_can_degrade_to_no_llm() -> None:
+    class Telemetry:
+        def snapshot(self) -> ResourceSnapshot:
+            return ResourceSnapshot(datetime.now(UTC), on_ac_power=False)
+
+    governor = ResourceGovernor(Telemetry())
+    router = ProviderRouter(registry(), governor)
+    result = router.route(request(priority=ResourcePriority.BENCHMARK, allow_no_llm=True))
+    assert result.status is RouteStatus.NO_LLM
+    assert result.resource_decision is not None
     unknown = router.route(request(resource_state=None, policy=RoutingPolicy.LOCAL_ONLY))
     assert unknown.status is RouteStatus.UNKNOWN
     no_llm = router.route(

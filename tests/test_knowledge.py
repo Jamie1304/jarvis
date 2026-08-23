@@ -5,9 +5,11 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from pathlib import Path
 
-from jarvis.knowledge.indexer import ProjectKnowledgeBuilder
+import pytest
+from jarvis.knowledge.indexer import KnowledgeIndexDeferred, ProjectKnowledgeBuilder
 from jarvis.knowledge.models import Authority
 from jarvis.knowledge.store import KnowledgeStore
+from jarvis.resources import ResourceGovernor, ResourceSnapshot
 from jarvis.tools.catalog import create_safe_tool_registry
 
 
@@ -52,6 +54,24 @@ def test_indexing_builds_components_documents_and_historical_adrs(tmp_path: Path
     assert decision.authority is Authority.HISTORICAL
     tree = next(item for item in snapshot.items if item.kind == "project-tree")
     assert "jarvis/sample/service.py" in tree.content
+
+
+def test_indexing_defers_under_shared_resource_pressure(tmp_path: Path) -> None:
+    _fixture_project(tmp_path)
+
+    class Telemetry:
+        def snapshot(self) -> ResourceSnapshot:
+            return ResourceSnapshot(
+                datetime.now(UTC),
+                cpu_utilization=0.99,
+                ram_total_bytes=100,
+                ram_available_bytes=10,
+                disk_free_bytes=10_000_000_000,
+            )
+
+    builder = ProjectKnowledgeBuilder(tmp_path, resource_governor=ResourceGovernor(Telemetry()))
+    with pytest.raises(KnowledgeIndexDeferred):
+        builder.build()
 
 
 def test_provenance_and_stale_detection_cover_changed_and_deleted_sources(tmp_path: Path) -> None:

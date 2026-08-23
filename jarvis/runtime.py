@@ -75,6 +75,7 @@ from jarvis.planning.models import ReplanEvidence
 from jarvis.planning.store import PlanningStoreError, SQLitePlanningStore
 from jarvis.planning.validation import PlanValidator
 from jarvis.recovery import RecoveryEvidence, RecoveryPhase, RecoveryStore
+from jarvis.resources import ResourceGovernor, SystemResourceTelemetry
 from jarvis.security import (
     SECURITY_POLICY_VERSION,
     SecurityViolation,
@@ -260,6 +261,7 @@ class RuntimeContainer:
     settings: Settings
     paths: RuntimePaths
     ai_provider: AIProvider
+    resource_governor: ResourceGovernor
     provider_router: ProviderRouter
     model_manager: LocalModelManager
     conversation: ConversationService
@@ -554,7 +556,8 @@ class ApplicationRuntime:
                 raise ConfigurationError(
                     f"Unsupported AI provider: {settings.ai_provider}"
                 ) from error
-            provider_router = ProviderRouter(provider_registry)
+            resource_governor = ResourceGovernor(SystemResourceTelemetry())
+            provider_router = ProviderRouter(provider_registry, resource_governor)
             model_manager = LocalModelManager(paths.models)
             conversation_memory = ConversationContextService()
             system_memory = ProjectSystemMemory(knowledge, root)
@@ -909,12 +912,13 @@ class ApplicationRuntime:
                     "model-provider", "Configured model/provider", test_provider, required=True
                 )
             )
-            startup_warmup = StartupWarmupRegistry()
+            startup_warmup = StartupWarmupRegistry(resource_governor)
             startup_warmup.register(WarmupComponent("default-model", warmup_provider))
             container = RuntimeContainer(
                 settings=settings,
                 paths=paths,
                 ai_provider=provider,
+                resource_governor=resource_governor,
                 provider_router=provider_router,
                 model_manager=model_manager,
                 conversation=ConversationService(

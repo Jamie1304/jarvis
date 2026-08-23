@@ -7,12 +7,14 @@ import json
 import math
 import sys
 from collections.abc import Mapping
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
 from uuid import uuid4
 
 import pytest
 from jarvis import sandbox as sandbox_module
+from jarvis.resources import ReservationStatus, ResourceGovernor, ResourceSnapshot
 from jarvis.sandbox import (
     SandboxCancelled,
     SandboxConfigurationError,
@@ -146,6 +148,33 @@ async def test_environment_source_boundary_and_cleanup(
     root = paths.root
     await process.close()
     assert not root.exists()
+
+
+@pytest.mark.asyncio
+async def test_sandbox_uses_governor_and_releases_on_close(tmp_path: Path) -> None:
+    class Telemetry:
+        def snapshot(self) -> ResourceSnapshot:
+            return ResourceSnapshot(
+                datetime.now(UTC),
+                cpu_cores=8,
+                ram_total_bytes=2_000_000_000,
+                ram_available_bytes=1_000_000_000,
+                disk_free_bytes=10_000_000_000,
+            )
+
+    governor = ResourceGovernor(Telemetry())
+    process = SandboxProcess(
+        Path(sys.executable),
+        ("-c", WORKER),
+        integration_id="test.integration",
+        parent_directory=tmp_path / "owned-sandboxes",
+        resource_governor=governor,
+        limits=SandboxLimits(timeout_seconds=1),
+    )
+    await process.start()
+    assert process.is_running
+    await process.close()
+    assert all(item.status is ReservationStatus.CANCELLED for item in governor.reservations())
 
 
 @pytest.mark.asyncio

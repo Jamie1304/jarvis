@@ -32,6 +32,14 @@ from jarvis.multi_agent.validation import (
     DelegationValidationReason,
     DelegationValidator,
 )
+from jarvis.resources import (
+    ReservationReleaseReason,
+    ResourceGovernor,
+    ResourcePriority,
+)
+from jarvis.resources import (
+    ResourceBudget as GovernorBudget,
+)
 
 
 def _now() -> datetime:
@@ -112,6 +120,7 @@ class MultiAgentCoordinator:
         goal_verifier: MultiAgentGoalVerifier,
         clock: Callable[[], datetime] = _now,
         monotonic_clock: Callable[[], float] = monotonic,
+        resource_governor: ResourceGovernor | None = None,
     ) -> None:
         self._enabled = enabled
         self._registry = registry
@@ -120,6 +129,7 @@ class MultiAgentCoordinator:
         self._goal_verifier = goal_verifier
         self._clock = clock
         self._monotonic = monotonic_clock
+        self._resource_governor = resource_governor
 
     @property
     def enabled(self) -> bool:
@@ -196,6 +206,7 @@ class MultiAgentCoordinator:
     ) -> OrchestrationResult:
         nodes = {node.node_id: node for node in graph.nodes}
         running: dict[asyncio.Task[AgentResult], UUID] = {}
+        reservations: dict[asyncio.Task[AgentResult], UUID] = {}
         deadline = self._monotonic() + self._validator.limits.total_budget.max_elapsed_seconds
         reason_code = "multi_agent_completed"
         reason = "All delegated task nodes completed"
@@ -203,6 +214,7 @@ class MultiAgentCoordinator:
         while True:
             if cancellation.is_set():
                 await self._stop_running(running)
+                self._release_reservations(reservations, ReservationReleaseReason.CANCEL)
                 nodes = self._cancel_nodes(nodes)
                 return self._graph_result(
                     request,
@@ -214,6 +226,7 @@ class MultiAgentCoordinator:
                 )
             if self._monotonic() >= deadline:
                 await self._stop_running(running)
+                self._release_reservations(reservations, ReservationReleaseReason.TIMEOUT)
                 nodes = self._timeout_nodes(nodes)
                 return self._graph_result(
                     request,
@@ -226,6 +239,7 @@ class MultiAgentCoordinator:
 
             nodes = self._block_failed_dependents(nodes)
             capacity = self._validator.limits.max_concurrency - len(running)
+            resource_blocked = False
             if capacity > 0:
                 ready = sorted(
                     (
@@ -237,12 +251,34 @@ class MultiAgentCoordinator:
                     key=lambda node: node.key,
                 )
                 for node in ready[:capacity]:
+                    reservation_id = None
+                    if self._resource_governor is not None:
+                        decision = self._resource_governor.reserve(
+                            f"multi-agent.{node.node_id}",
+                            ResourcePriority.USER_REQUESTED,
+                            GovernorBudget(
+                                concurrency=1,
+                                duration_seconds=max(
+                                    0.001,
+                                    min(
+                                        300.0,
+                                        self._validator.limits.total_budget.max_elapsed_seconds,
+                                    ),
+                                ),
+                            ),
+                        )
+                        if not decision.allowed or decision.reservation_id is None:
+                            resource_blocked = True
+                            continue
+                        reservation_id = decision.reservation_id
                     running_node = replace(node, status=AgentNodeStatus.RUNNING)
                     nodes[node.node_id] = running_node
                     task = asyncio.create_task(
                         self._execute_node(request, running_node, cancellation)
                     )
                     running[task] = node.node_id
+                    if reservation_id is not None:
+                        reservations[task] = reservation_id
 
             unfinished = tuple(
                 node
@@ -252,6 +288,9 @@ class MultiAgentCoordinator:
             if not unfinished:
                 break
             if not running:
+                if resource_blocked:
+                    await asyncio.sleep(min(0.05, max(0.0, deadline - self._monotonic())))
+                    continue
                 nodes = {
                     node_id: (
                         replace(
@@ -277,7 +316,26 @@ class MultiAgentCoordinator:
             )
             for task in done:
                 node_id = running.pop(task)
-                result = task.result()
+                reservation_id = reservations.pop(task, None)
+                try:
+                    result = task.result()
+                except asyncio.CancelledError:
+                    if reservation_id is not None and self._resource_governor is not None:
+                        self._resource_governor.release(
+                            reservation_id, ReservationReleaseReason.CANCEL
+                        )
+                    raise
+                except Exception:
+                    if reservation_id is not None and self._resource_governor is not None:
+                        self._resource_governor.release(
+                            reservation_id, ReservationReleaseReason.CRASH
+                        )
+                    result = self._failure("worker_crashed", "Delegated worker crashed")
+                else:
+                    if reservation_id is not None and self._resource_governor is not None:
+                        self._resource_governor.release(
+                            reservation_id, ReservationReleaseReason.COMPLETE
+                        )
                 nodes[node_id] = self._complete_node(nodes[node_id], result)
 
         statuses = {node.status for node in nodes.values()}
@@ -310,6 +368,18 @@ class MultiAgentCoordinator:
                 reason_code = "goal_verification_failed"
                 reason = verification.reason
         return self._graph_result(request, nodes, started_at, status, reason_code, reason)
+
+    def _release_reservations(
+        self,
+        reservations: dict[asyncio.Task[AgentResult], UUID],
+        reason: ReservationReleaseReason,
+    ) -> None:
+        if self._resource_governor is None:
+            reservations.clear()
+            return
+        for reservation_id in tuple(reservations.values()):
+            self._resource_governor.release(reservation_id, reason)
+        reservations.clear()
 
     async def _execute_node(
         self,

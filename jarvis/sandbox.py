@@ -26,6 +26,12 @@ from typing import Any
 from uuid import UUID, uuid4
 
 from jarvis.computer.process import ProcessIdentityError, resolve_trusted_executable
+from jarvis.resources import (
+    ReservationReleaseReason,
+    ResourceBudget,
+    ResourceGovernor,
+    ResourcePriority,
+)
 
 SANDBOX_PROTOCOL_VERSION = 1
 DEFAULT_MAX_MESSAGE_BYTES = 65_536
@@ -452,6 +458,8 @@ class SandboxProcess:
         integration_id: str,
         parent_directory: Path,
         limits: SandboxLimits | None = None,
+        resource_governor: ResourceGovernor | None = None,
+        resource_priority: ResourcePriority = ResourcePriority.USER_REQUESTED,
     ) -> None:
         try:
             self._executable = resolve_trusted_executable(os.fspath(executable))
@@ -472,7 +480,12 @@ class SandboxProcess:
         self._integration_id = _identifier(integration_id, "Integration ID")
         self._parent_directory = _owned_directory(parent_directory, create=True)
         self._limits = limits or SandboxLimits()
+        if not isinstance(resource_priority, ResourcePriority):
+            raise SandboxConfigurationError("Sandbox resource priority is invalid")
         self._arguments = arguments
+        self._resource_governor = resource_governor
+        self._resource_priority = resource_priority
+        self._resource_reservation_id: UUID | None = None
         self._process: asyncio.subprocess.Process | None = None
         self._job: _WindowsJob | None = None
         self._paths: SandboxPaths | None = None
@@ -504,9 +517,23 @@ class SandboxProcess:
         if self.is_running:
             raise SandboxProcessError("Sandbox is already running")
         if self._process is not None:
+            self._release_resource(ReservationReleaseReason.CRASH)
             await self._stop_locked()
         if self._paths is not None:
             self._cleanup_paths_locked()
+        if self._resource_governor is not None:
+            decision = self._resource_governor.reserve(
+                f"sandbox.{self._integration_id}",
+                self._resource_priority,
+                ResourceBudget(
+                    ram_bytes=self._limits.max_memory_bytes,
+                    concurrency=self._limits.max_processes,
+                    duration_seconds=self._limits.timeout_seconds,
+                ),
+            )
+            if not decision.allowed or decision.reservation_id is None:
+                raise SandboxProcessError(f"Sandbox resource admission denied: {decision.reason}")
+            self._resource_reservation_id = decision.reservation_id
         paths = SandboxPaths.create(self._parent_directory, self._integration_id)
         job: _WindowsJob | None = None
         process: asyncio.subprocess.Process | None = None
@@ -535,6 +562,7 @@ class SandboxProcess:
                 self._job = job
                 job = None
         except Exception as error:
+            self._release_resource(ReservationReleaseReason.CRASH)
             self._process = self._process or process
             self._paths = paths
             await self._stop_locked()
@@ -566,10 +594,19 @@ class SandboxProcess:
                 await self._process.stdin.drain()
                 response = await self._read_response(message, cancellation)
                 return dict(response.payload)
-            except SandboxError:
+            except SandboxError as error:
+                reason = (
+                    ReservationReleaseReason.TIMEOUT
+                    if isinstance(error, SandboxTimeout)
+                    else ReservationReleaseReason.CANCEL
+                    if isinstance(error, SandboxCancelled)
+                    else ReservationReleaseReason.CRASH
+                )
+                self._release_resource(reason)
                 await self._stop_locked()
                 raise
             except (BrokenPipeError, ConnectionError, OSError) as error:
+                self._release_resource(ReservationReleaseReason.CRASH)
                 await self._stop_locked()
                 raise SandboxProcessError("Sandbox IPC write failed") from error
 
@@ -627,6 +664,7 @@ class SandboxProcess:
         async with self._lock:
             if self._restart_count >= self._limits.max_restarts:
                 raise SandboxProcessError("Sandbox restart limit was exhausted")
+            self._release_resource(ReservationReleaseReason.CRASH)
             await self._stop_locked()
             self._cleanup_paths_locked()
             self._restart_count += 1
@@ -634,6 +672,7 @@ class SandboxProcess:
 
     async def stop(self) -> None:
         async with self._lock:
+            self._release_resource(ReservationReleaseReason.CANCEL)
             await self._stop_locked()
 
     async def close(self) -> None:
@@ -641,6 +680,7 @@ class SandboxProcess:
             if self._closed:
                 return
             self._closed = True
+            self._release_resource(ReservationReleaseReason.CANCEL)
             await self._stop_locked()
             self._cleanup_paths_locked()
 
@@ -682,6 +722,14 @@ class SandboxProcess:
         paths, self._paths = self._paths, None
         if paths is not None:
             paths.cleanup()
+
+    def _release_resource(self, reason: ReservationReleaseReason) -> None:
+        reservation_id, self._resource_reservation_id = (
+            self._resource_reservation_id,
+            None,
+        )
+        if reservation_id is not None and self._resource_governor is not None:
+            self._resource_governor.release(reservation_id, reason)
 
 
 __all__ = [

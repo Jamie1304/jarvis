@@ -1,6 +1,6 @@
 """Project-grounded knowledge indexing and local retrieval."""
 
-from jarvis.knowledge.indexer import ProjectKnowledgeBuilder
+from jarvis.knowledge.indexer import KnowledgeIndexDeferred, ProjectKnowledgeBuilder
 from jarvis.knowledge.models import (
     Authority,
     ComponentRecord,
@@ -16,6 +16,7 @@ __all__ = [
     "Authority",
     "ComponentRecord",
     "KnowledgeItem",
+    "KnowledgeIndexDeferred",
     "KnowledgeSnapshot",
     "KnowledgeStore",
     "ProjectKnowledgeBuilder",

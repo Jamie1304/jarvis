@@ -15,6 +15,13 @@ from enum import StrEnum
 from typing import Protocol
 from uuid import UUID
 
+from jarvis.resources import (
+    ReservationReleaseReason,
+    ResourceBudget,
+    ResourceDecision,
+    ResourceGovernor,
+    ResourcePriority,
+)
 from jarvis.setup_conductor import (
     SetupConductor,
     SetupContext,
@@ -496,7 +503,7 @@ class WarmupComponent:
 class StartupWarmupRegistry:
     """Non-blocking, bounded optional prewarm registry."""
 
-    def __init__(self, governor: WarmupResourceGovernor | None = None) -> None:
+    def __init__(self, governor: WarmupResourceGovernor | ResourceGovernor | None = None) -> None:
         self._components: dict[str, WarmupComponent] = {}
         self._governor = governor
         self._task: asyncio.Task[tuple[WarmupResult, ...]] | None = None
@@ -552,23 +559,52 @@ class StartupWarmupRegistry:
                     )
                 )
                 continue
-            if self._governor is not None and not await self._governor.admit(
-                component.component_id
-            ):
-                results.append(
-                    WarmupResult(
-                        component.component_id, WarmupStatus.SKIPPED, "resource governor denied"
+            reservation_id: UUID | None = None
+            if self._governor is not None:
+                reserve = getattr(self._governor, "reserve", None)
+                if callable(reserve):
+                    decision = reserve(
+                        f"warmup.{component.component_id}",
+                        ResourcePriority.MAINTENANCE,
+                        ResourceBudget(concurrency=1, duration_seconds=120),
                     )
-                )
-                continue
+                    if not isinstance(decision, ResourceDecision) or not decision.allowed:
+                        results.append(
+                            WarmupResult(
+                                component.component_id,
+                                WarmupStatus.SKIPPED,
+                                "resource governor denied",
+                            )
+                        )
+                        continue
+                    reservation_id = decision.reservation_id
+                else:
+                    admit = getattr(self._governor, "admit", None)
+                    if not callable(admit) or not await admit(component.component_id):
+                        results.append(
+                            WarmupResult(
+                                component.component_id,
+                                WarmupStatus.SKIPPED,
+                                "resource governor denied",
+                            )
+                        )
+                        continue
+            release_reason = ReservationReleaseReason.COMPLETE
             try:
                 await component.runner()
             except asyncio.CancelledError:
+                release_reason = ReservationReleaseReason.CANCEL
                 raise
             except Exception as error:
+                release_reason = ReservationReleaseReason.CRASH
                 results.append(
                     WarmupResult(component.component_id, WarmupStatus.FAILED, type(error).__name__)
                 )
             else:
                 results.append(WarmupResult(component.component_id, WarmupStatus.READY, "ready"))
+            finally:
+                if reservation_id is not None:
+                    release = getattr(self._governor, "release", None)
+                    if callable(release):
+                        release(reservation_id, release_reason)
         return tuple(results)

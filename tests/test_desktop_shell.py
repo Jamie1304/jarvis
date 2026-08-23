@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import UTC, datetime
 from uuid import uuid4
 
 import pytest
@@ -36,6 +37,7 @@ from jarvis.desktop_shell import (
     TestDriveStepResult as DriveStepResult,
 )
 from jarvis.provisioning import ProvisioningPlan, ProvisioningPlanState, ProvisioningResult
+from jarvis.resources import ResourceGovernor, ResourceSnapshot
 from jarvis.setup_conductor import (
     InMemorySetupStore,
     SetupConductor,
@@ -277,6 +279,28 @@ async def test_startup_warmup_obeys_governor_and_can_restart() -> None:
     assert (await first)[0].status is WarmupStatus.SKIPPED
     second = warmup.start()
     assert (await second)[0].status is WarmupStatus.SKIPPED
+
+
+@pytest.mark.asyncio
+async def test_startup_warmup_uses_shared_governor_reservation() -> None:
+    class Telemetry:
+        def snapshot(self) -> ResourceSnapshot:
+            return ResourceSnapshot(
+                datetime.now(UTC),
+                cpu_cores=8,
+                ram_total_bytes=16_000,
+                ram_available_bytes=12_000,
+                disk_free_bytes=10_000_000_000,
+            )
+
+    warmup = StartupWarmupRegistry(ResourceGovernor(Telemetry()))
+    warmup.register(WarmupComponent("ready", lambda: _ready()))
+    results = await warmup.start()
+    assert results[0] == WarmupResult("ready", WarmupStatus.READY, "ready")
+
+
+async def _ready() -> None:
+    return None
 
 
 def test_invalid_shell_registry_inputs_fail_closed() -> None:
