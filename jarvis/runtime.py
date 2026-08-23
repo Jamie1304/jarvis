@@ -24,6 +24,7 @@ from jarvis.core.logging import configure_logging
 from jarvis.discovery.service import CandidateEvaluator, CapabilityGapDetector
 from jarvis.events import EventBus, InMemoryEventBus
 from jarvis.knowledge.store import KnowledgeStore
+from jarvis.mcp.manager import MCPExtensionManager
 from jarvis.memory.services import (
     ConversationContextService,
     EpisodicMemoryService,
@@ -241,6 +242,7 @@ class RuntimeContainer:
     policy_engine: PolicyEngine
     audit_sink: SQLiteAuditSink
     artifact_store: ArtifactStore
+    mcp_manager: MCPExtensionManager
     permission_broker: PermissionBroker
     tool_registry: ToolRegistry
     planning_store: SQLitePlanningStore
@@ -282,6 +284,7 @@ class RuntimeContainer:
                 self.state_store,
                 self.audit_sink,
                 self.artifact_store,
+                self.mcp_manager,
                 self.voice,
                 self.camera,
                 self.application_manager,
@@ -464,6 +467,7 @@ class ApplicationRuntime:
                 (CalculatorTool(), LocalTimeTool(), UnavailableWeatherTool()),
                 permission_broker=broker,
             )
+            mcp_manager = MCPExtensionManager(registry)
             registry.seal()
             paths.validate_storage_layout()
             planning_store = SQLitePlanningStore(paths.planning_database)
@@ -515,6 +519,7 @@ class ApplicationRuntime:
                 policy_engine=policy,
                 audit_sink=audit,
                 artifact_store=artifact_store,
+                mcp_manager=mcp_manager,
                 permission_broker=broker,
                 tool_registry=registry,
                 planning_store=planning_store,

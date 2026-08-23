@@ -48,6 +48,8 @@ class Settings(BaseSettings):
     multi_agent_max_concurrency: int = Field(default=3, gt=0, le=16)
     multi_agent_timeout_seconds: float = Field(default=120.0, gt=0, le=3_600)
     app_data_dir: Path = Path(".jarvis")
+    mcp_enabled: bool = False
+    mcp_config_path: Path | None = None
     computer_enabled: bool = False
     camera_enabled: bool = False
     application_management_enabled: bool = False

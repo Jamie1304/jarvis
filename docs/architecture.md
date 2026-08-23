@@ -56,6 +56,13 @@ receipt, invokes `_execute_authorized`, and records the outcome. Unknown tools,
 permissions, scopes, and policy all fail closed. See `docs/threat-model.md` and
 `docs/permission-model.md` for the trust assumptions and policy contract.
 
+Optional MCP servers enter through the native `MCPExtensionManager` before the
+registry is sealed. The manager validates local configuration and untrusted MCP
+tool schemas, applies an `mcp:<extension>:<tool>` namespace, and registers a
+typed adapter. MCP descriptions/results are data only; every invocation still
+uses `ToolRegistry -> PermissionBroker -> Policy`, and no broker, vault, or
+trusted-core object is passed into the MCP process. See `docs/mcp.md`.
+
 Phase 6 adds a controlled computer capability layer without changing that boundary:
 
 `AI/planner -> typed computer tool -> PermissionBroker -> policy/approval -> adapter -> Windows`
