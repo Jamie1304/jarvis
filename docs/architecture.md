@@ -88,6 +88,13 @@ one exact brokered permission and an idempotency declaration; provisioning is
 not a second package catalog or execution authority. See
 `docs/provisioning.md`.
 
+`SetupConductor` coordinates adoption-first onboarding and future capability
+setup around that provisioning boundary. It collects one normalized
+`SetupContext`, preserves existing installations and user data unless the user
+chooses otherwise, and persists resumable setup state. Setup state is not task,
+permission, credential, audit, or artifact authority. See
+`docs/setup-conductor.md`.
+
 Phase 6 adds a controlled computer capability layer without changing that boundary:
 
 `AI/planner -> typed computer tool -> PermissionBroker -> policy/approval -> adapter -> Windows`
