@@ -80,6 +80,14 @@ roots; credentials remain opaque and are resolved by `CredentialVault` on the
 trusted side; process/device operations are typed declarations rather than
 arbitrary spawn. See `docs/sandbox-host-proxies.md`.
 
+Generic provisioning uses the same boundary through typed
+`ProvisioningPlan`/`ProvisioningAction` records. Providers inspect reality
+before every effect, never receive arbitrary shell scripts, and return bounded
+outcomes for verification, recovery, and explicit rollback. Each action has
+one exact brokered permission and an idempotency declaration; provisioning is
+not a second package catalog or execution authority. See
+`docs/provisioning.md`.
+
 Phase 6 adds a controlled computer capability layer without changing that boundary:
 
 `AI/planner -> typed computer tool -> PermissionBroker -> policy/approval -> adapter -> Windows`
