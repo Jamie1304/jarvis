@@ -380,3 +380,25 @@ pass through the normal tool and Permission Broker path. Registered contracts ar
 snapshotted against mutation, and all successful nodes still require aggregate goal
 evidence before completion. See
 `docs/multi-agent-orchestration.md`.
+
+Phase 17 adds a derived ambient presentation boundary without adding authority:
+
+`canonical EventBus/runtime facts -> PresenceProjection -> PresenceSnapshot`
+
+`PresenceProjection` is a rebuildable view of task, voice, permission, tool, health,
+error, runtime, and Safe Mode facts. It does not own lifecycle state, permission
+decisions, or task completion. Optional microphone/audio/activity signals are
+bounded display hints only. `PresenceThemeManifest` is declarative and may refer
+only to validated package-owned asset references; trusted desktop UI does not
+execute theme HTML, JavaScript, Python, or arbitrary code.
+
+`PresentationSurface` is the generic application boundary for presenting typed
+artifact references, package assets, bounded documents/charts/plans/comparisons,
+and declarative controls. It never loads an arbitrary filesystem path. Its
+`query_state()` result is an observed `UiStateSnapshot`, not an echo of the last
+request, so `VerificationEngine` can compare intended and actual surface state.
+Presentation controls are metadata rendered by application services; they do not
+bypass the normal TaskController, PlanningEngine, Tool, or PermissionBroker
+paths. Gesture/camera control remains a future self-built capability candidate,
+not a core feature or donor runtime. See
+`docs/presence-and-presentation.md`.
