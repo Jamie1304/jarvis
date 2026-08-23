@@ -26,6 +26,13 @@ from jarvis.planning.models import (
     StepExecutionResult,
     StepExecutionStatus,
 )
+from jarvis.skills import (
+    PrimedSkillContext,
+    SkillClassification,
+    SkillContextSources,
+    SkillManifest,
+    prime_skill_context,
+)
 from jarvis.tools.models import (
     ToolCaller,
     ToolEffectDisposition,
@@ -141,6 +148,29 @@ class AgentContext:
 
 class ContextManager:
     """Build bounded provider context while retaining protected facts."""
+
+    def prime_skill(
+        self,
+        skill: SkillManifest,
+        *,
+        workspace_id: str,
+        profile_id: str,
+        sources: SkillContextSources,
+        token_budget: int,
+        allowed_classifications: frozenset[SkillClassification],
+        privacy_mode: bool = False,
+    ) -> PrimedSkillContext:
+        """Prime one skill through the same canonical context manager boundary."""
+
+        return prime_skill_context(
+            skill,
+            workspace_id=workspace_id,
+            profile_id=profile_id,
+            sources=sources,
+            token_budget=token_budget,
+            allowed_classifications=allowed_classifications,
+            privacy_mode=privacy_mode,
+        )
 
     def prepare(
         self,
