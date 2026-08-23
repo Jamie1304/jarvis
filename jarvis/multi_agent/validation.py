@@ -11,8 +11,11 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from jarvis.multi_agent.models import (
     AgentType,
+    DataCeiling,
     DelegatedTaskNode,
     DelegationGraph,
+    FilesystemScope,
+    NetworkScope,
     OrchestrationRequest,
     ResourceBudget,
 )
@@ -28,6 +31,7 @@ class DelegationValidationReason(StrEnum):
     UNAVAILABLE_AGENT = "unavailable_agent"
     RECURSIVE_DELEGATION = "recursive_delegation"
     SCOPE_ESCALATION = "scope_escalation"
+    DATA_SCOPE_ESCALATION = "data_scope_escalation"
     MALFORMED_INPUT = "malformed_input"
     UNRESOLVED_DEPENDENCY = "unresolved_dependency"
     CYCLE = "cycle"
@@ -63,6 +67,9 @@ class ProposedAgentNode(BaseModel):
     required_permissions: list[str] = Field(default_factory=list, max_length=16)
     context_keys: list[str] = Field(default_factory=list, max_length=32)
     evidence_references: list[str] = Field(default_factory=list, max_length=64)
+    filesystem_roots: list[str] = Field(default_factory=list, max_length=32)
+    network_origins: list[str] = Field(default_factory=list, max_length=32)
+    data_ceiling: str = Field(default=DataCeiling.PUBLIC.value, min_length=1, max_length=32)
     budget: ProposedResourceBudget
     timeout_seconds: float = Field(gt=0, le=3_600, allow_inf_nan=False)
 
@@ -80,12 +87,15 @@ class DelegationLimits:
     max_nodes: int
     max_concurrency: int
     total_budget: ResourceBudget
+    max_depth: int = 1
 
     def __post_init__(self) -> None:
         if self.max_nodes <= 0 or self.max_nodes > 32:
             raise ValueError("Delegation node limit must be between 1 and 32")
         if self.max_concurrency <= 0 or self.max_concurrency > 16:
             raise ValueError("Delegation concurrency limit must be between 1 and 16")
+        if self.max_depth <= 0 or self.max_depth > 1:
+            raise ValueError("Delegation recursion depth must be exactly one")
 
 
 class DelegationValidator:
@@ -181,6 +191,42 @@ class DelegationValidator:
                 DelegationValidationReason.SCOPE_ESCALATION,
                 "Delegation cannot expand the parent or agent contract scope",
             )
+        try:
+            filesystem_scope = FilesystemScope(tuple(proposed.filesystem_roots))
+            network_scope = NetworkScope(tuple(proposed.network_origins))
+            data_ceiling = DataCeiling(proposed.data_ceiling)
+        except ValueError as error:
+            raise DelegationValidationError(
+                DelegationValidationReason.SCOPE_ESCALATION,
+                "Delegation contains an invalid host or data scope",
+            ) from error
+        if (
+            not request.filesystem_scope.contains(filesystem_scope)
+            or not contract.filesystem_scope.contains(filesystem_scope)
+            or not request.network_scope.contains(network_scope)
+            or not contract.network_scope.contains(network_scope)
+        ):
+            raise DelegationValidationError(
+                DelegationValidationReason.SCOPE_ESCALATION,
+                "Delegation cannot expand filesystem or network scope",
+            )
+        if not request.data_ceiling.contains(data_ceiling) or not contract.data_ceiling.contains(
+            data_ceiling
+        ):
+            raise DelegationValidationError(
+                DelegationValidationReason.DATA_SCOPE_ESCALATION,
+                "Delegation cannot expand its data ceiling",
+            )
+        if not request.model_policy.contains(contract.model_policy):
+            raise DelegationValidationError(
+                DelegationValidationReason.SCOPE_ESCALATION,
+                "Delegation cannot expand its model policy",
+            )
+        if not request.delegation_policy.contains(contract.delegation_policy):
+            raise DelegationValidationError(
+                DelegationValidationReason.RECURSIVE_DELEGATION,
+                "Delegation cannot expand its recursion policy",
+            )
         budget = self._budget(proposed.budget)
         if not contract.resource_budget.contains(budget):
             raise DelegationValidationError(
@@ -202,6 +248,21 @@ class DelegationValidator:
             raise DelegationValidationError(
                 DelegationValidationReason.MALFORMED_INPUT,
                 "Delegation references unavailable context or evidence",
+            )
+        selected_context = tuple(item for item in request.context if item.key in context_keys)
+        selected_evidence = tuple(
+            item for item in request.evidence if item.reference_id in evidence_references
+        )
+        if any(
+            item.contains_secret or not data_ceiling.allows(item.classification)
+            for item in selected_context
+        ) or any(
+            item.contains_secret or not data_ceiling.allows(item.classification)
+            for item in selected_evidence
+        ):
+            raise DelegationValidationError(
+                DelegationValidationReason.DATA_SCOPE_ESCALATION,
+                "Delegated worker cannot receive secret or out-of-ceiling data",
             )
         try:
             validated = contract.accepted_task_schema.model_validate(proposed.input)
@@ -230,6 +291,9 @@ class DelegationValidator:
             evidence_references=evidence_references,
             budget=budget,
             timeout_seconds=proposed.timeout_seconds,
+            filesystem_scope=filesystem_scope,
+            network_scope=network_scope,
+            data_ceiling=data_ceiling,
         )
 
     def _validate_total_budget(self, nodes: tuple[DelegatedTaskNode, ...]) -> None:

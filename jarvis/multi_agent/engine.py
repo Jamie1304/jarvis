@@ -331,6 +331,9 @@ class MultiAgentCoordinator:
             return self._failure("owned_input_invalid", "Owned agent input became invalid")
         context_by_key = {item.key: item for item in request.context}
         evidence_by_id = {item.reference_id: item for item in request.evidence}
+        profile = contract.profile
+        if profile is None:
+            return self._failure("agent_profile_missing", "Registered agent profile is missing")
         invocation = AgentInvocation(
             request.task_id,
             node.node_id,
@@ -342,6 +345,15 @@ class MultiAgentCoordinator:
             node.required_capabilities,
             node.required_permissions,
             node.budget,
+            profile,
+            contract.model_policy,
+            node.filesystem_scope,
+            node.network_scope,
+            node.data_ceiling,
+            contract.delegation_policy,
+            contract.result_schema,
+            frozenset(node.required_tools),
+            frozenset(node.required_capabilities),
         )
         try:
             result = await asyncio.wait_for(
@@ -366,6 +378,14 @@ class MultiAgentCoordinator:
         if not isinstance(result, AgentResult):
             return self._failure(
                 "malformed_agent_result", "Delegated agent returned an unknown result type"
+            )
+        if any(
+            evidence.contains_secret or not node.data_ceiling.allows(evidence.classification)
+            for evidence in result.evidence
+        ):
+            return self._failure(
+                "agent_result_scope_violation",
+                "Delegated agent returned secret or out-of-ceiling evidence",
             )
         if not result.usage.within(node.budget):
             return AgentResult(

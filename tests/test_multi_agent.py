@@ -7,7 +7,7 @@ import copy
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 from uuid import uuid4
 
 import pytest
@@ -22,6 +22,8 @@ from jarvis.multi_agent import (
     AgentType,
     AgentWorker,
     ContextItem,
+    DataCeiling,
+    DataClassification,
     DelegatedTaskNode,
     DelegationGraph,
     DelegationLimits,
@@ -31,7 +33,9 @@ from jarvis.multi_agent import (
     EvidenceMultiAgentGoalVerifier,
     EvidenceReference,
     ExecutionMode,
+    FilesystemScope,
     MultiAgentCoordinator,
+    NetworkScope,
     OrchestrationRequest,
     OrchestrationResult,
     OrchestrationStatus,
@@ -39,6 +43,9 @@ from jarvis.multi_agent import (
     ResourceUsage,
     SingleAgentExecutor,
     SingleAgentOutcome,
+    WorkerDelegationPolicy,
+    WorkerModelPolicy,
+    WorkerProfile,
 )
 from jarvis.permissions.models import Permission
 from pydantic import BaseModel, ConfigDict
@@ -77,6 +84,12 @@ class _Worker(AgentWorker):
         available: bool = True,
         probe: _ConcurrencyProbe | None = None,
         log: list[str] | None = None,
+        profile: WorkerProfile | None = None,
+        model_policy: WorkerModelPolicy | None = None,
+        filesystem_scope: FilesystemScope | None = None,
+        network_scope: NetworkScope | None = None,
+        data_ceiling: DataCeiling = DataCeiling.INTERNAL,
+        delegation_policy: WorkerDelegationPolicy | None = None,
     ) -> None:
         self._contract = AgentContract(
             agent_id=agent_id,
@@ -89,6 +102,12 @@ class _Worker(AgentWorker):
             resource_budget=ResourceBudget(4, 2_000, 20, 2),
             result_schema=_TaskOutput,
             available=available,
+            profile=profile,
+            model_policy=model_policy or WorkerModelPolicy(),
+            filesystem_scope=filesystem_scope or FilesystemScope(),
+            network_scope=network_scope or NetworkScope(),
+            data_ceiling=data_ceiling,
+            delegation_policy=delegation_policy or WorkerDelegationPolicy(),
         )
         self.delay = delay
         self.status = status
@@ -217,11 +236,18 @@ def _request(
     *,
     permissions: frozenset[Permission] = frozenset(),
     completion_evidence: tuple[str, ...] = ("coding-evidence",),
+    context: tuple[ContextItem, ...] | None = None,
+    filesystem_scope: FilesystemScope | None = None,
+    network_scope: NetworkScope | None = None,
+    model_policy: WorkerModelPolicy | None = None,
+    data_ceiling: DataCeiling = DataCeiling.INTERNAL,
+    delegation_policy: WorkerDelegationPolicy | None = None,
 ) -> OrchestrationRequest:
     return OrchestrationRequest(
         task_id=uuid4(),
         goal="Prepare a reviewed implementation brief",
-        context=(
+        context=context
+        or (
             ContextItem("objective", "Implement the requested feature"),
             ContextItem("constraint", "Do not contact external systems"),
             ContextItem("private-extra", "Must not be copied to unrelated workers"),
@@ -231,6 +257,11 @@ def _request(
         allowed_capabilities=frozenset({"analyze", "modify", "focus"}),
         allowed_permissions=permissions,
         completion_evidence=completion_evidence,
+        filesystem_scope=filesystem_scope or FilesystemScope(),
+        network_scope=network_scope or NetworkScope(),
+        model_policy=model_policy or WorkerModelPolicy(),
+        data_ceiling=data_ceiling,
+        delegation_policy=delegation_policy or WorkerDelegationPolicy(),
     )
 
 
@@ -255,6 +286,9 @@ def _node(
     capabilities: list[str] | None = None,
     context: list[str] | None = None,
     evidence: list[str] | None = None,
+    filesystem_roots: list[str] | None = None,
+    network_origins: list[str] | None = None,
+    data_ceiling: str = DataCeiling.PUBLIC.value,
     budget: dict[str, object] | None = None,
     timeout: float = 0.5,
 ) -> dict[str, object]:
@@ -269,6 +303,9 @@ def _node(
         "required_permissions": permissions or [],
         "context_keys": context or ["objective"],
         "evidence_references": evidence or ["architecture"],
+        "filesystem_roots": filesystem_roots or [],
+        "network_origins": network_origins or [],
+        "data_ceiling": data_ceiling,
         "budget": budget or _budget(),
         "timeout_seconds": timeout,
     }
@@ -337,6 +374,195 @@ async def test_correct_delegation_passes_only_selected_context_and_evidence() ->
     assert [item.reference_id for item in research.invocations[0].evidence] == ["architecture"]
     assert [item.key for item in coding.invocations[0].context] == ["constraint"]
     assert not hasattr(research.invocations[0], "delegate")
+
+
+@pytest.mark.asyncio
+async def test_specialist_roles_receive_least_privilege_worker_contract() -> None:
+    filesystem = FilesystemScope((r"C:\workspace",))
+    network = NetworkScope(("https://api.example.test",))
+    model_policy = WorkerModelPolicy(
+        frozenset({"local-provider"}), frozenset({"small-model"}), True, 8_000
+    )
+    parent_model_policy = WorkerModelPolicy(
+        frozenset({"local-provider"}), frozenset({"small-model"}), True, 32_000
+    )
+    profile = WorkerProfile("verification-profile", "Independently inspect completion evidence")
+    verification = _Worker(
+        "verification",
+        AgentType.VERIFICATION,
+        profile=profile,
+        model_policy=model_policy,
+        filesystem_scope=filesystem,
+        network_scope=network,
+        data_ceiling=DataCeiling.SENSITIVE,
+        tools=frozenset({"repository.read", "repository.write"}),
+        capabilities=frozenset({"analyze", "modify"}),
+    )
+    diagnostics = _Worker("diagnostics", AgentType.DIAGNOSTICS)
+    coordinator, _fallback, _validator = _coordinator((verification, diagnostics))
+
+    result = await coordinator.execute(
+        _request(
+            filesystem_scope=filesystem,
+            network_scope=network,
+            model_policy=parent_model_policy,
+            data_ceiling=DataCeiling.SENSITIVE,
+            completion_evidence=("diagnostics-evidence",),
+        ),
+        _proposal(
+            _node(
+                "verification",
+                "verification",
+                filesystem_roots=[r"C:\workspace\checks"],
+                network_origins=["https://api.example.test"],
+                data_ceiling=DataCeiling.SENSITIVE.value,
+                tools=["repository.read"],
+            ),
+            _node("diagnostics", "diagnostics"),
+        ),
+    )
+
+    assert result.status is OrchestrationStatus.COMPLETED
+    invocation = verification.invocations[0]
+    assert invocation.profile == profile
+    assert invocation.model_policy == model_policy
+    assert invocation.filesystem_scope.roots == (r"c:\workspace\checks",)
+    assert invocation.network_scope.origins == ("https://api.example.test",)
+    assert invocation.data_ceiling is DataCeiling.SENSITIVE
+    assert invocation.tool_allowlist == frozenset({"repository.read"})
+    assert invocation.capability_allowlist == frozenset({"analyze"})
+    assert not invocation.delegation_policy.allow_spawn
+    assert invocation.output_schema is _TaskOutput
+
+
+@pytest.mark.parametrize(
+    ("mutation", "reason"),
+    (
+        ("filesystem", DelegationValidationReason.SCOPE_ESCALATION),
+        ("network", DelegationValidationReason.SCOPE_ESCALATION),
+        ("data", DelegationValidationReason.DATA_SCOPE_ESCALATION),
+        ("model", DelegationValidationReason.SCOPE_ESCALATION),
+    ),
+)
+def test_specialist_scope_and_profile_policy_cannot_escalate(
+    mutation: str, reason: DelegationValidationReason
+) -> None:
+    filesystem = FilesystemScope((r"C:\workspace",))
+    network = NetworkScope(("https://api.example.test",))
+    policy = WorkerModelPolicy(frozenset({"local"}), frozenset({"small"}), True, 4_000)
+    worker = _Worker(
+        "research",
+        AgentType.RESEARCH,
+        model_policy=policy,
+        filesystem_scope=filesystem,
+        network_scope=network,
+        data_ceiling=DataCeiling.SENSITIVE,
+    )
+    coding = _Worker("coding", AgentType.CODING)
+    _coordinator_instance, _fallback, validator = _coordinator((worker, coding))
+    proposal = _proposal(_node("research", "research"), _node("coding", "coding"))
+    nodes = cast(list[dict[str, object]], proposal["nodes"])
+    if mutation == "filesystem":
+        nodes[0]["filesystem_roots"] = [r"C:\other"]
+    elif mutation == "network":
+        nodes[0]["network_origins"] = ["https://evil.example.test"]
+    elif mutation == "data":
+        nodes[0]["data_ceiling"] = DataCeiling.SENSITIVE.value
+    else:
+        parent_policy = WorkerModelPolicy(
+            frozenset({"different-provider"}), frozenset({"different-model"}), True, 4_000
+        )
+        request = _request(
+            filesystem_scope=filesystem,
+            network_scope=network,
+            model_policy=parent_policy,
+            data_ceiling=DataCeiling.SENSITIVE,
+        )
+        with pytest.raises(DelegationValidationError) as captured:
+            validator.validate(proposal, request)
+        assert captured.value.reason is reason
+        return
+
+    request = _request(
+        filesystem_scope=filesystem,
+        network_scope=network,
+        model_policy=policy,
+        data_ceiling=DataCeiling.INTERNAL,
+    )
+    with pytest.raises(DelegationValidationError) as captured:
+        validator.validate(proposal, request)
+    assert captured.value.reason is reason
+
+
+def test_secret_context_is_never_selectable_for_a_specialist() -> None:
+    research = _Worker("research", AgentType.RESEARCH, data_ceiling=DataCeiling.CONFIDENTIAL)
+    coding = _Worker("coding", AgentType.CODING)
+    _coordinator_instance, _fallback, validator = _coordinator((research, coding))
+    request = _request(
+        context=(
+            ContextItem("objective", "Implement the requested feature"),
+            ContextItem("secret", "password=do-not-forward", DataClassification.CONFIDENTIAL),
+        ),
+        data_ceiling=DataCeiling.CONFIDENTIAL,
+    )
+    proposal = _proposal(
+        _node("research", "research", context=["secret"]),
+        _node("coding", "coding"),
+    )
+
+    with pytest.raises(DelegationValidationError) as captured:
+        validator.validate(proposal, request)
+    assert captured.value.reason is DelegationValidationReason.DATA_SCOPE_ESCALATION
+
+
+def test_host_scope_normalization_is_exact_and_traversal_free() -> None:
+    with pytest.raises(ValueError, match="absolute"):
+        FilesystemScope(("relative\\path",))
+    with pytest.raises(ValueError, match="traversal"):
+        FilesystemScope((r"C:\workspace\..\secrets",))
+    with pytest.raises(ValueError, match="origins"):
+        NetworkScope(("https://user:password@example.test/private",))
+    parent = FilesystemScope((r"C:\workspace",))
+    assert parent.contains(FilesystemScope((r"C:\workspace\src",)))
+    assert not parent.contains(FilesystemScope((r"C:\workspaces",)))
+    origins = NetworkScope(("https://api.example.test",))
+    assert origins.contains(NetworkScope(("https://api.example.test",)))
+    assert not origins.contains(NetworkScope(("https://sub.api.example.test",)))
+
+
+def test_recursion_policy_is_explicitly_bounded() -> None:
+    with pytest.raises(ValueError, match="worker spawn"):
+        AgentContract(
+            "research",
+            AgentType.RESEARCH,
+            "Research",
+            _TaskInput,
+            frozenset(),
+            frozenset(),
+            frozenset(),
+            ResourceBudget(1, 100, 1, 1),
+            _TaskOutput,
+            delegation_policy=WorkerDelegationPolicy(True, 1),
+        )
+    with pytest.raises(ValueError, match="exactly one"):
+        DelegationLimits(2, 1, ResourceBudget(2, 100, 2, 1), max_depth=2)
+
+
+@pytest.mark.parametrize(
+    "role",
+    (
+        AgentType.RESEARCH,
+        AgentType.CODING,
+        AgentType.INTEGRATION_BUILDER,
+        AgentType.VERIFICATION,
+        AgentType.DIAGNOSTICS,
+    ),
+)
+def test_generic_specialist_roles_have_no_delegation_authority(role: AgentType) -> None:
+    worker = _Worker(role.value, role)
+    assert worker.contract.profile is not None
+    assert worker.contract.delegation_policy == WorkerDelegationPolicy()
+    assert not worker.contract.may_delegate
 
 
 @pytest.mark.asyncio
@@ -804,6 +1030,181 @@ def test_multi_agent_domain_models_reject_malformed_state() -> None:
             "failed",
             "Failed",
         )
+
+
+def test_specialist_policy_models_cover_fail_closed_boundaries() -> None:
+    assert DataCeiling.CONFIDENTIAL.contains(DataCeiling.PUBLIC)
+    assert not DataCeiling.PUBLIC.contains(DataCeiling.INTERNAL)
+    assert DataCeiling.SENSITIVE.allows(DataClassification.SENSITIVE)
+    assert not DataCeiling.CONFIDENTIAL.allows(DataClassification.SECRET)
+
+    with pytest.raises(ValueError, match="bounded tuple"):
+        FilesystemScope(cast(Any, [r"C:\workspace"]))
+    with pytest.raises(ValueError, match="control"):
+        FilesystemScope(("C:\\workspace\n",))
+    with pytest.raises(ValueError, match="wildcards"):
+        FilesystemScope((r"C:\workspace\*",))
+    with pytest.raises(ValueError, match="unique"):
+        FilesystemScope((r"C:\workspace", r"c:\workspace"))
+
+    with pytest.raises(ValueError, match="HTTP"):
+        NetworkScope(("ftp://example.test",))
+    with pytest.raises(ValueError, match="HTTP"):
+        NetworkScope(("https://",))
+    with pytest.raises(ValueError, match="port"):
+        NetworkScope(("https://example.test:bad",))
+    with pytest.raises(ValueError, match="host"):
+        NetworkScope(("https://:443",))
+    assert NetworkScope(("http://example.test:8080",)).origins == ("http://example.test:8080",)
+    assert NetworkScope(("https://[::1]",)).origins == ("https://[::1]",)
+    with pytest.raises(ValueError, match="unique"):
+        NetworkScope(("https://example.test", "HTTPS://EXAMPLE.TEST:443"))
+
+    bounded = WorkerModelPolicy(frozenset({"p"}), frozenset({"m"}), True, 8_000)
+    narrower = WorkerModelPolicy(frozenset({"p"}), frozenset({"m"}), True, 4_000)
+    broader = WorkerModelPolicy(frozenset({"p", "other"}), frozenset({"m"}), True, 8_000)
+    assert bounded.contains(narrower)
+    assert not bounded.contains(broader)
+    with pytest.raises(ValueError, match="frozensets"):
+        WorkerModelPolicy(cast(Any, {"p"}), frozenset({"m"}))
+    with pytest.raises(ValueError, match="malformed"):
+        WorkerModelPolicy(frozenset(), frozenset(), True, 0)
+    with pytest.raises(ValueError, match="malformed"):
+        WorkerModelPolicy(frozenset({"p"}), frozenset({"m"}), cast(Any, "yes"))
+
+    assert WorkerDelegationPolicy(True, 1).contains(WorkerDelegationPolicy(False, 0))
+    assert not WorkerDelegationPolicy(False, 0).contains(WorkerDelegationPolicy(True, 1))
+    with pytest.raises(ValueError, match="recursion depth"):
+        WorkerDelegationPolicy(False, 1)
+    with pytest.raises(ValueError, match="positive"):
+        WorkerDelegationPolicy(True, 0)
+    with pytest.raises(ValueError, match="malformed"):
+        WorkerDelegationPolicy(cast(Any, "yes"), 0)
+
+    with pytest.raises(ValueError, match="profile ID"):
+        WorkerProfile("", "purpose")
+    with pytest.raises(ValueError, match="purpose"):
+        WorkerProfile("profile", "")
+
+
+def test_specialist_invocation_rejects_scope_and_allowlist_violations() -> None:
+    context = (ContextItem("public", "safe"),)
+    evidence = (_evidence("architecture"),)
+    common: dict[str, object] = {
+        "task_id": uuid4(),
+        "node_id": uuid4(),
+        "objective": "Inspect the bounded objective",
+        "validated_input": _TaskInput(topic="test"),
+        "context": context,
+        "evidence": evidence,
+        "required_tools": ("repository.read",),
+        "required_capabilities": ("analyze",),
+        "required_permissions": (),
+        "budget": ResourceBudget(1, 100, 1, 1),
+        "tool_allowlist": frozenset({"repository.read"}),
+        "capability_allowlist": frozenset({"analyze"}),
+    }
+    invocation_factory = cast(Any, AgentInvocation)
+    valid = invocation_factory(**common)
+    assert valid.context == context
+    with pytest.raises(ValueError, match="allowlist"):
+        invocation_factory(**{**common, "tool_allowlist": frozenset()})
+    with pytest.raises(ValueError, match="permissions"):
+        invocation_factory(**{**common, "required_permissions": (cast(Any, "bad"),)})
+    with pytest.raises(ValueError, match="out-of-ceiling"):
+        invocation_factory(
+            **{
+                **common,
+                "context": (ContextItem("sensitive", "private", DataClassification.SENSITIVE),),
+            }
+        )
+    with pytest.raises(ValueError, match="secret"):
+        invocation_factory(
+            **{
+                **common,
+                "evidence": (
+                    EvidenceReference(
+                        "secret",
+                        "secret=must-not-forward",
+                        "a" * 64,
+                        DataClassification.CONFIDENTIAL,
+                    ),
+                ),
+                "data_ceiling": DataCeiling.CONFIDENTIAL,
+            }
+        )
+    with pytest.raises(ValueError, match="output schema"):
+        invocation_factory(**{**common, "output_schema": cast(Any, object())})
+
+
+def test_worker_result_evidence_is_typed_and_stays_within_data_ceiling() -> None:
+    with pytest.raises(ValueError, match="typed"):
+        AgentResult(
+            AgentResultStatus.SUCCEEDED,
+            "{}",
+            cast(Any, (object(),)),
+            ResourceUsage(),
+        )
+
+    research = _Worker("research", AgentType.RESEARCH)
+    coding = _Worker("coding", AgentType.CODING)
+    coordinator, _fallback, _validator = _coordinator((research, coding))
+    original_execute = research.execute
+
+    async def secret_result(
+        invocation: AgentInvocation, cancellation: asyncio.Event
+    ) -> AgentResult:
+        del invocation, cancellation
+        return AgentResult.success(
+            _TaskOutput(value="research"),
+            evidence=(
+                EvidenceReference(
+                    "secret-result",
+                    "secret=must-not-escape",
+                    "a" * 64,
+                    DataClassification.CONFIDENTIAL,
+                ),
+            ),
+        )
+
+    research.execute = secret_result  # type: ignore[method-assign]
+    try:
+        result = asyncio.run(
+            coordinator.execute(
+                _request(completion_evidence=("coding-evidence",)),
+                _proposal(_node("research", "research"), _node("coding", "coding")),
+            )
+        )
+    finally:
+        research.execute = original_execute  # type: ignore[method-assign]
+    assert result.status is OrchestrationStatus.PARTIAL
+    research_node = next(node for node in result.nodes if node.agent_id == "research")
+    assert research_node.error_code == "agent_result_scope_violation"
+
+
+def test_specialist_contract_rejects_policy_type_escalation() -> None:
+    arguments: tuple[object, ...] = (
+        "worker",
+        AgentType.RESEARCH,
+        "Research",
+        _TaskInput,
+        frozenset(),
+        frozenset(),
+        frozenset(),
+        ResourceBudget(1, 100, 1, 1),
+        _TaskOutput,
+    )
+    contract_factory = cast(Any, AgentContract)
+    with pytest.raises(ValueError, match="delegation policy"):
+        contract_factory(*arguments, delegation_policy=cast(Any, object()))
+    with pytest.raises(ValueError, match="profile"):
+        contract_factory(*arguments, profile=cast(Any, object()))
+    with pytest.raises(ValueError, match="model policy"):
+        contract_factory(*arguments, model_policy=cast(Any, object()))
+    with pytest.raises(ValueError, match="host scopes"):
+        contract_factory(*arguments, filesystem_scope=cast(Any, object()))
+    with pytest.raises(ValueError, match="data ceiling"):
+        contract_factory(*arguments, data_ceiling=cast(Any, "secret"))
 
 
 @pytest.mark.parametrize(

@@ -13,18 +13,21 @@ application container, or global conversation.
 
 ## Contracts and roles
 
-The initial roles are main/orchestrator, research, coding, and computer. The main role
+The initial roles are main/orchestrator, Research, Coding, IntegrationBuilder,
+Verification, Diagnostics, and the existing computer capability role. The main role
 is trusted application code and cannot be registered as a worker. A contract declares
-the stable agent ID/type, responsibility, strict Pydantic task and result schemas,
-allowed tools/capabilities/permissions, resource budget, availability, and delegation
-authority. Only an orchestrator contract may declare delegation authority, and the
-worker registry rejects orchestrator or delegating workers.
+the stable agent ID/type, immutable worker profile, responsibility, strict Pydantic
+task and output schemas, model/provider policy, tool and capability allowlists,
+filesystem and exact-network scopes, data ceiling, resource budget, availability,
+and delegation policy. Only an orchestrator contract may declare delegation authority,
+and the worker registry rejects orchestrator or delegating workers.
 The registry snapshots each immutable contract at registration and checks it again at
 execution, so a worker cannot swap its schema or scope after graph validation.
 
 Each graph node records its agent, objective, validated canonical input, dependencies,
-minimum selected context keys, shared evidence references, required scope, timeout,
-reserved resource budget, lifecycle state, typed result, and error. Communication is
+minimum selected context keys, shared evidence references, narrowed host/data scope,
+per-node tool/capability allowlists, timeout, reserved resource budget, lifecycle state,
+typed result, and error. Communication is
 request/result only; there is no unbounded agent-to-agent chat channel.
 
 ## Delegation policy and execution
@@ -53,11 +56,15 @@ usage claims are not authoritative.
 ## Privilege and context boundary
 
 Delegated tool, capability, and permission sets must be subsets of both the parent
-task scope and the selected agent contract. These are declarations, not grants. A
-computer-agent action must still invoke a registered controlled computer tool through
-`PermissionBroker`; delegation or another agent's request cannot create an approval or
-receipt. Worker adapters are trusted composition and must expose only brokered,
-scope-limited capability ports to a model provider.
+task scope and the selected agent contract. The child model policy, filesystem roots,
+exact network origins, data ceiling, and delegation policy are also intersected with
+the parent and contract ceilings. These are declarations, not grants. A computer-agent
+action must still invoke a registered controlled computer tool through `PermissionBroker`;
+delegation or another agent's request cannot create an approval or receipt. Secret or
+secret-looking context/evidence is rejected before invocation. Worker adapters are
+trusted composition and must expose only brokered, scope-limited capability ports to a
+model provider; lexical filesystem scopes do not replace trusted reparse/TOCTOU
+hardening in those adapters.
 
 Trusted application code selects context keys and evidence references. It must not
 copy the full conversation, secrets, credentials, approval material, or unrelated
