@@ -1,6 +1,24 @@
 """Project-grounded knowledge indexing and local retrieval."""
 
 from jarvis.knowledge.indexer import KnowledgeIndexDeferred, ProjectKnowledgeBuilder
+from jarvis.knowledge.library import (
+    DEFAULT_KNOWLEDGE_MIGRATIONS,
+    DocumentChunk,
+    IndexedDocument,
+    KnowledgeCitation,
+    KnowledgeClassification,
+    KnowledgeLibrary,
+    KnowledgeLibraryMigrationError,
+    KnowledgeMigration,
+    KnowledgeRetrievalMode,
+    KnowledgeSearchHit,
+    KnowledgeSource,
+    KnowledgeSourceKind,
+    KnowledgeSyncResult,
+    KnowledgeSyncStatus,
+    SQLiteKnowledgeLibrary,
+    SyncState,
+)
 from jarvis.knowledge.models import (
     Authority,
     ComponentRecord,
@@ -15,12 +33,28 @@ from jarvis.knowledge.store import KnowledgeStore
 __all__ = [
     "Authority",
     "ComponentRecord",
+    "DEFAULT_KNOWLEDGE_MIGRATIONS",
+    "DocumentChunk",
+    "IndexedDocument",
     "KnowledgeItem",
+    "KnowledgeCitation",
+    "KnowledgeClassification",
     "KnowledgeIndexDeferred",
+    "KnowledgeLibrary",
+    "KnowledgeLibraryMigrationError",
+    "KnowledgeMigration",
+    "KnowledgeRetrievalMode",
+    "KnowledgeSearchHit",
+    "KnowledgeSource",
+    "KnowledgeSourceKind",
     "KnowledgeSnapshot",
     "KnowledgeStore",
+    "KnowledgeSyncResult",
+    "KnowledgeSyncStatus",
     "ProjectKnowledgeBuilder",
     "Provenance",
     "SearchResult",
+    "SQLiteKnowledgeLibrary",
+    "SyncState",
     "ToolPermissionRecord",
 ]

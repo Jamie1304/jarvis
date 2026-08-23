@@ -46,6 +46,7 @@ from jarvis.desktop_shell import (
 )
 from jarvis.discovery.service import CandidateEvaluator, CapabilityGapDetector
 from jarvis.events import EventBus, InMemoryEventBus
+from jarvis.knowledge import KnowledgeLibrary, KnowledgeLibraryMigrationError
 from jarvis.knowledge.store import KnowledgeStore
 from jarvis.mcp.manager import MCPExtensionManager
 from jarvis.memory.control import MemoryControlService
@@ -111,6 +112,7 @@ class RuntimePaths:
     planning_database: Path
     memory_database: Path
     user_model_database: Path
+    knowledge_library_database: Path
     sessions_database: Path
     audit_database: Path
     artifacts: Path
@@ -130,6 +132,7 @@ class RuntimePaths:
             base / "planning.sqlite3",
             base / "memory.sqlite3",
             base / "user-model.sqlite3",
+            base / "knowledge-library.sqlite3",
             base / "sessions.sqlite3",
             base / "audit.sqlite3",
             base / "artifacts",
@@ -176,6 +179,7 @@ class RuntimePaths:
             self.planning_database,
             self.memory_database,
             self.user_model_database,
+            self.knowledge_library_database,
             self.sessions_database,
             self.audit_database,
             self.artifacts / "artifacts.sqlite3",
@@ -292,6 +296,7 @@ class RuntimeContainer:
     memory_consistency: MemoryConsistencyService
     memory_control: MemoryControlService
     memory_retrieval: MemoryRetrievalService
+    knowledge_library: KnowledgeLibrary
     knowledge: KnowledgeStore
     system_memory: ProjectSystemMemory
     discovery: CapabilityGapDetector
@@ -330,6 +335,7 @@ class RuntimeContainer:
                 self.planning_store,
                 self.memory_store,
                 self.user_model_store,
+                self.knowledge_library,
                 self.state_store,
                 self.audit_sink,
                 self.artifact_store,
@@ -466,6 +472,7 @@ class ApplicationRuntime:
         planning_store: SQLitePlanningStore | None = None
         memory_store: SQLiteMemoryStore | None = None
         user_model_store: UserModelStore | None = None
+        knowledge_library: KnowledgeLibrary | None = None
         recovery: RecoveryStore | None = None
         artifact_store: ArtifactStore | None = None
         transaction_id = str(uuid4())
@@ -545,6 +552,8 @@ class ApplicationRuntime:
             paths.validate_storage_layout()
             memory_store = SQLiteMemoryStore(paths.memory_database)
             user_model_store = UserModelStore(paths.user_model_database)
+            knowledge_library = KnowledgeLibrary(paths.knowledge_library_database)
+            assert knowledge_library is not None
             session_store = AgentSessionStore(paths.sessions_database)
             paths.validate_storage_layout()
             artifact_store = ArtifactStore(paths.artifacts, event_bus=events)
@@ -861,11 +870,21 @@ class ApplicationRuntime:
                 "store",
                 lambda: (
                     ControlCenterItem(
-                        "knowledge-store",
-                        "Knowledge library",
+                        "project-knowledge-store",
+                        "Project knowledge index",
                         ControlCenterStatus.AVAILABLE,
-                        "Generated knowledge is read as bounded context",
+                        "Generated project knowledge is read as bounded context",
                         metadata=(("item_count", str(len(knowledge.snapshot.items))),),
+                    ),
+                    ControlCenterItem(
+                        "personal-knowledge-library",
+                        "Personal knowledge library",
+                        ControlCenterStatus.AVAILABLE,
+                        "Only explicitly approved sources are indexed",
+                        metadata=(
+                            ("document_count", str(len(knowledge_library.list_documents()))),
+                            ("source_count", str(len(knowledge_library.list_sources()))),
+                        ),
                     ),
                 ),
             )
@@ -976,6 +995,7 @@ class ApplicationRuntime:
                 memory_retrieval=MemoryRetrievalService(
                     memory_store, conversation_memory, system_memory
                 ),
+                knowledge_library=knowledge_library,
                 knowledge=knowledge,
                 system_memory=system_memory,
                 discovery=CapabilityGapDetector(frozenset({"calculator", "local_time"})),
@@ -1008,6 +1028,7 @@ class ApplicationRuntime:
                     "planning": "validated",
                     "memory": "validated",
                     "user_model": "validated",
+                    "knowledge_library": "validated",
                     "audit": "validated",
                     "artifacts": "validated",
                 },
@@ -1019,6 +1040,7 @@ class ApplicationRuntime:
             AuditStoreError,
             PlanningStoreError,
             MemoryMigrationError,
+            KnowledgeLibraryMigrationError,
             UserModelMigrationError,
             StateStoreError,
             sqlite3.DatabaseError,
@@ -1035,7 +1057,13 @@ class ApplicationRuntime:
                     )
                 )
             cls._close_partial_stores(
-                artifact_store, memory_store, user_model_store, planning_store, audit, state_store
+                artifact_store,
+                memory_store,
+                user_model_store,
+                knowledge_library,
+                planning_store,
+                audit,
+                state_store,
             )
             return cls(
                 None,
@@ -1056,7 +1084,13 @@ class ApplicationRuntime:
                     )
                 )
             cls._close_partial_stores(
-                artifact_store, memory_store, user_model_store, planning_store, audit, state_store
+                artifact_store,
+                memory_store,
+                user_model_store,
+                knowledge_library,
+                planning_store,
+                audit,
+                state_store,
             )
             return cls(
                 None,
