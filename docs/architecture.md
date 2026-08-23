@@ -95,6 +95,13 @@ chooses otherwise, and persists resumable setup state. Setup state is not task,
 permission, credential, audit, or artifact authority. See
 `docs/setup-conductor.md`.
 
+`CapabilityFactory` applies the central `DISCOVER -> ADOPT -> REUSE -> BUILD`
+order. It reuses active JARVIS capabilities and compatible machine/API/library
+capabilities before requesting setup or generating an inactive package
+proposal. Generated proposals stop at `READY_FOR_APPROVAL`; they cannot become
+active or authoritative through factory output alone. See
+`docs/capability-factory.md`.
+
 Phase 6 adds a controlled computer capability layer without changing that boundary:
 
 `AI/planner -> typed computer tool -> PermissionBroker -> policy/approval -> adapter -> Windows`
