@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from collections.abc import Mapping
+from typing import TYPE_CHECKING, Any
 
 from jarvis.ai.providers.base import AIProvider
 from jarvis.ai.providers.ollama import OllamaProvider
+from jarvis.ai.providers.registry import ProviderDefinition, ProviderMetadata, ProviderRegistry
 from jarvis.application import JarvisAssistantService
 from jarvis.conversation.service import ConversationService
 from jarvis.core.config import Settings
@@ -19,19 +21,47 @@ if TYPE_CHECKING:
     from jarvis.runtime import ApplicationRuntime
 
 
-def create_ai_provider(settings: Settings) -> AIProvider:
-    """Create the configured model adapter while validating supported providers."""
-
-    if settings.ai_provider.casefold() != "ollama":
-        raise ConfigurationError(f"Unsupported AI provider: {settings.ai_provider}")
-    if not local_model_endpoint_is_safe(settings.ai_endpoint):
+def _ollama_factory(configuration: Mapping[str, Any]) -> AIProvider:
+    endpoint = str(configuration["endpoint"])
+    if not local_model_endpoint_is_safe(endpoint):
         raise ConfigurationError("Ollama endpoint must use a literal local loopback address")
     return OllamaProvider(
-        model=settings.ai_model,
-        endpoint=settings.ai_endpoint,
-        timeout_seconds=settings.ai_timeout_seconds,
-        context_limit=settings.ai_context_limit,
+        model=str(configuration["model"]),
+        endpoint=endpoint,
+        timeout_seconds=float(configuration["timeout_seconds"]),
+        context_limit=int(configuration["context_limit"]),
     )
+
+
+def create_provider_registry() -> ProviderRegistry:
+    """Return the native registry; integrations register definitions, not branches."""
+
+    return ProviderRegistry(
+        (
+            ProviderDefinition(
+                metadata=ProviderMetadata("ollama", "Ollama", "native", local_only=True),
+                factory=_ollama_factory,
+            ),
+        )
+    )
+
+
+def create_ai_provider(settings: Settings) -> AIProvider:
+    """Create the configured provider through the provider registry."""
+
+    registry = create_provider_registry()
+    try:
+        return registry.create(
+            settings.ai_provider,
+            {
+                "model": settings.ai_model,
+                "endpoint": settings.ai_endpoint,
+                "timeout_seconds": settings.ai_timeout_seconds,
+                "context_limit": settings.ai_context_limit,
+            },
+        )
+    except KeyError as error:
+        raise ConfigurationError(f"Unsupported AI provider: {settings.ai_provider}") from error
 
 
 def create_assistant_service(

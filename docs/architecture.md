@@ -20,6 +20,10 @@ Phase 1 adds a deliberately narrow conversational path: normalized text or trans
 
 Conversation history is process-local and typed. The ordinary chat path has no long-term memory, tool execution, computer control, planning, or autonomous behavior. Raw microphone samples remain in memory only and are discarded after transcription. Long-running streams have cancellation requests and UI-visible status events.
 
+Provider selection is registry-based and persistent execution sessions are
+separate from task, goal, user-memory, and conversation-memory authorities;
+see [provider-and-session-runtime.md](provider-and-session-runtime.md).
+
 Phase 2 adds a separate, bounded task path while preserving the ordinary chat path:
 
 `request → interpret → construct task → plan → select capability → execute → observe → verify → respond`

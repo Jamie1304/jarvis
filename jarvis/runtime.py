@@ -15,6 +15,7 @@ from uuid import uuid4
 
 from jarvis.agent_runtime import AgentLoop
 from jarvis.ai.providers.base import AIProvider
+from jarvis.ai.sessions import AgentSessionStore
 from jarvis.bootstrap import create_ai_provider
 from jarvis.conversation.service import ConversationService
 from jarvis.core.config import Settings, get_settings
@@ -78,6 +79,7 @@ class RuntimePaths:
     state_database: Path
     planning_database: Path
     memory_database: Path
+    sessions_database: Path
     audit_database: Path
     logs: Path
     config: Path
@@ -94,6 +96,7 @@ class RuntimePaths:
             base / "state.sqlite3",
             base / "planning.sqlite3",
             base / "memory.sqlite3",
+            base / "sessions.sqlite3",
             base / "audit.sqlite3",
             base / "logs",
             base / "config",
@@ -136,6 +139,7 @@ class RuntimePaths:
             self.state_database,
             self.planning_database,
             self.memory_database,
+            self.sessions_database,
             self.audit_database,
         )
         sidecars = tuple(
@@ -237,6 +241,7 @@ class RuntimeContainer:
     planning_engine: PlanningEngine
     task_controller: TaskController
     memory_store: SQLiteMemoryStore
+    session_store: AgentSessionStore
     conversation_memory: ConversationContextService
     long_term_memory: LongTermMemoryService
     episodic_memory: EpisodicMemoryService
@@ -265,6 +270,7 @@ class RuntimeContainer:
             resources = (
                 self.event_bus,
                 self.conversation,
+                self.session_store,
                 self.planning_store,
                 self.memory_store,
                 self.state_store,
@@ -475,6 +481,7 @@ class ApplicationRuntime:
                 )
             paths.validate_storage_layout()
             memory_store = SQLiteMemoryStore(paths.memory_database)
+            session_store = AgentSessionStore(paths.sessions_database)
             paths.validate_storage_layout()
             root = resolved_project_root
             knowledge = KnowledgeStore.load(root / "knowledge" / "generated" / "project-index.json")
@@ -486,7 +493,11 @@ class ApplicationRuntime:
                 paths=paths,
                 ai_provider=provider,
                 conversation=ConversationService(
-                    provider, model=settings.ai_model, context_limit=settings.ai_context_limit
+                    provider,
+                    model=settings.ai_model,
+                    context_limit=settings.ai_context_limit,
+                    session_store=session_store,
+                    provider_id=settings.ai_provider,
                 ),
                 event_bus=events,
                 state_store=state_store,
@@ -499,6 +510,7 @@ class ApplicationRuntime:
                 planning_engine=engine,
                 task_controller=PlanningTaskController(engine, broker),
                 memory_store=memory_store,
+                session_store=session_store,
                 conversation_memory=conversation_memory,
                 long_term_memory=LongTermMemoryService(memory_store),
                 episodic_memory=EpisodicMemoryService(memory_store),

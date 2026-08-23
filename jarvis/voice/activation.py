@@ -15,6 +15,7 @@ from enum import StrEnum
 from typing import Protocol
 from uuid import UUID, uuid4
 
+from jarvis.ai.sessions import AgentSessionStore, AgentSessionType
 from jarvis.autonomy.models import Task, TaskStatus
 from jarvis.autonomy.orchestrator import AgentOrchestrator
 from jarvis.events import EventBus, EventEnvelope, EventType, VoiceStateChanged
@@ -246,26 +247,73 @@ class OrchestratorVoiceTaskRunner:
 class PlanningVoiceTaskRunner:
     """Voice adapter for the canonical TaskController, never AgentOrchestrator."""
 
-    def __init__(self, controller: TaskController) -> None:
+    def __init__(
+        self,
+        controller: TaskController,
+        *,
+        session_store: AgentSessionStore | None = None,
+        provider_id: str = "default",
+        model_id: str = "default",
+    ) -> None:
         self._controller = controller
+        self._session_store = session_store
+        self._provider_id = provider_id
+        self._model_id = model_id
+        self._sessions: dict[UUID, UUID] = {}
+        self._task_sessions: dict[UUID, UUID] = {}
+
+    def session_id(self, conversation_id: UUID) -> UUID | None:
+        return self._sessions.get(conversation_id)
 
     async def start(self, conversation_id: UUID, request: str) -> VoiceTaskHandle:
-        del conversation_id
+        session_id = self._ensure_session(conversation_id)
         task = await self._controller.create_task(request)
+        if session_id is not None:
+            self._task_sessions[task.task_id] = session_id
         completion = asyncio.create_task(self._run(task.task_id))
         return VoiceTaskHandle(task.task_id, completion)
 
     async def cancel(self, task_id: UUID) -> None:
+        session_id = self._task_sessions.get(task_id)
+        if session_id is not None and self._session_store is not None:
+            self._session_store.mark_synchronized(session_id, False)
         await self._controller.cancel_task(task_id)
 
     async def _run(self, task_id: UUID) -> VoiceTaskOutcome:
         result = await self._controller.run_task(task_id)
+        session_id = self._task_sessions.pop(task_id, None)
+        if session_id is not None and self._session_store is not None:
+            self._session_store.mark_synchronized(session_id, result.status.value == "completed")
         return VoiceTaskOutcome(
             task_id,
             result.status.value,
             response=None,
             error=result.error.code if result.error is not None else None,
         )
+
+    def _ensure_session(self, conversation_id: UUID) -> UUID | None:
+        if self._session_store is None:
+            return None
+        session_id = self._sessions.get(conversation_id)
+        if session_id is None:
+            session = self._session_store.create(
+                AgentSessionType.VOICE,
+                self._provider_id,
+                self._model_id,
+                context_metadata=(("conversation_id", str(conversation_id)),),
+            )
+        else:
+            current = self._session_store.get(session_id)
+            if current is None:
+                session = self._session_store.create(
+                    AgentSessionType.VOICE, self._provider_id, self._model_id
+                )
+            elif current.archived or not current.synchronized:
+                session = self._session_store.rebuild(session_id)
+            else:
+                session = current
+        self._sessions[conversation_id] = session.session_id
+        return session.session_id
 
 
 class LocalVoiceController:
