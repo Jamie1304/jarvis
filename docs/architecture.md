@@ -138,6 +138,16 @@ and voice use `OutputMediumProfile` for formatting only and receive the same
 trusted permission presentation object; neither channel can create authority.
 See `docs/control-center.md`.
 
+Human-readable execution facts are provided by `ExecutionTrace` and the
+versioned `TraceStore`. They record bounded lifecycle facts, sanitized
+arguments, usage, permissions, results, artifact links, evidence, and
+verification outcomes without storing prompts or hidden chain-of-thought.
+Trace replay produces only a guarded plan: simulation has zero effects,
+checkpoint replay creates no external effects, and safe re-execution requires
+an explicitly replay-safe operation plus fresh current authorization. Recorded
+approvals are never inherited and `UNKNOWN_OUTCOME` blocks replay until trusted
+reconciliation. See `docs/execution-trace-and-replay.md`.
+
 Phase 6 adds a controlled computer capability layer without changing that boundary:
 
 `AI/planner -> typed computer tool -> PermissionBroker -> policy/approval -> adapter -> Windows`
