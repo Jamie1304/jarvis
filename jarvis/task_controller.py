@@ -22,6 +22,7 @@ from jarvis.planning.models import (
     PlanningTaskStatus,
     StepError,
 )
+from jarvis.planning.validation import PlanProposal
 
 
 @dataclass(frozen=True, slots=True)
@@ -51,6 +52,20 @@ class TaskController(Protocol):
         assumptions: tuple[str, ...] = (),
         constraints: tuple[str, ...] = (),
         budgets: ExecutionBudgets | None = None,
+    ) -> PlanningTask: ...
+    async def submit_proposal(
+        self,
+        proposal: PlanProposal,
+        *,
+        budgets: ExecutionBudgets | None = None,
+        provenance: tuple[str, ...] = (),
+    ) -> PlanningTask: ...
+    async def create_proposal_task(
+        self,
+        proposal: PlanProposal,
+        *,
+        budgets: ExecutionBudgets | None = None,
+        provenance: tuple[str, ...] = (),
     ) -> PlanningTask: ...
     async def run_task(self, task_id: UUID) -> PlanningTask: ...
     def get_task(self, task_id: UUID) -> PlanningTask | None: ...
@@ -105,6 +120,26 @@ class PlanningTaskController:
     ) -> PlanningTask:
         return await self._engine.submit(
             goal, assumptions=assumptions, constraints=constraints, budgets=budgets
+        )
+
+    async def submit_proposal(
+        self,
+        proposal: PlanProposal,
+        *,
+        budgets: ExecutionBudgets | None = None,
+        provenance: tuple[str, ...] = (),
+    ) -> PlanningTask:
+        return await self._engine.submit_proposal(proposal, budgets=budgets, provenance=provenance)
+
+    async def create_proposal_task(
+        self,
+        proposal: PlanProposal,
+        *,
+        budgets: ExecutionBudgets | None = None,
+        provenance: tuple[str, ...] = (),
+    ) -> PlanningTask:
+        return await self._engine.create_proposal_task(
+            proposal, budgets=budgets, provenance=provenance
         )
 
     async def run_task(self, task_id: UUID) -> PlanningTask:

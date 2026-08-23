@@ -19,6 +19,7 @@ from jarvis.ai.providers.base import AIProvider
 from jarvis.ai.routing import ProviderRouter
 from jarvis.ai.sessions import AgentSessionStore
 from jarvis.artifacts import ArtifactStore
+from jarvis.automations import AutomationService, AutomationStoreError, SQLiteAutomationStore
 from jarvis.bootstrap import create_provider_registry
 from jarvis.capabilities import CapabilityRegistry
 from jarvis.control_center import (
@@ -29,7 +30,6 @@ from jarvis.control_center import (
     ControlCenterStatus,
     SemanticActionMetadata,
     static_provider,
-    unavailable_item,
 )
 from jarvis.conversation.service import ConversationService
 from jarvis.core.config import Settings, get_settings
@@ -94,7 +94,9 @@ from jarvis.tools.calculator import CalculatorTool
 from jarvis.tools.local_time import LocalTimeTool
 from jarvis.tools.registry import ToolRegistry
 from jarvis.tools.weather import UnavailableWeatherTool
+from jarvis.trace import TraceError, TraceStore
 from jarvis.user_model import UserModelMigrationError, UserModelStore
+from jarvis.workflows import WorkflowTemplateRegistry
 
 
 class RuntimeStatus(StrEnum):
@@ -113,6 +115,8 @@ class RuntimePaths:
     memory_database: Path
     user_model_database: Path
     knowledge_library_database: Path
+    automation_database: Path
+    trace_database: Path
     sessions_database: Path
     audit_database: Path
     artifacts: Path
@@ -133,6 +137,8 @@ class RuntimePaths:
             base / "memory.sqlite3",
             base / "user-model.sqlite3",
             base / "knowledge-library.sqlite3",
+            base / "automations.sqlite3",
+            base / "trace.sqlite3",
             base / "sessions.sqlite3",
             base / "audit.sqlite3",
             base / "artifacts",
@@ -180,6 +186,8 @@ class RuntimePaths:
             self.memory_database,
             self.user_model_database,
             self.knowledge_library_database,
+            self.automation_database,
+            self.trace_database,
             self.sessions_database,
             self.audit_database,
             self.artifacts / "artifacts.sqlite3",
@@ -299,6 +307,10 @@ class RuntimeContainer:
     knowledge_library: KnowledgeLibrary
     knowledge: KnowledgeStore
     system_memory: ProjectSystemMemory
+    automation_store: SQLiteAutomationStore
+    trace_store: TraceStore
+    automation_service: AutomationService
+    workflow_templates: WorkflowTemplateRegistry
     discovery: CapabilityGapDetector
     candidate_evaluator: CandidateEvaluator
     recovery: RecoveryStore
@@ -317,6 +329,7 @@ class RuntimeContainer:
     voice: object | None = None
     multi_agent: object | None = None
     improvement: object | None = None
+    automation_start_task: asyncio.Task[None] | None = None
     _close_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False, repr=False)
     _closed: bool = field(default=False, init=False, repr=False)
 
@@ -325,7 +338,11 @@ class RuntimeContainer:
             if self._closed:
                 return
             object.__setattr__(self, "_closed", True)
+            if self.automation_start_task is not None:
+                self.automation_start_task.cancel()
+                await asyncio.gather(self.automation_start_task, return_exceptions=True)
             resources = (
+                self.automation_service,
                 self.event_bus,
                 self.startup_warmup,
                 self.control_center,
@@ -336,6 +353,8 @@ class RuntimeContainer:
                 self.memory_store,
                 self.user_model_store,
                 self.knowledge_library,
+                self.trace_store,
+                self.automation_store,
                 self.state_store,
                 self.audit_sink,
                 self.artifact_store,
@@ -473,6 +492,9 @@ class ApplicationRuntime:
         memory_store: SQLiteMemoryStore | None = None
         user_model_store: UserModelStore | None = None
         knowledge_library: KnowledgeLibrary | None = None
+        automation_store: SQLiteAutomationStore | None = None
+        trace_store: TraceStore | None = None
+        automation_service: AutomationService | None = None
         recovery: RecoveryStore | None = None
         artifact_store: ArtifactStore | None = None
         transaction_id = str(uuid4())
@@ -592,6 +614,19 @@ class ApplicationRuntime:
                 consistency=memory_consistency,
             )
             control_center = ControlCenterService()
+            task_controller = PlanningTaskController(engine, broker)
+            workflow_templates = WorkflowTemplateRegistry()
+            paths.validate_storage_layout()
+            automation_store = SQLiteAutomationStore(paths.automation_database)
+            paths.validate_storage_layout()
+            trace_store = TraceStore(paths.trace_database)
+            automation_service = AutomationService(
+                automation_store,
+                events,
+                task_controller,
+                workflow_registry=workflow_templates,
+                trace_store=trace_store,
+            )
 
             def tool_projection() -> tuple[ControlCenterItem, ...]:
                 items: list[ControlCenterItem] = []
@@ -903,17 +938,23 @@ class ApplicationRuntime:
             )
             control_center.register(
                 ControlCenterSection.AUTOMATIONS,
-                "scheduler",
+                "automation.service",
                 lambda: ControlCenterContribution(
-                    ControlCenterStatus.NOT_AVAILABLE,
-                    (
-                        unavailable_item(
-                            "scheduler",
-                            "Automation scheduler",
-                            "No production scheduler is enabled",
-                        ),
+                    ControlCenterStatus.AVAILABLE,
+                    tuple(
+                        ControlCenterItem(
+                            str(definition.automation_id),
+                            definition.name,
+                            (
+                                ControlCenterStatus.AVAILABLE
+                                if definition.enabled
+                                else ControlCenterStatus.DEGRADED
+                            ),
+                            "Durable event trigger and PlanningEngine dispatch",
+                        )
+                        for definition in automation_service.definitions()
                     ),
-                    "No production scheduler is enabled",
+                    "Generic automations are disabled by default until registered",
                 ),
             )
             control_center.register(ControlCenterSection.AUDIT, "store", audit_projection)
@@ -958,6 +999,10 @@ class ApplicationRuntime:
             )
             startup_warmup = StartupWarmupRegistry(resource_governor)
             startup_warmup.register(WarmupComponent("default-model", warmup_provider))
+            try:
+                automation_start_task = asyncio.create_task(automation_service.start())
+            except RuntimeError:
+                automation_start_task = None
             container = RuntimeContainer(
                 settings=settings,
                 paths=paths,
@@ -983,7 +1028,7 @@ class ApplicationRuntime:
                 tool_registry=registry,
                 planning_store=planning_store,
                 planning_engine=engine,
-                task_controller=PlanningTaskController(engine, broker),
+                task_controller=task_controller,
                 memory_store=memory_store,
                 user_model_store=user_model_store,
                 session_store=session_store,
@@ -998,6 +1043,10 @@ class ApplicationRuntime:
                 knowledge_library=knowledge_library,
                 knowledge=knowledge,
                 system_memory=system_memory,
+                automation_store=automation_store,
+                trace_store=trace_store,
+                automation_service=automation_service,
+                workflow_templates=workflow_templates,
                 discovery=CapabilityGapDetector(frozenset({"calculator", "local_time"})),
                 candidate_evaluator=CandidateEvaluator(),
                 recovery=recovery,
@@ -1014,6 +1063,7 @@ class ApplicationRuntime:
                 skill_registry=skill_registry,
                 agent_registry=agent_registry,
                 control_center=control_center,
+                automation_start_task=automation_start_task,
             )
             snapshot = recovery.create_snapshot(
                 transaction_id=transaction_id,
@@ -1029,6 +1079,8 @@ class ApplicationRuntime:
                     "memory": "validated",
                     "user_model": "validated",
                     "knowledge_library": "validated",
+                    "automations": "validated",
+                    "trace": "validated",
                     "audit": "validated",
                     "artifacts": "validated",
                 },
@@ -1038,11 +1090,13 @@ class ApplicationRuntime:
             recovery.commit_start(transaction_id, snapshot.snapshot_id)
         except (
             AuditStoreError,
+            AutomationStoreError,
             PlanningStoreError,
             MemoryMigrationError,
             KnowledgeLibraryMigrationError,
             UserModelMigrationError,
             StateStoreError,
+            TraceError,
             sqlite3.DatabaseError,
         ) as error:
             if recovery is not None:
@@ -1058,6 +1112,9 @@ class ApplicationRuntime:
                 )
             cls._close_partial_stores(
                 artifact_store,
+                automation_service,
+                trace_store,
+                automation_store,
                 memory_store,
                 user_model_store,
                 knowledge_library,
@@ -1085,6 +1142,9 @@ class ApplicationRuntime:
                 )
             cls._close_partial_stores(
                 artifact_store,
+                automation_service,
+                trace_store,
+                automation_store,
                 memory_store,
                 user_model_store,
                 knowledge_library,

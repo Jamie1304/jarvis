@@ -59,6 +59,25 @@ Schema version `1` is additive-only for the current release. Consumers must igno
 - `Tool.invoke` emits lifecycle observations only after broker authorization and never accepts event-supplied authorization.
 - Voice and camera controllers emit state observations while their existing lifecycle/permission checks remain authoritative.
 
+## Automation boundary
+
+`AutomationService` is a durable consumer of the typed bus, not a second task
+engine. A persisted `AutomationDefinition` contains a bounded trigger, optional
+declarative conditions, and exactly one fixed goal or workspace/profile-scoped
+`WorkflowTemplate` reference. A matching event creates an `AutomationRun`, then
+the service submits through `TaskController` to the canonical `PlanningEngine`.
+The resulting task still uses the normal `PermissionBroker` and verification
+path; an event can never create a trusted approval or alter policy.
+
+Definitions survive restart in `automations.sqlite3`. Run records retain event
+identity and safe metadata, not raw external payloads. Duplicate event IDs and
+recent deduplication keys are suppressed. Debounce, cooldown, bounded queues,
+and `DROP`, `QUEUE`, `RESTART_IF_SAFE`, and `PARALLEL_BOUNDED` policies limit
+event storms. Simulation persists a traceable run but creates no task and has no
+side effect. A run interrupted before task binding fails closed; an already
+bound in-flight task is reconciled from the planning authority and is not
+blindly replayed. Automation state events are projections only.
+
 No event consumer may mutate state directly, bypass `PermissionBroker`, or treat an
 event as proof that an action succeeded. Generic event logging must still apply
 redaction because the public bus does not authenticate producers or prove arbitrary

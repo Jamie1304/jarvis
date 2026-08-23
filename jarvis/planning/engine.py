@@ -52,7 +52,7 @@ from jarvis.planning.models import (
     StepVerification,
 )
 from jarvis.planning.store import PlanningStore, PlanningStoreError
-from jarvis.planning.validation import PlanValidationError, PlanValidator
+from jarvis.planning.validation import PlanProposal, PlanValidationError, PlanValidator
 from jarvis.state import ApplicationStateMachine
 from jarvis.state.models import TaskState, TransitionEvent
 from jarvis.tools.models import (
@@ -393,6 +393,77 @@ class PlanningEngine:
         if task.status in self._TERMINAL:
             return task
         return await self.run(task.task_id)
+
+    async def submit_proposal(
+        self,
+        proposal: PlanProposal,
+        *,
+        budgets: ExecutionBudgets | None = None,
+        provenance: tuple[str, ...] = (),
+    ) -> PlanningTask:
+        """Submit a declared proposal through the canonical planning owner."""
+
+        task = await self.create_proposal_task(proposal, budgets=budgets, provenance=provenance)
+        return await self.run(task.task_id)
+
+    async def create_proposal_task(
+        self,
+        proposal: PlanProposal,
+        *,
+        budgets: ExecutionBudgets | None = None,
+        provenance: tuple[str, ...] = (),
+    ) -> PlanningTask:
+        """Persist a validated declared proposal without starting effects."""
+
+        budgets = budgets or ExecutionBudgets()
+        now = self._clock()
+        task = PlanningTask(
+            task_id=uuid4(),
+            goal=proposal.goal,
+            original_assumptions=tuple(proposal.assumptions),
+            original_constraints=tuple(proposal.constraints),
+            status=PlanningTaskStatus.PLANNING,
+            plan_id=None,
+            budgets=budgets,
+            usage=BudgetUsage(),
+            created_at=now,
+            started_at=now,
+            deadline=now + timedelta(seconds=budgets.max_elapsed_seconds),
+            updated_at=now,
+        )
+        self._store.create_task(task)
+        self._publish_state(task)
+        try:
+            plan = self._validator.validate(
+                proposal,
+                task_id=task.task_id,
+                required_goal=proposal.goal,
+                required_assumptions=tuple(proposal.assumptions),
+                required_constraints=tuple(proposal.constraints),
+                provenance=provenance,
+            )
+            if len(plan.steps) > budgets.max_steps:
+                raise PlanValidationError("Plan exceeds this task's step budget")
+        except (PlanValidationError, ValueError) as error:
+            return self._fail(task, "plan_validation_failed", str(error))
+        task = replace(
+            task,
+            status=PlanningTaskStatus.READY,
+            plan_id=plan.plan_id,
+            updated_at=self._clock(),
+        )
+        self._save_state(task, plan)
+        if self._event_bus is not None:
+            self._event_bus.publish_nowait(
+                EventEnvelope.create(
+                    EventType.PLAN_CREATED,
+                    PlanCreated(plan.plan_id, len(plan.steps)),
+                    source="planning.engine",
+                    task_id=task.task_id,
+                    correlation_id=task.task_id,
+                )
+            )
+        return task
 
     def get_task(self, task_id: UUID) -> PlanningTask | None:
         """Return a durable task snapshot without executing it."""

@@ -52,7 +52,7 @@ async def test_canonical_runtime_calculates_and_recovers_persisted_task(tmp_path
     assert any(
         item.item_id == "settings" for item in center.section(ControlCenterSection.SYSTEM).items
     )
-    assert center.section(ControlCenterSection.AUTOMATIONS).status.value == "not_available"
+    assert center.section(ControlCenterSection.AUTOMATIONS).status.value == "available"
 
     task = await runtime.container.task_controller.submit_task("calculate 25% of 800")
     assert task.status is PlanningTaskStatus.COMPLETED
