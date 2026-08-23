@@ -22,7 +22,7 @@ from typing import Final, Protocol
 from uuid import UUID, uuid4
 
 from jarvis.memory.models import RetentionPolicy, Sensitivity
-from jarvis.memory.policy import contains_secret
+from jarvis.memory.policy import contains_prompt_injection, contains_secret
 
 
 class UserModelMigrationError(RuntimeError):
@@ -130,7 +130,11 @@ def _validate_json(value: object, *, depth: int = 0) -> None:
             raise ValueError("User-model value contains a non-finite number")
         return
     if isinstance(value, str):
-        if len(value) > 4_000 or "\x00" in value or contains_secret(value):
+        if len(value) > 4_000 or "\x00" in value:
+            raise ValueError("User-model string is too large or contains NUL")
+        if contains_prompt_injection(value):
+            raise PermissionError("Prompt-injected user-model content is not stored")
+        if contains_secret(value):
             raise PermissionError("Credential-like user-model content is not stored")
         return
     if isinstance(value, Mapping):

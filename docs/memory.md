@@ -10,9 +10,11 @@ permission grant, tool registration, approval, or executable instruction.
 does not create a hidden repository database or upload data. Each record has a UUID,
 durable type, safe content and JSON data, UTC creation/update/access times, source
 provenance, optional confidence, sensitivity, retention policy, and computed expiry.
-The store rejects malformed migrations, duplicate IDs, expired records, and
-secret-like content. It has inspect, individual-delete, category-delete, and
-expiry-cleanup operations.
+The store also retains bounded quarantine and supersession state. It rejects
+malformed migrations, duplicate IDs, expired records, and secret-like content.
+It has inspect, individual-delete, category-delete, and expiry-cleanup operations.
+Quarantined and superseded records remain inspectable by trusted application code
+but are excluded from ordinary retrieval.
 
 Only two categories enter this database:
 
@@ -46,6 +48,22 @@ Every durable record records source category/reference/receipt time and whether 
 content was untrusted. Historical web or tool text is returned only as labelled data
 (`content_is_untrusted_data`); it must not be interpreted as instructions or used to
 alter policy, tools, prompts, approvals, or execution.
+
+`MemoryConsistencyService` scans the authoritative store for exact duplicates,
+structured contradictions, stale records, explicit supersession, low confidence,
+impossible provenance, and instruction-shaped prompt injection. Findings are
+persisted as `MemoryConflictRecord` values. Similarity or matching text never
+silently merges records. Prompt-injected or impossible-provenance content is
+quarantined at the storage boundary; low-confidence long-term records are treated
+the same way until revalidated. Quarantine removes records from ordinary retrieval
+without destroying the evidence.
+
+Trusted revalidation appends `MemoryConfidenceEvent` history and may release a
+quarantine only with typed evidence. Long-term personal memory requires trusted,
+explicit user revalidation. Sensitive memory requires user confirmation, confidence
+at least 0.8, and multiple bounded evidence items. A user correction creates a new
+record and explicitly supersedes the old one; it never overwrites or merges the old
+value. External content cannot perform that correction.
 
 `MemoryRetrievalService` returns four separate result lists: `conversation`,
 `long_term`, `episodic`, and `system`. It uses deterministic local lexical matching,

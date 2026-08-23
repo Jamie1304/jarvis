@@ -10,8 +10,11 @@ transaction commits. The audit record follows the authoritative planning commit;
 the state projection and events follow it as non-authoritative observations.
 
 Memory, knowledge, and audit remain separate stores because they have different
-retention and authority boundaries. They do not decide task completion. EventBus is
-in-process only and is never a persistence or authorization source.
+retention and authority boundaries. `SQLiteMemoryStore` remains the sole authority
+for durable memory records, conflict findings, quarantine, supersession, and
+confidence history. Consistency findings do not become instructions or approvals.
+They do not decide task completion. EventBus is in-process only and is never a
+persistence or authorization source.
 
 ## Transaction model
 
@@ -26,6 +29,13 @@ SQLite stores enable foreign keys, WAL, a bounded busy timeout, ordered migratio
 future-schema refusal, and `PRAGMA integrity_check`. Corrupt or future persistence
 opens place `ApplicationRuntime` in `SAFE_MODE`; no task is guessed, replayed, or
 silently repaired.
+
+Memory consistency remediation is explicit: revalidation appends evidence and a
+confidence event, user correction creates a replacement and supersession record,
+and quarantine only removes a record from normal retrieval. Duplicate or
+contradictory records are never merged because embeddings or lexical similarity
+looked close. Prompt-injected or impossible-provenance content is treated as data
+or quarantine evidence, never as a personal fact.
 
 ## Restart semantics
 

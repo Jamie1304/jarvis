@@ -52,6 +52,7 @@ from jarvis.memory.services import (
     ConversationContextService,
     EpisodicMemoryService,
     LongTermMemoryService,
+    MemoryConsistencyService,
     MemoryRetrievalService,
     ProjectSystemMemory,
 )
@@ -287,6 +288,7 @@ class RuntimeContainer:
     conversation_memory: ConversationContextService
     long_term_memory: LongTermMemoryService
     episodic_memory: EpisodicMemoryService
+    memory_consistency: MemoryConsistencyService
     memory_retrieval: MemoryRetrievalService
     knowledge: KnowledgeStore
     system_memory: ProjectSystemMemory
@@ -954,6 +956,7 @@ class ApplicationRuntime:
                 conversation_memory=conversation_memory,
                 long_term_memory=LongTermMemoryService(memory_store),
                 episodic_memory=EpisodicMemoryService(memory_store),
+                memory_consistency=MemoryConsistencyService(memory_store),
                 memory_retrieval=MemoryRetrievalService(
                     memory_store, conversation_memory, system_memory
                 ),

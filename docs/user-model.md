@@ -25,7 +25,10 @@ retention expiry is a separate audited purge.
 The API accepts structured records, not raw messages or an utterance ingestion
 stream. Credential-like fields, secret sensitivity, raw transcript fields, and
 credential-like source references are rejected before persistence. Raw
-credentials belong only in `CredentialVault`.
+credentials belong only in `CredentialVault`. Instruction-shaped prompt-injection
+content is also rejected; imported or model-derived values remain explicitly
+inferred data and cannot become trusted personal facts merely because they are
+stored.
 
 ## Context and privacy
 

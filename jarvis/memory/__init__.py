@@ -6,9 +6,14 @@ from jarvis.memory.models import (
     EpisodicAction,
     LongTermEligibility,
     LongTermMemoryCandidate,
+    MemoryConfidenceEvent,
+    MemoryConflictKind,
+    MemoryConflictRecord,
+    MemoryConflictStatus,
     MemoryProvenance,
     MemoryRecord,
     MemoryRetrieval,
+    MemoryRevalidation,
     MemorySource,
     MemoryType,
     RetentionDecision,
@@ -16,16 +21,22 @@ from jarvis.memory.models import (
     Sensitivity,
     SystemMemoryHit,
 )
-from jarvis.memory.policy import LongTermRetentionPolicy
+from jarvis.memory.policy import LongTermRetentionPolicy, contains_prompt_injection
 from jarvis.memory.services import (
     ContextSummarizer,
     ConversationContextService,
     EpisodicMemoryService,
     LongTermMemoryService,
+    MemoryConsistencyService,
     MemoryRetrievalService,
     ProjectSystemMemory,
 )
-from jarvis.memory.store import MemoryMigration, MemoryMigrationError, SQLiteMemoryStore
+from jarvis.memory.store import (
+    DEFAULT_MIGRATIONS,
+    MemoryMigration,
+    MemoryMigrationError,
+    SQLiteMemoryStore,
+)
 
 __all__ = [
     "ContextSummarizer",
@@ -38,9 +49,16 @@ __all__ = [
     "LongTermMemoryCandidate",
     "LongTermMemoryService",
     "LongTermRetentionPolicy",
+    "DEFAULT_MIGRATIONS",
+    "MemoryConfidenceEvent",
+    "MemoryConflictKind",
+    "MemoryConflictRecord",
+    "MemoryConflictStatus",
+    "MemoryConsistencyService",
     "MemoryMigration",
     "MemoryMigrationError",
     "MemoryProvenance",
+    "MemoryRevalidation",
     "MemoryRecord",
     "MemoryRetrieval",
     "MemoryRetrievalService",
@@ -52,4 +70,5 @@ __all__ = [
     "Sensitivity",
     "SQLiteMemoryStore",
     "SystemMemoryHit",
+    "contains_prompt_injection",
 ]

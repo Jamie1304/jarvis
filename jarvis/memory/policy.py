@@ -32,6 +32,20 @@ _SECRET_PATTERNS = (
     re.compile(r"\b(?:api[_ -]?key|password|secret|token)\s*[:=]\s*\S+", re.IGNORECASE),
 )
 
+_PROMPT_INJECTION_PATTERNS = (
+    re.compile(
+        r"\b(?:ignore|disregard|override)\s+(?:all|any|the|your|previous|prior)?\s*"
+        r"(?:instructions|policies|rules|safety)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(r"\b(?:system|developer)\s+(?:message|prompt|instruction)\b", re.IGNORECASE),
+    re.compile(
+        r"\b(?:call|invoke|run|execute)\s+(?:the\s+)?(?:tool|command|function)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(r"\b(?:grant|approve|allow)\s+(?:permission|access)\b", re.IGNORECASE),
+)
+
 
 def contains_secret(value: str) -> bool:
     """Heuristically identify common credentials before durable persistence.
@@ -43,6 +57,17 @@ def contains_secret(value: str) -> bool:
     return any(pattern.search(value) is not None for pattern in _SECRET_PATTERNS)
 
 
+def contains_prompt_injection(value: str) -> bool:
+    """Detect instruction-shaped content before it can influence memory retrieval.
+
+    This is intentionally conservative pattern matching. It is a poisoning
+    boundary, not a claim that arbitrary natural language can be classified
+    perfectly.
+    """
+
+    return any(pattern.search(value) is not None for pattern in _PROMPT_INJECTION_PATTERNS)
+
+
 class LongTermRetentionPolicy:
     """Deny by default; durable user facts require a meaningful, confirmed candidate."""
 
@@ -51,6 +76,8 @@ class LongTermRetentionPolicy:
             candidate.content + "\n" + candidate.data
         ):
             return LongTermEligibility(RetentionDecision.DENY, "secret_content", candidate)
+        if contains_prompt_injection(candidate.content + "\n" + candidate.data):
+            return LongTermEligibility(RetentionDecision.DENY, "prompt_injection", candidate)
         if candidate.provenance.untrusted_content:
             return LongTermEligibility(RetentionDecision.DENY, "untrusted_source", candidate)
         if candidate.provenance.source is not MemorySource.USER:
@@ -58,6 +85,10 @@ class LongTermRetentionPolicy:
         if not candidate.user_confirmed:
             return LongTermEligibility(
                 RetentionDecision.DENY, "user_confirmation_required", candidate
+            )
+        if candidate.sensitivity is Sensitivity.SENSITIVE and candidate.confidence < 0.8:
+            return LongTermEligibility(
+                RetentionDecision.DENY, "sensitive_validation_required", candidate
             )
         if candidate.confidence < 0.5:
             return LongTermEligibility(RetentionDecision.DENY, "insufficient_confidence", candidate)
