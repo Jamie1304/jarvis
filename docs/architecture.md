@@ -148,6 +148,17 @@ an explicitly replay-safe operation plus fresh current authorization. Recorded
 approvals are never inherited and `UNKNOWN_OUTCOME` blocks replay until trusted
 reconciliation. See `docs/execution-trace-and-replay.md`.
 
+Long-horizon goals use `GoalSupervisor` only as a bounded coordinator around
+the canonical `PlanningEngine`. `GoalSupervisorStore` persists immutable user
+intent and high-level recovery state; it does not own task, plan, permission,
+capability, artifact, or verification truth. Missing capabilities go through
+the registry and existing `DISCOVER -> ADOPT -> REUSE -> BUILD` factory, and
+only active certified capability results may proceed. Before `BLOCKED`, all
+generic alternative categories are examined. Time, token, cost, retry,
+replan, disk, network, and risk ceilings are trusted immutable limits; active
+or unknown execution outcomes require reconciliation rather than blind retry.
+See `docs/goal-supervisor.md`.
+
 Phase 6 adds a controlled computer capability layer without changing that boundary:
 
 `AI/planner -> typed computer tool -> PermissionBroker -> policy/approval -> adapter -> Windows`

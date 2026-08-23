@@ -37,10 +37,20 @@ class TaskResult:
 
 class TaskController(Protocol):
     async def create_task(
-        self, goal: str, *, budgets: ExecutionBudgets | None = None
+        self,
+        goal: str,
+        *,
+        assumptions: tuple[str, ...] = (),
+        constraints: tuple[str, ...] = (),
+        budgets: ExecutionBudgets | None = None,
     ) -> PlanningTask: ...
     async def submit_task(
-        self, goal: str, *, budgets: ExecutionBudgets | None = None
+        self,
+        goal: str,
+        *,
+        assumptions: tuple[str, ...] = (),
+        constraints: tuple[str, ...] = (),
+        budgets: ExecutionBudgets | None = None,
     ) -> PlanningTask: ...
     async def run_task(self, task_id: UUID) -> PlanningTask: ...
     def get_task(self, task_id: UUID) -> PlanningTask | None: ...
@@ -74,14 +84,28 @@ class PlanningTaskController:
         self._broker = broker
 
     async def create_task(
-        self, goal: str, *, budgets: ExecutionBudgets | None = None
+        self,
+        goal: str,
+        *,
+        assumptions: tuple[str, ...] = (),
+        constraints: tuple[str, ...] = (),
+        budgets: ExecutionBudgets | None = None,
     ) -> PlanningTask:
-        return await self._engine.create_task(goal, budgets=budgets)
+        return await self._engine.create_task(
+            goal, assumptions=assumptions, constraints=constraints, budgets=budgets
+        )
 
     async def submit_task(
-        self, goal: str, *, budgets: ExecutionBudgets | None = None
+        self,
+        goal: str,
+        *,
+        assumptions: tuple[str, ...] = (),
+        constraints: tuple[str, ...] = (),
+        budgets: ExecutionBudgets | None = None,
     ) -> PlanningTask:
-        return await self._engine.submit(goal, budgets=budgets)
+        return await self._engine.submit(
+            goal, assumptions=assumptions, constraints=constraints, budgets=budgets
+        )
 
     async def run_task(self, task_id: UUID) -> PlanningTask:
         return await self._engine.run(task_id)
