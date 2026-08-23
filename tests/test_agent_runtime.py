@@ -2,11 +2,16 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterator
+from types import SimpleNamespace
+from typing import Any, cast
 from uuid import uuid4
 
 import pytest
 from jarvis.agent_runtime import (
     AgentContext,
+    AgentEffect,
+    AgentEffectOutcome,
+    AgenticPlanningStepExecutor,
     AgentLoop,
     AgentLoopBudget,
     AgentMessage,
@@ -15,6 +20,9 @@ from jarvis.agent_runtime import (
     AgentTerminationReason,
     ContextManager,
     LoopGuard,
+    _estimate_tokens,
+    _is_context_error,
+    _parse_model_output,
     classify_retry,
 )
 from jarvis.ai.models import (
@@ -26,9 +34,19 @@ from jarvis.ai.models import (
     ProviderHealth,
 )
 from jarvis.ai.providers.base import AIProvider
+from jarvis.tools.base import Tool
 from jarvis.tools.calculator import CalculatorTool
 from jarvis.tools.local_time import LocalTimeTool
+from jarvis.tools.models import (
+    SemanticVersion,
+    ToolEffectDisposition,
+    ToolManifest,
+    ToolPlatform,
+    ToolResult,
+    ToolResultStatus,
+)
 from jarvis.tools.registry import ToolRegistry
+from pydantic import BaseModel, ConfigDict
 
 
 class SequenceProvider(AIProvider):
@@ -67,6 +85,55 @@ class ContextErrorProvider(SequenceProvider):
             self.failed = True
             raise ValueError("context length exceeded")
         return GenerationResult(self.responses.pop(0).strip(), model="fake")
+
+
+class RetryInput(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    value: str
+
+
+class RetryOutput(BaseModel):
+    value: str
+
+
+class SafeRetryTool(Tool[RetryInput, RetryOutput]):
+    _manifest = ToolManifest(
+        tool_id="safe_retry",
+        name="Safe retry",
+        description="Deterministic test capability",
+        version=SemanticVersion(1, 0, 0),
+        capability_tags=frozenset({"test"}),
+        input_schema=RetryInput,
+        output_schema=RetryOutput,
+        declared_permissions=frozenset(),
+        supported_platforms=frozenset(ToolPlatform),
+        timeout_seconds=1.0,
+        implementation_id="tests.SafeRetryTool",
+    )
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    @property
+    def manifest(self) -> ToolManifest:
+        return self._manifest
+
+    @property
+    def input_model(self) -> type[RetryInput]:
+        return RetryInput
+
+    async def _execute_authorized(self, context: object, validated_input: RetryInput) -> ToolResult:
+        del context
+        self.calls += 1
+        if self.calls == 1:
+            return ToolResult.failure(
+                ToolResultStatus.INTERNAL_FAILURE,
+                "safe_transient",
+                "retryable pre-effect failure",
+                effect_disposition=ToolEffectDisposition.NO_EFFECT,
+            )
+        return ToolResult.success(RetryOutput(value=validated_input.value))
 
 
 def _loop(provider: AIProvider) -> AgentLoop:
@@ -214,6 +281,24 @@ async def test_context_error_recovers_once_with_bounded_retry() -> None:
 
 
 @pytest.mark.asyncio
+async def test_safe_pre_effect_failure_retries_and_then_finalizes() -> None:
+    invalid = (
+        '{"kind":"tool_call","request_id":"00000000-0000-0000-0000-000000000001",'
+        '"tool_id":"safe_retry","arguments":{"value":"retry"}}'
+    )
+    provider = SequenceProvider((invalid, '{"kind":"response","content":"ok"}'))
+    loop = AgentLoop(
+        provider,
+        ToolRegistry((SafeRetryTool(),)),
+        model="fake",
+        context_limit=4096,
+    )
+    result = await loop.run(uuid4(), "retry safely")
+    assert result.termination_reason is AgentTerminationReason.COMPLETED
+    assert result.usage.retries == 1
+
+
+@pytest.mark.asyncio
 async def test_loop_guard_detects_repeated_semantic_no_progress() -> None:
     response = (
         '{"kind":"tool_call","request_id":"00000000-0000-0000-0000-000000000001",'
@@ -229,4 +314,135 @@ def test_retry_classification_never_replays_unknown_effect() -> None:
     assert classify_retry(malformed_response=True) is AgentRetryClass.MALFORMED_RESPONSE
     assert classify_retry(cancelled=True) is AgentRetryClass.CANCEL
     assert classify_retry(provider_error=TimeoutError()) is AgentRetryClass.PROVIDER_TRANSIENT
-    assert LoopGuard().observe_progress("same response") is False
+    assert classify_retry(provider_error=ValueError("429 rate limit")) is AgentRetryClass.RATE_LIMIT
+    assert (
+        classify_retry(
+            effect=AgentEffect(
+                uuid4(),
+                "x",
+                {},
+                status=ToolResultStatus.UNKNOWN_OUTCOME,
+                effect_outcome=AgentEffectOutcome.UNKNOWN_OUTCOME,
+            )
+        )
+        is AgentRetryClass.UNKNOWN_OUTCOME
+    )
+    guard = LoopGuard()
+    assert guard.observe_progress("same response") is False
+    assert guard.observe_progress("same-response") is False
+    assert guard.observe_progress("same response") is True
+    assert guard.observe_call("tool", {"x": 1}) is False
+    assert guard.observe_call("tool", {"x": 1}) is False
+    assert guard.observe_call("tool", {"x": 1}) is True
+
+
+def test_context_and_structured_contracts_reject_malformed_values() -> None:
+    with pytest.raises(ValueError):
+        AgentContext("", "goal")
+    with pytest.raises(ValueError):
+        AgentContext("request", "goal", provider_context_limit=4, reserved_output=4)
+    with pytest.raises(ValueError):
+        AgentContext("request", "goal", security_context=(("", "value"),))
+    with pytest.raises(ValueError):
+        AgentLoopBudget(max_turns=0)
+    with pytest.raises(ValueError):
+        AgentMessage(MessageRole.USER, "")
+    assert _parse_model_output('{"kind":"response","content":"ok","extra":1}')[0] == "malformed"
+    assert _parse_model_output('{"kind":"tool_calls","calls":[]}')[0] == "malformed"
+    assert (
+        _parse_model_output('{"kind":"tool_call","request_id":"x","tool_id":"a","arguments":[]}')[0]
+        == "malformed"
+    )
+    assert (
+        _parse_model_output(
+            '{"kind":"tool_call","request_id":"00000000-0000-0000-0000-000000000001",'
+            '"tool_id":"calculator","arguments":{}}'
+        )[0]
+        == "calls"
+    )
+    assert (
+        _parse_model_output('{"kind":"tool_calls","calls":[{"request_id":"x"}]}')[0] == "malformed"
+    )
+    assert _parse_model_output('{"kind":"other"}')[0] == "malformed"
+    assert _estimate_tokens("") == 1
+    assert _is_context_error(ValueError("maximum context exceeded"))
+    assert not _is_context_error(ValueError("ordinary failure"))
+
+
+def test_context_manager_and_loop_guard_cover_bounded_projections() -> None:
+    context = AgentContext("request", "goal", provider_context_limit=128, reserved_output=16)
+    manager = ContextManager()
+    with pytest.raises(ValueError):
+        manager.prepare(context, (), conversation_id=uuid4(), model="fake", context_limit=256)
+    request = manager.prepare(
+        context,
+        (AgentMessage(MessageRole.USER, "request"),),
+        conversation_id=uuid4(),
+        model="fake",
+        context_limit=128,
+    )
+    assert request.messages
+    effect = AgentEffect(uuid4(), "tool", {}, ToolResultStatus.INTERNAL_FAILURE)
+    guard = LoopGuard()
+    assert guard.observe_failure(effect) is False
+    assert guard.observe_failure(effect) is False
+    assert guard.observe_failure(effect) is True
+    with pytest.raises(ValueError):
+        LoopGuard(threshold=1)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "reason", [AgentTerminationReason.COMPLETED, AgentTerminationReason.CANCELLED]
+)
+async def test_planning_adapter_maps_bounded_results(reason: AgentTerminationReason) -> None:
+    class FakeLoop:
+        async def run(self, task_id: object, prompt: str, *, cancellation: asyncio.Event) -> object:
+            del task_id, prompt, cancellation
+            return SimpleNamespace(
+                termination_reason=reason,
+                proposed_result="proposed",
+                effects=(),
+            )
+
+    adapter = AgenticPlanningStepExecutor(FakeLoop())  # type: ignore[arg-type]
+    result = await adapter.execute(
+        cast(Any, SimpleNamespace(task_id=uuid4(), goal="goal")),
+        cast(Any, SimpleNamespace()),
+        asyncio.Event(),
+    )
+    assert result.status.value in {"succeeded", "cancelled"}
+
+
+@pytest.mark.asyncio
+async def test_planning_adapter_maps_approval_pause_and_failure() -> None:
+    class FakeLoop:
+        def __init__(self, reason: AgentTerminationReason) -> None:
+            self.reason = reason
+
+        async def run(self, task_id: object, prompt: str, *, cancellation: asyncio.Event) -> object:
+            del task_id, prompt, cancellation
+            return SimpleNamespace(
+                termination_reason=self.reason,
+                proposed_result=None,
+                effects=(
+                    AgentEffect(
+                        uuid4(),
+                        "tool",
+                        {},
+                        ToolResultStatus.PERMISSION_DENIED,
+                        approval_request_ids=(uuid4(),),
+                    ),
+                ),
+            )
+
+    for reason, expected in (
+        (AgentTerminationReason.APPROVAL_PAUSED, "waiting_for_permission"),
+        (AgentTerminationReason.PROVIDER_FAILURE, "deterministic_failure"),
+    ):
+        result = await AgenticPlanningStepExecutor(cast(Any, FakeLoop(reason))).execute(
+            cast(Any, SimpleNamespace(task_id=uuid4(), goal="goal")),
+            cast(Any, SimpleNamespace()),
+            asyncio.Event(),
+        )
+        assert result.status.value == expected
