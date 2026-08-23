@@ -32,7 +32,8 @@ from jarvis.desktop_shell import (
     WarmupResult,
 )
 from jarvis.permissions.models import ActionDescriptor, ApprovalRequest, PermissionRequest
-from jarvis.planning.models import PlanningTask
+from jarvis.planning.editing import PlanEdit, PlanInspection, PlanRevision
+from jarvis.planning.models import OwnedPlan, PlanningTask
 from jarvis.setup_conductor import SetupContext
 from jarvis.speech.stt import SpeechToTextService, Transcription
 from jarvis.speech.tts import SpeakableChunker, TextToSpeechService
@@ -271,6 +272,29 @@ class JarvisAssistantService:
         """Request clean cancellation of a running task."""
 
         return await self._require_task_controller().cancel_task(task_id)
+
+    def inspect_plan(self, task_id: UUID) -> PlanInspection | None:
+        """Expose plan facts through the canonical application task service."""
+
+        return self._require_task_controller().inspect_plan_details(task_id)
+
+    def list_plan_revisions(self, task_id: UUID) -> tuple[OwnedPlan, ...]:
+        """Return persisted revisions without exposing a planner to the UI."""
+
+        return self._require_task_controller().list_plan_revisions(task_id)
+
+    async def edit_plan(self, task_id: UUID, edit: PlanEdit) -> PlanRevision:
+        return await self._require_task_controller().edit_plan(task_id, edit)
+
+    async def checkpoint_plan(self, task_id: UUID, edit: PlanEdit) -> PlanRevision:
+        return await self._require_task_controller().checkpoint_plan(task_id, edit)
+
+    async def replan_task(
+        self, task_id: UUID, *, additional_constraints: tuple[str, ...] = ()
+    ) -> PlanRevision:
+        return await self._require_task_controller().replan_task(
+            task_id, additional_constraints=additional_constraints
+        )
 
     async def stream_text(
         self,

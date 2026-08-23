@@ -7,7 +7,7 @@ import hashlib
 import json
 import logging
 from abc import ABC, abstractmethod
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
@@ -23,6 +23,15 @@ from jarvis.events import (
     StepStarted,
 )
 from jarvis.permissions.audit import SQLiteAuditSink
+from jarvis.planning.editing import (
+    PlanEdit,
+    PlanEditError,
+    PlanInspection,
+    PlanRevision,
+    PlanStepSpec,
+    PlanStepView,
+    StructuredStepEdit,
+)
 from jarvis.planning.models import (
     BudgetUsage,
     EffectOutcome,
@@ -287,6 +296,7 @@ class PlanningEngine:
         state_machine: ApplicationStateMachine | None = None,
         event_bus: EventBus | None = None,
         lifecycle_audit: SQLiteAuditSink | None = None,
+        approval_invalidator: Callable[[UUID], Awaitable[tuple[UUID, ...]]] | None = None,
     ) -> None:
         self._store = store
         self._advisor = advisor
@@ -298,6 +308,7 @@ class PlanningEngine:
         self._state_machine = state_machine
         self._event_bus = event_bus
         self._lifecycle_audit = lifecycle_audit
+        self._approval_invalidator = approval_invalidator
         self._cancellations: dict[UUID, asyncio.Event] = {}
 
     async def create_task(
@@ -397,6 +408,401 @@ class PlanningEngine:
         """Return the current immutable plan snapshot without executing it."""
 
         return self._store.load_plan(task_id)
+
+    def inspect_plan_details(self, task_id: UUID) -> PlanInspection | None:
+        """Return a UI-safe projection of the current authoritative plan."""
+
+        task = self._store.load_task(task_id)
+        plan = self._store.load_plan(task_id)
+        if task is None or plan is None:
+            return None
+        names = {step.step_id: step.key for step in plan.steps}
+        views = tuple(
+            PlanStepView(
+                key=step.key,
+                status=step.status,
+                dependencies=tuple(names[item] for item in step.dependencies),
+                tool_id=step.tool_id,
+                effect=(
+                    "privileged_or_external"
+                    if step.expensive_action or step.required_permissions
+                    else "no_declared_external_effect"
+                ),
+                capabilities=(step.capability,),
+                permissions=step.required_permissions,
+                verification=(step.verification_rule, *step.expected_evidence),
+                resource_estimate=(
+                    f"max_retries={step.max_retries}",
+                    f"expensive_action={str(step.expensive_action).lower()}",
+                ),
+                evidence=step.result.evidence if step.result is not None else (),
+            )
+            for step in plan.steps
+        )
+        return PlanInspection(
+            task_id=task_id,
+            plan_id=plan.plan_id,
+            version=plan.version,
+            goal=plan.goal,
+            constraints=plan.constraints,
+            status=task.status,
+            plan_status=plan.status,
+            steps=views,
+            capabilities=plan.required_capabilities,
+            permissions=plan.required_permissions,
+            verification=plan.completion_criteria,
+            resource_estimates=(
+                f"max_steps={task.budgets.max_steps}",
+                f"max_elapsed_seconds={task.budgets.max_elapsed_seconds:g}",
+                f"max_expensive_actions={task.budgets.max_expensive_actions}",
+                f"max_retries={task.budgets.max_retries}",
+                f"executed_steps={task.usage.executed_steps}",
+                f"expensive_actions={task.usage.expensive_actions}",
+            ),
+            budgets=task.budgets,
+            usage=task.usage,
+            provenance=plan.provenance,
+            updated_at=plan.updated_at,
+        )
+
+    def list_plan_revisions(self, task_id: UUID) -> tuple[OwnedPlan, ...]:
+        """Return immutable persisted plan revisions, oldest first."""
+
+        return self._store.list_plan_revisions(task_id)
+
+    async def apply_plan_edit(self, task_id: UUID, edit: PlanEdit) -> PlanRevision:
+        """Validate and persist a structured pre-effect user edit."""
+
+        return await self._revise_plan(task_id, edit, checkpoint_branch=False)
+
+    async def create_checkpoint_branch(self, task_id: UUID, edit: PlanEdit) -> PlanRevision:
+        """Create a new plan revision without reversing or replaying prior effects."""
+
+        return await self._revise_plan(task_id, edit, checkpoint_branch=True)
+
+    async def request_replan(
+        self, task_id: UUID, *, additional_constraints: tuple[str, ...] = ()
+    ) -> PlanRevision:
+        """Delegate a user-requested replan to the existing PlanAdvisor only."""
+
+        task, plan = self._load_state(task_id)
+        if task.usage.executed_steps or any(
+            step.status is not PlanningStepStatus.QUEUED for step in plan.steps
+        ):
+            raise PlanningEngineError("A replan request is only editable before execution")
+        if len(additional_constraints) > 32 or any(
+            not item.strip() or len(item) > 1_000 for item in additional_constraints
+        ):
+            raise PlanEditError("Additional constraints are malformed")
+        constraints = task.original_constraints + additional_constraints
+        evidence = ReplanEvidence(
+            original_goal=task.goal,
+            original_assumptions=task.original_assumptions,
+            original_constraints=constraints,
+            failed_step_key="user_requested_replan",
+            error=StepError(
+                "user_requested_replan",
+                "The user requested a fresh proposal before execution",
+                FailureKind.DETERMINISTIC,
+            ),
+            observed_evidence=(),
+            prior_plan_version=plan.version,
+        )
+        try:
+            raw = await self._advisor.replan(evidence)
+            replacement = self._validator.validate(
+                raw,
+                task_id=task.task_id,
+                version=plan.version + 1,
+                required_goal=task.goal,
+                required_assumptions=task.original_assumptions,
+                required_constraint_prefix=constraints,
+                provenance=("user.requested_replan",),
+            )
+            if len(replacement.steps) > task.budgets.max_steps:
+                raise PlanValidationError("Replan exceeds this task's step budget")
+        except (PlanValidationError, ValueError) as error:
+            raise PlanningEngineError("Requested replan failed validation") from error
+        return await self._persist_revision(
+            task,
+            plan,
+            replacement,
+            changed_fields=("plan", "constraints"),
+            checkpoint_branch=False,
+            provenance="user.requested_replan",
+        )
+
+    async def _revise_plan(
+        self, task_id: UUID, edit: PlanEdit, *, checkpoint_branch: bool
+    ) -> PlanRevision:
+        task, plan = self._load_state(task_id)
+        if task.status in self._TERMINAL:
+            raise PlanningEngineError("A terminal task cannot be edited")
+        if not checkpoint_branch and task.usage.executed_steps:
+            raise PlanningEngineError("Plan edits are only allowed before execution")
+        unknown = any(
+            step.error is not None and step.error.failure_kind is FailureKind.UNKNOWN_OUTCOME
+            for step in plan.steps
+        ) or (task.error is not None and task.error.failure_kind is FailureKind.UNKNOWN_OUTCOME)
+        if unknown:
+            raise PlanningEngineError("UNKNOWN_OUTCOME cannot be branched or replayed")
+        if any(
+            step.status in {PlanningStepStatus.RUNNING, PlanningStepStatus.VERIFYING}
+            for step in plan.steps
+        ) or task.status in {
+            PlanningTaskStatus.EXECUTING,
+            PlanningTaskStatus.VERIFYING,
+            PlanningTaskStatus.REPLANNING,
+            PlanningTaskStatus.RECOVERING,
+        }:
+            raise PlanningEngineError("Active or uncertain effects cannot be edited")
+        if checkpoint_branch and task.usage.executed_steps:
+            allowed = {
+                PlanningStepStatus.SUCCEEDED,
+                PlanningStepStatus.QUEUED,
+                PlanningStepStatus.WAITING_FOR_PERMISSION,
+            }
+            if any(step.status not in allowed for step in plan.steps):
+                raise PlanningEngineError("Checkpoint branch has invalid prior evidence")
+        raw, changed_fields = self._edit_proposal(plan, edit, checkpoint_branch)
+        try:
+            replacement = self._validator.validate(
+                raw,
+                task_id=task.task_id,
+                version=plan.version + 1,
+                required_goal=task.goal,
+                required_assumptions=task.original_assumptions,
+                required_constraint_prefix=task.original_constraints,
+                provenance=(edit.provenance,),
+            )
+            if len(replacement.steps) > task.budgets.max_steps:
+                raise PlanValidationError("Edited plan exceeds this task's step budget")
+        except (PlanValidationError, ValueError) as error:
+            raise PlanEditError("Edited plan failed PlanValidator") from error
+        if checkpoint_branch and task.usage.executed_steps:
+            completed = {step.key: step for step in plan.steps}
+            replacement = replace(
+                replacement,
+                steps=tuple(
+                    replace(
+                        step,
+                        status=PlanningStepStatus.SUCCEEDED,
+                        attempts=completed[step.key].attempts,
+                        result=completed[step.key].result,
+                        error=None,
+                    )
+                    if step.key in completed
+                    and completed[step.key].status is PlanningStepStatus.SUCCEEDED
+                    and completed[step.key].result is not None
+                    else step
+                    for step in replacement.steps
+                ),
+            )
+        return await self._persist_revision(
+            task,
+            plan,
+            replacement,
+            changed_fields=changed_fields,
+            checkpoint_branch=checkpoint_branch,
+            provenance=edit.provenance,
+        )
+
+    async def _persist_revision(
+        self,
+        task: PlanningTask,
+        plan: OwnedPlan,
+        replacement: OwnedPlan,
+        *,
+        changed_fields: tuple[str, ...],
+        checkpoint_branch: bool,
+        provenance: str,
+    ) -> PlanRevision:
+        old_fingerprints = {step.key: self._effect_fingerprint(step) for step in plan.steps}
+        new_fingerprints = {step.key: self._effect_fingerprint(step) for step in replacement.steps}
+        if old_fingerprints != new_fingerprints and self._approval_invalidator is not None:
+            invalidated = await self._approval_invalidator(task.task_id)
+        else:
+            invalidated = ()
+        now = self._clock()
+        updated_task = replace(
+            task,
+            status=PlanningTaskStatus.READY,
+            plan_id=replacement.plan_id,
+            active_step_id=None,
+            waiting_request_ids=(),
+            updated_at=now,
+        )
+        self._save_state(updated_task, replacement)
+        if self._lifecycle_audit is not None:
+            self._lifecycle_audit.record_lifecycle(
+                "planning.plan_revision",
+                task_id=task.task_id,
+                detail={
+                    "parent_plan_id": str(plan.plan_id),
+                    "parent_version": str(plan.version),
+                    "plan_id": str(replacement.plan_id),
+                    "plan_version": str(replacement.version),
+                    "changed_fields": ",".join(changed_fields),
+                    "checkpoint_branch": str(checkpoint_branch).lower(),
+                    "provenance": provenance,
+                    "approval_invalidation_count": str(len(invalidated)),
+                },
+            )
+        return PlanRevision(
+            task_id=task.task_id,
+            parent_plan_id=plan.plan_id,
+            parent_version=plan.version,
+            plan=replacement,
+            changed_fields=changed_fields,
+            invalidated_approval_ids=tuple(invalidated),
+            checkpoint_branch=checkpoint_branch,
+            provenance=provenance,
+        )
+
+    @classmethod
+    def _edit_proposal(
+        cls, plan: OwnedPlan, edit: PlanEdit, checkpoint_branch: bool
+    ) -> tuple[dict[str, object], tuple[str, ...]]:
+        specs = {step.key: cls._step_spec(plan, step) for step in plan.steps}
+        changed: list[str] = []
+        for key in edit.remove_optional_steps:
+            if key not in specs:
+                raise PlanEditError(f"Cannot remove unknown step: {key}")
+            source = next(step for step in plan.steps if step.key == key)
+            if source.status not in {
+                PlanningStepStatus.QUEUED,
+                PlanningStepStatus.WAITING_FOR_PERMISSION,
+            }:
+                raise PlanEditError("Only queued optional steps can be removed")
+            if any(key in candidate.dependencies for candidate in specs.values()):
+                raise PlanEditError("A step with dependents cannot be removed")
+            if set(source.expected_evidence) & set(plan.completion_criteria):
+                raise PlanEditError("A completion-evidence step cannot be removed")
+            del specs[key]
+            changed.append(f"remove_step:{key}")
+        for replacement in edit.alternatives:
+            if replacement.key not in specs:
+                raise PlanEditError(f"Cannot replace unknown step: {replacement.key}")
+            source = next(step for step in plan.steps if step.key == replacement.key)
+            if source.status not in {
+                PlanningStepStatus.QUEUED,
+                PlanningStepStatus.WAITING_FOR_PERMISSION,
+            }:
+                raise PlanEditError("Only queued steps can be replaced")
+            specs[replacement.key] = replacement
+            changed.append(f"alternative:{replacement.key}")
+        for update in edit.structured_steps:
+            if update.key not in specs:
+                raise PlanEditError(f"Cannot edit unknown step: {update.key}")
+            source = next(step for step in plan.steps if step.key == update.key)
+            if source.status not in {
+                PlanningStepStatus.QUEUED,
+                PlanningStepStatus.WAITING_FOR_PERMISSION,
+            }:
+                raise PlanEditError("Only queued steps can be structurally edited")
+            specs[update.key] = cls._apply_step_update(specs[update.key], update)
+            changed.append(f"structured:{update.key}")
+        if edit.add_constraints:
+            changed.append("constraints")
+        if edit.pause_checkpoint:
+            changed.append("pause_checkpoint")
+        if not changed:
+            raise PlanEditError("Plan edit contains no changes")
+        raw_steps: list[dict[str, object]] = [
+            {
+                "key": spec.key,
+                "tool_id": spec.tool_id,
+                "capability": spec.capability,
+                "input": dict(spec.input),
+                "dependencies": list(spec.dependencies),
+                "required_permissions": list(spec.required_permissions),
+                "expected_output": spec.expected_output,
+                "verification_rule": spec.verification_rule,
+                "expected_evidence": list(spec.expected_evidence),
+                "expensive_action": spec.expensive_action,
+                "max_retries": spec.max_retries,
+            }
+            for spec in specs.values()
+        ]
+        capabilities: list[str] = sorted({spec.capability for spec in specs.values()})
+        permissions: list[str] = sorted(
+            {permission for spec in specs.values() for permission in spec.required_permissions}
+        )
+        raw: dict[str, object] = {
+            "goal": plan.goal,
+            "assumptions": list(plan.assumptions),
+            "constraints": list(plan.constraints) + list(edit.add_constraints),
+            "required_capabilities": capabilities,
+            "required_permissions": permissions,
+            "completion_criteria": list(plan.completion_criteria),
+            "steps": raw_steps,
+        }
+        return raw, tuple(changed)
+
+    @staticmethod
+    def _step_spec(plan: OwnedPlan, step: PlanningStep) -> PlanStepSpec:
+        names = {item.step_id: item.key for item in plan.steps}
+        return PlanStepSpec(
+            key=step.key,
+            tool_id=step.tool_id,
+            capability=step.capability,
+            input=json.loads(step.input_json),
+            dependencies=tuple(names[item] for item in step.dependencies),
+            required_permissions=tuple(item.value for item in step.required_permissions),
+            expected_output=step.expected_output,
+            verification_rule=step.verification_rule,
+            expected_evidence=step.expected_evidence,
+            expensive_action=step.expensive_action,
+            max_retries=step.max_retries,
+        )
+
+    @staticmethod
+    def _apply_step_update(spec: PlanStepSpec, update: StructuredStepEdit) -> PlanStepSpec:
+        return PlanStepSpec(
+            key=spec.key,
+            tool_id=spec.tool_id if update.tool_id is None else update.tool_id,
+            capability=spec.capability if update.capability is None else update.capability,
+            input=spec.input if update.input is None else update.input,
+            dependencies=(
+                spec.dependencies if update.dependencies is None else update.dependencies
+            ),
+            required_permissions=(
+                spec.required_permissions
+                if update.required_permissions is None
+                else update.required_permissions
+            ),
+            expected_output=(
+                spec.expected_output if update.expected_output is None else update.expected_output
+            ),
+            verification_rule=(
+                spec.verification_rule
+                if update.verification_rule is None
+                else update.verification_rule
+            ),
+            expected_evidence=(
+                spec.expected_evidence
+                if update.expected_evidence is None
+                else update.expected_evidence
+            ),
+            expensive_action=(
+                spec.expensive_action
+                if update.expensive_action is None
+                else update.expensive_action
+            ),
+            max_retries=spec.max_retries if update.max_retries is None else update.max_retries,
+        )
+
+    @staticmethod
+    def _effect_fingerprint(step: PlanningStep) -> str:
+        payload = {
+            "tool_id": step.tool_id,
+            "capability": step.capability,
+            "input": json.loads(step.input_json),
+            "permissions": [item.value for item in step.required_permissions],
+            "expensive_action": step.expensive_action,
+        }
+        encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+        return hashlib.sha256(encoded).hexdigest()
 
     def reconcile_after_restart(self) -> tuple[PlanningTask, ...]:
         """Make interrupted work explicit without replaying an unknown external effect.

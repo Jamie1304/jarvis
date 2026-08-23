@@ -13,6 +13,7 @@ from jarvis.permissions.models import (
     ApprovalDecisionResult,
     ApprovalRequest,
 )
+from jarvis.planning.editing import PlanEdit, PlanInspection, PlanRevision
 from jarvis.planning.engine import PlanningEngine
 from jarvis.planning.models import (
     ExecutionBudgets,
@@ -46,6 +47,13 @@ class TaskController(Protocol):
     def list_tasks(self) -> tuple[PlanningTask, ...]: ...
     def get_status(self, task_id: UUID) -> PlanningTaskStatus | None: ...
     def inspect_plan(self, task_id: UUID) -> OwnedPlan | None: ...
+    def inspect_plan_details(self, task_id: UUID) -> PlanInspection | None: ...
+    def list_plan_revisions(self, task_id: UUID) -> tuple[OwnedPlan, ...]: ...
+    async def edit_plan(self, task_id: UUID, edit: PlanEdit) -> PlanRevision: ...
+    async def checkpoint_plan(self, task_id: UUID, edit: PlanEdit) -> PlanRevision: ...
+    async def replan_task(
+        self, task_id: UUID, *, additional_constraints: tuple[str, ...] = ()
+    ) -> PlanRevision: ...
     def get_result(self, task_id: UUID) -> TaskResult | None: ...
     async def resume_task(self, task_id: UUID) -> PlanningTask: ...
     async def cancel_task(self, task_id: UUID) -> PlanningTask: ...
@@ -90,6 +98,25 @@ class PlanningTaskController:
 
     def inspect_plan(self, task_id: UUID) -> OwnedPlan | None:
         return self._engine.inspect_plan(task_id)
+
+    def inspect_plan_details(self, task_id: UUID) -> PlanInspection | None:
+        return self._engine.inspect_plan_details(task_id)
+
+    def list_plan_revisions(self, task_id: UUID) -> tuple[OwnedPlan, ...]:
+        return self._engine.list_plan_revisions(task_id)
+
+    async def edit_plan(self, task_id: UUID, edit: PlanEdit) -> PlanRevision:
+        return await self._engine.apply_plan_edit(task_id, edit)
+
+    async def checkpoint_plan(self, task_id: UUID, edit: PlanEdit) -> PlanRevision:
+        return await self._engine.create_checkpoint_branch(task_id, edit)
+
+    async def replan_task(
+        self, task_id: UUID, *, additional_constraints: tuple[str, ...] = ()
+    ) -> PlanRevision:
+        return await self._engine.request_replan(
+            task_id, additional_constraints=additional_constraints
+        )
 
     def get_result(self, task_id: UUID) -> TaskResult | None:
         task = self._engine.get_task(task_id)

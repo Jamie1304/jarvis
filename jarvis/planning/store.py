@@ -93,6 +93,18 @@ class PlanningStore(ABC):
     @abstractmethod
     def load_plan(self, task_id: UUID) -> OwnedPlan | None: ...
 
+    def load_plan_revision(self, task_id: UUID, version: int) -> OwnedPlan | None:
+        """Load an immutable historical plan revision when the store supports it."""
+
+        del task_id, version
+        return None
+
+    def list_plan_revisions(self, task_id: UUID) -> tuple[OwnedPlan, ...]:
+        """List persisted plan revisions in ascending version order."""
+
+        del task_id
+        return ()
+
     @abstractmethod
     def save_state(self, task: PlanningTask, plan: OwnedPlan) -> None: ...
 
@@ -298,6 +310,36 @@ class SQLitePlanningStore(PlanningStore):
             return None
         try:
             return _plan_from_dict(_object(json.loads(str(rows[0]["plan_json"]))))
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
+            raise PlanningStoreError("Stored planning plan is malformed") from error
+
+    def load_plan_revision(self, task_id: UUID, version: int) -> OwnedPlan | None:
+        if version <= 0:
+            raise PlanningStoreError("Plan revision must be positive")
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT plan_json FROM planning_plans WHERE task_id = ? AND version = ?",
+                (str(task_id), version),
+            ).fetchone()
+        if row is None:
+            return None
+        try:
+            return _plan_from_dict(_object(json.loads(str(row["plan_json"]))))
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
+            raise PlanningStoreError("Stored planning plan is malformed") from error
+
+    def list_plan_revisions(self, task_id: UUID) -> tuple[OwnedPlan, ...]:
+        with self._lock:
+            rows = tuple(
+                self._connection.execute(
+                    "SELECT plan_json FROM planning_plans WHERE task_id = ? ORDER BY version",
+                    (str(task_id),),
+                )
+            )
+        try:
+            return tuple(
+                _plan_from_dict(_object(json.loads(str(row["plan_json"])))) for row in rows
+            )
         except (KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
             raise PlanningStoreError("Stored planning plan is malformed") from error
 
@@ -518,6 +560,7 @@ def _plan_dict(plan: OwnedPlan) -> dict[str, object]:
         "status": plan.status.value,
         "created_at": _iso(plan.created_at),
         "updated_at": _iso(plan.updated_at),
+        "provenance": list(plan.provenance),
     }
 
 
@@ -541,6 +584,7 @@ def _plan_from_dict(data: dict[str, object]) -> OwnedPlan:
         status=OwnedPlanStatus(str(data["status"])),
         created_at=datetime.fromisoformat(str(data["created_at"])),
         updated_at=datetime.fromisoformat(str(data["updated_at"])),
+        provenance=_strings(data.get("provenance", [])),
     )
 
 

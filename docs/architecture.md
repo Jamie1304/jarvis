@@ -358,6 +358,13 @@ broker pause resumes without reconstructing the task. Resume never grants permis
 the same exact action re-enters the broker. Step success is evidence only, and the
 plan completes only after goal-level verification. See `docs/planning-engine.md`.
 
+Pending plans are inspected and edited through the typed application task
+service (`PlanInspection`/`PlanEdit`). `PlanningEngine` converts each edit
+through `PlanValidator` and persists a new revision; it remains the only
+planner and task authority. A checkpoint branch carries only confirmed step
+evidence and never undoes or replays an external effect. See
+`docs/plan-editing.md`.
+
 Phase 16 adds an optional bounded coordinator above, without replacing Phase 15:
 
 `single-agent default | proposal -> contract/scope validation -> shared delegated DAG -> bounded parallel workers -> typed aggregate result`

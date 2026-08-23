@@ -514,6 +514,7 @@ class ApplicationRuntime:
                 state_machine=state_machine,
                 event_bus=events,
                 lifecycle_audit=audit,
+                approval_invalidator=broker.invalidate_task_approvals,
             )
             engine.reconcile_after_restart()
             for task in engine.list_tasks():

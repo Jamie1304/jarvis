@@ -225,6 +225,7 @@ class OwnedPlan:
     status: OwnedPlanStatus
     created_at: datetime
     updated_at: datetime
+    provenance: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         _bounded(self.goal, "Plan goal")
@@ -248,6 +249,10 @@ class OwnedPlan:
             not item.strip() or len(item) > 1_000 for item in (*self.assumptions, *self.constraints)
         ):
             raise ValueError("Plan assumptions and constraints must contain bounded text")
+        if len(self.provenance) > 32 or any(
+            not item.strip() or len(item) > 512 for item in self.provenance
+        ):
+            raise ValueError("Plan provenance must be bounded and non-empty")
 
 
 @dataclass(frozen=True, slots=True)

@@ -729,6 +729,59 @@ class PermissionBroker:
             raise audit_error
         return tuple(cancelled)
 
+    async def invalidate_task_approvals(self, task_id: UUID) -> tuple[UUID, ...]:
+        """Invalidate unconsumed authority when a task's exact plan changes.
+
+        This is intentionally narrower than ``cancel_task``: task execution
+        remains alive, while every pending/approved request and issued receipt
+        is made unusable.  Consumed approvals are retained as historical audit
+        evidence and are never released or replayed.
+        """
+
+        invalidated: list[UUID] = []
+        audit_error: BaseException | None = None
+        async with self._lock:
+            for request_id, request in tuple(self._approvals.items()):
+                if request.task_id != task_id or request.status not in {
+                    ApprovalStatus.PENDING,
+                    ApprovalStatus.APPROVED,
+                }:
+                    continue
+                updated = replace(
+                    request,
+                    status=ApprovalStatus.CANCELLED,
+                    approval_source=ApprovalSource.SYSTEM,
+                )
+                if audit_error is None:
+                    try:
+                        await self._audit_approval_event(
+                            updated,
+                            None,
+                            ApprovalSource.SYSTEM,
+                            Decision.DENY,
+                            DecisionReason.APPROVAL_CANCELLED,
+                            "approval_invalidated_plan_revision",
+                        )
+                    except (Exception, asyncio.CancelledError) as error:
+                        audit_error = error
+                self._approvals[request_id] = updated
+                invalidated.append(request_id)
+            for receipt_id, receipt in tuple(self._issued_receipts.items()):
+                if receipt.task_id != task_id:
+                    continue
+                if audit_error is None:
+                    try:
+                        await self._append_receipt_audit(
+                            receipt,
+                            "not_executed_plan_revision",
+                        )
+                    except (Exception, asyncio.CancelledError) as error:
+                        audit_error = error
+                del self._issued_receipts[receipt_id]
+        if audit_error is not None:
+            raise audit_error
+        return tuple(invalidated)
+
     async def get_approval(self, request_id: UUID) -> ApprovalRequest | None:
         async with self._lock:
             self._expire_locked(self._now())

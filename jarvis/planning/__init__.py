@@ -1,5 +1,14 @@
 """Durable single-agent planning and DAG execution control plane."""
 
+from jarvis.planning.editing import (
+    PlanEdit,
+    PlanEditError,
+    PlanInspection,
+    PlanRevision,
+    PlanStepSpec,
+    PlanStepView,
+    StructuredStepEdit,
+)
 from jarvis.planning.engine import (
     BrokeredPlanningStepExecutor,
     CompletionCriteriaVerifier,
@@ -50,7 +59,13 @@ __all__ = [
     "OwnedPlan",
     "OwnedPlanStatus",
     "PlanAdvisor",
+    "PlanEdit",
+    "PlanEditError",
+    "PlanInspection",
     "PlanProposal",
+    "PlanRevision",
+    "PlanStepSpec",
+    "PlanStepView",
     "PlanValidationError",
     "PlanValidator",
     "PlanningEngine",
@@ -71,5 +86,6 @@ __all__ = [
     "StepExecutionStatus",
     "StepResult",
     "StepVerification",
+    "StructuredStepEdit",
     "SQLitePlanningStore",
 ]

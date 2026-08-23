@@ -80,6 +80,8 @@ class PlanValidator:
         required_goal: str | None = None,
         required_assumptions: tuple[str, ...] | None = None,
         required_constraints: tuple[str, ...] | None = None,
+        required_constraint_prefix: tuple[str, ...] | None = None,
+        provenance: tuple[str, ...] = (),
     ) -> OwnedPlan:
         try:
             proposal = PlanProposal.model_validate(raw)
@@ -93,6 +95,12 @@ class PlanValidator:
             raise PlanValidationError("Replanning cannot discard original assumptions")
         if required_constraints is not None and tuple(proposal.constraints) != required_constraints:
             raise PlanValidationError("Replanning cannot discard original constraints")
+        if (
+            required_constraint_prefix is not None
+            and tuple(proposal.constraints)[: len(required_constraint_prefix)]
+            != required_constraint_prefix
+        ):
+            raise PlanValidationError("Plan cannot discard original constraints")
         keys = [step.key for step in proposal.steps]
         if len(keys) != len(set(keys)):
             raise PlanValidationError("Plan step keys must be unique")
@@ -129,6 +137,7 @@ class PlanValidator:
             status=OwnedPlanStatus.READY,
             created_at=now,
             updated_at=now,
+            provenance=provenance,
         )
 
     def _step(self, proposed: ProposedStep, key_ids: dict[str, UUID]) -> PlanningStep:

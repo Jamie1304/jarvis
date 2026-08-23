@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import math
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -42,6 +42,8 @@ from jarvis.planning import (
     GoalVerification,
     OwnedPlanStatus,
     PlanAdvisor,
+    PlanEdit,
+    PlanEditError,
     PlanningEngine,
     PlanningEngineError,
     PlanningGoalVerifier,
@@ -52,6 +54,7 @@ from jarvis.planning import (
     PlanningStoreError,
     PlanningTask,
     PlanningTaskStatus,
+    PlanStepSpec,
     PlanValidationError,
     PlanValidator,
     ReplanEvidence,
@@ -60,6 +63,7 @@ from jarvis.planning import (
     StepExecutionResult,
     StepExecutionStatus,
     StepResult,
+    StructuredStepEdit,
 )
 from jarvis.state import ApplicationStateMachine
 from jarvis.task_controller import PlanningTaskController
@@ -1212,3 +1216,465 @@ def test_planning_store_context_manager_and_failed_migration(tmp_path: Path) -> 
             tmp_path / "invalid.sqlite3",
             migrations=(PlanningMigration(1, "invalid", "NOT VALID SQL"),),
         )
+
+
+@pytest.mark.asyncio
+async def test_plan_inspection_edit_revision_and_restart_history(tmp_path: Path) -> None:
+    harness = _harness(tmp_path, (_plan(_step("prepare")),), ())
+    task = await harness.engine.create_task("Prepare my system for a meeting")
+
+    inspection = harness.engine.inspect_plan_details(task.task_id)
+    assert inspection is not None
+    assert inspection.steps[0].dependencies == ()
+    assert inspection.steps[0].verification == ("evidence_contains_all", "prepare-ready")
+    assert "max_steps=32" in inspection.resource_estimates
+
+    revision = await harness.engine.apply_plan_edit(
+        task.task_id,
+        PlanEdit(
+            add_constraints=("Use the already configured local capability",),
+            structured_steps=(StructuredStepEdit(key="prepare", input={"value": "revised"}),),
+            provenance="trusted-ui.plan-editor",
+        ),
+    )
+    assert revision.plan.version == 2
+    assert revision.plan.provenance == ("trusted-ui.plan-editor",)
+    assert revision.changed_fields == ("structured:prepare", "constraints")
+    assert harness.engine.get_task(task.task_id).plan_id == revision.plan.plan_id  # type: ignore[union-attr]
+    assert [plan.version for plan in harness.engine.list_plan_revisions(task.task_id)] == [1, 2]
+    harness.store.close()
+
+    reopened = SQLitePlanningStore(tmp_path / "planning.sqlite3")
+    assert [plan.version for plan in reopened.list_plan_revisions(task.task_id)] == [1, 2]
+    assert reopened.load_plan_revision(task.task_id, 1) is not None
+    assert reopened.load_plan_revision(uuid4(), 1) is None
+    assert reopened.list_plan_revisions(uuid4()) == ()
+    with pytest.raises(PlanningStoreError, match="positive"):
+        reopened.load_plan_revision(task.task_id, 0)
+    assert reopened.load_plan(task.task_id).version == 2  # type: ignore[union-attr]
+    reopened.close()
+
+
+@pytest.mark.asyncio
+async def test_invalid_plan_edit_cannot_remove_required_or_dependent_step(tmp_path: Path) -> None:
+    proposal = _plan(_step("prepare"), _step("finish", dependencies=["prepare"]))
+    harness = _harness(
+        tmp_path,
+        (proposal,),
+        (),
+        tools=(_Tool("prepare"), _Tool("finish")),
+    )
+    task = await harness.engine.create_task("Prepare my system for a meeting")
+
+    with pytest.raises(PlanEditError, match="dependents"):
+        await harness.engine.apply_plan_edit(
+            task.task_id,
+            PlanEdit(remove_optional_steps=("prepare",)),
+        )
+
+    with pytest.raises(PlanEditError, match="completion-evidence"):
+        await harness.engine.apply_plan_edit(
+            task.task_id,
+            PlanEdit(remove_optional_steps=("finish",)),
+        )
+
+
+@pytest.mark.asyncio
+async def test_optional_step_removal_and_user_replan_use_canonical_validator(
+    tmp_path: Path,
+) -> None:
+    optional_plan = _plan(
+        _step("prepare"),
+        _step("optional"),
+    )
+    optional_plan["completion_criteria"] = ["prepare-ready"]
+    harness = _harness(
+        tmp_path / "optional",
+        (optional_plan,),
+        (),
+        tools=(_Tool("prepare"), _Tool("optional")),
+    )
+    task = await harness.engine.create_task("Prepare my system for a meeting")
+    removed = await harness.engine.apply_plan_edit(
+        task.task_id,
+        PlanEdit(remove_optional_steps=("optional",), pause_checkpoint=True),
+    )
+    assert tuple(step.key for step in removed.plan.steps) == ("prepare",)
+    assert "pause_checkpoint" in removed.changed_fields
+
+    first = _plan(_step("prepare"))
+    second = _plan(_step("prepare"), constraints=["Keep the operation local"])
+    replanning = _harness(tmp_path / "replan", (first, second), ())
+    replanning_task = await replanning.engine.create_task("Prepare my system for a meeting")
+    replanned = await replanning.engine.request_replan(
+        replanning_task.task_id,
+        additional_constraints=("Keep the operation local",),
+    )
+    assert replanned.plan.version == 2
+    assert replanned.provenance == "user.requested_replan"
+    assert replanning.advisor.replan_evidence[0].failed_step_key == "user_requested_replan"
+    assert replanning.advisor.replan_evidence[0].original_constraints == (
+        "Keep the operation local",
+    )
+
+
+@pytest.mark.asyncio
+async def test_plan_edit_invalidates_approval_when_effect_fingerprint_changes(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path.resolve()
+    tool = _PermissionTool(root)
+    policy = PolicyEngine(
+        (
+            PolicyRule(
+                policy_id="planning-approval",
+                permission=Permission.FILESYSTEM_READ,
+                decision=Decision.REQUIRE_APPROVAL,
+                scope=ScopeConstraint(paths=(str(root),), tools=frozenset({"protected"})),
+                actions=frozenset({"invoke:protected"}),
+            ),
+        )
+    )
+    broker = PermissionBroker(policy)
+    registry = ToolRegistry((tool,), permission_broker=broker)
+    store = SQLitePlanningStore(tmp_path / "approval-edit.sqlite3")
+    engine = PlanningEngine(
+        store=store,
+        advisor=_Advisor(
+            (
+                _plan(
+                    _step("protected", permissions=[Permission.FILESYSTEM_READ.value]),
+                    goal="Read the protected planning fixture",
+                ),
+            )
+        ),
+        validator=PlanValidator(registry, max_steps=1),
+        executor=BrokeredPlanningStepExecutor(registry),
+        step_verifier=EvidencePlanningStepVerifier(),
+        goal_verifier=CompletionCriteriaVerifier(),
+        approval_invalidator=broker.invalidate_task_approvals,
+    )
+    paused = await engine.submit("Read the protected planning fixture")
+    request = (await broker.pending_approvals(paused.task_id))[0]
+    details = engine.inspect_plan_details(paused.task_id)
+    assert details is not None
+    assert details.steps[0].effect == "privileged_or_external"
+
+    revision = await engine.apply_plan_edit(
+        paused.task_id,
+        PlanEdit(
+            structured_steps=(StructuredStepEdit(key="protected", input={"value": "changed"}),)
+        ),
+    )
+
+    assert revision.invalidated_approval_ids == (request.request_id,)
+    assert (await broker.get_approval(request.request_id)).status is ApprovalStatus.CANCELLED  # type: ignore[union-attr]
+    assert engine.get_task(paused.task_id).status is PlanningTaskStatus.READY  # type: ignore[union-attr]
+    assert not tool.executed
+    store.close()
+
+
+@pytest.mark.asyncio
+async def test_checkpoint_branch_inherits_only_confirmed_evidence(tmp_path: Path) -> None:
+    proposal = _plan(_step("prepare"), _step("finish", dependencies=["prepare"]))
+    harness = _harness(
+        tmp_path,
+        (proposal,),
+        (),
+        tools=(_Tool("prepare"), _Tool("finish")),
+    )
+    task = await harness.engine.create_task("Prepare my system for a meeting")
+    plan = harness.engine.inspect_plan(task.task_id)
+    assert plan is not None
+    completed = replace(
+        plan.steps[0],
+        status=PlanningStepStatus.SUCCEEDED,
+        attempts=1,
+        result=StepResult('{"value":"ok"}', ("prepare-ready",)),
+    )
+    persisted_plan = replace(plan, steps=(completed, plan.steps[1]))
+    persisted_task = replace(
+        task,
+        status=PlanningTaskStatus.READY,
+        usage=replace(task.usage, executed_steps=1),
+    )
+    harness.store.save_state(persisted_task, persisted_plan)
+
+    branch = await harness.engine.create_checkpoint_branch(
+        task.task_id,
+        PlanEdit(
+            structured_steps=(StructuredStepEdit(key="finish", input={"value": "new-finish"}),),
+            provenance="trusted-ui.checkpoint",
+        ),
+    )
+
+    assert branch.checkpoint_branch
+    assert branch.plan.steps[0].status is PlanningStepStatus.SUCCEEDED
+    assert branch.plan.steps[0].result is not None
+    assert branch.plan.steps[1].status is PlanningStepStatus.QUEUED
+    assert branch.plan.version == 2
+    assert isinstance(harness.executor, _Executor)
+    assert harness.executor.calls == []  # checkpoint creation never executes
+
+
+@pytest.mark.asyncio
+async def test_checkpoint_branch_rejects_unknown_outcome(tmp_path: Path) -> None:
+    harness = _harness(tmp_path, (_plan(_step("prepare")),), ())
+    task = await harness.engine.create_task("Prepare my system for a meeting")
+    plan = harness.engine.inspect_plan(task.task_id)
+    assert plan is not None
+    unknown = replace(
+        plan.steps[0],
+        status=PlanningStepStatus.RUNNING,
+        error=StepError(
+            "unknown",
+            "Effect boundary was interrupted",
+            FailureKind.UNKNOWN_OUTCOME,
+        ),
+    )
+    harness.store.save_state(
+        replace(
+            task,
+            status=PlanningTaskStatus.RECOVERING,
+            usage=replace(task.usage, executed_steps=1),
+            error=unknown.error,
+        ),
+        replace(plan, steps=(unknown,)),
+    )
+
+    with pytest.raises(PlanningEngineError, match="UNKNOWN_OUTCOME"):
+        await harness.engine.create_checkpoint_branch(task.task_id, PlanEdit(pause_checkpoint=True))
+
+
+def test_plan_edit_contract_rejects_malformed_metadata() -> None:
+    with pytest.raises(PlanEditError, match="provenance"):
+        PlanEdit(provenance=" ")
+    with pytest.raises(PlanEditError, match="constraints"):
+        PlanEdit(add_constraints=("x",) * 33)
+    with pytest.raises(PlanEditError, match="bounded"):
+        PlanEdit(add_constraints=(" ",))
+    with pytest.raises(PlanEditError, match="unique"):
+        PlanEdit(remove_optional_steps=("same", "same"))
+    with pytest.raises(PlanEditError, match="key"):
+        StructuredStepEdit(key=" ")
+    with pytest.raises(PlanEditError, match="input"):
+        StructuredStepEdit(key="step", input=cast(Mapping[str, object], []))
+    with pytest.raises(PlanEditError, match="input"):
+        PlanStepSpec(
+            "step",
+            "tool",
+            "capability",
+            cast(Mapping[str, object], []),
+            (),
+            (),
+            "output",
+            "evidence_contains_all",
+            ("evidence",),
+        )
+
+
+@pytest.mark.asyncio
+async def test_plan_editor_alternative_and_lifecycle_guards(tmp_path: Path) -> None:
+    harness = _harness(tmp_path, (_plan(_step("prepare")),), (_result("prepare-ready"),))
+    missing = harness.engine.inspect_plan_details(uuid4())
+    assert missing is None
+    task = await harness.engine.create_task("Prepare my system for a meeting")
+    alternative = PlanStepSpec(
+        "prepare",
+        "prepare",
+        "prepare",
+        {"value": "alternative"},
+        (),
+        (),
+        "prepare prepared",
+        "evidence_contains_all",
+        ("prepare-ready",),
+        max_retries=2,
+    )
+    revised = await harness.engine.apply_plan_edit(
+        task.task_id,
+        PlanEdit(alternatives=(alternative,), provenance="trusted-ui.alternative"),
+    )
+    assert json.loads(revised.plan.steps[0].input_json)["value"] == "alternative"
+
+    completed = await harness.engine.run(task.task_id)
+    assert completed.status is PlanningTaskStatus.COMPLETED
+    with pytest.raises(PlanningEngineError, match="terminal"):
+        await harness.engine.apply_plan_edit(task.task_id, PlanEdit(pause_checkpoint=True))
+
+
+@pytest.mark.asyncio
+async def test_plan_editor_rejects_active_and_post_effect_edits(tmp_path: Path) -> None:
+    blocking = _BlockingExecutor()
+    harness = _harness(
+        tmp_path / "active",
+        (_plan(_step("prepare")),),
+        (),
+        executor=blocking,
+    )
+    task = await harness.engine.create_task("Prepare my system for a meeting")
+    running = asyncio.create_task(harness.engine.run(task.task_id))
+    await blocking.started.wait()
+    with pytest.raises(PlanningEngineError, match="Active"):
+        await harness.engine.create_checkpoint_branch(
+            task.task_id,
+            PlanEdit(pause_checkpoint=True),
+        )
+    harness.engine.cancel(task.task_id)
+    await running
+
+    completed_harness = _harness(tmp_path / "effect", (_plan(_step("prepare")),), ())
+    completed_task = await completed_harness.engine.create_task("Prepare my system for a meeting")
+    completed_plan = completed_harness.engine.inspect_plan(completed_task.task_id)
+    assert completed_plan is not None
+    completed_step = replace(
+        completed_plan.steps[0],
+        status=PlanningStepStatus.SUCCEEDED,
+        attempts=1,
+        result=StepResult('{"value":"ok"}', ("prepare-ready",)),
+    )
+    completed_harness.store.save_state(
+        replace(
+            completed_task,
+            status=PlanningTaskStatus.READY,
+            usage=replace(completed_task.usage, executed_steps=1),
+        ),
+        replace(completed_plan, steps=(completed_step,)),
+    )
+    with pytest.raises(PlanningEngineError, match="before execution"):
+        await completed_harness.engine.apply_plan_edit(
+            completed_task.task_id,
+            PlanEdit(pause_checkpoint=True),
+        )
+    with pytest.raises(PlanningEngineError, match="before execution"):
+        await completed_harness.engine.request_replan(completed_task.task_id)
+
+
+@pytest.mark.asyncio
+async def test_plan_editor_rejects_invalid_checkpoint_and_validator_output(
+    tmp_path: Path,
+) -> None:
+    harness = _harness(
+        tmp_path / "failed-checkpoint",
+        (_plan(_step("prepare")),),
+        (),
+    )
+    task = await harness.engine.create_task("Prepare my system for a meeting")
+    plan = harness.engine.inspect_plan(task.task_id)
+    assert plan is not None
+    failed = replace(
+        plan.steps[0],
+        status=PlanningStepStatus.FAILED,
+        error=StepError("failed", "not done", FailureKind.DETERMINISTIC),
+    )
+    harness.store.save_state(
+        replace(task, usage=replace(task.usage, executed_steps=1)),
+        replace(plan, steps=(failed,)),
+    )
+    with pytest.raises(PlanningEngineError, match="invalid prior evidence"):
+        await harness.engine.create_checkpoint_branch(task.task_id, PlanEdit(pause_checkpoint=True))
+
+    invalid = _harness(tmp_path / "invalid-edit", (_plan(_step("prepare")),), ())
+    invalid_task = await invalid.engine.create_task("Prepare my system for a meeting")
+    with pytest.raises(PlanEditError, match="PlanValidator"):
+        await invalid.engine.apply_plan_edit(
+            invalid_task.task_id,
+            PlanEdit(structured_steps=(StructuredStepEdit(key="prepare", expected_output=""),)),
+        )
+
+
+@pytest.mark.asyncio
+async def test_plan_editor_structured_fields_and_replan_budget_are_bounded(
+    tmp_path: Path,
+) -> None:
+    harness = _harness(tmp_path / "fields", (_plan(_step("prepare")),), ())
+    task = await harness.engine.create_task("Prepare my system for a meeting")
+    edited = await harness.engine.apply_plan_edit(
+        task.task_id,
+        PlanEdit(
+            structured_steps=(
+                StructuredStepEdit(
+                    key="prepare",
+                    tool_id="prepare",
+                    capability="prepare",
+                    input={"value": "all-fields"},
+                    dependencies=(),
+                    required_permissions=(),
+                    expected_output="all fields",
+                    verification_rule="evidence_contains_all",
+                    expected_evidence=("prepare-ready",),
+                    expensive_action=True,
+                    max_retries=2,
+                ),
+            )
+        ),
+    )
+    assert edited.plan.steps[0].expensive_action is True
+    assert edited.plan.steps[0].max_retries == 2
+
+    first = _plan(_step("prepare"))
+    too_large = _plan(_step("prepare"), _step("extra"))
+    budget = _harness(
+        tmp_path / "budget",
+        (first, too_large),
+        (),
+        tools=(_Tool("prepare"), _Tool("extra")),
+    )
+    budget_task = await budget.engine.create_task(
+        "Prepare my system for a meeting",
+        budgets=ExecutionBudgets(max_steps=1),
+    )
+    with pytest.raises(PlanningEngineError, match="failed validation"):
+        await budget.engine.request_replan(budget_task.task_id)
+
+
+@pytest.mark.asyncio
+async def test_replan_rejects_unbounded_constraints_and_invalid_proposal(tmp_path: Path) -> None:
+    harness = _harness(tmp_path, (_plan(_step("prepare")),), ())
+    task = await harness.engine.create_task("Prepare my system for a meeting")
+    with pytest.raises(PlanEditError, match="malformed"):
+        await harness.engine.request_replan(task.task_id, additional_constraints=("x",) * 33)
+
+    invalid = _harness(
+        tmp_path / "invalid",
+        (_plan(_step("prepare")), {"invalid": True}),
+        (),
+    )
+    invalid_task = await invalid.engine.create_task("Prepare my system for a meeting")
+    with pytest.raises(PlanningEngineError, match="failed validation"):
+        await invalid.engine.request_replan(invalid_task.task_id)
+
+
+@pytest.mark.asyncio
+async def test_task_controller_exposes_typed_plan_editing_only(tmp_path: Path) -> None:
+    harness = _harness(tmp_path, (_plan(_step("prepare")),), ())
+    broker = PermissionBroker(PolicyEngine())
+    controller = PlanningTaskController(harness.engine, broker)
+    task = await controller.create_task("Prepare my system for a meeting")
+
+    assert controller.list_tasks() == (task,)
+    assert controller.get_task(task.task_id) == task
+    assert controller.get_status(task.task_id) is PlanningTaskStatus.READY
+    assert controller.get_status(uuid4()) is None
+    assert controller.inspect_plan(task.task_id) is not None
+    assert controller.inspect_plan_details(task.task_id) is not None
+    assert controller.list_plan_revisions(task.task_id)[0].version == 1
+    assert controller.get_result(uuid4()) is None
+    assert controller.get_result(task.task_id).evidence == ()  # type: ignore[union-attr]
+    assert await controller.pending_approvals(task.task_id) == ()
+
+    with pytest.raises(PlanEditError, match="no changes"):
+        await controller.edit_plan(task.task_id, PlanEdit())
+
+    revision = await controller.edit_plan(
+        task.task_id,
+        PlanEdit(
+            structured_steps=(StructuredStepEdit(key="prepare", expected_output="new expectation"),)
+        ),
+    )
+    assert revision.plan.version == 2
+    checkpoint = await controller.checkpoint_plan(
+        task.task_id,
+        PlanEdit(pause_checkpoint=True),
+    )
+    assert checkpoint.plan.version == 3
