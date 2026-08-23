@@ -1,7 +1,7 @@
 """UI-facing application service for bounded conversational flows."""
 
 import asyncio
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterable
 from dataclasses import dataclass
 from enum import StrEnum
 from uuid import UUID
@@ -9,7 +9,19 @@ from uuid import UUID
 from jarvis.ai.models import ProviderHealth
 from jarvis.conversation.service import ConversationService
 from jarvis.core.errors import ConversationError, ServiceUnavailableError, SpeechDisabledError
+from jarvis.desktop_shell import (
+    FirstRunWizard,
+    LaunchProfile,
+    LaunchProfileRegistry,
+    LaunchProfileSelection,
+    OnboardingResult,
+    StartupWarmupRegistry,
+    TestDriveRegistry,
+    TestDriveReport,
+    WarmupResult,
+)
 from jarvis.planning.models import PlanningTask
+from jarvis.setup_conductor import SetupContext
 from jarvis.speech.stt import SpeechToTextService, Transcription
 from jarvis.speech.tts import SpeakableChunker, TextToSpeechService
 from jarvis.state import ApplicationStateMachine
@@ -61,6 +73,10 @@ class JarvisAssistantService:
         voice: LocalVoiceController | None = None,
         state_machine: ApplicationStateMachine | None = None,
         response_session_rebuilder: Callable[[], Awaitable[None]] | None = None,
+        onboarding: FirstRunWizard | None = None,
+        test_drive: TestDriveRegistry | None = None,
+        startup_warmup: StartupWarmupRegistry | None = None,
+        launch_profiles: LaunchProfileRegistry | None = None,
     ) -> None:
         self._conversation = conversation
         self._normalizer = normalizer or InputNormalizer()
@@ -70,6 +86,44 @@ class JarvisAssistantService:
         self._voice = voice
         self._state_machine = state_machine
         self._response_session_rebuilder = response_session_rebuilder
+        self._onboarding = onboarding
+        self._test_drive = test_drive
+        self._startup_warmup = startup_warmup
+        self._launch_profiles = launch_profiles or LaunchProfileRegistry()
+
+    @property
+    def launch_profiles(self) -> LaunchProfileRegistry:
+        """Expose profile selection without changing security policy."""
+
+        return self._launch_profiles
+
+    def select_launch_profile(self, profile: LaunchProfile) -> LaunchProfileSelection:
+        return self._launch_profiles.select(profile)
+
+    async def run_onboarding(
+        self,
+        context: SetupContext,
+        *,
+        run_id: UUID | None = None,
+        cancellation: asyncio.Event | None = None,
+    ) -> OnboardingResult:
+        if self._onboarding is None:
+            raise ServiceUnavailableError("First-run onboarding is not configured")
+        if not isinstance(context, SetupContext):
+            raise ConversationError("Onboarding context is malformed")
+        return await self._onboarding.run(context, run_id=run_id, cancellation=cancellation)
+
+    async def run_test_drive(self, *, skip: Iterable[str] = ()) -> TestDriveReport:
+        if self._test_drive is None:
+            raise ServiceUnavailableError("Test-drive checks are not configured")
+        if not isinstance(self._test_drive, TestDriveRegistry):
+            raise ServiceUnavailableError("Test-drive checks are malformed")
+        return await self._test_drive.run(skip=skip)
+
+    def start_startup_warmup(self) -> asyncio.Task[tuple[WarmupResult, ...]]:
+        if self._startup_warmup is None:
+            raise ServiceUnavailableError("Startup warmup is not configured")
+        return self._startup_warmup.start()
 
     def create_conversation(self, system_prompt: str | None = None) -> UUID:
         """Create a UI conversation with optional system context."""

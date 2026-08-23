@@ -120,6 +120,16 @@ proposal. Generated proposals stop at `READY_FOR_APPROVAL`; they cannot become
 active or authoritative through factory output alone. See
 `docs/capability-factory.md`.
 
+The desktop adapter is a minimal generic shell with Home, Tasks, Memory,
+Capabilities, Activity, and Settings surfaces. `FirstRunWizard` delegates
+optional/resumable areas to `SetupConductor`; `TestDriveRegistry` reports
+component-level PASS/FAIL/SKIPPED/NOT_AVAILABLE evidence and only declares
+full readiness when required configured checks pass. `StartupWarmupRegistry`
+prewarms optional local components asynchronously and cannot grant authority.
+Launch profiles are presentation/startup preferences, never permission or
+security-policy switches. See `docs/desktop-shell.md` and
+`docs/onboarding-test-drive.md`.
+
 Phase 6 adds a controlled computer capability layer without changing that boundary:
 
 `AI/planner -> typed computer tool -> PermissionBroker -> policy/approval -> adapter -> Windows`

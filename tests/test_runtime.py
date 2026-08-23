@@ -22,6 +22,20 @@ async def test_canonical_runtime_calculates_and_recovers_persisted_task(tmp_path
     assert initial_status is RuntimeStatus.READY
     assert runtime.container is not None
     assert isinstance(runtime.container.task_controller, PlanningTaskController)
+    assert {step.step_id for step in runtime.container.test_drive.steps()} == {
+        "system-health",
+        "model-provider",
+    }
+    assert [item.component_id for item in runtime.container.startup_warmup.components()] == [
+        "default-model"
+    ]
+    test_drive = await runtime.container.test_drive.run()
+    assert {step_id for step_id, _ in test_drive.results} == {
+        "system-health",
+        "model-provider",
+    }
+    warmup = runtime.container.startup_warmup.start()
+    assert (await warmup)[0].component_id == "default-model"
 
     task = await runtime.container.task_controller.submit_task("calculate 25% of 800")
     assert task.status is PlanningTaskStatus.COMPLETED

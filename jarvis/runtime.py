@@ -21,6 +21,15 @@ from jarvis.bootstrap import create_ai_provider
 from jarvis.conversation.service import ConversationService
 from jarvis.core.config import Settings, get_settings
 from jarvis.core.logging import configure_logging
+from jarvis.desktop_shell import (
+    LaunchProfileRegistry,
+    StartupWarmupRegistry,
+    TestDriveRegistry,
+    TestDriveStatus,
+    TestDriveStep,
+    TestDriveStepResult,
+    WarmupComponent,
+)
 from jarvis.discovery.service import CandidateEvaluator, CapabilityGapDetector
 from jarvis.events import EventBus, InMemoryEventBus
 from jarvis.knowledge.store import KnowledgeStore
@@ -260,6 +269,9 @@ class RuntimeContainer:
     candidate_evaluator: CandidateEvaluator
     recovery: RecoveryStore
     agent_loop: AgentLoop
+    launch_profiles: LaunchProfileRegistry = field(default_factory=LaunchProfileRegistry)
+    test_drive: TestDriveRegistry = field(default_factory=TestDriveRegistry)
+    startup_warmup: StartupWarmupRegistry = field(default_factory=StartupWarmupRegistry)
     computer: object | None = None
     vision: object | None = None
     camera: object | None = None
@@ -277,6 +289,7 @@ class RuntimeContainer:
             object.__setattr__(self, "_closed", True)
             resources = (
                 self.event_bus,
+                self.startup_warmup,
                 self.conversation,
                 self.session_store,
                 self.planning_store,
@@ -502,6 +515,32 @@ class ApplicationRuntime:
             provider = create_ai_provider(settings)
             conversation_memory = ConversationContextService()
             system_memory = ProjectSystemMemory(knowledge, root)
+
+            async def test_provider() -> TestDriveStepResult:
+                health = await provider.health_check()
+                return TestDriveStepResult(
+                    TestDriveStatus.PASS if health.available else TestDriveStatus.FAIL,
+                    health.detail,
+                )
+
+            async def test_persistence() -> TestDriveStepResult:
+                engine.list_tasks()
+                return TestDriveStepResult(TestDriveStatus.PASS, "authoritative stores responded")
+
+            async def warmup_provider() -> None:
+                await provider.health_check()
+
+            test_drive = TestDriveRegistry()
+            test_drive.register(
+                TestDriveStep("system-health", "System health", test_persistence, required=True)
+            )
+            test_drive.register(
+                TestDriveStep(
+                    "model-provider", "Configured model/provider", test_provider, required=True
+                )
+            )
+            startup_warmup = StartupWarmupRegistry()
+            startup_warmup.register(WarmupComponent("default-model", warmup_provider))
             container = RuntimeContainer(
                 settings=settings,
                 paths=paths,
@@ -544,6 +583,9 @@ class ApplicationRuntime:
                     model=settings.ai_model,
                     context_limit=settings.ai_context_limit,
                 ),
+                launch_profiles=LaunchProfileRegistry(),
+                test_drive=test_drive,
+                startup_warmup=startup_warmup,
             )
             snapshot = recovery.create_snapshot(
                 transaction_id=transaction_id,

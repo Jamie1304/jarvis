@@ -116,4 +116,7 @@ def create_assistant_from_runtime(runtime: ApplicationRuntime) -> JarvisAssistan
         container.conversation,
         task_controller=container.task_controller,
         state_machine=container.state_machine,
+        test_drive=container.test_drive,
+        startup_warmup=container.startup_warmup,
+        launch_profiles=container.launch_profiles,
     )
