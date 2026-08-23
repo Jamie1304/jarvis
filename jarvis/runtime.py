@@ -16,6 +16,7 @@ from uuid import uuid4
 from jarvis.agent_runtime import AgentLoop
 from jarvis.ai.providers.base import AIProvider
 from jarvis.ai.sessions import AgentSessionStore
+from jarvis.artifacts import ArtifactStore
 from jarvis.bootstrap import create_ai_provider
 from jarvis.conversation.service import ConversationService
 from jarvis.core.config import Settings, get_settings
@@ -81,6 +82,7 @@ class RuntimePaths:
     memory_database: Path
     sessions_database: Path
     audit_database: Path
+    artifacts: Path
     logs: Path
     config: Path
     cache: Path
@@ -98,6 +100,7 @@ class RuntimePaths:
             base / "memory.sqlite3",
             base / "sessions.sqlite3",
             base / "audit.sqlite3",
+            base / "artifacts",
             base / "logs",
             base / "config",
             base / "cache",
@@ -116,6 +119,7 @@ class RuntimePaths:
             self.temporary,
             self.models,
             self.recovery,
+            self.artifacts,
         ):
             path.mkdir(parents=True, exist_ok=True)
         self.validate_storage_layout()
@@ -141,6 +145,7 @@ class RuntimePaths:
             self.memory_database,
             self.sessions_database,
             self.audit_database,
+            self.artifacts / "artifacts.sqlite3",
         )
         sidecars = tuple(
             database.with_name(f"{database.name}{suffix}")
@@ -235,6 +240,7 @@ class RuntimeContainer:
     state_machine: ApplicationStateMachine
     policy_engine: PolicyEngine
     audit_sink: SQLiteAuditSink
+    artifact_store: ArtifactStore
     permission_broker: PermissionBroker
     tool_registry: ToolRegistry
     planning_store: SQLitePlanningStore
@@ -275,6 +281,7 @@ class RuntimeContainer:
                 self.memory_store,
                 self.state_store,
                 self.audit_sink,
+                self.artifact_store,
                 self.voice,
                 self.camera,
                 self.application_manager,
@@ -407,6 +414,7 @@ class ApplicationRuntime:
         planning_store: SQLitePlanningStore | None = None
         memory_store: SQLiteMemoryStore | None = None
         recovery: RecoveryStore | None = None
+        artifact_store: ArtifactStore | None = None
         transaction_id = str(uuid4())
         try:
             paths = RuntimePaths.from_root(resolved_app_data_dir)
@@ -483,6 +491,8 @@ class ApplicationRuntime:
             memory_store = SQLiteMemoryStore(paths.memory_database)
             session_store = AgentSessionStore(paths.sessions_database)
             paths.validate_storage_layout()
+            artifact_store = ArtifactStore(paths.artifacts, event_bus=events)
+            paths.validate_storage_layout()
             root = resolved_project_root
             knowledge = KnowledgeStore.load(root / "knowledge" / "generated" / "project-index.json")
             provider = create_ai_provider(settings)
@@ -504,6 +514,7 @@ class ApplicationRuntime:
                 state_machine=state_machine,
                 policy_engine=policy,
                 audit_sink=audit,
+                artifact_store=artifact_store,
                 permission_broker=broker,
                 tool_registry=registry,
                 planning_store=planning_store,
@@ -542,6 +553,7 @@ class ApplicationRuntime:
                     "planning": "validated",
                     "memory": "validated",
                     "audit": "validated",
+                    "artifacts": "validated",
                 },
                 integration_versions={},
                 generated_package_state={"activation": "disabled"},
@@ -565,7 +577,9 @@ class ApplicationRuntime:
                         datetime.now(UTC).isoformat(),
                     )
                 )
-            cls._close_partial_stores(memory_store, planning_store, audit, state_store)
+            cls._close_partial_stores(
+                artifact_store, memory_store, planning_store, audit, state_store
+            )
             return cls(
                 None,
                 status=RuntimeStatus.SAFE_MODE,
@@ -584,7 +598,9 @@ class ApplicationRuntime:
                         datetime.now(UTC).isoformat(),
                     )
                 )
-            cls._close_partial_stores(memory_store, planning_store, audit, state_store)
+            cls._close_partial_stores(
+                artifact_store, memory_store, planning_store, audit, state_store
+            )
             return cls(
                 None,
                 status=RuntimeStatus.ERROR,

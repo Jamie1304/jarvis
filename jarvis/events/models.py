@@ -36,10 +36,24 @@ class EventType(StrEnum):
     HEALTH_CHANGED = "health.changed"
     AUTOMATION_STATE_CHANGED = "automation.state_changed"
     SYSTEM_ERROR = "system.error"
+    ARTIFACT_CREATED = "artifact.created"
 
 
 class EventPayload:
     """Marker for trusted, bounded payloads."""
+
+
+@dataclass(frozen=True, slots=True)
+class ArtifactCreated(EventPayload):
+    artifact_id: UUID
+    version: int
+    workspace_id: str
+    size: int
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.artifact_id, UUID) or self.version < 1 or self.size < 0:
+            raise ValueError("invalid artifact event")
+        _text(self.workspace_id)
 
 
 def _text(value: str, *, limit: int = 256) -> str:
@@ -291,6 +305,7 @@ _PAYLOAD_TYPES: dict[EventType, type[EventPayload]] = {
     EventType.HEALTH_CHANGED: HealthChanged,
     EventType.AUTOMATION_STATE_CHANGED: AutomationStateChanged,
     EventType.SYSTEM_ERROR: SystemError,
+    EventType.ARTIFACT_CREATED: ArtifactCreated,
 }
 
 

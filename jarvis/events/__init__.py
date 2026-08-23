@@ -2,6 +2,7 @@
 
 from jarvis.events.bus import EventBus, EventBusMetrics, InMemoryEventBus
 from jarvis.events.models import (
+    ArtifactCreated,
     AutomationStateChanged,
     CameraStateChanged,
     CapabilityChanged,
@@ -30,6 +31,7 @@ from jarvis.events.models import (
 )
 
 __all__ = [
+    "ArtifactCreated",
     "CameraStateChanged",
     "CapabilityChanged",
     "AutomationStateChanged",
