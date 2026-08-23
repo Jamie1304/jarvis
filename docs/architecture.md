@@ -415,6 +415,18 @@ queried state—not the presentation request—is authoritative for that
 observation. Verification does not execute, authorize, or replace
 `PlanningEngine`.
 
+Effect previews and compensation remain separate from execution. Trusted
+capability code may provide a structured `EffectPreview` with exact target,
+change, permissions, resources, reversibility, artifacts, and verification
+metadata; model prose cannot create that metadata. `CompensationExecutor`
+re-enters the normal `ToolRegistry -> PermissionBroker -> Policy/approval`
+boundary and requires a matching state baseline plus fresh
+`VerificationEngine` evidence. Stale state, failed compensation, unknown
+outcomes, and failed verification are explicit results.
+`PlanStudioEffectProjection` and optional effect trace records are derived
+presentation/observability projections only. See
+`docs/effect-previews-and-compensation.md`.
+
 Phase 18 adds deterministic pre-activation UI evidence:
 
 `declarative package UI -> UISimulationHarness -> semantic checks/render artifact -> certification evidence`
