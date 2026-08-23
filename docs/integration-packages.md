@@ -29,6 +29,14 @@ data. Package update/uninstall declarations cannot remove them or Vault
 credentials. A future lifecycle executor must apply these rules through trusted
 policy and record migration/rollback evidence.
 
+Before staged activation, a generated package must complete the native
+`PackageCertifier` pipeline documented in
+[`package-certification.md`](package-certification.md). Certification binds
+the exact package/source/dependency/manifest hashes, test and audit evidence,
+permissions, trusted authority decision, install/health/verification evidence,
+and rollback target. `CERTIFIED` is not `ACTIVE`; activation remains owned by
+the hot-load manager and its Shadow/Canary/runtime gates.
+
 Paths are portable relative paths with no traversal, absolute path, drive,
 reparse-style ambiguity, empty segment, or arbitrary asset loading. UI assets
 must be immutable package-owned entries below the validated asset root or

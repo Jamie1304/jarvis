@@ -33,7 +33,8 @@ install targets.
 Generated proposals pass through `DESIGNING`, `GENERATING`,
 `STATIC_CHECKING`, `SANDBOX_TESTING`, and `SECURITY_CHECKING`. A fully checked
 proposal ends at `READY_FOR_APPROVAL`; it is not registered, provisioned,
-loaded, or active. Certification, shadow/canary operation, activation,
+loaded, or active. It must then pass the separate staged `PackageCertifier`
+pipeline before it can be considered certified. Certification, shadow/canary operation, activation,
 degradation, quarantine, update, and rollback remain later trusted lifecycle
 operations. A declined proposal remains inactive.
 

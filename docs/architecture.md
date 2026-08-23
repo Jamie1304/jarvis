@@ -89,6 +89,13 @@ reviewer cannot execute a package or modify reviewer, policy, broker, or
 approval authority; a passing result does not replace certification or runtime
 sandbox and broker gates. See `docs/generated-package-review.md`.
 
+Before staged activation, `PackageCertifier` runs BUILD, static audit, unit and
+sandbox integration tests, permission diff, trusted authority decision,
+install, healthcheck, and verification. Its immutable `CertificationRecord`
+binds exact package/source/dependency/manifest hashes and evidence. CERTIFIED
+is not ACTIVE; hot-load registration remains a separate Shadow/Canary-gated
+runtime operation. See `docs/package-certification.md`.
+
 Generic provisioning uses the same boundary through typed
 `ProvisioningPlan`/`ProvisioningAction` records. Providers inspect reality
 before every effect, never receive arbitrary shell scripts, and return bounded

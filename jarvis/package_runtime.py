@@ -14,6 +14,7 @@ from threading import RLock
 from typing import Protocol, TypeVar
 
 from jarvis.integration_package import IntegrationPackage
+from jarvis.package_certification import CertificationRecord
 from jarvis.tools.models import SemanticVersion
 
 
@@ -36,6 +37,22 @@ class PackageCertification:
     permission_diff_approved: bool
     shadow_passed: bool
     canary_passed: bool
+    record: CertificationRecord | None = None
+
+    @classmethod
+    def from_record(cls, record: CertificationRecord) -> PackageCertification:
+        if not isinstance(record, CertificationRecord):
+            raise HotLoadError("Certification record is malformed")
+        return cls(
+            record.package_id,
+            record.version,
+            record.package_hash,
+            True,
+            True,
+            record.shadow_eligible,
+            record.canary_eligible,
+            record,
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -271,6 +288,14 @@ class HotLoadManager:
             or certification.package_hash != package.package_hash
         ):
             raise HotLoadError("Certification does not bind this exact package version")
+        if certification.record is not None:
+            if (
+                certification.record.package_id != package.package_id
+                or certification.record.version != package.version
+                or certification.record.package_hash != package.package_hash
+                or certification.record.permissions != package.permissions
+            ):
+                raise HotLoadError("Certification record does not bind package metadata")
         if not all(
             (
                 certification.certified,
