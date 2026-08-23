@@ -483,3 +483,17 @@ not measured. It does not download, load, activate, authorize, or claim that a
 model works on a different machine. CI uses fake hardware/model fixtures; real
 hardware and model measurements remain explicitly unexecuted unless separately
 run. See `docs/hardware-and-models.md`.
+
+Phase 20 adds local model lifecycle and inference routing without adding a
+provider or vendor authority:
+
+`typed catalog -> hash/size verification -> app-owned model root -> typed runtime`
+
+`LocalModelManager` supports discovery, compatibility checks, download,
+integrity, install, load/unload, health, benchmark, removal, and repair. It has
+no shell or arbitrary post-install hook. `ProviderRouter` applies explicit
+privacy, quality, speed, cost, latency, context, tool/schema, health, resource,
+and concurrency constraints. Provider-neutral STT/TTS definitions use the same
+router and degrade to `NO_LLM`/text-only when policy allows. Routing never
+grants permission or activates a model. See
+`docs/model-management-and-routing.md`.

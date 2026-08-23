@@ -9,10 +9,15 @@ policy.
 
 `ModelMetadata` is descriptive rather than a download or execution request. It
 can identify model roles, family/version/quantization, runtime/source,
-modalities, context, resource requirements, license, compatibility tags, and
-evidence provenance. `ModelPlanner` can combine models for different roles
-under measured hardware and concurrency limits; an unknown capacity produces an
-unknown fit, never an optimistic fit. See `docs/hardware-and-models.md`.
+modalities, context, resource requirements, license, compatibility tags,
+evidence provenance, quality/latency benchmarks, and token-cost metadata.
+`LocalModelManager` owns verified local artifact lifecycle through typed
+catalog/downloader/runtime protocols and exposes no post-install script hook.
+`ProviderRouter` selects compatible provider/model candidates under explicit
+privacy, latency, resource, concurrency, benchmark, and cost policy. Unknown
+capacity produces an unknown route, never an optimistic fit. It also selects
+provider-neutral STT/TTS chains and can return explicit `NO_LLM`. See
+`docs/hardware-and-models.md` and `docs/model-management-and-routing.md`.
 
 `AgentSessionStore` is the authoritative store for execution-session identity
 and lifecycle metadata only. It is not a task/goal store, user-model store, or

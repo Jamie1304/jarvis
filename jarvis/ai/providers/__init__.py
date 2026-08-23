@@ -8,6 +8,8 @@ from jarvis.ai.providers.registry import (
     ProviderDefinition,
     ProviderMetadata,
     ProviderRegistry,
+    VoiceProviderDefinition,
+    VoiceProviderKind,
 )
 
 __all__ = [
@@ -20,4 +22,6 @@ __all__ = [
     "ProviderDefinition",
     "ProviderMetadata",
     "ProviderRegistry",
+    "VoiceProviderDefinition",
+    "VoiceProviderKind",
 ]

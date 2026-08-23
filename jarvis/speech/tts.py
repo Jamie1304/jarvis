@@ -89,12 +89,15 @@ class TextToSpeechService:
         *,
         enabled: bool,
         fallback: TtsProvider | None = None,
+        fallbacks: tuple[TtsProvider, ...] = (),
         queue_size: int = 8,
     ) -> None:
         if queue_size < 1 or queue_size > 64:
             raise ValueError("TTS queue size must be between one and sixty-four")
         self._provider = provider
-        self._fallback = fallback
+        self._providers = (provider, *((fallback,) if fallback is not None else ()), *fallbacks)
+        if any(not isinstance(item, TtsProvider) for item in self._providers):
+            raise ValueError("TTS fallback providers are invalid")
         self._enabled = enabled
         self._speaking = False
         self._generation = 0
@@ -151,13 +154,17 @@ class TextToSpeechService:
             await self._provider.speak_chunks(guarded())
             self._available = True
         except SpeechError:
-            if self._fallback is None or generation != self._generation:
+            if generation != self._generation:
                 self._available = False
                 return
-            try:
-                await self._fallback.speak_chunks(guarded())
-                self._available = True
-            except SpeechError:
+            for provider in self._providers[1:]:
+                try:
+                    await provider.speak_chunks(guarded())
+                    self._available = True
+                    break
+                except SpeechError:
+                    continue
+            else:
                 self._available = False
         finally:
             self._speaking = False
@@ -184,35 +191,35 @@ class TextToSpeechService:
             active.cancel()
             await asyncio.gather(active, return_exceptions=True)
         await self._provider.stop()
-        if self._fallback is not None:
-            await self._fallback.stop()
+        for provider in self._providers[1:]:
+            await provider.stop()
         self._speaking = False
 
     async def reopen_output(self) -> None:
         await self.stop()
         await self._provider.reopen_output()
-        if self._fallback is not None:
-            await self._fallback.reopen_output()
+        for provider in self._providers[1:]:
+            await provider.reopen_output()
 
     async def aclose(self) -> None:
         await self.stop()
         await self._provider.aclose()
-        if self._fallback is not None:
-            await self._fallback.aclose()
+        for provider in self._providers[1:]:
+            await provider.aclose()
 
     async def _speak_with_fallback(self, text: str) -> None:
         try:
             await self._provider.speak(text)
             self._available = True
         except SpeechError:
-            if self._fallback is None:
-                self._available = False
-                return
-            try:
-                await self._fallback.speak(text)
-                self._available = True
-            except SpeechError:
-                self._available = False
+            for provider in self._providers[1:]:
+                try:
+                    await provider.speak(text)
+                    self._available = True
+                    return
+                except SpeechError:
+                    continue
+            self._available = False
 
 
 class SpeakableChunker:

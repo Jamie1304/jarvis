@@ -14,10 +14,12 @@ from pathlib import Path
 from uuid import uuid4
 
 from jarvis.agent_runtime import AgentLoop
+from jarvis.ai.model_manager import LocalModelManager
 from jarvis.ai.providers.base import AIProvider
+from jarvis.ai.routing import ProviderRouter
 from jarvis.ai.sessions import AgentSessionStore
 from jarvis.artifacts import ArtifactStore
-from jarvis.bootstrap import create_ai_provider
+from jarvis.bootstrap import create_provider_registry
 from jarvis.capabilities import CapabilityRegistry
 from jarvis.control_center import (
     ControlCenterContribution,
@@ -31,6 +33,7 @@ from jarvis.control_center import (
 )
 from jarvis.conversation.service import ConversationService
 from jarvis.core.config import Settings, get_settings
+from jarvis.core.errors import ConfigurationError
 from jarvis.core.logging import configure_logging
 from jarvis.desktop_shell import (
     LaunchProfileRegistry,
@@ -257,6 +260,8 @@ class RuntimeContainer:
     settings: Settings
     paths: RuntimePaths
     ai_provider: AIProvider
+    provider_router: ProviderRouter
+    model_manager: LocalModelManager
     conversation: ConversationService
     event_bus: EventBus
     state_store: SQLiteStateStore
@@ -309,6 +314,7 @@ class RuntimeContainer:
                 self.startup_warmup,
                 self.control_center,
                 self.conversation,
+                self.model_manager,
                 self.session_store,
                 self.planning_store,
                 self.memory_store,
@@ -531,7 +537,25 @@ class ApplicationRuntime:
             paths.validate_storage_layout()
             root = resolved_project_root
             knowledge = KnowledgeStore.load(root / "knowledge" / "generated" / "project-index.json")
-            provider = create_ai_provider(settings)
+            provider_registry = create_provider_registry(
+                model_id=settings.ai_model, context_limit=settings.ai_context_limit
+            )
+            try:
+                provider = provider_registry.create(
+                    settings.ai_provider,
+                    {
+                        "model": settings.ai_model,
+                        "endpoint": settings.ai_endpoint,
+                        "timeout_seconds": settings.ai_timeout_seconds,
+                        "context_limit": settings.ai_context_limit,
+                    },
+                )
+            except KeyError as error:
+                raise ConfigurationError(
+                    f"Unsupported AI provider: {settings.ai_provider}"
+                ) from error
+            provider_router = ProviderRouter(provider_registry)
+            model_manager = LocalModelManager(paths.models)
             conversation_memory = ConversationContextService()
             system_memory = ProjectSystemMemory(knowledge, root)
             capability_registry = CapabilityRegistry()
@@ -891,6 +915,8 @@ class ApplicationRuntime:
                 settings=settings,
                 paths=paths,
                 ai_provider=provider,
+                provider_router=provider_router,
+                model_manager=model_manager,
                 conversation=ConversationService(
                     provider,
                     model=settings.ai_model,

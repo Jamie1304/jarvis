@@ -5,9 +5,15 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any
 
+from jarvis.ai.models import ModelRole
 from jarvis.ai.providers.base import AIProvider
 from jarvis.ai.providers.ollama import OllamaProvider
-from jarvis.ai.providers.registry import ProviderDefinition, ProviderMetadata, ProviderRegistry
+from jarvis.ai.providers.registry import (
+    ModelMetadata,
+    ProviderDefinition,
+    ProviderMetadata,
+    ProviderRegistry,
+)
 from jarvis.application import JarvisAssistantService
 from jarvis.conversation.service import ConversationService
 from jarvis.core.config import Settings
@@ -33,7 +39,9 @@ def _ollama_factory(configuration: Mapping[str, Any]) -> AIProvider:
     )
 
 
-def create_provider_registry() -> ProviderRegistry:
+def create_provider_registry(
+    *, model_id: str = "llama3.2:3b", context_limit: int = 4096
+) -> ProviderRegistry:
     """Return the native registry; integrations register definitions, not branches."""
 
     return ProviderRegistry(
@@ -41,6 +49,17 @@ def create_provider_registry() -> ProviderRegistry:
             ProviderDefinition(
                 metadata=ProviderMetadata("ollama", "Ollama", "native", local_only=True),
                 factory=_ollama_factory,
+                models=(
+                    ModelMetadata(
+                        model_id,
+                        context_limit,
+                        frozenset({"chat", "tool_use", "structured_output"}),
+                        roles=frozenset({ModelRole.GENERAL, ModelRole.TOOL_USE}),
+                        modalities=frozenset({"text"}),
+                        runtime="ollama",
+                        source="configured_local_provider",
+                    ),
+                ),
             ),
         )
     )
@@ -49,7 +68,9 @@ def create_provider_registry() -> ProviderRegistry:
 def create_ai_provider(settings: Settings) -> AIProvider:
     """Create the configured provider through the provider registry."""
 
-    registry = create_provider_registry()
+    registry = create_provider_registry(
+        model_id=settings.ai_model, context_limit=settings.ai_context_limit
+    )
     try:
         return registry.create(
             settings.ai_provider,
