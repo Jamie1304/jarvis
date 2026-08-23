@@ -10,10 +10,17 @@ consumers.
 
 Records are workspace-scoped, typed as facts or preferences, and carry source,
 confidence, timestamps, verification, sensitivity, retention, origin, and
-bounded relationships. Explicit values require a trusted user source;
+bounded relationships. Semantic retrieval is a derived ranking projection with
+metadata gates; embeddings never become source truth. Explicit values require a trusted user source;
 model-originated values are inferred data. Corrections increment revisions and
 append audit fingerprints without retaining previous raw values. Deletion and
 retention expiry are audited.
+
+Consolidation is an explicit typed decision. MERGE, UPDATE, and REPLACE require
+independent evidence and an exact resolved result; KEEP_SEPARATE and IGNORE_SKIP
+are auditable no-ops. Consolidation preserves lineage, provenance, timestamps,
+confidence, sensitivity, and supersession, while derived summaries remain
+non-authoritative.
 
 ## Security and privacy
 

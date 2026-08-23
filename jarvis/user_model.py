@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import re
 import sqlite3
 import threading
 from collections.abc import Callable, Mapping, Sequence
@@ -17,7 +18,7 @@ from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
-from typing import Final
+from typing import Final, Protocol
 from uuid import UUID, uuid4
 
 from jarvis.memory.models import RetentionPolicy, Sensitivity
@@ -51,6 +52,16 @@ class UserModelAuditAction(StrEnum):
     VERIFIED = "verified"
     DELETED = "deleted"
     PURGED = "purged"
+    CONSOLIDATED = "consolidated"
+    SUPERSEDED = "superseded"
+
+
+class ConsolidationDecision(StrEnum):
+    MERGE = "merge"
+    UPDATE = "update"
+    REPLACE = "replace"
+    KEEP_SEPARATE = "keep_separate"
+    IGNORE_SKIP = "ignore_skip"
 
 
 _SAFE_SENSITIVITIES: Final[frozenset[Sensitivity]] = frozenset(
@@ -71,6 +82,13 @@ _SECRET_KEY_WORDS: Final[frozenset[str]] = frozenset(
 _RAW_UTTERANCE_KEYS: Final[frozenset[str]] = frozenset(
     {"conversation", "raw_text", "transcript", "utterance"}
 )
+_TOKENS = re.compile(r"[a-z0-9_./-]+")
+_SENSITIVITY_ORDER: Final[dict[Sensitivity, int]] = {
+    Sensitivity.PUBLIC: 0,
+    Sensitivity.PRIVATE: 1,
+    Sensitivity.SENSITIVE: 2,
+    Sensitivity.SECRET: 3,
+}
 
 
 def _utc(value: datetime) -> datetime:
@@ -149,6 +167,55 @@ def _canonical_value(value: object) -> object:
     return canonical
 
 
+def _tokens(value: str) -> frozenset[str]:
+    return frozenset(_TOKENS.findall(value.casefold()))
+
+
+def _bounded_vector(vector: Sequence[float]) -> tuple[float, ...]:
+    if not vector or len(vector) > 4_096:
+        raise ValueError("Semantic vectors must be non-empty and bounded")
+    result = tuple(float(value) for value in vector)
+    if any(not math.isfinite(value) for value in result):
+        raise ValueError("Semantic vectors must contain finite numbers")
+    return result
+
+
+class SemanticEncoder(Protocol):
+    """Provider-neutral derived encoder; its output is never source truth."""
+
+    def encode(self, text: str) -> Sequence[float]: ...
+
+
+class DeterministicSemanticEncoder:
+    """Small local hash encoder used when no model-backed encoder is configured."""
+
+    def __init__(self, dimension: int = 64) -> None:
+        if dimension < 8 or dimension > 512:
+            raise ValueError("Deterministic semantic dimension is invalid")
+        self._dimension = dimension
+
+    def encode(self, text: str) -> tuple[float, ...]:
+        values = [0.0] * self._dimension
+        for token in _tokens(text):
+            digest = hashlib.sha256(token.encode("utf-8")).digest()
+            index = int.from_bytes(digest[:4], "big") % self._dimension
+            values[index] += 1.0 if digest[4] & 1 else -1.0
+        return _bounded_vector(values)
+
+
+def _cosine(left: Sequence[float], right: Sequence[float]) -> float:
+    first = _bounded_vector(left)
+    second = _bounded_vector(right)
+    if len(first) != len(second):
+        raise ValueError("Semantic vectors have incompatible dimensions")
+    numerator = sum(a * b for a, b in zip(first, second, strict=True))
+    left_norm = math.sqrt(sum(value * value for value in first))
+    right_norm = math.sqrt(sum(value * value for value in second))
+    if left_norm == 0 or right_norm == 0:
+        return 0.0
+    return max(0.0, min(1.0, numerator / (left_norm * right_norm)))
+
+
 @dataclass(frozen=True, slots=True)
 class UserModelRelationship:
     """A bounded, non-authoritative link to another application entity."""
@@ -185,6 +252,9 @@ class UserModelRecord:
     relationships: tuple[UserModelRelationship, ...] = ()
     revision: int = 1
     active: bool = True
+    lineage: tuple[UUID, ...] = ()
+    supersedes: tuple[UUID, ...] = ()
+    superseded_by: UUID | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.record_id, UUID):
@@ -215,6 +285,17 @@ class UserModelRecord:
             raise ValueError("User-model relationships must be typed")
         if self.revision < 1 or type(self.active) is not bool:
             raise ValueError("User-model revision or active state is invalid")
+        for name, values in (("lineage", self.lineage), ("supersedes", self.supersedes)):
+            if not isinstance(values, tuple) or len(values) > 64:
+                raise ValueError(f"User-model {name} must be a bounded tuple")
+            if any(not isinstance(item, UUID) for item in values):
+                raise ValueError(f"User-model {name} must contain UUIDs")
+            if len(values) != len(set(values)):
+                raise ValueError(f"User-model {name} must be unique")
+        if self.superseded_by is not None and not isinstance(self.superseded_by, UUID):
+            raise ValueError("User-model supersession target must be a UUID")
+        if self.record_id in self.lineage or self.record_id in self.supersedes:
+            raise ValueError("User-model lineage cannot contain its own record ID")
         created = _utc(self.created_at)
         updated = _utc(self.updated_at)
         verified = _utc(self.last_verified_at) if self.last_verified_at is not None else None
@@ -253,6 +334,7 @@ class UserModelAuditEntry:
     revision: int
     old_value_hash: str | None
     new_value_hash: str | None
+    related_record_ids: tuple[UUID, ...] = ()
 
     def __post_init__(self) -> None:
         if not isinstance(self.audit_id, UUID) or not isinstance(self.record_id, UUID):
@@ -265,6 +347,10 @@ class UserModelAuditEntry:
             raise ValueError("User-model audit revision must be positive")
         if _invalid_hash(self.old_value_hash) or _invalid_hash(self.new_value_hash):
             raise ValueError("User-model audit value hashes must be lowercase SHA-256 values")
+        if not isinstance(self.related_record_ids, tuple) or len(self.related_record_ids) > 16:
+            raise ValueError("User-model audit related IDs must be bounded")
+        if any(not isinstance(item, UUID) for item in self.related_record_ids):
+            raise ValueError("User-model audit related IDs must be UUIDs")
         object.__setattr__(self, "occurred_at", _utc(self.occurred_at))
 
 
@@ -272,6 +358,16 @@ def _invalid_hash(value: str | None) -> bool:
     return value is not None and (
         len(value) != 64 or any(character not in "0123456789abcdef" for character in value)
     )
+
+
+def _unique_uuids(values: Sequence[UUID]) -> tuple[UUID, ...]:
+    result: list[UUID] = []
+    for value in values:
+        if value not in result:
+            result.append(value)
+    if len(result) > 64:
+        raise ValueError("User-model lineage is too large")
+    return tuple(result)
 
 
 @dataclass(frozen=True, slots=True)
@@ -341,6 +437,120 @@ class UserModelContext:
 
 
 @dataclass(frozen=True, slots=True)
+class UserModelRetrievalQuery:
+    """Semantic retrieval request with metadata and privacy gates."""
+
+    text: str
+    workspace_id: str
+    allowed_sensitivities: frozenset[Sensitivity] = frozenset(_SAFE_SENSITIVITIES)
+    categories: tuple[str, ...] = ()
+    keys: tuple[str, ...] = ()
+    include_inferred: bool = True
+    min_confidence: float = 0.0
+    recency_half_life_days: float = 90.0
+    limit: int = 10
+    min_score: float = 0.0
+    now: datetime | None = None
+
+    def __post_init__(self) -> None:
+        _text(self.text, "Semantic retrieval text", 2_000)
+        _text(self.workspace_id, "Semantic retrieval workspace ID", 128)
+        if not self.allowed_sensitivities <= _SAFE_SENSITIVITIES:
+            raise PermissionError("Semantic retrieval cannot include secrets")
+        if len(self.categories) > 64 or len(self.keys) > 64:
+            raise ValueError("Semantic retrieval metadata filters are bounded")
+        for value in (*self.categories, *self.keys):
+            _text(value, "Semantic retrieval metadata filter", 128)
+        if not 0 <= self.min_confidence <= 1:
+            raise ValueError("Semantic retrieval confidence threshold is invalid")
+        if not math.isfinite(self.recency_half_life_days) or self.recency_half_life_days <= 0:
+            raise ValueError("Semantic retrieval recency half-life is invalid")
+        if not 1 <= self.limit <= 256:
+            raise ValueError("Semantic retrieval result limit is invalid")
+        if not 0 <= self.min_score <= 1:
+            raise ValueError("Semantic retrieval score threshold is invalid")
+        if type(self.include_inferred) is not bool:
+            raise ValueError("Semantic retrieval origin filter is invalid")
+        if self.now is not None:
+            object.__setattr__(self, "now", _utc(self.now))
+
+
+@dataclass(frozen=True, slots=True)
+class UserModelRetrievalHit:
+    record: UserModelRecord
+    score: float
+    semantic_score: float
+    recency_score: float
+    confidence_score: float
+    matched_metadata: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        for name, value in (
+            ("score", self.score),
+            ("semantic score", self.semantic_score),
+            ("recency score", self.recency_score),
+            ("confidence score", self.confidence_score),
+        ):
+            if not math.isfinite(value) or not 0 <= value <= 1:
+                raise ValueError(f"User-model {name} is invalid")
+        if not isinstance(self.matched_metadata, tuple):
+            raise ValueError("User-model retrieval metadata must be a tuple")
+
+
+@dataclass(frozen=True, slots=True)
+class UserModelConsolidationRequest:
+    """Explicit application decision; similarity is advisory and insufficient."""
+
+    decision: ConsolidationDecision
+    target_id: UUID
+    source_id: UUID
+    evidence: tuple[str, ...] = ()
+    result_value: object | None = None
+    reason: str = "controlled consolidation"
+    now: datetime | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.decision, ConsolidationDecision):
+            raise ValueError("Consolidation decision must be recognized")
+        if not isinstance(self.target_id, UUID) or not isinstance(self.source_id, UUID):
+            raise ValueError("Consolidation records must use UUIDs")
+        if self.target_id == self.source_id:
+            raise ValueError("Consolidation target and source must differ")
+        if len(self.evidence) > 32 or any(
+            type(value) is not str or not value.strip() or len(value) > 512
+            for value in self.evidence
+        ):
+            raise ValueError("Consolidation evidence is invalid")
+        _text(self.reason, "Consolidation reason", 512)
+        if self.decision in {
+            ConsolidationDecision.MERGE,
+            ConsolidationDecision.UPDATE,
+            ConsolidationDecision.REPLACE,
+        }:
+            if not self.evidence:
+                raise ValueError("Effectful consolidation requires independent evidence")
+            if self.result_value is None:
+                raise ValueError("Effectful consolidation requires a resolved result value")
+            _canonical_value(self.result_value)
+        if self.now is not None:
+            object.__setattr__(self, "now", _utc(self.now))
+
+
+@dataclass(frozen=True, slots=True)
+class UserModelConsolidationResult:
+    decision: ConsolidationDecision
+    target: UserModelRecord
+    source: UserModelRecord
+    changed: bool
+    reason: str
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.decision, ConsolidationDecision):
+            raise ValueError("Consolidation result decision must be recognized")
+        _text(self.reason, "Consolidation result reason", 512)
+
+
+@dataclass(frozen=True, slots=True)
 class UserModelMigration:
     version: int
     name: str
@@ -395,6 +605,16 @@ DEFAULT_USER_MODEL_MIGRATIONS: tuple[UserModelMigration, ...] = (
             FOREIGN KEY(record_id) REFERENCES user_model_records(record_id)
         );
         CREATE INDEX user_model_audit_record ON user_model_audit(record_id, occurred_at);
+        """,
+    ),
+    UserModelMigration(
+        2,
+        "add_user_model_lineage",
+        """
+        ALTER TABLE user_model_records ADD COLUMN lineage_json TEXT NOT NULL DEFAULT '[]';
+        ALTER TABLE user_model_records ADD COLUMN supersedes_json TEXT NOT NULL DEFAULT '[]';
+        ALTER TABLE user_model_records ADD COLUMN superseded_by TEXT;
+        ALTER TABLE user_model_audit ADD COLUMN related_record_ids_json TEXT NOT NULL DEFAULT '[]';
         """,
     ),
 )
@@ -492,8 +712,12 @@ class UserModelStore:
         with self._lock:
             try:
                 self._connection.execute(
-                    "INSERT INTO user_model_records VALUES "
-                    "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    "INSERT INTO user_model_records (record_id, workspace_id, model_key, kind, "
+                    "category, value_json, source, source_reference, confidence, created_at, "
+                    "updated_at, last_verified_at, sensitivity, retention, origin, "
+                    "relationships_json, revision, active, lineage_json, supersedes_json, "
+                    "superseded_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "
+                    "?, ?, ?)",
                     self._record_values(record),
                 )
                 self._audit_locked(
@@ -585,6 +809,100 @@ class UserModelStore:
             )
             self._connection.commit()
         return updated
+
+    def consolidate(self, request: UserModelConsolidationRequest) -> UserModelConsolidationResult:
+        """Apply one explicit consolidation decision inside the authoritative store.
+
+        Similarity is intentionally absent from this API. Callers must provide
+        independent evidence and an exact resolved value for any effectful
+        decision; embeddings alone cannot merge user truth.
+        """
+
+        self._ensure_open()
+        if not isinstance(request, UserModelConsolidationRequest):
+            raise ValueError("Consolidation requires a typed request")
+        target = self.get(request.target_id)
+        source = self.get(request.source_id)
+        if target is None or source is None:
+            raise KeyError("Consolidation requires two active records")
+        if target.workspace_id != source.workspace_id:
+            raise PermissionError("Consolidation cannot cross workspaces")
+        if target.kind is not source.kind or target.category != source.category:
+            raise ValueError("Consolidation records must share kind and category")
+        timestamp = _utc(request.now or self._clock())
+        if request.decision in {
+            ConsolidationDecision.KEEP_SEPARATE,
+            ConsolidationDecision.IGNORE_SKIP,
+        }:
+            with self._lock:
+                self._audit_locked(
+                    target,
+                    UserModelAuditAction.CONSOLIDATED,
+                    actor="consolidation",
+                    reason=request.reason,
+                    old_value=target,
+                    related_record_ids=(source.record_id,),
+                )
+                self._connection.commit()
+            return UserModelConsolidationResult(
+                request.decision, target, source, False, request.reason
+            )
+
+        sensitivity = max(
+            (target.sensitivity, source.sensitivity),
+            key=lambda value: _SENSITIVITY_ORDER[value],
+        )
+        explicit = target.explicit or source.explicit
+        provenance_record = target if target.explicit else source
+        lineage = _unique_uuids((*target.lineage, *source.lineage, source.record_id))
+        supersedes = _unique_uuids((*target.supersedes, source.record_id))
+        updated = replace(
+            target,
+            value=request.result_value,
+            source=provenance_record.source if explicit else target.source,
+            source_reference=provenance_record.source_reference
+            if explicit
+            else target.source_reference,
+            origin=UserModelOrigin.EXPLICIT if explicit else UserModelOrigin.INFERRED,
+            sensitivity=sensitivity,
+            updated_at=timestamp,
+            last_verified_at=None,
+            revision=target.revision + 1,
+            lineage=lineage,
+            supersedes=supersedes,
+        )
+        superseded = replace(
+            source,
+            active=False,
+            updated_at=timestamp,
+            revision=source.revision + 1,
+            superseded_by=target.record_id,
+        )
+        self._validate_record(updated)
+        self._validate_record(superseded)
+        with self._lock:
+            self._update_record_locked(updated)
+            self._update_record_locked(superseded)
+            self._audit_locked(
+                updated,
+                UserModelAuditAction.CONSOLIDATED,
+                actor="consolidation",
+                reason=request.reason,
+                old_value=target,
+                related_record_ids=(source.record_id,),
+            )
+            self._audit_locked(
+                superseded,
+                UserModelAuditAction.SUPERSEDED,
+                actor="consolidation",
+                reason=request.reason,
+                old_value=source,
+                related_record_ids=(target.record_id,),
+            )
+            self._connection.commit()
+        return UserModelConsolidationResult(
+            request.decision, updated, superseded, True, request.reason
+        )
 
     def verify(self, record_id: UUID, *, now: datetime | None = None) -> UserModelRecord:
         self._ensure_open()
@@ -694,6 +1012,76 @@ class UserModelStore:
     def context_for(self, policy: UserModelContextPolicy) -> UserModelContext:
         return UserModelContext(policy.workspace_id, self.query(policy), policy.allow_cloud)
 
+    def semantic_retrieve(
+        self,
+        request: UserModelRetrievalQuery,
+        *,
+        encoder: SemanticEncoder | None = None,
+    ) -> tuple[UserModelRetrievalHit, ...]:
+        """Retrieve semantically similar records only after strict metadata gates."""
+
+        if not isinstance(request, UserModelRetrievalQuery):
+            raise ValueError("Semantic retrieval requires a typed query")
+        active_encoder = encoder or DeterministicSemanticEncoder()
+        query_vector = _bounded_vector(active_encoder.encode(request.text))
+        now = _utc(request.now or self._clock())
+        candidates = self.list(
+            workspace_id=request.workspace_id,
+            include_global=True,
+            include_inferred=request.include_inferred,
+        )
+        hits: list[UserModelRetrievalHit] = []
+        for record in candidates:
+            if record.sensitivity not in request.allowed_sensitivities:
+                continue
+            if request.categories and record.category not in request.categories:
+                continue
+            if request.keys and record.key not in request.keys:
+                continue
+            if record.confidence < request.min_confidence:
+                continue
+            semantic_score = _cosine(
+                query_vector,
+                active_encoder.encode(self._record_search_text(record)),
+            )
+            if semantic_score <= 0:
+                continue
+            age_days = max(0.0, (now - record.updated_at).total_seconds() / 86_400)
+            recency_score = math.exp(-age_days / request.recency_half_life_days)
+            score = 0.65 * semantic_score + 0.20 * recency_score + 0.15 * record.confidence
+            if score < request.min_score:
+                continue
+            matched = ["workspace", "classification", "recency", "confidence"]
+            if request.categories:
+                matched.append("category")
+            if request.keys:
+                matched.append("key")
+            hits.append(
+                UserModelRetrievalHit(
+                    record,
+                    score,
+                    semantic_score,
+                    recency_score,
+                    record.confidence,
+                    tuple(matched),
+                )
+            )
+        hits.sort(
+            key=lambda hit: (
+                -hit.score,
+                -hit.semantic_score,
+                -hit.record.confidence,
+                str(hit.record.record_id),
+            )
+        )
+        return tuple(hits[: request.limit])
+
+    retrieve_semantic = semantic_retrieve
+
+    @staticmethod
+    def _record_search_text(record: UserModelRecord) -> str:
+        return " ".join((record.key, record.kind.value, record.category, record.value_json))
+
     def audit(self, record_id: UUID | None = None) -> tuple[UserModelAuditEntry, ...]:
         self._ensure_open()
         query = "SELECT * FROM user_model_audit"
@@ -793,6 +1181,35 @@ class UserModelStore:
             self._relationships_json(record.relationships),
             record.revision,
             int(record.active),
+            self._uuids_json(record.lineage),
+            self._uuids_json(record.supersedes),
+            str(record.superseded_by) if record.superseded_by else None,
+        )
+
+    def _update_record_locked(self, record: UserModelRecord) -> None:
+        self._connection.execute(
+            "UPDATE user_model_records SET value_json=?, source=?, source_reference=?, "
+            "confidence=?, updated_at=?, last_verified_at=?, sensitivity=?, retention=?, "
+            "origin=?, relationships_json=?, revision=?, active=?, lineage_json=?, "
+            "supersedes_json=?, superseded_by=? WHERE record_id=?",
+            (
+                record.value_json,
+                record.source.value,
+                record.source_reference,
+                record.confidence,
+                self._iso(record.updated_at),
+                self._iso(record.last_verified_at) if record.last_verified_at else None,
+                record.sensitivity.value,
+                record.retention.value,
+                record.origin.value,
+                self._relationships_json(record.relationships),
+                record.revision,
+                int(record.active),
+                self._uuids_json(record.lineage),
+                self._uuids_json(record.supersedes),
+                str(record.superseded_by) if record.superseded_by else None,
+                str(record.record_id),
+            ),
         )
 
     @staticmethod
@@ -803,6 +1220,10 @@ class UserModelStore:
             separators=(",", ":"),
         )
 
+    @staticmethod
+    def _uuids_json(values: tuple[UUID, ...]) -> str:
+        return json.dumps([str(value) for value in values], separators=(",", ":"))
+
     def _audit_locked(
         self,
         record: UserModelRecord,
@@ -811,6 +1232,7 @@ class UserModelStore:
         actor: str,
         reason: str,
         old_value: UserModelRecord | None,
+        related_record_ids: tuple[UUID, ...] = (),
     ) -> None:
         entry = UserModelAuditEntry(
             uuid4(),
@@ -822,9 +1244,13 @@ class UserModelStore:
             record.revision,
             self._value_hash(old_value) if old_value else None,
             self._value_hash(record) if record.active else None,
+            related_record_ids,
         )
         self._connection.execute(
-            "INSERT INTO user_model_audit VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO user_model_audit "
+            "(audit_id, record_id, action, occurred_at, actor, reason, revision, "
+            "old_value_hash, new_value_hash, related_record_ids_json) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 str(entry.audit_id),
                 str(entry.record_id),
@@ -835,6 +1261,7 @@ class UserModelStore:
                 entry.revision,
                 entry.old_value_hash,
                 entry.new_value_hash,
+                self._uuids_json(entry.related_record_ids),
             ),
         )
 
@@ -859,6 +1286,12 @@ class UserModelStore:
             )
             if len(relationships) != len(relationships_raw):
                 raise ValueError("relationships are malformed")
+            lineage_raw = json.loads(str(row["lineage_json"]))
+            supersedes_raw = json.loads(str(row["supersedes_json"]))
+            if not isinstance(lineage_raw, list) or not isinstance(supersedes_raw, list):
+                raise ValueError("lineage is malformed")
+            lineage = tuple(UUID(str(value)) for value in lineage_raw)
+            supersedes = tuple(UUID(str(value)) for value in supersedes_raw)
             return UserModelRecord(
                 record_id=UUID(str(row["record_id"])),
                 workspace_id=str(row["workspace_id"]) or None,
@@ -882,6 +1315,9 @@ class UserModelStore:
                 relationships=relationships,
                 revision=int(row["revision"]),
                 active=bool(row["active"]),
+                lineage=lineage,
+                supersedes=supersedes,
+                superseded_by=(UUID(str(row["superseded_by"])) if row["superseded_by"] else None),
             )
         except (KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
             raise UserModelMigrationError("Stored user-model record is malformed") from error
@@ -889,6 +1325,9 @@ class UserModelStore:
     @staticmethod
     def _audit(row: sqlite3.Row) -> UserModelAuditEntry:
         try:
+            related_raw = json.loads(str(row["related_record_ids_json"]))
+            if not isinstance(related_raw, list):
+                raise ValueError("audit related IDs are malformed")
             return UserModelAuditEntry(
                 UUID(str(row["audit_id"])),
                 UUID(str(row["record_id"])),
@@ -899,6 +1338,7 @@ class UserModelStore:
                 int(row["revision"]),
                 str(row["old_value_hash"]) if row["old_value_hash"] else None,
                 str(row["new_value_hash"]) if row["new_value_hash"] else None,
+                tuple(UUID(str(value)) for value in related_raw),
             )
         except (KeyError, TypeError, ValueError) as error:
             raise UserModelMigrationError("Stored user-model audit is malformed") from error
@@ -908,18 +1348,25 @@ SQLiteUserModelStore = UserModelStore
 
 
 __all__ = [
+    "ConsolidationDecision",
     "DEFAULT_USER_MODEL_MIGRATIONS",
+    "DeterministicSemanticEncoder",
     "SQLiteUserModelStore",
     "UserModelAuditAction",
     "UserModelAuditEntry",
     "UserModelContext",
     "UserModelContextPolicy",
+    "UserModelConsolidationRequest",
+    "UserModelConsolidationResult",
     "UserModelKind",
     "UserModelMigration",
     "UserModelMigrationError",
     "UserModelOrigin",
     "UserModelRecord",
+    "UserModelRetrievalHit",
+    "UserModelRetrievalQuery",
     "UserModelRelationship",
     "UserModelSource",
     "UserModelStore",
+    "SemanticEncoder",
 ]

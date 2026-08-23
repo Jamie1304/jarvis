@@ -13,8 +13,12 @@ import pytest
 from jarvis.memory.models import RetentionPolicy, Sensitivity
 from jarvis.user_model import (
     DEFAULT_USER_MODEL_MIGRATIONS,
+    ConsolidationDecision,
+    DeterministicSemanticEncoder,
     UserModelAuditAction,
     UserModelAuditEntry,
+    UserModelConsolidationRequest,
+    UserModelConsolidationResult,
     UserModelContextPolicy,
     UserModelKind,
     UserModelMigration,
@@ -22,6 +26,8 @@ from jarvis.user_model import (
     UserModelOrigin,
     UserModelRecord,
     UserModelRelationship,
+    UserModelRetrievalHit,
+    UserModelRetrievalQuery,
     UserModelSource,
     UserModelStore,
 )
@@ -348,13 +354,22 @@ def test_migration_identity_order_and_sql_errors_fail_closed(tmp_path: Path) -> 
             migrations=(UserModelMigration(2, "x", "SELECT 1"),),
         )
 
+    migrated_path = tmp_path / "migrated.sqlite3"
+    with UserModelStore(migrated_path, migrations=(DEFAULT_USER_MODEL_MIGRATIONS[0],)):
+        pass
+    with UserModelStore(migrated_path) as migrated:
+        assert migrated.schema_version() == len(DEFAULT_USER_MODEL_MIGRATIONS)
+
     path = tmp_path / "identity.sqlite3"
     with UserModelStore(path):
         pass
     with pytest.raises(UserModelMigrationError, match="identity"):
         UserModelStore(
             path,
-            migrations=(UserModelMigration(1, "different", DEFAULT_USER_MODEL_MIGRATIONS[0].sql),),
+            migrations=(
+                UserModelMigration(1, "different", DEFAULT_USER_MODEL_MIGRATIONS[0].sql),
+                UserModelMigration(2, "lineage", "SELECT 1"),
+            ),
         )
     with pytest.raises(UserModelMigrationError, match="migration failed"):
         UserModelStore(
@@ -384,3 +399,233 @@ def test_malformed_persisted_rows_and_policies_are_rejected(tmp_path: Path) -> N
         UserModelContextPolicy("workspace-a", include_inferred=cast(Any, 1))
     with pytest.raises(ValueError):
         UserModelContextPolicy("workspace-a", allow_cloud=cast(Any, 1))
+
+
+class FixedEncoder:
+    def encode(self, text: str) -> tuple[float, float]:
+        return (1.0, 0.0) if "target" in text.casefold() else (0.0, 1.0)
+
+
+def test_semantic_contracts_validate_vectors_queries_and_hits() -> None:
+    with pytest.raises(ValueError):
+        DeterministicSemanticEncoder(7)
+    with pytest.raises(ValueError):
+        DeterministicSemanticEncoder(513)
+    encoder = DeterministicSemanticEncoder()
+    assert len(encoder.encode("concise communication")) == 64
+
+    now = datetime(2026, 8, 23, tzinfo=UTC)
+    record = _record(now)
+    with pytest.raises(ValueError):
+        UserModelRetrievalQuery("x", "workspace-a", categories=tuple("x" for _ in range(65)))
+    with pytest.raises(PermissionError):
+        UserModelRetrievalQuery(
+            "x", "workspace-a", allowed_sensitivities=frozenset({Sensitivity.SECRET})
+        )
+    with pytest.raises(ValueError):
+        UserModelRetrievalQuery("x", "workspace-a", min_confidence=2)
+    with pytest.raises(ValueError):
+        UserModelRetrievalQuery("x", "workspace-a", recency_half_life_days=0)
+    with pytest.raises(ValueError):
+        UserModelRetrievalQuery("x", "workspace-a", limit=0)
+    with pytest.raises(ValueError):
+        UserModelRetrievalQuery("x", "workspace-a", min_score=2)
+    with pytest.raises(ValueError):
+        UserModelRetrievalQuery("x", "workspace-a", include_inferred=cast(Any, 1))
+    with pytest.raises(ValueError):
+        UserModelRetrievalHit(record, 2, 1, 1, 1, ())
+    with pytest.raises(ValueError):
+        UserModelRetrievalHit(record, 1, 1, 1, 1, cast(Any, ["metadata"]))
+    with pytest.raises(ValueError):
+        UserModelConsolidationResult(cast(Any, "bad"), record, record, False, "reason")
+
+
+def test_semantic_retrieval_applies_metadata_workspace_recency_and_confidence_filters(
+    tmp_path: Path,
+) -> None:
+    now = datetime(2026, 8, 23, tzinfo=UTC)
+    with UserModelStore(tmp_path / "user-model.sqlite3") as store:
+        target = _record(now, key="target.communication", value={"style": "concise"})
+        old = _record(
+            now - timedelta(days=100), key="old.communication", value={"style": "concise"}
+        )
+        other_workspace = _record(
+            now, key="other.target", workspace_id="workspace-b", value={"style": "concise"}
+        )
+        low_confidence = replace(
+            _record(now, key="low.target", value={"style": "concise"}), confidence=0.2
+        )
+        for record in (target, old, other_workspace, low_confidence):
+            store.create(record)
+
+        query = UserModelRetrievalQuery(
+            "target",
+            "workspace-a",
+            categories=("communication",),
+            min_confidence=0.5,
+            recency_half_life_days=30,
+            now=now,
+        )
+        hits = store.semantic_retrieve(query, encoder=FixedEncoder())
+        assert [hit.record.record_id for hit in hits] == [target.record_id]
+        assert hits[0].matched_metadata == (
+            "workspace",
+            "classification",
+            "recency",
+            "confidence",
+            "category",
+        )
+        assert hits[0].semantic_score == 1.0
+        assert hits[0].recency_score == 1.0
+
+        with pytest.raises(ValueError):
+            store.semantic_retrieve(cast(Any, "untyped query"))
+        with pytest.raises(ValueError):
+            UserModelRetrievalQuery("target", "workspace-a", min_score=2)
+
+
+def test_semantic_similarity_does_not_consolidate_and_decision_requires_evidence(
+    tmp_path: Path,
+) -> None:
+    now = datetime(2026, 8, 23, tzinfo=UTC)
+    with UserModelStore(tmp_path / "user-model.sqlite3") as store:
+        target = _record(now, key="target.preference", value={"style": "concise"})
+        source = _record(now, key="source.preference", value={"style": "brief"})
+        store.create(target)
+        store.create(source)
+        assert store.semantic_retrieve(
+            UserModelRetrievalQuery("target", "workspace-a"), encoder=FixedEncoder()
+        )
+        assert store.get(target.record_id) is not None
+        assert store.get(source.record_id) is not None
+        with pytest.raises(ValueError, match="evidence"):
+            UserModelConsolidationRequest(
+                ConsolidationDecision.MERGE,
+                target.record_id,
+                source.record_id,
+                result_value={"style": "brief"},
+            )
+
+
+def test_consolidation_request_rejects_ambiguous_or_untyped_decisions() -> None:
+    now = datetime(2026, 8, 23, tzinfo=UTC)
+    target = _record(now, key="target.preference")
+    source = _record(now, key="source.preference")
+    with pytest.raises(ValueError):
+        UserModelConsolidationRequest(cast(Any, "merge"), target.record_id, source.record_id)
+    with pytest.raises(ValueError):
+        UserModelConsolidationRequest(
+            ConsolidationDecision.MERGE, target.record_id, target.record_id
+        )
+    with pytest.raises(ValueError):
+        UserModelConsolidationRequest(
+            ConsolidationDecision.MERGE,
+            target.record_id,
+            source.record_id,
+            evidence=("",),
+            result_value={"x": 1},
+        )
+    with pytest.raises(ValueError):
+        UserModelConsolidationRequest(
+            ConsolidationDecision.UPDATE,
+            target.record_id,
+            source.record_id,
+            evidence=("evidence",),
+        )
+    with pytest.raises(PermissionError):
+        UserModelConsolidationRequest(
+            ConsolidationDecision.REPLACE,
+            target.record_id,
+            source.record_id,
+            evidence=("evidence",),
+            result_value={"token": "raw"},
+        )
+
+
+def test_controlled_consolidation_preserves_lineage_sensitivity_and_supersession(
+    tmp_path: Path,
+) -> None:
+    now = datetime(2026, 8, 23, tzinfo=UTC)
+    with UserModelStore(tmp_path / "user-model.sqlite3") as store:
+        target = _record(now, key="target.preference", value={"style": "concise"})
+        source = _record(
+            now,
+            key="source.preference",
+            value={"style": "detailed"},
+            source=UserModelSource.USER,
+            origin=UserModelOrigin.EXPLICIT,
+            sensitivity=Sensitivity.SENSITIVE,
+        )
+        store.create(target)
+        store.create(source)
+        result = store.consolidate(
+            UserModelConsolidationRequest(
+                ConsolidationDecision.MERGE,
+                target.record_id,
+                source.record_id,
+                evidence=("user-confirmed same preference",),
+                result_value={"style": "concise when possible; detailed on request"},
+                now=now + timedelta(minutes=1),
+            )
+        )
+        assert result.changed
+        assert result.target.explicit
+        assert result.target.source is UserModelSource.USER
+        assert result.target.source_reference == "ui:edit-1"
+        assert result.target.sensitivity is Sensitivity.SENSITIVE
+        assert result.target.lineage == (source.record_id,)
+        assert result.target.supersedes == (source.record_id,)
+        assert result.source.active is False
+        assert result.source.superseded_by == target.record_id
+        assert store.get(source.record_id) is None
+        loaded_target = store.get(target.record_id)
+        assert loaded_target is not None
+        assert loaded_target.lineage == (source.record_id,)
+        assert [entry.action for entry in store.audit(target.record_id)] == [
+            UserModelAuditAction.CREATED,
+            UserModelAuditAction.CONSOLIDATED,
+        ]
+        assert store.audit(target.record_id)[-1].related_record_ids == (source.record_id,)
+        assert store.audit(source.record_id)[-1].action is UserModelAuditAction.SUPERSEDED
+
+
+def test_keep_separate_and_ignore_skip_are_audited_noops_and_scope_is_enforced(
+    tmp_path: Path,
+) -> None:
+    now = datetime(2026, 8, 23, tzinfo=UTC)
+    with UserModelStore(tmp_path / "user-model.sqlite3") as store:
+        target = _record(now, key="target.preference")
+        source = _record(now, key="source.preference")
+        other = _record(now, key="other.preference", workspace_id="workspace-b")
+        store.create(target)
+        store.create(source)
+        store.create(other)
+        result = store.consolidate(
+            UserModelConsolidationRequest(
+                ConsolidationDecision.KEEP_SEPARATE,
+                target.record_id,
+                source.record_id,
+                reason="distinct user contexts",
+            )
+        )
+        assert result.changed is False
+        assert store.get(target.record_id) is not None
+        assert store.audit(target.record_id)[-1].action is UserModelAuditAction.CONSOLIDATED
+        skipped = store.consolidate(
+            UserModelConsolidationRequest(
+                ConsolidationDecision.IGNORE_SKIP,
+                target.record_id,
+                source.record_id,
+            )
+        )
+        assert skipped.changed is False
+        with pytest.raises(PermissionError, match="workspaces"):
+            store.consolidate(
+                UserModelConsolidationRequest(
+                    ConsolidationDecision.REPLACE,
+                    target.record_id,
+                    other.record_id,
+                    evidence=("independent evidence",),
+                    result_value={"style": "other"},
+                )
+            )

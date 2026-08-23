@@ -35,6 +35,13 @@ records, and result count. Workspace-specific records never cross into another
 workspace; global records are explicitly marked and may be included by the
 caller.
 
+`UserModelRetrievalQuery` adds semantic ranking over the structured record
+projection. Metadata, workspace, classification, confidence, and origin gates
+are applied before scoring; recency and confidence are bounded ranking signals.
+The default local hash encoder is deterministic and replaceable by a configured
+provider-neutral encoder. Any embedding is derived search data, never source
+truth, and a close semantic score does not consolidate records.
+
 Local context can include the configured non-secret sensitivity classes. Cloud
 context is opt-in and the convenient `cloud_public()` policy selects only
 `PUBLIC` records. `UserModelContext.export_for_cloud()` refuses local views and
@@ -45,6 +52,21 @@ the final data-sharing decision.
 User-model views may inform solution ranking, model routing, UI, opportunities,
 communication, and `AttentionPolicy`. They are data inputs only and never grant
 permissions or change the trusted security constitution.
+
+## Controlled consolidation
+
+Consolidation requires a typed `UserModelConsolidationRequest`. `MERGE`,
+`UPDATE`, and `REPLACE` require independent evidence and an exact resolved
+structured result value. `KEEP_SEPARATE` and `IGNORE_SKIP` are auditable no-op
+decisions. No decision is generated from embedding proximity alone.
+
+Effectful consolidation keeps the target record authoritative, marks the source
+as a tombstone, and records lineage, supersession, related record IDs, and
+audited value fingerprints. The target retains its creation history and the
+source remains inspectable through its audit/tombstone record. Sensitivity is
+promoted to the most restrictive participating level; provenance and confidence
+remain available on the involved records. A derived summary is never written as
+source truth without an explicit resolved value and evidence.
 
 ## Persistence and recovery
 
