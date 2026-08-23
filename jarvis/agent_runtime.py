@@ -21,7 +21,6 @@ from uuid import UUID, uuid4
 from jarvis.ai.models import ChatMessage, GenerationRequest, MessageRole
 from jarvis.ai.providers.base import AIProvider
 from jarvis.planning.models import (
-    EffectOutcome,
     PlanningStep,
     PlanningTask,
     StepExecutionResult,
@@ -69,6 +68,15 @@ class AgentRetryClass(StrEnum):
     SAFE_TRANSIENT = "safe_transient"
     UNKNOWN_OUTCOME = "unknown_outcome"
     CANCEL = "cancel"
+
+
+class AgentEffectOutcome(StrEnum):
+    """Runtime-local effect classification at the external-effect boundary."""
+
+    PRE_EFFECT_FAILURE = "pre_effect_failure"
+    SAFE_TO_RETRY = "safe_to_retry"
+    EFFECT_CONFIRMED = "effect_confirmed"
+    UNKNOWN_OUTCOME = "unknown_outcome"
 
 
 @dataclass(frozen=True, slots=True)
@@ -298,7 +306,7 @@ class AgentEffect:
     status: ToolResultStatus
     output_json: str | None = None
     evidence: tuple[str, ...] = ()
-    effect_outcome: EffectOutcome = EffectOutcome.PRE_EFFECT_FAILURE
+    effect_outcome: AgentEffectOutcome = AgentEffectOutcome.PRE_EFFECT_FAILURE
     approval_request_ids: tuple[UUID, ...] = ()
 
 
@@ -480,7 +488,10 @@ class AgentLoop:
                             if (
                                 reason is AgentTerminationReason.TOOL_FAILURE
                                 and effect.effect_outcome
-                                in {EffectOutcome.PRE_EFFECT_FAILURE, EffectOutcome.SAFE_TO_RETRY}
+                                in {
+                                    AgentEffectOutcome.PRE_EFFECT_FAILURE,
+                                    AgentEffectOutcome.SAFE_TO_RETRY,
+                                }
                                 and usage.retries < budget.max_retries
                             ):
                                 usage = AgentUsage(
@@ -588,11 +599,11 @@ class AgentLoop:
             UUID(item.value) for item in result.metadata if item.key == "approval_request_id"
         )
         effect_outcome = (
-            EffectOutcome.EFFECT_CONFIRMED
+            AgentEffectOutcome.EFFECT_CONFIRMED
             if result.effect_disposition is ToolEffectDisposition.CONFIRMED_EFFECT
-            else EffectOutcome.UNKNOWN_OUTCOME
+            else AgentEffectOutcome.UNKNOWN_OUTCOME
             if result.effect_disposition is ToolEffectDisposition.UNKNOWN
-            else EffectOutcome.PRE_EFFECT_FAILURE
+            else AgentEffectOutcome.PRE_EFFECT_FAILURE
         )
         effect = AgentEffect(
             request_id,
@@ -733,9 +744,9 @@ def classify_retry(
     if cancelled:
         return AgentRetryClass.CANCEL
     if effect is not None:
-        if effect.effect_outcome is EffectOutcome.UNKNOWN_OUTCOME:
+        if effect.effect_outcome is AgentEffectOutcome.UNKNOWN_OUTCOME:
             return AgentRetryClass.UNKNOWN_OUTCOME
-        if effect.effect_outcome is EffectOutcome.SAFE_TO_RETRY:
+        if effect.effect_outcome is AgentEffectOutcome.SAFE_TO_RETRY:
             return AgentRetryClass.SAFE_TRANSIENT
         return AgentRetryClass.DETERMINISTIC_TOOL_FAILURE
     if malformed_response:
