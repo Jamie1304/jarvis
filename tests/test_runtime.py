@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
 from jarvis import application
+from jarvis.capability_health import HealthProbeMode, HealthProbeResult, HealthStatus
 from jarvis.control_center import ControlCenterSection
 from jarvis.core.config import Settings
 from jarvis.memory.control import MemoryControlService
@@ -53,6 +55,16 @@ async def test_canonical_runtime_calculates_and_recovers_persisted_task(tmp_path
         item.item_id == "settings" for item in center.section(ControlCenterSection.SYSTEM).items
     )
     assert center.section(ControlCenterSection.AUTOMATIONS).status.value == "available"
+    capability_health = runtime.container.capability_health.evaluate_health(
+        "runtime-fixture",
+        (HealthProbeResult(HealthProbeMode.PASSIVE, True, "observed", datetime.now(UTC)),),
+    )
+    assert capability_health.status is HealthStatus.HEALTHY
+    health_center = await runtime.container.control_center.refresh(ControlCenterSection.HEALTH)
+    assert any(
+        item.item_id == "runtime-fixture"
+        for item in health_center.section(ControlCenterSection.HEALTH).items
+    )
 
     task = await runtime.container.task_controller.submit_task("calculate 25% of 800")
     assert task.status is PlanningTaskStatus.COMPLETED

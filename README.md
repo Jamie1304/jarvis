@@ -15,6 +15,10 @@ approval-bound installation/update, independent verification, and no default pac
 or process capability. Phase 10 adds advisory capability-gap detection and
 provider-neutral candidate discovery; discovery findings cannot install, execute, or
 authorize anything.
+Capability health and behavior drift are monitored through trusted broker
+observations against immutable certified baselines; drift can degrade or
+quarantine an active capability without allowing generated code to rewrite its
+baseline or self-recertify.
 
 ## Quick start
 

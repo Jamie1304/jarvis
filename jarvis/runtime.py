@@ -22,6 +22,7 @@ from jarvis.artifacts import ArtifactStore
 from jarvis.automations import AutomationService, AutomationStoreError, SQLiteAutomationStore
 from jarvis.bootstrap import create_provider_registry
 from jarvis.capabilities import CapabilityRegistry
+from jarvis.capability_health import CapabilityHealthService, HealthStatus
 from jarvis.control_center import (
     ControlCenterContribution,
     ControlCenterItem,
@@ -94,7 +95,7 @@ from jarvis.tools.calculator import CalculatorTool
 from jarvis.tools.local_time import LocalTimeTool
 from jarvis.tools.registry import ToolRegistry
 from jarvis.tools.weather import UnavailableWeatherTool
-from jarvis.trace import TraceError, TraceStore
+from jarvis.trace import ExecutionTrace, TraceError, TraceStore
 from jarvis.user_model import UserModelMigrationError, UserModelStore
 from jarvis.workflows import WorkflowTemplateRegistry
 
@@ -310,6 +311,7 @@ class RuntimeContainer:
     automation_store: SQLiteAutomationStore
     trace_store: TraceStore
     automation_service: AutomationService
+    capability_health: CapabilityHealthService
     workflow_templates: WorkflowTemplateRegistry
     discovery: CapabilityGapDetector
     candidate_evaluator: CandidateEvaluator
@@ -343,6 +345,7 @@ class RuntimeContainer:
                 await asyncio.gather(self.automation_start_task, return_exceptions=True)
             resources = (
                 self.automation_service,
+                self.capability_health,
                 self.event_bus,
                 self.startup_warmup,
                 self.control_center,
@@ -627,6 +630,10 @@ class ApplicationRuntime:
                 workflow_registry=workflow_templates,
                 trace_store=trace_store,
             )
+            capability_health = CapabilityHealthService(
+                event_bus=events,
+                trace=ExecutionTrace(store=trace_store),
+            )
 
             def tool_projection() -> tuple[ControlCenterItem, ...]:
                 items: list[ControlCenterItem] = []
@@ -819,6 +826,25 @@ class ApplicationRuntime:
                     ),
                 )
 
+            def capability_health_projection() -> tuple[ControlCenterItem, ...]:
+                return tuple(
+                    ControlCenterItem(
+                        report.capability_id,
+                        f"Capability health: {report.capability_id}",
+                        (
+                            ControlCenterStatus.AVAILABLE
+                            if report.status is HealthStatus.HEALTHY
+                            else ControlCenterStatus.DEGRADED
+                        ),
+                        report.detail,
+                        metadata=(
+                            ("health", report.status.value),
+                            ("checked_at", report.checked_at.isoformat()),
+                        ),
+                    )
+                    for report in capability_health.reports()
+                )
+
             def audit_projection() -> tuple[ControlCenterItem, ...]:
                 return (
                     ControlCenterItem(
@@ -960,6 +986,11 @@ class ApplicationRuntime:
             control_center.register(ControlCenterSection.AUDIT, "store", audit_projection)
             control_center.register(ControlCenterSection.HEALTH, "provider", health_projection)
             control_center.register(
+                ControlCenterSection.HEALTH,
+                "capability-health",
+                capability_health_projection,
+            )
+            control_center.register(
                 ControlCenterSection.RECOVERY,
                 "store",
                 static_provider(
@@ -1046,6 +1077,7 @@ class ApplicationRuntime:
                 automation_store=automation_store,
                 trace_store=trace_store,
                 automation_service=automation_service,
+                capability_health=capability_health,
                 workflow_templates=workflow_templates,
                 discovery=CapabilityGapDetector(frozenset({"calculator", "local_time"})),
                 candidate_evaluator=CandidateEvaluator(),

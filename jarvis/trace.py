@@ -34,6 +34,8 @@ class TraceError(ValueError):
 class TraceEventType(StrEnum):
     GOAL = "goal"
     AUTOMATION = "automation"
+    HEALTH = "health"
+    DRIFT = "drift"
     PLAN_REVISION = "plan_revision"
     STEP = "step"
     AGENT_EXECUTION = "agent_execution"
