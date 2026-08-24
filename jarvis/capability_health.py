@@ -621,6 +621,30 @@ class CapabilityHealthService:
     def reports(self) -> tuple[CapabilityHealthReport, ...]:
         return tuple(self._health.values())
 
+    def record_status(
+        self,
+        capability_id: str,
+        status: HealthStatus,
+        detail: str,
+        *,
+        evidence: Iterable[str] = (),
+    ) -> CapabilityHealthReport:
+        """Record an application-owned status when a doctor/fallback has acted."""
+
+        capability_id = _text(capability_id, "Capability ID", 256)
+        if not isinstance(status, HealthStatus):
+            raise CapabilityHealthError("Health status is malformed")
+        report = CapabilityHealthReport(
+            capability_id,
+            status,
+            detail,
+            checked_at=self._now(),
+            evidence=_labels(evidence, "Health evidence", 64),
+        )
+        self._health[capability_id] = report
+        self._emit_health(report)
+        return report
+
     def evaluate_health(
         self,
         capability_id: str,

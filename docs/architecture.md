@@ -505,3 +505,15 @@ and concurrency constraints. Provider-neutral STT/TTS definitions use the same
 router and degrade to `NO_LLM`/text-only when policy allows. Routing never
 grants permission or activates a model. See
 `docs/model-management-and-routing.md`.
+
+## Hierarchical diagnostics and repair
+
+`ComponentDoctor` is the transient composition-root-owned diagnostic
+orchestrator. `CapabilityHealthService` remains the health authority and
+routes failures to the explicit CORE, PROVIDER, SANDBOX, PROVISIONING, or
+package-declared CAPABILITY owner. Package declarations provide only bounded
+read-only probes, approval-bound repair metadata, fallback strategies, and
+expected verification; trusted application code binds executable callbacks.
+Unknown repair outcomes quarantine without replay, while a safe fallback may
+degrade one capability without silently changing privacy or authority
+semantics. See `docs/component-doctor.md`.

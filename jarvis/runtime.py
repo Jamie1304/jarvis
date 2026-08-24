@@ -23,6 +23,7 @@ from jarvis.automations import AutomationService, AutomationStoreError, SQLiteAu
 from jarvis.bootstrap import create_provider_registry
 from jarvis.capabilities import CapabilityRegistry
 from jarvis.capability_health import CapabilityHealthService, HealthStatus
+from jarvis.component_doctor import ComponentDoctor
 from jarvis.control_center import (
     ControlCenterContribution,
     ControlCenterItem,
@@ -312,6 +313,7 @@ class RuntimeContainer:
     trace_store: TraceStore
     automation_service: AutomationService
     capability_health: CapabilityHealthService
+    component_doctor: ComponentDoctor
     workflow_templates: WorkflowTemplateRegistry
     discovery: CapabilityGapDetector
     candidate_evaluator: CandidateEvaluator
@@ -345,6 +347,7 @@ class RuntimeContainer:
                 await asyncio.gather(self.automation_start_task, return_exceptions=True)
             resources = (
                 self.automation_service,
+                self.component_doctor,
                 self.capability_health,
                 self.event_bus,
                 self.startup_warmup,
@@ -634,6 +637,7 @@ class ApplicationRuntime:
                 event_bus=events,
                 trace=ExecutionTrace(store=trace_store),
             )
+            component_doctor = ComponentDoctor(capability_health)
 
             def tool_projection() -> tuple[ControlCenterItem, ...]:
                 items: list[ControlCenterItem] = []
@@ -1078,6 +1082,7 @@ class ApplicationRuntime:
                 trace_store=trace_store,
                 automation_service=automation_service,
                 capability_health=capability_health,
+                component_doctor=component_doctor,
                 workflow_templates=workflow_templates,
                 discovery=CapabilityGapDetector(frozenset({"calculator", "local_time"})),
                 candidate_evaluator=CandidateEvaluator(),

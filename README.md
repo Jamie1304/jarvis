@@ -19,6 +19,9 @@ Capability health and behavior drift are monitored through trusted broker
 observations against immutable certified baselines; drift can degrade or
 quarantine an active capability without allowing generated code to rewrite its
 baseline or self-recertify.
+Hierarchical component diagnostics route failures to the core, provider,
+sandbox, provisioning, or package capability owner, and use approval-bound
+repairs or privacy-preserving fallbacks without creating a second authority.
 
 ## Quick start
 

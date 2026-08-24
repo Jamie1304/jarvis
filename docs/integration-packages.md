@@ -47,10 +47,13 @@ opaque `ArtifactRef` values. They cannot be caller-supplied filesystem paths.
 ## Diagnostics
 
 The optional diagnostics contract contains known failure signatures,
-read-only diagnostic probes, safe repair declarations, and fallback hints.
-Probes must be read-only. Repairs must declare permissions and cannot disable
-approval. Run 25B may execute these declarations only after trusted policy
-validation; package metadata itself does not authorize repair.
+read-only diagnostic probes, safe repair declarations, fallback hints or
+fallback strategies, and expected repair-verification evidence. Probes must be
+read-only. Repairs must declare permissions and cannot disable approval. The
+runtime `ComponentDoctor` binds declarations to trusted application-owned
+callbacks and routes them through the normal health, broker, sandbox, and
+verification boundaries. Package metadata itself does not authorize repair;
+unknown outcomes are quarantined and never blindly replayed.
 
 Generated package source and security surfaces are reviewed by the native
 data-only `GeneratedPackageReviewer`; see

@@ -36,6 +36,8 @@ class TraceEventType(StrEnum):
     AUTOMATION = "automation"
     HEALTH = "health"
     DRIFT = "drift"
+    DIAGNOSTIC = "diagnostic"
+    REPAIR = "repair"
     PLAN_REVISION = "plan_revision"
     STEP = "step"
     AGENT_EXECUTION = "agent_execution"

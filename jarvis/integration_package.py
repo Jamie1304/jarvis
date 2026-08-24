@@ -205,9 +205,17 @@ class DiagnosticsContract:
     probes: tuple[DiagnosticProbe, ...] = ()
     safe_repairs: tuple[SafeRepairAction, ...] = ()
     fallback_hints: tuple[str, ...] = ()
+    fallback_strategy: tuple[str, ...] = ()
+    expected_repair_verification: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         _labels(self.fallback_hints, "Diagnostic fallback hints", 32)
+        _labels(self.fallback_strategy, "Diagnostic fallback strategy", 32)
+        _labels(
+            self.expected_repair_verification,
+            "Diagnostic repair verification",
+            32,
+        )
         if len({probe.probe_id for probe in self.probes}) != len(self.probes):
             raise PackageContractError("Diagnostic probe IDs must be unique")
         if len({repair.action_id for repair in self.safe_repairs}) != len(self.safe_repairs):
