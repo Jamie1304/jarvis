@@ -43,7 +43,7 @@ store and validates content hashes on reads.
 
 The EventBus receives an observational `artifact.created` event after the
 metadata/content transaction commits. Events do not grant authority or become
-artifact truth. Future Trace, PresentationSurface, Knowledge import, and
-Backup services should consume references and store their own projections or
-backup copies under an explicitly documented ownership contract; none may
-silently become a second artifact metadata/content owner.
+artifact truth. Trace, PresentationSurface, Knowledge import, and `BackupService`
+consume references and store their own projections or encrypted backup copies
+under explicit ownership contracts; none may silently become a second artifact
+metadata/content owner. Backup does not export CredentialVault secrets.

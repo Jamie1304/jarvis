@@ -9,6 +9,7 @@ description = "Local-first desktop AI agent engineering foundation"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
+    "cryptography==44.0.2",
     "fastapi==0.115.6",
     "httpx==0.28.1",
     "pydantic==2.10.5",

@@ -20,6 +20,7 @@ from jarvis.ai.routing import ProviderRouter
 from jarvis.ai.sessions import AgentSessionStore
 from jarvis.artifacts import ArtifactStore
 from jarvis.automations import AutomationService, AutomationStoreError, SQLiteAutomationStore
+from jarvis.backup import BackupService
 from jarvis.bootstrap import create_provider_registry
 from jarvis.capabilities import CapabilityRegistry
 from jarvis.capability_health import CapabilityHealthService, HealthStatus
@@ -136,6 +137,7 @@ class RuntimePaths:
     temporary: Path
     models: Path
     recovery: Path
+    backups: Path
 
     @classmethod
     def from_root(cls, root: Path) -> RuntimePaths:
@@ -159,6 +161,7 @@ class RuntimePaths:
             base / "tmp",
             base / "models",
             base / "recovery",
+            base / "backups",
         )
 
     def ensure_directories(self) -> None:
@@ -171,6 +174,7 @@ class RuntimePaths:
             self.temporary,
             self.models,
             self.recovery,
+            self.backups,
             self.artifacts,
         ):
             path.mkdir(parents=True, exist_ok=True)
@@ -190,6 +194,7 @@ class RuntimePaths:
             self.temporary,
             self.models,
             self.recovery,
+            self.backups,
         )
         databases = (
             self.state_database,
@@ -329,6 +334,7 @@ class RuntimeContainer:
     workflow_templates: WorkflowTemplateRegistry
     discovery: CapabilityGapDetector
     candidate_evaluator: CandidateEvaluator
+    backup: BackupService
     recovery: RecoveryStore
     agent_loop: AgentLoop
     launch_profiles: LaunchProfileRegistry = field(default_factory=LaunchProfileRegistry)
@@ -514,6 +520,7 @@ class ApplicationRuntime:
         automation_store: SQLiteAutomationStore | None = None
         trace_store: TraceStore | None = None
         golden_workflow_store: GoldenWorkflowStore | None = None
+        backup: BackupService | None = None
         automation_service: AutomationService | None = None
         recovery: RecoveryStore | None = None
         artifact_store: ArtifactStore | None = None
@@ -561,6 +568,7 @@ class ApplicationRuntime:
                     security_report=security_report,
                 )
             events = InMemoryEventBus()
+            backup = BackupService(paths.backups)
             paths.validate_storage_layout()
             state_store = SQLiteStateStore(paths.state_database)
             paths.validate_storage_layout()
@@ -1067,6 +1075,7 @@ class ApplicationRuntime:
                 automation_start_task = asyncio.create_task(automation_service.start())
             except RuntimeError:
                 automation_start_task = None
+            assert backup is not None
             container = RuntimeContainer(
                 settings=settings,
                 paths=paths,
@@ -1117,6 +1126,7 @@ class ApplicationRuntime:
                 workflow_templates=workflow_templates,
                 discovery=CapabilityGapDetector(frozenset({"calculator", "local_time"})),
                 candidate_evaluator=CandidateEvaluator(),
+                backup=backup,
                 recovery=recovery,
                 agent_loop=AgentLoop(
                     provider,

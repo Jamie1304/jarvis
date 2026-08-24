@@ -30,6 +30,9 @@ async def test_canonical_runtime_calculates_and_recovers_persisted_task(tmp_path
     assert isinstance(runtime.container.task_controller, PlanningTaskController)
     assert isinstance(runtime.container.memory_consistency, MemoryConsistencyService)
     assert isinstance(runtime.container.memory_control, MemoryControlService)
+    assert runtime.container.backup.installation_id
+    assert runtime.container.paths.backups.is_dir()
+    assert (runtime.container.paths.backups / "installation-id").is_file()
     assert runtime.container.user_model_store.database_path == (
         runtime.container.paths.user_model_database
     )

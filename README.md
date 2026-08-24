@@ -25,6 +25,10 @@ repairs or privacy-preserving fallbacks without creating a second authority.
 Open-source donor research is provenance-first metadata that can only hand an
 adaptation proposal to the isolated, gated self-improvement pipeline; donors
 are never imported or required at runtime.
+User-facing settings, workspaces, memory, knowledge metadata, skills,
+workflows, automations, and selected artifacts can be exported through the
+separate encrypted backup/migration boundary; credential secrets and large model or
+cache files are never included by default.
 
 ## Quick start
 

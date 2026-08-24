@@ -26,6 +26,24 @@ Golden run history is bounded and run IDs are idempotent. User retirement and
 deletion are separate lifecycle operations; candidate/model output has no such
 mutation path.
 
+User-facing backup/export is a separate boundary from startup recovery. The
+composition root owns `BackupService` and its app-owned `backups/` directory,
+but component providers and appliers remain owned by their authoritative
+domain services. A `BackupBundle` is encrypted transport and migration input;
+it is never treated as a second task, memory, artifact, credential, package, or
+recovery store. `RecoveryStore` remains the authority for candidate/LKG
+startup rollback and crash-loop state.
+
+Backup uses reviewed `cryptography` primitives (PBKDF2-HMAC-SHA256 key
+derivation and AES-GCM authenticated encryption). The decryption key is never
+stored in the bundle and there is no plaintext fallback. Credential components
+are rejected; components may contain only opaque Vault references and can
+require reauthorization on another installation. Restore verifies authenticated
+content and component hashes before applying, previews conflicts, requires
+explicit migration/relink/recertification callbacks, and requires a technical
+snapshot/rollback callback before destructive application. A failed restore
+does not silently become a partially successful migration.
+
 ## Transaction model
 
 Planning task/plan versions are written atomically in one SQLite transaction. The
