@@ -23,6 +23,12 @@ from jarvis.security.models import (
     SecurityViolationCode,
     StartupSecurityReport,
 )
+from jarvis.security.modification_policy import (
+    ModificationTrustClassification,
+    ModificationTrustClassifier,
+    ModificationTrustError,
+    ModificationTrustLevel,
+)
 from jarvis.security.startup import (
     StartupSecurityConfiguration,
     StartupSecurityValidator,
@@ -43,6 +49,10 @@ __all__ = [
     "MutationPolicy",
     "MutationReason",
     "MutationStage",
+    "ModificationTrustClassification",
+    "ModificationTrustClassifier",
+    "ModificationTrustError",
+    "ModificationTrustLevel",
     "RepositoryIntegrityClassifier",
     "SecurityViolation",
     "SecurityViolationCode",

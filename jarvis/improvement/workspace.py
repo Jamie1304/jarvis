@@ -23,6 +23,8 @@ from jarvis.improvement.models import (
     ProposedFileChange,
 )
 from jarvis.security import (
+    ModificationTrustClassifier,
+    ModificationTrustError,
     MutationAuthority,
     MutationContext,
     MutationPolicy,
@@ -404,6 +406,19 @@ class TrustedWorkspaceChangeApplier:
         await self._manager.validate(workspace, cancellation)
         if change_set.specification_id != specification.specification_id:
             raise WorkspaceSecurityError("Change set does not match the approved specification")
+        try:
+            trust = ModificationTrustClassifier().classify(
+                change.path for change in change_set.changes
+            )
+        except ModificationTrustError as error:
+            raise WorkspaceSecurityError(
+                "Modification trust classification failed closed"
+            ) from error
+        if not trust.agent_editable:
+            raise WorkspaceSecurityError(
+                "trusted_core_owner_release_required: modification trust level "
+                f"{trust.level.value} is not agent-editable"
+            )
         checked = tuple(
             self._check_change(workspace, specification, change) for change in change_set.changes
         )

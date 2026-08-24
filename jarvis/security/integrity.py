@@ -22,6 +22,11 @@ from jarvis.security.models import (
     MutationReason,
     MutationStage,
 )
+from jarvis.security.modification_policy import (
+    ModificationTrustClassifier,
+    ModificationTrustError,
+    ModificationTrustLevel,
+)
 
 SECURITY_POLICY_VERSION = 1
 
@@ -245,6 +250,17 @@ class MutationAuthorizer:
         gate_report_digest: str,
     ) -> MutationAuthorization:
         classified = RepositoryIntegrityClassifier().classify(path)
+        try:
+            trust = ModificationTrustClassifier().classify((path,))
+        except ModificationTrustError as error:
+            raise ValueError(
+                "Mutation authorization is outside the trusted release scope"
+            ) from error
+        if (
+            authority is MutationAuthority.CONTROLLED_UPDATE
+            and trust.level >= ModificationTrustLevel.PERMISSION_BROKER_SECURITY
+        ):
+            raise ValueError("Mutation authorization is outside the trusted release scope")
         if authority is MutationAuthority.OWNER_SECURITY_RELEASE:
             permitted = (
                 self._source is MutationAuthorizationSource.OWNER_LOCAL_RELEASE
@@ -416,7 +432,20 @@ class MutationPolicy:
         ):
             return MutationDecision(False, MutationReason.MALFORMED_CONTEXT, classified)
 
+        try:
+            trust = ModificationTrustClassifier().classify((classified.relative_path,))
+        except ModificationTrustError:
+            return MutationDecision(False, MutationReason.MALFORMED_PATH, classified)
         integrity_class = classified.integrity_class
+        if (
+            trust.level >= ModificationTrustLevel.PERMISSION_BROKER_SECURITY
+            and integrity_class is not IntegrityClass.TRUSTED_CORE
+        ):
+            return MutationDecision(
+                False,
+                MutationReason.TRUSTED_CORE_OWNER_RELEASE_REQUIRED,
+                classified,
+            )
         if integrity_class is IntegrityClass.TRUSTED_CORE:
             if self._authorized_release(context, classified.relative_path):
                 return MutationDecision(True, MutationReason.OWNER_RELEASE_ALLOWED, classified)

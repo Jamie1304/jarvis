@@ -125,6 +125,23 @@ candidate code can execute and again as the mandatory security gate after the te
 gates. It is not a complete security analysis. Trusted production composition must
 add appropriate scanners and review, and final human approval remains mandatory.
 
+## Modification trust levels
+
+The trusted `ModificationTrustClassifier` derives a modification level from every
+path in the complete proposed change set. It does not accept a model-supplied
+classification. The aggregate is the highest applicable level, so a mixed patch
+cannot be split into lower-risk requests. A typed rename retains its old protected
+path, and conservative protected filename tokens cover renamed Broker, Vault,
+recovery, updater, policy, and classifier modules.
+
+Generated integrations are Level 1, user-space JARVIS is Level 2, and the Core
+Agent Runtime is Level 3. PermissionBroker/Vault/security services are Level 4;
+Updater/Recovery/Security Constitution/root-of-trust surfaces are Level 5. The
+last two levels are rejected by the proposal applier for agent-authored changes
+and require a separately held trusted release. The classifier and policy are
+themselves Level 5. See [`self-modification-policy.md`](self-modification-policy.md)
+for the complete gate contract and limitations.
+
 ## Supply-chain policy
 
 Dependency manifests are discovered recursively and fingerprinted before

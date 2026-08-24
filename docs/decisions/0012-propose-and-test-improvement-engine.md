@@ -14,6 +14,12 @@ not give the coding agent filesystem, command, approval, policy, Git, merge, or
 deployment primitives. Reject unapproved dependency-manifest changes and isolate
 raw external content as untrusted digest evidence.
 
+All proposed changes also pass the application-owned modification trust classifier.
+It derives one Level 1-5 classification from the complete path set and uses the
+highest level for mixed patches. Level 4 PermissionBroker/Vault/security changes
+and Level 5 updater/recovery/root-of-trust changes are not agent-editable; changing
+the classifier or splitting a protected patch cannot lower the requirement.
+
 ## Rationale
 
 Self-modification concentrates code-execution, supply-chain, prompt-injection, and

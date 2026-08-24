@@ -163,6 +163,20 @@ those documents into imports, entry points, commands, or configuration authority
 Mutation classification is independent of candidate risk, model confidence, tests,
 or an approval statement inside a prompt.
 
+Self-modification also has a separate trusted level classification. The complete
+path set of a proposed patch is classified by the application-owned
+`ModificationTrustClassifier`; no model or worker may declare a lower level, and
+the highest level in a mixed patch controls the gate set. The canonical level
+contract, including rename and patch-splitting rules, is in
+[`self-modification-policy.md`](self-modification-policy.md).
+
+Level 1 is Generated Integration, Level 2 is User-space JARVIS, Level 3 is the
+Core Agent Runtime, Level 4 is PermissionBroker/Vault/security services, and
+Level 5 is Updater/Recovery/Security Constitution/root of trust. Level 4 and
+Level 5 are not agent-editable. The classifier, mutation policy, and security
+constitution are Level 5 surfaces and cannot be changed by the routine
+improvement path to relax a later gate.
+
 | Workflow | Isolated proposal | Production apply |
 |---|---|---|
 | Routine improvement | May inspect/test `PRODUCTION_CORE`, `INTEGRATION`, and non-executable `GENERATED`; cannot touch `TRUSTED_CORE`, config, data, or unknown paths | Never; no production deploy port exists |
