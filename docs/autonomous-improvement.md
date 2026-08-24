@@ -171,6 +171,18 @@ require exact scoped policy and fresh trusted approval as appropriate. A Phase 1
 proposal grants none of them, and critical/high-impact modifications must never be
 automatically merged or deployed.
 
+## Donor/reference study
+
+Open-source donor research is metadata-only and feeds Phase 11 rather than
+creating a parallel change path. `DonorStudyService` verifies an authoritative
+upstream, exact revision, license/notices, source-file digests, concept,
+comparison, risk/benefit, tests, and benchmarks before creating a fingerprinted
+`NativeAdaptationProposal`. It never clones, imports, executes, installs, or
+adds dependencies. The proposal can be converted only into an
+`ObservedImprovementSignal`; the existing isolated workspace, security,
+dependency, benchmark, regression, rollback, and approval gates remain
+mandatory.
+
 ## Security review
 
 | Threat | Current control | Residual assumption or limitation |

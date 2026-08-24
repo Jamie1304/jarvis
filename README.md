@@ -22,6 +22,9 @@ baseline or self-recertify.
 Hierarchical component diagnostics route failures to the core, provider,
 sandbox, provisioning, or package capability owner, and use approval-bound
 repairs or privacy-preserving fallbacks without creating a second authority.
+Open-source donor research is provenance-first metadata that can only hand an
+adaptation proposal to the isolated, gated self-improvement pipeline; donors
+are never imported or required at runtime.
 
 ## Quick start
 

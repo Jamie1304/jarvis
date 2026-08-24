@@ -337,6 +337,16 @@ improvement. Success produces only an expiring, fingerprinted
 Phase 11 has no autonomous approval, merge, push, installation, deployment, or
 production-write path. See `docs/autonomous-improvement.md`.
 
+Open-source donor study is a separate metadata-only boundary. `DonorStudyService`
+requires an authoritative upstream, exact revision, inspected license/notices,
+source-file digests, concept comparison, risk/benefit, tests, and benchmarks
+before creating a review-only `NativeAdaptationProposal`. It cannot clone,
+import, execute, install, add dependencies, or alter production. A proposal is
+handed to the existing `ImprovementEngine` as an unexecuted signal; the same
+isolated workspace, security, dependency, protected benchmark, regression,
+rollback, and trusted-approval gates remain mandatory. See
+`docs/native-donor-study.md`.
+
 Phase 12 adds repository-grounded project knowledge without creating a new
 authorization path. Human-authored `docs/` and ADRs remain authoritative or
 historical sources; `knowledge/generated/project-index.json` is a disposable

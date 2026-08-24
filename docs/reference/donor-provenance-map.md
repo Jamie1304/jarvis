@@ -8,6 +8,11 @@ useful without its implementation, and a repository license does not
 automatically license its dependencies, assets, models, prompts, or generated
 content.
 
+The native `DonorStudyService` accepts only the bounded provenance records in
+this map’s contract. It does not discover by cloning, import source, execute a
+donor, install a package, or add dependencies. Any native implementation is
+handed to the existing proposal-and-test self-improvement pipeline.
+
 ## Rules
 
 - **PORT** means source reuse is approved only after exact-file provenance,

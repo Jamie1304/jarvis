@@ -23,6 +23,18 @@ from jarvis.improvement.dependencies import (
     ManifestDependencyGuard,
     TrustedDependencyException,
 )
+from jarvis.improvement.donor_study import (
+    DonorDecision,
+    DonorFileReference,
+    DonorLicenseEvidence,
+    DonorStudy,
+    DonorStudyError,
+    DonorStudySecurityError,
+    DonorStudyService,
+    DonorStudyStage,
+    NativeAdaptationProposal,
+    NativeAdaptationStatus,
+)
 from jarvis.improvement.engine import ImprovementEngine
 from jarvis.improvement.models import (
     ChangeOperation,
@@ -64,6 +76,14 @@ __all__ = [
     "DependencyBaseline",
     "DependencyChange",
     "DependencyRecord",
+    "DonorDecision",
+    "DonorFileReference",
+    "DonorLicenseEvidence",
+    "DonorStudy",
+    "DonorStudyError",
+    "DonorStudySecurityError",
+    "DonorStudyService",
+    "DonorStudyStage",
     "EvaluationDirection",
     "EvaluationBaseline",
     "EvaluationResult",
@@ -86,6 +106,8 @@ __all__ = [
     "MergeDeploymentProposal",
     "ManifestDependencyGuard",
     "ModificationResult",
+    "NativeAdaptationProposal",
+    "NativeAdaptationStatus",
     "ObservedImprovementSignal",
     "PrioritizationResult",
     "PriorityOutcome",

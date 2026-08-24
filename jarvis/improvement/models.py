@@ -27,6 +27,7 @@ class ImprovementSource(StrEnum):
     CAPABILITY_GAP = "capability_gap"
     DEPENDENCY_PROBLEM = "dependency_problem"
     EVALUATION_REGRESSION = "evaluation_regression"
+    DONOR_STUDY = "donor_study"
 
 
 class Reversibility(StrEnum):
