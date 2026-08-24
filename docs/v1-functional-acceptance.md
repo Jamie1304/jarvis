@@ -1,8 +1,10 @@
 # v1 functional acceptance record
 
-**Run revision:** `d9f514d703ab2f5de108a955d5b27c03e876fccc`  
-**Branch:** `agent/v1-integration`  
-**Date:** 2026-08-24  
+**Run revision:** `d9f514d703ab2f5de108a955d5b27c03e876fccc`
+
+**Branch:** `agent/v1-integration`
+
+**Date:** 2026-08-24
 **Result:** **NO-GO for the complete end-to-end v1 constitution**
 
 This record is the primary acceptance boundary for the current v1 baseline. It
