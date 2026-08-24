@@ -1,9 +1,9 @@
 # JARVIS v1 Architecture and Efficiency Audit
 
-Audit date: 2026-08-24  
-Repository: `Jamie1304/jarvis`  
-Branch: `agent/v1-integration`  
-Audited revision: `e1cb175b6cc9fbcc6c2e95ca290cfbfd3e9815b5`  
+Audit date: 2026-08-24
+Repository: `Jamie1304/jarvis`
+Branch: `agent/v1-integration`
+Audited revision: `e1cb175b6cc9fbcc6c2e95ca290cfbfd3e9815b5`
 Result: **CORE GO / COMPLETE SELF-EXPANSION BASELINE NO-GO**
 
 This is an architecture and efficiency audit, not a feature implementation. It
