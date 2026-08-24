@@ -49,3 +49,15 @@ Evidence is observation data, not permission, identity, policy, or audit
 authority. Durable task outcome remains owned by `PlanningEngine`; any future
 durable evidence store must be added to `docs/authoritative-state-map.md`
 before implementation.
+
+## Installation-specific regressions
+
+`GoldenWorkflowStore` owns versioned privacy-safe regression definitions and run
+evidence. `GoldenWorkflowService` passes trusted executor observations through
+this same `VerificationEngine`; exact response text or a model completion claim
+cannot pass a golden workflow. Synthetic fixtures are preferred, real trace data
+is sanitized and generalized, and failed or `UNKNOWN_OUTCOME` traces cannot
+create a golden definition. Before model changes, integration updates,
+self-improvement, or self-update activation, the owning change service must run
+all applicable active golden workflows. Missing coverage and unavailable
+integration/hardware checks are not passes.

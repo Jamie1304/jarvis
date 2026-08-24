@@ -92,6 +92,7 @@ from jarvis.security import (
 from jarvis.skills import SkillRegistry
 from jarvis.state import ApplicationStateMachine, SQLiteStateStore, StateStoreError
 from jarvis.task_controller import PlanningTaskController, TaskController
+from jarvis.testing.golden import GoldenWorkflowError, GoldenWorkflowService, GoldenWorkflowStore
 from jarvis.tools.calculator import CalculatorTool
 from jarvis.tools.local_time import LocalTimeTool
 from jarvis.tools.registry import ToolRegistry
@@ -119,6 +120,7 @@ class RuntimePaths:
     knowledge_library_database: Path
     automation_database: Path
     trace_database: Path
+    golden_workflow_database: Path
     sessions_database: Path
     audit_database: Path
     artifacts: Path
@@ -141,6 +143,7 @@ class RuntimePaths:
             base / "knowledge-library.sqlite3",
             base / "automations.sqlite3",
             base / "trace.sqlite3",
+            base / "golden-workflows.sqlite3",
             base / "sessions.sqlite3",
             base / "audit.sqlite3",
             base / "artifacts",
@@ -190,6 +193,7 @@ class RuntimePaths:
             self.knowledge_library_database,
             self.automation_database,
             self.trace_database,
+            self.golden_workflow_database,
             self.sessions_database,
             self.audit_database,
             self.artifacts / "artifacts.sqlite3",
@@ -311,6 +315,8 @@ class RuntimeContainer:
     system_memory: ProjectSystemMemory
     automation_store: SQLiteAutomationStore
     trace_store: TraceStore
+    golden_workflow_store: GoldenWorkflowStore
+    golden_workflows: GoldenWorkflowService
     automation_service: AutomationService
     capability_health: CapabilityHealthService
     component_doctor: ComponentDoctor
@@ -360,6 +366,7 @@ class RuntimeContainer:
                 self.user_model_store,
                 self.knowledge_library,
                 self.trace_store,
+                self.golden_workflow_store,
                 self.automation_store,
                 self.state_store,
                 self.audit_sink,
@@ -500,6 +507,7 @@ class ApplicationRuntime:
         knowledge_library: KnowledgeLibrary | None = None
         automation_store: SQLiteAutomationStore | None = None
         trace_store: TraceStore | None = None
+        golden_workflow_store: GoldenWorkflowStore | None = None
         automation_service: AutomationService | None = None
         recovery: RecoveryStore | None = None
         artifact_store: ArtifactStore | None = None
@@ -626,6 +634,9 @@ class ApplicationRuntime:
             automation_store = SQLiteAutomationStore(paths.automation_database)
             paths.validate_storage_layout()
             trace_store = TraceStore(paths.trace_database)
+            paths.validate_storage_layout()
+            golden_workflow_store = GoldenWorkflowStore(paths.golden_workflow_database)
+            golden_workflows = GoldenWorkflowService(golden_workflow_store)
             automation_service = AutomationService(
                 automation_store,
                 events,
@@ -1080,6 +1091,8 @@ class ApplicationRuntime:
                 system_memory=system_memory,
                 automation_store=automation_store,
                 trace_store=trace_store,
+                golden_workflow_store=golden_workflow_store,
+                golden_workflows=golden_workflows,
                 automation_service=automation_service,
                 capability_health=capability_health,
                 component_doctor=component_doctor,
@@ -1118,6 +1131,7 @@ class ApplicationRuntime:
                     "knowledge_library": "validated",
                     "automations": "validated",
                     "trace": "validated",
+                    "golden_workflows": "validated",
                     "audit": "validated",
                     "artifacts": "validated",
                 },
@@ -1134,6 +1148,7 @@ class ApplicationRuntime:
             UserModelMigrationError,
             StateStoreError,
             TraceError,
+            GoldenWorkflowError,
             sqlite3.DatabaseError,
         ) as error:
             if recovery is not None:
@@ -1151,6 +1166,7 @@ class ApplicationRuntime:
                 artifact_store,
                 automation_service,
                 trace_store,
+                golden_workflow_store,
                 automation_store,
                 memory_store,
                 user_model_store,
@@ -1181,6 +1197,7 @@ class ApplicationRuntime:
                 artifact_store,
                 automation_service,
                 trace_store,
+                golden_workflow_store,
                 automation_store,
                 memory_store,
                 user_model_store,

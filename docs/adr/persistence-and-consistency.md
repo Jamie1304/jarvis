@@ -16,6 +16,16 @@ confidence history. Consistency findings do not become instructions or approvals
 They do not decide task completion. EventBus is in-process only and is never a
 persistence or authorization source.
 
+Installation-specific regression definitions and run evidence are a separate
+durable domain owned by `GoldenWorkflowStore`. Golden workflows are immutable
+fingerprint-bound definitions; `GoldenWorkflowService` delegates outcome
+evaluation to `VerificationEngine` and never becomes task, plan, permission, or
+artifact authority. A missing applicable workflow, unavailable required
+integration/hardware, failed run, or fingerprint mismatch fails the change gate.
+Golden run history is bounded and run IDs are idempotent. User retirement and
+deletion are separate lifecycle operations; candidate/model output has no such
+mutation path.
+
 ## Transaction model
 
 Planning task/plan versions are written atomically in one SQLite transaction. The

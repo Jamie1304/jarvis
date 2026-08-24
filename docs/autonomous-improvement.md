@@ -110,6 +110,16 @@ A proposal must contain exactly one passing result for every gate:
 6. independent static security check; and
 7. protected regression evaluation.
 
+The protected regression evaluation may include installation-specific
+`GoldenWorkflow` definitions. Before a self-improvement activation, the trusted
+change service must invoke `GoldenWorkflowService.require_before` with
+`SELF_IMPROVEMENT` and run every applicable active workflow. The same gate
+contract is required for model changes, integration updates, and self-updates.
+No applicable workflow or an unavailable required integration/hardware check is
+a failure, not a waiver. Golden definitions and expected criteria are owned by
+`GoldenWorkflowStore`; generated output cannot delete, weaken, exclude, or
+regenerate them.
+
 Executable gate definitions are host-owned absolute executables with argument
 arrays and finite timeouts. There is no shell-string interface. The process adapter
 must attest that writes are confined to the candidate workspace, production and

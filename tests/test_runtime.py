@@ -32,6 +32,9 @@ async def test_canonical_runtime_calculates_and_recovers_persisted_task(tmp_path
     assert runtime.container.user_model_store.database_path == (
         runtime.container.paths.user_model_database
     )
+    assert runtime.container.golden_workflow_store.database_path == (
+        runtime.container.paths.golden_workflow_database
+    )
     assert {step.step_id for step in runtime.container.test_drive.steps()} == {
         "system-health",
         "model-provider",
