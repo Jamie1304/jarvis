@@ -18,18 +18,32 @@ integration version metadata, generated-package state, and explicitly selected
 regular-file artifacts. Manifests are schema-versioned and future schemas are
 refused. Writes use a temporary file plus `fsync` and atomic replacement.
 
-Startup writes an active marker before work begins. A marker left by a crash is
-failed-start evidence on the next startup. A committed startup clears the marker
-and advances the last-known-good (LKG) pointer only to a validated snapshot.
-Retention is bounded and never removes the LKG restore point.
+`RecoveryCoordinator.boot_candidate()` writes a typed startup attempt before
+starting a candidate. The attempt binds the candidate build and snapshot to the
+transaction, records the current LKG, migration references, and a bounded
+health deadline. A committed startup clears the marker and advances the LKG
+pointer only to a validated snapshot. Retention is bounded and never removes
+the LKG restore point.
 
 ## Failure behavior
 
-Every failure is evidence with transaction, phase, outcome, and timestamp. The
-trusted owner must execute `FAIL -> ROLLBACK -> RESTORE_LAST_KNOWN_GOOD ->
-HEALTH_CHECK`; repeated uncommitted starts may enter `SAFE_MODE`. Recovery never
-turns an unknown external effect into a retry instruction and never fabricates
-approval or bypasses `Tool -> PermissionBroker -> Policy`.
+Every failure is evidence with transaction, phase, outcome, and timestamp. A
+candidate is attempted once. The bounded recovery path is
+`FAIL -> ROLLBACK -> RESTORE_LAST_KNOWN_GOOD -> START -> HEALTH_CHECK`; a
+migration reconciliation hook runs before the LKG restart. A healthy LKG is
+committed; an LKG restart or health failure enters `SAFE_MODE`. Failed candidate
+snapshots are not retried, and the crash-loop threshold prevents indefinite
+restart loops. Recovery never turns an unknown external effect into a retry
+instruction and never fabricates approval or bypasses
+`Tool -> PermissionBroker -> Policy`.
+
+The callbacks supplied to `boot_candidate()` are trusted composition-root hooks:
+the coordinator does not execute builds, migrations, processes, or privileged
+operations. The normal runtime uses the same bounded startup marker and
+crash-loop guard; an updater/build owner must supply the candidate start,
+migration reconciliation, restart, and health hooks to perform an actual
+candidate-to-LKG process handoff. Malformed markers, manifests, migration
+metadata, deadlines, and evidence fail closed.
 
 Safe Mode disables privileged mutations, generated integration activation,
 autonomous self-update, and scheduler effects. Diagnostics, audit, rollback, and

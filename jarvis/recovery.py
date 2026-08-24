@@ -12,7 +12,7 @@ import shutil
 import tempfile
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from pathlib import Path
 from typing import Any, cast
@@ -36,6 +36,15 @@ class RecoveryPhase(StrEnum):
     SAFE_MODE = "safe_mode"
 
 
+class StartupAttemptStatus(StrEnum):
+    STARTING = "starting"
+    HEALTH_CHECK = "health_check"
+    COMMITTED = "committed"
+    FAILED = "failed"
+    ROLLING_BACK = "rolling_back"
+    SAFE_MODE = "safe_mode"
+
+
 @dataclass(frozen=True, slots=True)
 class RecoveryManifest:
     snapshot_id: str
@@ -52,6 +61,44 @@ class RecoveryManifest:
 
 
 @dataclass(frozen=True, slots=True)
+class StartupAttempt:
+    """Durable identity and deadline for one candidate or recovery boot."""
+
+    attempt_id: str
+    transaction_id: str
+    candidate_snapshot_id: str | None
+    candidate_build: str | None
+    lkg_snapshot_id: str | None
+    lkg_build: str | None
+    started_at: str
+    health_deadline: str | None
+    migrations: tuple[str, ...] = ()
+    status: StartupAttemptStatus = StartupAttemptStatus.STARTING
+
+    def __post_init__(self) -> None:
+        _bounded_text(self.attempt_id, "attempt_id")
+        _bounded_text(self.transaction_id, "transaction_id")
+        for value, label in (
+            (self.candidate_snapshot_id, "candidate_snapshot_id"),
+            (self.candidate_build, "candidate_build"),
+            (self.lkg_snapshot_id, "lkg_snapshot_id"),
+            (self.lkg_build, "lkg_build"),
+            (self.health_deadline, "health_deadline"),
+        ):
+            if value is not None:
+                _bounded_text(value, label)
+        _bounded_text(self.started_at, "started_at")
+        if (
+            not isinstance(self.migrations, tuple)
+            or len(self.migrations) > 128
+            or any(not isinstance(item, str) for item in self.migrations)
+        ):
+            raise RecoveryError("startup migrations are malformed")
+        if not isinstance(self.status, StartupAttemptStatus):
+            raise RecoveryError("startup attempt status is malformed")
+
+
+@dataclass(frozen=True, slots=True)
 class RecoveryEvidence:
     transaction_id: str
     phase: RecoveryPhase
@@ -59,6 +106,29 @@ class RecoveryEvidence:
     detail: str
     snapshot_id: str | None
     timestamp: str
+    candidate_build: str | None = None
+    lkg_snapshot_id: str | None = None
+    lkg_build: str | None = None
+    migration_refs: tuple[str, ...] = ()
+    incident_evidence: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        _bounded_text(self.transaction_id, "transaction_id")
+        if not isinstance(self.phase, RecoveryPhase):
+            raise RecoveryError("recovery phase is malformed")
+        _bounded_text(self.outcome, "outcome")
+        _bounded_text(self.detail, "detail")
+        for value, label in (
+            (self.snapshot_id, "snapshot_id"),
+            (self.candidate_build, "candidate_build"),
+            (self.lkg_snapshot_id, "lkg_snapshot_id"),
+            (self.lkg_build, "lkg_build"),
+            (self.timestamp, "timestamp"),
+        ):
+            if value is not None:
+                _bounded_text(value, label)
+        _bounded_sequence(self.migration_refs, "migration_refs")
+        _bounded_sequence(self.incident_evidence, "incident_evidence")
 
 
 @dataclass(frozen=True, slots=True)
@@ -79,7 +149,13 @@ class RecoveryStore:
     CURRENT_SCHEMA = 1
     _MAX_TEXT = 512
 
-    def __init__(self, root: Path, *, retention: int = 5) -> None:
+    def __init__(
+        self,
+        root: Path,
+        *,
+        retention: int = 5,
+        clock: Callable[[], datetime] | None = None,
+    ) -> None:
         if retention < 1 or retention > 100:
             raise ValueError("retention must be between 1 and 100")
         root = root.expanduser()
@@ -91,6 +167,7 @@ class RecoveryStore:
         self.active = self.root / "active-start.json"
         self.lkg = self.root / "last-known-good.json"
         self.retention = retention
+        self._clock = clock or (lambda: datetime.now(UTC))
         self.root.mkdir(parents=True, exist_ok=True)
         self.snapshots.mkdir(exist_ok=True)
 
@@ -150,10 +227,37 @@ class RecoveryStore:
         path = self._snapshot_path(snapshot_id) / "manifest.json"
         try:
             raw = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(raw, dict):
+                raise RecoveryError("snapshot manifest is malformed")
             if raw.get("schema_version") != self.CURRENT_SCHEMA:
                 raise RecoveryError("snapshot schema is unsupported or from the future")
+            migrations = raw.get("migrations", ())
+            files = raw.get("files", ())
+            if not isinstance(migrations, list | tuple) or not isinstance(files, list | tuple):
+                raise RecoveryError("snapshot manifest is malformed")
+            if any(not isinstance(item, str) for item in tuple(migrations) + tuple(files)):
+                raise RecoveryError("snapshot manifest is malformed")
+            raw["migrations"] = tuple(migrations)
+            raw["files"] = tuple(files)
             manifest = RecoveryManifest(**raw)
+            for value, label in (
+                (manifest.snapshot_id, "snapshot_id"),
+                (manifest.transaction_id, "transaction_id"),
+                (manifest.app_revision, "app_revision"),
+                (manifest.created_at, "created_at"),
+            ):
+                _bounded_text(value, label)
+            _parse_time(manifest.created_at)
             _safe_json_mapping(manifest.configuration, "configuration")
+            _safe_json_mapping(manifest.database_schema, "database_schema")
+            _safe_json_mapping(manifest.generated_package_state, "generated_package_state")
+            _safe_string_mapping(manifest.integration_versions)
+            _bounded_sequence(manifest.migrations, "migrations")
+            _bounded_sequence(manifest.files, "files")
+            for file_name in manifest.files:
+                file_path = Path(file_name)
+                if file_path.is_absolute() or ".." in file_path.parts:
+                    raise RecoveryError("snapshot manifest contains an unsafe file path")
             return manifest
         except RecoveryError:
             raise
@@ -184,31 +288,164 @@ class RecoveryStore:
                     os.unlink(temporary)
         return manifest
 
-    def begin_start(self, transaction_id: UUID | str) -> bool:
+    def begin_start(
+        self,
+        transaction_id: UUID | str,
+        *,
+        candidate_snapshot_id: str | None = None,
+        candidate_build: str | None = None,
+        health_deadline: datetime | None = None,
+        migrations: tuple[str, ...] = (),
+    ) -> bool:
         """Mark startup intent; return true when an uncommitted start was found."""
 
         previous = self.active.exists()
         if previous:
+            previous_attempt = self.active_start()
             self.record(
                 RecoveryEvidence(
                     str(transaction_id),
                     RecoveryPhase.FAIL,
                     "failed_start",
                     "previous start did not commit",
-                    None,
-                    _now(),
+                    previous_attempt.candidate_snapshot_id,
+                    _now(self._clock),
+                    candidate_build=previous_attempt.candidate_build,
+                    lkg_snapshot_id=previous_attempt.lkg_snapshot_id,
+                    lkg_build=previous_attempt.lkg_build,
+                    migration_refs=previous_attempt.migrations,
                 )
             )
-        _atomic_json(self.active, {"transaction_id": str(transaction_id), "started_at": _now()})
+        candidate_manifest = (
+            self.load(candidate_snapshot_id) if candidate_snapshot_id is not None else None
+        )
+        if candidate_manifest is not None:
+            if candidate_build is not None and candidate_build != candidate_manifest.app_revision:
+                raise RecoveryError("candidate build does not match its snapshot")
+            candidate_build = candidate_manifest.app_revision
+            if migrations and migrations != candidate_manifest.migrations:
+                raise RecoveryError("candidate migrations do not match its snapshot")
+            migrations = candidate_manifest.migrations
+            if candidate_snapshot_id in self.failed_candidate_snapshot_ids():
+                raise RecoveryError("candidate build was previously marked failed")
+        lkg_snapshot_id = self.last_known_good() if self.lkg.exists() else None
+        lkg_build = self.load(lkg_snapshot_id).app_revision if lkg_snapshot_id else None
+        deadline = _deadline_text(health_deadline)
+        attempt = StartupAttempt(
+            attempt_id=str(uuid4()),
+            transaction_id=str(transaction_id),
+            candidate_snapshot_id=candidate_snapshot_id,
+            candidate_build=candidate_build,
+            lkg_snapshot_id=lkg_snapshot_id,
+            lkg_build=lkg_build,
+            started_at=_now(self._clock),
+            health_deadline=deadline,
+            migrations=tuple(_bounded_text(item, "migration") for item in migrations),
+        )
+        _atomic_json(self.active, asdict(attempt))
+        self.record(
+            RecoveryEvidence(
+                str(transaction_id),
+                RecoveryPhase.START,
+                "started",
+                "startup attempt started",
+                candidate_snapshot_id,
+                _now(self._clock),
+                candidate_build=candidate_build,
+                lkg_snapshot_id=lkg_snapshot_id,
+                lkg_build=lkg_build,
+                migration_refs=attempt.migrations,
+            )
+        )
         return previous
+
+    def active_start(self) -> StartupAttempt:
+        """Load the active startup marker, failing closed when it is malformed."""
+
+        if not self.active.exists():
+            raise RecoveryError("no active startup attempt")
+        try:
+            raw = json.loads(self.active.read_text(encoding="utf-8"))
+            if not isinstance(raw, dict):
+                raise RecoveryError("active startup marker is malformed")
+            transaction_id = _raw_marker_text(raw, "transaction_id", required=True)
+            attempt_id = _raw_marker_text(raw, "attempt_id", required=False)
+            migrations = raw.get("migrations", ())
+            if not isinstance(migrations, list | tuple):
+                raise RecoveryError("active startup marker is malformed")
+            status = raw.get("status", StartupAttemptStatus.STARTING.value)
+            if not isinstance(status, str):
+                raise RecoveryError("active startup marker is malformed")
+            started_at = _raw_marker_text(raw, "started_at", required=True)
+            assert transaction_id is not None and started_at is not None
+            if attempt_id is None:
+                attempt_id = transaction_id
+            return StartupAttempt(
+                attempt_id=attempt_id,
+                transaction_id=transaction_id,
+                candidate_snapshot_id=_raw_marker_text(
+                    raw, "candidate_snapshot_id", required=False
+                ),
+                candidate_build=_raw_marker_text(raw, "candidate_build", required=False),
+                lkg_snapshot_id=_raw_marker_text(raw, "lkg_snapshot_id", required=False),
+                lkg_build=_raw_marker_text(raw, "lkg_build", required=False),
+                started_at=started_at,
+                health_deadline=_raw_marker_text(raw, "health_deadline", required=False),
+                migrations=tuple(migrations),
+                status=StartupAttemptStatus(status),
+            )
+        except RecoveryError:
+            raise
+        except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
+            raise RecoveryError("active startup marker is malformed") from error
+
+    def clear_active(self, transaction_id: UUID | str | None = None) -> None:
+        if not self.active.exists():
+            return
+        attempt = self.active_start()
+        if transaction_id is not None and attempt.transaction_id != str(transaction_id):
+            raise RecoveryError("active startup transaction does not match")
+        self.active.unlink(missing_ok=True)
+
+    def failed_candidate_snapshot_ids(self) -> frozenset[str]:
+        """Return candidate snapshots that have a durable failed-build record."""
+
+        if not self.evidence.exists():
+            return frozenset()
+        failed: set[str] = set()
+        try:
+            lines = self.evidence.read_text(encoding="utf-8").splitlines()[-500:]
+            for line in lines:
+                raw = json.loads(line)
+                if not isinstance(raw, dict):
+                    raise RecoveryError("recovery evidence is malformed")
+                if raw.get("phase") == RecoveryPhase.FAIL.value and isinstance(
+                    raw.get("snapshot_id"), str
+                ):
+                    failed.add(str(raw["snapshot_id"]))
+        except (OSError, json.JSONDecodeError, TypeError, RecoveryError) as error:
+            if isinstance(error, RecoveryError):
+                raise
+            raise RecoveryError("recovery evidence is malformed") from error
+        return frozenset(failed)
 
     def failed_start_count(self) -> int:
         if not self.evidence.exists():
             return 0
         count = 0
-        for line in self.evidence.read_text(encoding="utf-8").splitlines()[-100:]:
+        # Crash-loop protection concerns consecutive failed startup/recovery
+        # evidence.  A later committed startup proves that the previous failure
+        # sequence ended and must reset the counter; historical incidents
+        # remain in the evidence log but cannot permanently force Safe Mode.
+        lines = self.evidence.read_text(encoding="utf-8").splitlines()[-100:]
+        for line in reversed(lines):
             try:
-                if json.loads(line).get("outcome") == "failed_start":
+                raw = json.loads(line)
+                if not isinstance(raw, dict):
+                    raise RecoveryError("recovery evidence is malformed")
+                if raw.get("phase") == RecoveryPhase.COMMIT.value:
+                    break
+                if raw.get("phase") == RecoveryPhase.FAIL.value:
                     count += 1
             except (json.JSONDecodeError, TypeError):
                 raise RecoveryError("recovery evidence is malformed") from None
@@ -218,6 +455,20 @@ class RecoveryStore:
         manifest = self.load(snapshot_id)
         if manifest.transaction_id != str(transaction_id):
             raise RecoveryError("commit transaction does not match snapshot")
+        if self.active.exists():
+            attempt = self.active_start()
+            if attempt.transaction_id != str(transaction_id):
+                raise RecoveryError("commit transaction does not match active startup")
+            if (
+                attempt.candidate_snapshot_id is not None
+                and attempt.candidate_snapshot_id != snapshot_id
+            ):
+                raise RecoveryError("commit snapshot does not match candidate startup")
+            if (
+                attempt.health_deadline is not None
+                and _parse_time(attempt.health_deadline) < self._clock()
+            ):
+                raise RecoveryError("startup health deadline expired")
         _atomic_json(self.lkg, {"snapshot_id": snapshot_id, "transaction_id": str(transaction_id)})
         self.active.unlink(missing_ok=True)
         self.record(
@@ -227,7 +478,41 @@ class RecoveryStore:
                 "success",
                 "startup committed",
                 snapshot_id,
-                _now(),
+                _now(self._clock),
+                candidate_build=manifest.app_revision,
+                migration_refs=manifest.migrations,
+            )
+        )
+
+    def mark_failed(
+        self,
+        transaction_id: UUID | str,
+        *,
+        failed_phase: RecoveryPhase,
+        detail: str,
+        incident_evidence: tuple[str, ...] = (),
+    ) -> None:
+        """Persist a candidate failure with build, LKG, and migration references."""
+
+        attempt = self.active_start() if self.active.exists() else None
+        candidate_snapshot_id = attempt.candidate_snapshot_id if attempt else None
+        candidate_build = attempt.candidate_build if attempt else None
+        lkg_snapshot_id = attempt.lkg_snapshot_id if attempt else None
+        lkg_build = attempt.lkg_build if attempt else None
+        migrations = attempt.migrations if attempt else ()
+        self.record(
+            RecoveryEvidence(
+                str(transaction_id),
+                RecoveryPhase.FAIL,
+                "failed",
+                _bounded_text(detail, "detail"),
+                candidate_snapshot_id,
+                _now(self._clock),
+                candidate_build=candidate_build,
+                lkg_snapshot_id=lkg_snapshot_id,
+                lkg_build=lkg_build,
+                migration_refs=migrations,
+                incident_evidence=incident_evidence,
             )
         )
 
@@ -281,19 +566,124 @@ class RecoveryStore:
 class RecoveryCoordinator:
     """Lifecycle policy for apply/start/health/rollback orchestration."""
 
-    def __init__(self, store: RecoveryStore, *, crash_loop_limit: int = 3) -> None:
+    def __init__(
+        self,
+        store: RecoveryStore,
+        *,
+        crash_loop_limit: int = 3,
+        startup_deadline: timedelta = timedelta(seconds=60),
+        clock: Callable[[], datetime] | None = None,
+    ) -> None:
         if crash_loop_limit < 1:
             raise ValueError("crash_loop_limit must be positive")
+        if startup_deadline <= timedelta(0) or startup_deadline > timedelta(hours=1):
+            raise ValueError("startup_deadline must be positive and bounded")
         self.store = store
         self.crash_loop_limit = crash_loop_limit
+        self.startup_deadline = startup_deadline
+        self._clock = clock or (lambda: datetime.now(UTC))
         self.safe_mode = False
         self.capabilities = SafeModeCapabilities()
 
-    def begin_start(self, transaction_id: UUID | str) -> bool:
-        previous = self.store.begin_start(transaction_id)
+    def begin_start(
+        self,
+        transaction_id: UUID | str,
+        *,
+        candidate_snapshot_id: str | None = None,
+        candidate_build: str | None = None,
+        migrations: tuple[str, ...] = (),
+    ) -> bool:
+        previous = self.store.begin_start(
+            transaction_id,
+            candidate_snapshot_id=candidate_snapshot_id,
+            candidate_build=candidate_build,
+            health_deadline=self._clock() + self.startup_deadline,
+            migrations=migrations,
+        )
         if self.store.failed_start_count() >= self.crash_loop_limit:
             self.enter_safe_mode(transaction_id, "crash-loop threshold reached")
         return previous
+
+    def boot_candidate(
+        self,
+        transaction_id: UUID | str,
+        candidate_snapshot_id: str,
+        *,
+        start: Callable[[], None],
+        health_check: Callable[[], bool],
+        restart_lkg: Callable[[RecoveryManifest], bool] | None = None,
+        lkg_health_check: Callable[[], bool] | None = None,
+        migration_reconcile: Callable[[RecoveryManifest], bool] | None = None,
+        destinations: dict[str, Path] | None = None,
+        incident_evidence: tuple[str, ...] = (),
+    ) -> str | None:
+        """Boot a candidate once and perform one bounded LKG recovery attempt.
+
+        The callbacks are trusted composition-root hooks.  This coordinator never
+        executes a build, migration, restart, or privileged operation itself.
+        """
+
+        candidate = self.store.load(candidate_snapshot_id)
+        try:
+            self.begin_start(
+                transaction_id,
+                candidate_snapshot_id=candidate_snapshot_id,
+                candidate_build=candidate.app_revision,
+                migrations=candidate.migrations,
+            )
+            if self.safe_mode:
+                return None
+            start()
+            self._assert_deadline()
+            self.store.record(
+                RecoveryEvidence(
+                    str(transaction_id),
+                    RecoveryPhase.HEALTH_CHECK,
+                    "started",
+                    "candidate health check started",
+                    candidate_snapshot_id,
+                    _now(self._clock),
+                    candidate_build=candidate.app_revision,
+                    migration_refs=candidate.migrations,
+                )
+            )
+            healthy = health_check()
+            attempt = self.store.active_start()
+            self.store.record(
+                RecoveryEvidence(
+                    str(transaction_id),
+                    RecoveryPhase.HEALTH_CHECK,
+                    "success" if healthy else "failed",
+                    "candidate health verification",
+                    candidate_snapshot_id,
+                    _now(self._clock),
+                    candidate_build=candidate.app_revision,
+                    lkg_snapshot_id=attempt.lkg_snapshot_id,
+                    lkg_build=attempt.lkg_build,
+                    migration_refs=candidate.migrations,
+                    incident_evidence=incident_evidence,
+                )
+            )
+            if not healthy:
+                raise RecoveryError("candidate health check failed")
+            self._assert_deadline()
+            self.store.commit_start(transaction_id, candidate_snapshot_id)
+            return candidate_snapshot_id
+        except Exception as error:
+            self.store.mark_failed(
+                transaction_id,
+                failed_phase=RecoveryPhase.HEALTH_CHECK,
+                detail=f"candidate boot failed: {type(error).__name__}",
+                incident_evidence=incident_evidence,
+            )
+            return self._recover_lkg(
+                transaction_id,
+                destinations=destinations,
+                restart_lkg=restart_lkg,
+                health_check=lkg_health_check or health_check,
+                migration_reconcile=migration_reconcile,
+                incident_evidence=incident_evidence,
+            )
 
     def enter_safe_mode(self, transaction_id: UUID | str, detail: str) -> None:
         self.safe_mode = True
@@ -304,9 +694,129 @@ class RecoveryCoordinator:
                 "entered",
                 _bounded_text(detail, "detail"),
                 None,
-                _now(),
+                _now(self._clock),
             )
         )
+        self.store.clear_active()
+
+    def _assert_deadline(self) -> None:
+        if not self.store.active.exists():
+            raise RecoveryError("startup attempt is not active")
+        attempt = self.store.active_start()
+        if (
+            attempt.health_deadline is not None
+            and _parse_time(attempt.health_deadline) < self._clock()
+        ):
+            raise RecoveryError("startup health deadline expired")
+
+    def _recover_lkg(
+        self,
+        transaction_id: UUID | str,
+        *,
+        destinations: dict[str, Path] | None,
+        restart_lkg: Callable[[RecoveryManifest], bool] | None,
+        health_check: Callable[[], bool],
+        migration_reconcile: Callable[[RecoveryManifest], bool] | None,
+        incident_evidence: tuple[str, ...],
+    ) -> str | None:
+        """Restore, restart, and verify LKG exactly once; failure enters Safe Mode."""
+
+        lkg: str | None = None
+        manifest: RecoveryManifest | None = None
+        try:
+            lkg = self.store.last_known_good()
+            if lkg is None:
+                self.enter_safe_mode(str(transaction_id), "no last-known-good restore point")
+                return None
+            manifest = self.store.load(lkg)
+            self.store.record(
+                RecoveryEvidence(
+                    str(transaction_id),
+                    RecoveryPhase.ROLLBACK,
+                    "started",
+                    "restoring last-known-good build",
+                    lkg,
+                    _now(self._clock),
+                    candidate_build=manifest.app_revision,
+                    lkg_snapshot_id=lkg,
+                    lkg_build=manifest.app_revision,
+                    migration_refs=manifest.migrations,
+                    incident_evidence=incident_evidence,
+                )
+            )
+            self.store.restore(lkg, destinations=destinations or {})
+            if migration_reconcile is not None and not migration_reconcile(manifest):
+                raise RecoveryError("LKG migration reconciliation failed")
+            self.store.record(
+                RecoveryEvidence(
+                    str(transaction_id),
+                    RecoveryPhase.RESTORE_LAST_KNOWN_GOOD,
+                    "success",
+                    "last-known-good state restored",
+                    lkg,
+                    _now(self._clock),
+                    candidate_build=manifest.app_revision,
+                    lkg_snapshot_id=lkg,
+                    lkg_build=manifest.app_revision,
+                    migration_refs=manifest.migrations,
+                    incident_evidence=incident_evidence,
+                )
+            )
+            self.store.clear_active()
+            # A snapshot is transaction-bound.  Reboot the LKG under the
+            # transaction that produced that snapshot; do not forge a new
+            # transaction identity for a different build.
+            recovery_transaction = manifest.transaction_id
+            self.begin_start(
+                recovery_transaction,
+                candidate_snapshot_id=lkg,
+                candidate_build=manifest.app_revision,
+                migrations=manifest.migrations,
+            )
+            if self.safe_mode:
+                return None
+            if restart_lkg is not None and not restart_lkg(manifest):
+                raise RecoveryError("LKG restart failed")
+            self._assert_deadline()
+            healthy = health_check()
+            self.store.record(
+                RecoveryEvidence(
+                    recovery_transaction,
+                    RecoveryPhase.HEALTH_CHECK,
+                    "success" if healthy else "failed",
+                    "LKG health verification",
+                    lkg,
+                    _now(self._clock),
+                    candidate_build=manifest.app_revision,
+                    lkg_snapshot_id=lkg,
+                    lkg_build=manifest.app_revision,
+                    migration_refs=manifest.migrations,
+                    incident_evidence=incident_evidence,
+                )
+            )
+            if not healthy:
+                raise RecoveryError("LKG health verification failed")
+            self._assert_deadline()
+            self.store.commit_start(recovery_transaction, lkg)
+            return lkg
+        except Exception as error:
+            self.store.record(
+                RecoveryEvidence(
+                    str(transaction_id),
+                    RecoveryPhase.FAIL,
+                    "lkg_failed",
+                    f"LKG recovery failed: {type(error).__name__}",
+                    lkg,
+                    _now(self._clock),
+                    candidate_build=manifest.app_revision if manifest is not None else None,
+                    lkg_snapshot_id=lkg,
+                    lkg_build=manifest.app_revision if manifest is not None else None,
+                    migration_refs=manifest.migrations if manifest is not None else (),
+                    incident_evidence=incident_evidence,
+                )
+            )
+            self.enter_safe_mode(str(transaction_id), "last-known-good recovery failed")
+            return None
 
     def fail_and_restore(
         self,
@@ -383,8 +893,25 @@ class RecoveryCoordinator:
         return not self.safe_mode
 
 
-def _now() -> str:
-    return datetime.now(UTC).isoformat()
+def _now(clock: Callable[[], datetime] | None = None) -> str:
+    value = clock() if clock is not None else datetime.now(UTC)
+    if value.tzinfo is None:
+        raise RecoveryError("recovery clock must be timezone-aware")
+    return value.astimezone(UTC).isoformat()
+
+
+def _deadline_text(value: datetime | None) -> str | None:
+    return _now(lambda: value) if value is not None else None
+
+
+def _parse_time(value: str) -> datetime:
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError as error:
+        raise RecoveryError("recovery timestamp is malformed") from error
+    if parsed.tzinfo is None:
+        raise RecoveryError("recovery timestamp must be timezone-aware")
+    return parsed.astimezone(UTC)
 
 
 def _bounded_text(value: str, label: str) -> str:
@@ -396,6 +923,32 @@ def _bounded_text(value: str, label: str) -> str:
     ):
         raise RecoveryError(f"{label} is malformed")
     return value
+
+
+def _raw_marker_text(marker: dict[str, Any], key: str, *, required: bool) -> str | None:
+    value = marker.get(key)
+    if value is None:
+        if required:
+            raise RecoveryError("active startup marker is malformed")
+        return None
+    if not isinstance(value, str):
+        raise RecoveryError("active startup marker is malformed")
+    return value
+
+
+def _bounded_sequence(values: tuple[str, ...], label: str) -> None:
+    if (
+        not isinstance(values, tuple)
+        or len(values) > 128
+        or any(
+            not isinstance(value, str)
+            or not value
+            or len(value) > RecoveryStore._MAX_TEXT
+            or any(ord(char) < 32 for char in value)
+            for value in values
+        )
+    ):
+        raise RecoveryError(f"{label} is malformed")
 
 
 def _safe_json_mapping(value: dict[str, Any], label: str) -> dict[str, Any]:
@@ -412,7 +965,7 @@ def _safe_json_mapping(value: dict[str, Any], label: str) -> dict[str, Any]:
 
 
 def _safe_string_mapping(value: dict[str, str]) -> dict[str, str]:
-    if not isinstance(value, dict):
+    if not isinstance(value, dict) or len(value) > 128:
         raise RecoveryError("integration_versions is malformed")
     return {
         _bounded_text(key, "integration"): _bounded_text(item, "version")

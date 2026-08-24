@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import uuid4
 
@@ -8,8 +9,11 @@ import pytest
 from jarvis.recovery import (
     RecoveryCoordinator,
     RecoveryError,
+    RecoveryEvidence,
+    RecoveryManifest,
     RecoveryPhase,
     RecoveryStore,
+    StartupAttemptStatus,
 )
 
 
@@ -23,6 +27,50 @@ def _snapshot(store: RecoveryStore, tx: str | None = None) -> str:
         migrations=("planning:4",),
         generated_package_state={"index": "clean"},
     ).snapshot_id
+
+
+class FakeClock:
+    def __init__(self) -> None:
+        self.value = datetime(2026, 8, 24, 12, tzinfo=UTC)
+
+    def __call__(self) -> datetime:
+        return self.value
+
+
+def _parse_deadline(value: str) -> datetime:
+    parsed = datetime.fromisoformat(value)
+    assert parsed.tzinfo is not None
+    return parsed
+
+
+def _build_pair(root: Path, clock: FakeClock) -> tuple[RecoveryStore, str, str, Path]:
+    recovery_root = root / "recovery"
+    state = recovery_root / "state.txt"
+    state.parent.mkdir(parents=True)
+    state.write_text("known-good", encoding="utf-8")
+    store = RecoveryStore(recovery_root, clock=clock)
+    lkg = store.create_snapshot(
+        transaction_id="lkg-tx",
+        app_revision="build-lkg",
+        configuration={"mode": "safe"},
+        database_schema={"planning": 4},
+        integration_versions={"core": "lkg"},
+        migrations=("planning:4",),
+        files=(state,),
+    ).snapshot_id
+    store.begin_start("lkg-tx", candidate_snapshot_id=lkg)
+    store.commit_start("lkg-tx", lkg)
+    state.write_text("candidate-state", encoding="utf-8")
+    candidate = store.create_snapshot(
+        transaction_id="candidate-tx",
+        app_revision="build-candidate",
+        configuration={"mode": "candidate"},
+        database_schema={"planning": 5},
+        integration_versions={"core": "candidate"},
+        migrations=("planning:5",),
+        files=(state,),
+    ).snapshot_id
+    return store, lkg, candidate, state
 
 
 def test_snapshot_manifest_tracks_revision_schema_migrations_and_lkg(tmp_path: Path) -> None:
@@ -145,6 +193,29 @@ def test_crash_loop_threshold_and_malformed_evidence_fail_closed(tmp_path: Path)
         store.failed_start_count()
 
 
+def test_successful_commit_resets_consecutive_crash_loop_count(tmp_path: Path) -> None:
+    store = RecoveryStore(tmp_path / "recovery")
+    first = _snapshot(store, "first")
+    store.record(
+        RecoveryEvidence(
+            "old-1", RecoveryPhase.FAIL, "failed_start", "old failure", None, _now_for_test()
+        )
+    )
+    store.record(
+        RecoveryEvidence(
+            "old-2", RecoveryPhase.FAIL, "failed_start", "old failure", None, _now_for_test()
+        )
+    )
+    assert store.failed_start_count() == 2
+    store.begin_start("first")
+    store.commit_start("first", first)
+    assert store.failed_start_count() == 0
+
+
+def _now_for_test() -> str:
+    return datetime(2026, 8, 24, 12, tzinfo=UTC).isoformat()
+
+
 def test_retention_keeps_lkg_restore_point(tmp_path: Path) -> None:
     store = RecoveryStore(tmp_path / "recovery", retention=1)
     first = _snapshot(store, "one")
@@ -204,3 +275,202 @@ def test_failure_without_lkg_enters_safe_mode(tmp_path: Path) -> None:
         is None
     )
     assert coordinator.safe_mode
+
+
+def test_candidate_boot_commits_only_after_deadline_bounded_health(tmp_path: Path) -> None:
+    clock = FakeClock()
+    store, lkg, candidate, _state = _build_pair(tmp_path, clock)
+    coordinator = RecoveryCoordinator(
+        store,
+        startup_deadline=timedelta(seconds=10),
+        clock=clock,
+    )
+    started: list[str] = []
+
+    result = coordinator.boot_candidate(
+        "candidate-tx",
+        candidate,
+        start=lambda: started.append("candidate"),
+        health_check=lambda: True,
+    )
+
+    assert result == candidate
+    assert started == ["candidate"]
+    assert store.last_known_good() == candidate
+    assert not store.active.exists()
+    assert store.failed_candidate_snapshot_ids() == frozenset()
+    assert store.load(lkg).app_revision == "build-lkg"
+
+
+def test_bad_candidate_restores_restarts_and_verifies_lkg(tmp_path: Path) -> None:
+    clock = FakeClock()
+    store, lkg, candidate, state = _build_pair(tmp_path, clock)
+    coordinator = RecoveryCoordinator(store, clock=clock)
+    calls: list[str] = []
+
+    def restart_lkg(manifest: RecoveryManifest) -> bool:
+        calls.append(manifest.app_revision)
+        return True
+
+    def reconcile_migrations(manifest: RecoveryManifest) -> bool:
+        calls.append(",".join(manifest.migrations))
+        return True
+
+    result = coordinator.boot_candidate(
+        "candidate-tx",
+        candidate,
+        start=lambda: calls.append("candidate-start"),
+        health_check=lambda: False,
+        lkg_health_check=lambda: True,
+        restart_lkg=restart_lkg,
+        migration_reconcile=reconcile_migrations,
+        destinations={"state.txt": state},
+        incident_evidence=("health:unavailable", "process:exit-1"),
+    )
+
+    assert result == lkg
+    assert calls == ["candidate-start", "planning:4", "build-lkg"]
+    assert state.read_text(encoding="utf-8") == "known-good"
+    assert store.last_known_good() == lkg
+    assert candidate in store.failed_candidate_snapshot_ids()
+    assert not store.active.exists()
+    evidence = store.evidence.read_text(encoding="utf-8")
+    assert "health:unavailable" in evidence
+    assert "build-candidate" in evidence
+    assert "build-lkg" in evidence
+
+
+def test_candidate_start_exception_is_recovered_once(tmp_path: Path) -> None:
+    clock = FakeClock()
+    store, lkg, candidate, state = _build_pair(tmp_path, clock)
+    coordinator = RecoveryCoordinator(store, clock=clock)
+    attempts = 0
+
+    def bad_start() -> None:
+        nonlocal attempts
+        attempts += 1
+        raise RuntimeError("bad build")
+
+    assert (
+        coordinator.boot_candidate(
+            "candidate-tx",
+            candidate,
+            start=bad_start,
+            health_check=lambda: True,
+            restart_lkg=lambda _manifest: True,
+            destinations={"state.txt": state},
+        )
+        == lkg
+    )
+    assert attempts == 1
+
+    # A retry of the same failed candidate cannot start it again.
+    assert (
+        coordinator.boot_candidate(
+            "bad-start-again",
+            candidate,
+            start=bad_start,
+            health_check=lambda: True,
+            restart_lkg=lambda _manifest: True,
+            destinations={"state.txt": state},
+        )
+        == lkg
+    )
+    assert attempts == 1
+
+
+def test_deadline_and_lkg_failure_enter_safe_mode(tmp_path: Path) -> None:
+    clock = FakeClock()
+    store, _lkg, candidate, state = _build_pair(tmp_path, clock)
+    coordinator = RecoveryCoordinator(
+        store,
+        startup_deadline=timedelta(seconds=1),
+        clock=clock,
+    )
+
+    def candidate_health() -> bool:
+        clock.value += timedelta(seconds=2)
+        return True
+
+    assert (
+        coordinator.boot_candidate(
+            "candidate-tx",
+            candidate,
+            start=lambda: None,
+            health_check=candidate_health,
+            restart_lkg=lambda _manifest: False,
+            destinations={"state.txt": state},
+        )
+        is None
+    )
+    assert coordinator.safe_mode
+    assert not store.active.exists()
+
+
+def test_corrupt_lkg_pointer_fails_closed_without_restart_loop(tmp_path: Path) -> None:
+    clock = FakeClock()
+    store, _lkg, candidate, _state = _build_pair(tmp_path, clock)
+    store.lkg.write_text(json.dumps({"snapshot_id": "../missing"}), encoding="utf-8")
+    coordinator = RecoveryCoordinator(store, clock=clock)
+
+    assert (
+        coordinator.boot_candidate(
+            "candidate-tx",
+            candidate,
+            start=lambda: None,
+            health_check=lambda: False,
+        )
+        is None
+    )
+    assert coordinator.safe_mode
+    assert not store.active.exists()
+    assert "lkg_failed" in store.evidence.read_text(encoding="utf-8")
+
+
+def test_migration_reconciliation_failure_is_fail_closed(tmp_path: Path) -> None:
+    clock = FakeClock()
+    store, _lkg, candidate, state = _build_pair(tmp_path, clock)
+    coordinator = RecoveryCoordinator(store, clock=clock)
+
+    assert (
+        coordinator.boot_candidate(
+            "candidate-tx",
+            candidate,
+            start=lambda: None,
+            health_check=lambda: False,
+            restart_lkg=lambda _manifest: True,
+            migration_reconcile=lambda _manifest: False,
+            destinations={"state.txt": state},
+        )
+        is None
+    )
+    assert coordinator.safe_mode
+    assert "LKG migration reconciliation failed" not in store.evidence.read_text(encoding="utf-8")
+    assert "last-known-good recovery failed" in store.evidence.read_text(encoding="utf-8")
+
+
+def test_malformed_active_marker_fails_closed(tmp_path: Path) -> None:
+    clock = FakeClock()
+    store = RecoveryStore(tmp_path / "recovery", clock=clock)
+    store.active.write_text("not-json", encoding="utf-8")
+    with pytest.raises(RecoveryError, match="active startup marker"):
+        RecoveryCoordinator(store, clock=clock).begin_start("tx")
+
+
+def test_startup_attempt_records_build_lkg_deadline_and_migrations(tmp_path: Path) -> None:
+    clock = FakeClock()
+    store, _lkg, candidate, _state = _build_pair(tmp_path, clock)
+    coordinator = RecoveryCoordinator(
+        store,
+        startup_deadline=timedelta(seconds=30),
+        clock=clock,
+    )
+    coordinator.begin_start("inspect", candidate_snapshot_id=candidate)
+    attempt = store.active_start()
+    assert attempt.status is StartupAttemptStatus.STARTING
+    assert attempt.candidate_snapshot_id == candidate
+    assert attempt.candidate_build == "build-candidate"
+    assert attempt.lkg_build == "build-lkg"
+    assert attempt.migrations == ("planning:5",)
+    assert attempt.health_deadline is not None
+    assert _parse_deadline(attempt.health_deadline) == clock.value + timedelta(seconds=30)

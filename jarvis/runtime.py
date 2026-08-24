@@ -79,7 +79,13 @@ from jarvis.planning.engine import (
 from jarvis.planning.models import ReplanEvidence
 from jarvis.planning.store import PlanningStoreError, SQLitePlanningStore
 from jarvis.planning.validation import PlanValidator
-from jarvis.recovery import RecoveryEvidence, RecoveryPhase, RecoveryStore
+from jarvis.recovery import (
+    RecoveryCoordinator,
+    RecoveryError,
+    RecoveryEvidence,
+    RecoveryPhase,
+    RecoveryStore,
+)
 from jarvis.resources import ResourceGovernor, SystemResourceTelemetry
 from jarvis.security import (
     SECURITY_POLICY_VERSION,
@@ -511,6 +517,7 @@ class ApplicationRuntime:
         automation_service: AutomationService | None = None
         recovery: RecoveryStore | None = None
         artifact_store: ArtifactStore | None = None
+        recovery_coordinator: RecoveryCoordinator | None = None
         transaction_id = str(uuid4())
         try:
             paths = RuntimePaths.from_root(resolved_app_data_dir)
@@ -541,7 +548,18 @@ class ApplicationRuntime:
             paths.validate_storage_layout()
             configure_logging(settings.log_level)
             recovery = RecoveryStore(paths.recovery)
-            recovery.begin_start(transaction_id)
+            recovery_coordinator = RecoveryCoordinator(recovery)
+            recovery_coordinator.begin_start(
+                transaction_id,
+                candidate_build=settings.version,
+            )
+            if recovery_coordinator.safe_mode:
+                return cls(
+                    None,
+                    status=RuntimeStatus.SAFE_MODE,
+                    error="recovery crash-loop guard entered safe mode",
+                    security_report=security_report,
+                )
             events = InMemoryEventBus()
             paths.validate_storage_layout()
             state_store = SQLiteStateStore(paths.state_database)
@@ -1152,16 +1170,23 @@ class ApplicationRuntime:
             sqlite3.DatabaseError,
         ) as error:
             if recovery is not None:
-                recovery.record(
-                    RecoveryEvidence(
+                try:
+                    recovery.mark_failed(
                         transaction_id,
-                        RecoveryPhase.FAIL,
-                        "startup_failure",
-                        type(error).__name__,
-                        None,
-                        datetime.now(UTC).isoformat(),
+                        failed_phase=RecoveryPhase.START,
+                        detail=f"startup failure: {type(error).__name__}",
                     )
-                )
+                except RecoveryError:
+                    recovery.record(
+                        RecoveryEvidence(
+                            transaction_id,
+                            RecoveryPhase.FAIL,
+                            "startup_failure",
+                            type(error).__name__,
+                            None,
+                            datetime.now(UTC).isoformat(),
+                        )
+                    )
             cls._close_partial_stores(
                 artifact_store,
                 automation_service,
@@ -1183,16 +1208,23 @@ class ApplicationRuntime:
             )
         except Exception as error:
             if recovery is not None:
-                recovery.record(
-                    RecoveryEvidence(
+                try:
+                    recovery.mark_failed(
                         transaction_id,
-                        RecoveryPhase.FAIL,
-                        "startup_failure",
-                        type(error).__name__,
-                        None,
-                        datetime.now(UTC).isoformat(),
+                        failed_phase=RecoveryPhase.START,
+                        detail=f"startup failure: {type(error).__name__}",
                     )
-                )
+                except RecoveryError:
+                    recovery.record(
+                        RecoveryEvidence(
+                            transaction_id,
+                            RecoveryPhase.FAIL,
+                            "startup_failure",
+                            type(error).__name__,
+                            None,
+                            datetime.now(UTC).isoformat(),
+                        )
+                    )
             cls._close_partial_stores(
                 artifact_store,
                 automation_service,

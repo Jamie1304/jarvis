@@ -15,7 +15,8 @@ from jarvis.core.config import Settings
 from jarvis.memory.control import MemoryControlService
 from jarvis.memory.services import MemoryConsistencyService
 from jarvis.planning.models import PlanningTaskStatus
-from jarvis.runtime import ApplicationRuntime, RuntimeStatus
+from jarvis.recovery import RecoveryEvidence, RecoveryPhase, RecoveryStore
+from jarvis.runtime import ApplicationRuntime, RuntimePaths, RuntimeStatus
 from jarvis.task_controller import PlanningTaskController
 
 
@@ -117,3 +118,28 @@ def test_production_application_and_desktop_do_not_import_legacy_orchestrator() 
         encoding="utf-8"
     )
     assert "AgentOrchestrator" not in desktop_source
+
+
+def test_runtime_enters_safe_mode_after_bounded_startup_crash_loop(tmp_path: Path) -> None:
+    settings = Settings(app_data_dir=tmp_path / "jarvis-data", ai_provider="ollama")
+    paths = RuntimePaths.from_root(settings.app_data_dir)
+    store = RecoveryStore(paths.recovery)
+    timestamp = datetime.now(UTC).isoformat()
+    for index in range(2):
+        store.record(
+            RecoveryEvidence(
+                f"failed-{index}",
+                RecoveryPhase.FAIL,
+                "failed_start",
+                "candidate did not reach a committed startup",
+                None,
+                timestamp,
+            )
+        )
+    store.begin_start("stale-start")
+
+    runtime = ApplicationRuntime.create(settings)
+
+    assert runtime.status is RuntimeStatus.SAFE_MODE
+    assert runtime.container is None
+    assert runtime.error == "recovery crash-loop guard entered safe mode"

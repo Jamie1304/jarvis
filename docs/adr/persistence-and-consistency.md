@@ -60,6 +60,16 @@ creating a fresh request bound to the exact current task, action, fingerprint,
 permission, scope, and expiry. No approval, receipt, remembered grant, or model
 claim is restored from a process restart.
 
+Candidate-build startup is owned by `RecoveryStore` and `RecoveryCoordinator`.
+Each attempt records the candidate and LKG build/snapshot references, transaction,
+deadline, migration references, health result, and incident evidence. A failed
+candidate is not retried blindly: the coordinator performs one bounded
+`FAIL -> ROLLBACK -> RESTORE_LAST_KNOWN_GOOD -> START -> HEALTH_CHECK` path,
+reconciling migration state before restarting LKG. LKG failure enters Safe Mode;
+the crash-loop guard prevents indefinite restart. Recovery callbacks remain
+composition-root hooks and cannot grant permission or bypass policy. No second
+store owns startup or rollback truth.
+
 ## Audit and idempotency
 
 `SQLiteAuditSink` stores secret-safe permission records and planning lifecycle
