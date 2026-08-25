@@ -64,6 +64,34 @@ class SandboxProtocolError(SandboxError):
 class SandboxProcessError(SandboxError):
     """The child could not start, crashed, or stopped unexpectedly."""
 
+    def __init__(
+        self,
+        message: str,
+        *,
+        diagnostics: SandboxStartupDiagnostics | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.diagnostics = diagnostics
+
+
+@dataclass(frozen=True, slots=True)
+class SandboxStartupDiagnostics:
+    """Bounded, non-secret evidence for a child that failed to become ready."""
+
+    containment_mode: WindowsContainmentMode
+    executable: str
+    bootstrap: str
+    pipes_established: bool
+    job_assigned: bool
+    readiness_reached: bool
+    process_id: int | None
+    exit_code: int | None
+    stderr_tail: str | None = None
+
+
+class SandboxStartupError(SandboxProcessError):
+    """The child exited before returning a valid protocol response."""
+
 
 class SandboxTimeout(SandboxProcessError):
     """A request exceeded its bounded execution time."""
@@ -627,6 +655,9 @@ class SandboxProcess:
         self._lock = asyncio.Lock()
         self._closed = False
         self._restart_count = 0
+        self._protocol_ready = False
+        self._pipes_established = False
+        self._job_assigned = False
 
     @property
     def paths(self) -> SandboxPaths:
@@ -648,6 +679,35 @@ class SandboxProcess:
 
         return self._security_status
 
+    def _startup_diagnostics(self) -> SandboxStartupDiagnostics:
+        """Build bounded launch evidence without retaining command arguments."""
+
+        return SandboxStartupDiagnostics(
+            containment_mode=(
+                self._security_status.mode
+                if self._security_status is not None
+                else self._limits.windows_containment
+            ),
+            executable=os.fspath(self._executable),
+            bootstrap=(
+                "windows-native-launcher"
+                if sys.platform == "win32"
+                and self._limits.windows_containment
+                in {
+                    WindowsContainmentMode.APPCONTAINER,
+                    WindowsContainmentMode.RESTRICTED_TOKEN,
+                }
+                else "bounded-subprocess"
+            ),
+            pipes_established=self._pipes_established,
+            job_assigned=self._job_assigned,
+            readiness_reached=self._protocol_ready,
+            process_id=(getattr(self._process, "pid", None) if self._process is not None else None),
+            exit_code=(
+                getattr(self._process, "returncode", None) if self._process is not None else None
+            ),
+        )
+
     async def start(self) -> None:
         async with self._lock:
             await self._start_locked()
@@ -663,6 +723,9 @@ class SandboxProcess:
         if self._paths is not None:
             self._cleanup_paths_locked()
         self._security_status = None
+        self._protocol_ready = False
+        self._pipes_established = False
+        self._job_assigned = False
         if self._resource_governor is not None:
             decision = self._resource_governor.reserve(
                 f"sandbox.{self._integration_id}",
@@ -717,6 +780,8 @@ class SandboxProcess:
                         allowed_roots=(*(os.fspath(root) for root in dependency_roots),),
                         writable_roots=(os.fspath(paths.root),),
                     )
+                    self._pipes_established = True
+                    self._job_assigned = True
                 elif self._limits.windows_containment is WindowsContainmentMode.RESTRICTED_TOKEN:
                     if job is None:  # pragma: no cover - defensive invariant
                         raise SandboxIsolationUnavailable("Sandbox Job Object was not created")
@@ -728,6 +793,8 @@ class SandboxProcess:
                         limit=self._limits.max_message_bytes + 1,
                         job=job,
                     )
+                    self._pipes_established = True
+                    self._job_assigned = True
                 else:
                     flags = 0x00000200 | 0x08000000 | 0x00000400
                     process = await asyncio.create_subprocess_exec(
@@ -742,6 +809,7 @@ class SandboxProcess:
                         start_new_session=False,
                         limit=self._limits.max_message_bytes + 1,
                     )
+                    self._pipes_established = True
                     self._security_status = SandboxSecurityStatus(
                         mode=WindowsContainmentMode.JOB_OBJECT_ONLY,
                         token_restricted=False,
@@ -765,6 +833,7 @@ class SandboxProcess:
                     start_new_session=True,
                     limit=self._limits.max_message_bytes + 1,
                 )
+                self._pipes_established = True
                 self._security_status = SandboxSecurityStatus(
                     mode=WindowsContainmentMode.PROCESS_GROUP_ONLY,
                     token_restricted=False,
@@ -789,6 +858,7 @@ class SandboxProcess:
                 WindowsContainmentMode.APPCONTAINER,
             }:
                 job.assign(process.pid)
+                self._job_assigned = True
                 self._job = job
                 job = None
             elif job is not None:
@@ -880,8 +950,15 @@ class SandboxProcess:
                     with contextlib.suppress(TimeoutError):
                         await asyncio.wait_for(self._process.wait(), timeout=0.1)
                     if self._process.returncode is not None:
-                        raise SandboxProcessError(
-                            "Sandbox process exited before responding"
+                        diagnostics = self._startup_diagnostics()
+                        error_type: type[SandboxProcessError] = (
+                            SandboxStartupError
+                            if not diagnostics.readiness_reached
+                            else SandboxProcessError
+                        )
+                        raise error_type(
+                            "Sandbox process exited before responding",
+                            diagnostics=diagnostics,
                         ) from error
                 raise SandboxProtocolError("Sandbox response frame is malformed") from error
             except (asyncio.LimitOverrunError, ValueError) as error:
@@ -894,6 +971,7 @@ class SandboxProcess:
                 or response.version != SANDBOX_PROTOCOL_VERSION
             ):
                 raise SandboxProtocolError("Sandbox response identity does not match request")
+            self._protocol_ready = True
             return response
         finally:
             if cancel_task is not None and not cancel_task.done():
@@ -1005,6 +1083,8 @@ __all__ = [
     "SandboxPaths",
     "SandboxProcess",
     "SandboxProcessError",
+    "SandboxStartupDiagnostics",
+    "SandboxStartupError",
     "SandboxProtocolError",
     "SandboxSecurityStatus",
     "SandboxTimeout",

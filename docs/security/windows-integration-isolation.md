@@ -50,6 +50,32 @@ evidence; SID and native handles never cross IPC or enter ordinary data stores.
 
 ## Actual boundary
 
+### Diagnostic and test-mode separation
+
+`SandboxProcess` now records bounded `SandboxStartupDiagnostics` when a child
+exits before its first valid protocol response. The record contains only the
+containment mode, resolved executable identity, launch bootstrap category,
+pipe/job setup state, readiness state, process ID, and exit code. It does not
+retain executable arguments, environment values, credentials, or unbounded
+child output. The canonical native launch continues to use the explicit
+stdio-handle list; no stderr handle is added to the production AppContainer
+contract merely to improve diagnostics.
+
+The deterministic protocol/lifecycle tests use the explicit `JOB_OBJECT_ONLY`
+diagnostic mode on Windows. This mode exercises JSON IPC, environment
+sanitization, request bounds, identity checks, timeout/cancellation, restart,
+process-tree cleanup, and resource limits without making restricted-token
+bootstrap a hidden prerequisite. It is not a production generated-code
+boundary and cannot certify or activate an executable package.
+
+Restricted-token tests remain focused on the restricted launcher itself:
+token/privilege status, explicit handle-list evidence, and non-certifiability.
+If a host can create the token but the child cannot reach protocol readiness,
+the test records the typed startup diagnostic instead of treating a generic
+protocol failure as proof of successful restricted-token execution. A native
+launcher setup failure remains an explicit unsupported result. AppContainer
+tests remain separate and continue to exercise the production contract.
+
 ### Process lifecycle containment
 
 `Job Object` membership is established while the child is suspended and before

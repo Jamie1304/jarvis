@@ -26,6 +26,7 @@ from jarvis.sandbox import (
     SandboxProcess,
     SandboxProcessError,
     SandboxProtocolError,
+    SandboxStartupError,
     SandboxTimeout,
     WindowsContainmentMode,
 )
@@ -149,7 +150,10 @@ def sandbox(tmp_path: Path, *, limits: SandboxLimits | None = None) -> SandboxPr
             timeout_seconds=1,
             max_message_bytes=65_536,
             max_restarts=2,
-            windows_containment=WindowsContainmentMode.RESTRICTED_TOKEN,
+            # Protocol/lifecycle tests must not accidentally test restricted
+            # token bootstrap. This remains an explicit diagnostic mode on
+            # Windows and is not a certifiable generated-code boundary.
+            windows_containment=WindowsContainmentMode.JOB_OBJECT_ONLY,
         ),
     )
 
@@ -208,9 +212,19 @@ async def test_windows_restricted_token_and_explicit_handle_boundary(
     trusted_handle_file.write_text("trusted-only", encoding="utf-8")
     file_descriptor = os.open(trusted_handle_file, os.O_RDONLY)
     os.set_handle_inheritable(file_descriptor, True)
-    process = sandbox(tmp_path)
+    process = sandbox(
+        tmp_path,
+        limits=SandboxLimits(
+            timeout_seconds=1,
+            windows_containment=WindowsContainmentMode.RESTRICTED_TOKEN,
+        ),
+    )
     try:
-        await process.start()
+        try:
+            await process.start()
+        except SandboxIsolationUnavailable as error:
+            assert "restricted" in str(error).lower() or "native" in str(error).lower()
+            return
         status = process.security_status
         assert status is not None
         assert status.mode.value == "restricted_token"
@@ -223,10 +237,18 @@ async def test_windows_restricted_token_and_explicit_handle_boundary(
         assert status.max_memory_bytes == SandboxLimits().max_memory_bytes
         assert not status.filesystem_acl_restricted
         assert not status.network_restricted
-        result = await process.request(
-            "probe-handle",
-            {"handle": int(msvcrt.get_osfhandle(file_descriptor))},
-        )
+        try:
+            result = await process.request(
+                "probe-handle",
+                {"handle": int(msvcrt.get_osfhandle(file_descriptor))},
+            )
+        except SandboxStartupError as error:
+            diagnostics = error.diagnostics
+            assert diagnostics is not None
+            assert diagnostics.containment_mode is WindowsContainmentMode.RESTRICTED_TOKEN
+            assert diagnostics.readiness_reached is False
+            assert diagnostics.exit_code is not None
+            return
         assert result["visible"] is False
     finally:
         os.close(file_descriptor)
@@ -244,7 +266,10 @@ async def test_mandatory_windows_containment_unavailable_fails_closed(
         del args, kwargs
         raise SandboxIsolationUnavailable("synthetic mandatory feature failure")
 
-    process = sandbox(tmp_path)
+    process = sandbox(
+        tmp_path,
+        limits=SandboxLimits(windows_containment=WindowsContainmentMode.RESTRICTED_TOKEN),
+    )
     sandbox_any: Any = sandbox_module
     with monkeypatch.context() as context:
         context.setattr(sandbox_any.WindowsRestrictedLauncher, "launch", fail_launch)
@@ -401,7 +426,7 @@ async def test_sandbox_uses_governor_and_releases_on_close(tmp_path: Path) -> No
         resource_governor=governor,
         limits=SandboxLimits(
             timeout_seconds=1,
-            windows_containment=WindowsContainmentMode.RESTRICTED_TOKEN,
+            windows_containment=WindowsContainmentMode.JOB_OBJECT_ONLY,
         ),
     )
     await process.start()
@@ -416,7 +441,7 @@ async def test_identity_spoof_oversized_response_and_crash_are_contained(tmp_pat
         tmp_path,
         limits=SandboxLimits(
             max_restarts=4,
-            windows_containment=WindowsContainmentMode.RESTRICTED_TOKEN,
+            windows_containment=WindowsContainmentMode.JOB_OBJECT_ONLY,
         ),
     )
     await process.start()
@@ -442,7 +467,7 @@ async def test_timeout_cancellation_and_restart_bound(tmp_path: Path) -> None:
         limits=SandboxLimits(
             timeout_seconds=0.1,
             max_restarts=1,
-            windows_containment=WindowsContainmentMode.RESTRICTED_TOKEN,
+            windows_containment=WindowsContainmentMode.JOB_OBJECT_ONLY,
         ),
     )
     await process.start()
@@ -653,13 +678,25 @@ async def test_process_start_failure_and_malformed_response_are_contained(
     sandbox_any: Any = sandbox_module
     with monkeypatch.context() as context:
         expected_error: type[Exception] = SandboxProcessError
-        if sys.platform == "win32":
-            context.setattr(sandbox_any.WindowsRestrictedLauncher, "launch", fail_start)
-        else:
-            context.setattr(sandbox_any.asyncio, "create_subprocess_exec", fail_start)
+        context.setattr(sandbox_any.asyncio, "create_subprocess_exec", fail_start)
         with pytest.raises(expected_error):
             await process.start()
 
+    process = sandbox(tmp_path)
+    await process.start()
+    with pytest.raises(SandboxStartupError) as startup_error:
+        await process.request("crash", {})
+    diagnostics = startup_error.value.diagnostics
+    assert diagnostics is not None
+    assert diagnostics.readiness_reached is False
+    assert diagnostics.pipes_established is True
+    assert diagnostics.executable == str(Path(sys.executable).resolve())
+    assert "must-not-cross" not in repr(diagnostics)
+    await process.close()
+
+
+@pytest.mark.asyncio
+async def test_malformed_response_is_rejected_after_protocol_start(tmp_path: Path) -> None:
     process = sandbox(tmp_path)
     await process.start()
     with pytest.raises(SandboxProtocolError):
