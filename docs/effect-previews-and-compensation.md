@@ -32,6 +32,23 @@ canonical `PlanningEngine`; execution then follows:
 
 `PlanningEngine -> ToolRegistry -> Tool.invoke -> PermissionBroker -> Policy/approval`
 
+### Trusted observation boundary
+
+Normal application composition owns one sealed `EffectStateObserverRegistry`.
+It binds trusted observers to the exact compensating tool or capability and
+validates the returned request, effect, task, tool, capability, and target
+identities before use. The registry is not exposed to generated packages or
+sandbox processes. `FilesystemStateObserver` is the generic v1 observer; it
+reads only bounded files under the application-owned data root and emits a
+SHA-256 state fingerprint plus hash-only `FILE` evidence. Other capabilities
+must register an application-side observer through the same trusted startup
+boundary or compensation returns `OBSERVATION_UNAVAILABLE`.
+
+The pre-effect observation is fresh and must match the original effect's exact
+state baseline. The post-effect observation is fresh trusted evidence for
+`VerificationEngine`. A package callback, model claim, tool return value, or
+caller-supplied verdict cannot establish compensation safety or success.
+
 `CompensationExecutor` remains a lower-level compatibility contract for
 isolated callers and tests. It is not a second production task engine or
 authority.
@@ -41,7 +58,9 @@ missing baseline, failed tool, unknown effect outcome, or failed verification is
 returned as an explicit `CompensationResult`; none is silently treated as Undo
 success or replayed. Tool success is not compensation proof. The configured
 `VerificationEngine` must receive fresh independent evidence before the result
-can be `VERIFIED`.
+can be `VERIFIED`. If a trusted observer is absent or stale, the service returns
+`OBSERVATION_UNAVAILABLE` and performs no compensating execution. Existing
+`STALE_STATE` remains the result for a changed baseline or binding.
 
 ## Plan Studio and Trace
 
@@ -59,8 +78,9 @@ result.
 Before execution, `CompensationService.bind_original_effect()` derives an
 immutable `OriginalEffectReference` from a completed durable PlanningEngine
 task, exact plan revision, exact successful step, and its durable evidence.
-The compensation tool/capability must match that producing step. A caller
-boolean, callback, or model statement cannot create this binding. The service
+The compensation target must match the trusted preview and the compensation
+tool/capability must match that producing step. A caller boolean, callback, or
+model statement cannot create this binding. The service
 revalidates the current state fingerprint, persists bounded lifecycle metadata
 in `compensation.sqlite3`, and binds its compensation task into the original
 trace lineage. Independent VerificationEngine evidence is required for

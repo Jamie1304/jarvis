@@ -10,16 +10,24 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
+import shutil
 import sys
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 from uuid import uuid4
 
 import httpx
 import pytest
+from jarvis.ai.providers.registry import (
+    ModelMetadata,
+    ProviderDefinition,
+    ProviderMetadata,
+    ProviderRegistry,
+)
 from jarvis.browser import (
     BrowserAccessDenied,
     BrowserAdapter,
@@ -54,13 +62,23 @@ from jarvis.capability_factory import (
 )
 from jarvis.capability_lifecycle import StoredLifecycleRecord
 from jarvis.core.config import Settings
-from jarvis.credentials import AuthenticationMethod, CredentialVault
+from jarvis.credentials import (
+    AuthenticationMethod,
+    CredentialVault,
+    TestOnlyInMemorySecretBackend,
+)
 from jarvis.discovery.models import CapabilityGap, DiscoverySource
 from jarvis.effect_attestation import (
     EffectAttestationStatus,
     EffectAttestationStore,
 )
-from jarvis.effects import CompensationDefinition, CompensationRequest, EffectError, EffectPreview
+from jarvis.effects import (
+    CompensationDefinition,
+    CompensationRequest,
+    CompensationStatus,
+    EffectError,
+    EffectPreview,
+)
 from jarvis.environment_discovery import (
     DiscoveryConfidence,
     DiscoveryMode,
@@ -143,6 +161,7 @@ from jarvis.setup_conductor import (
     SetupHandler,
     SetupInspection,
     SetupRequirement,
+    SetupRunState,
     SetupStep,
 )
 from jarvis.skills import SkillContextRequirements
@@ -192,6 +211,8 @@ from jarvis.workflows import (
     WorkflowVerificationCriteria,
 )
 from pydantic import BaseModel, ConfigDict
+
+from tests.fakes import FakeAIProvider
 
 
 @dataclass
@@ -245,7 +266,7 @@ class _FileStateTool(Tool[_FileStateInput, _FileStateOutput]):
             "Synthetic state writer",
             "Writes one bounded synthetic state file",
             SemanticVersion(1, 0, 0),
-            frozenset({"synthetic-state"}),
+            frozenset({"synthetic-state", "filesystem"}),
             _FileStateInput,
             _FileStateOutput,
             frozenset({Permission.FILESYSTEM_WRITE}),
@@ -291,11 +312,13 @@ class _FileStateTool(Tool[_FileStateInput, _FileStateOutput]):
                 effect_disposition=ToolEffectDisposition.UNKNOWN,
             )
         Path(validated_input.path).write_text(validated_input.value, encoding="utf-8")
+        state_hash = hashlib.sha256(Path(validated_input.path).read_bytes()).hexdigest()
         return ToolResult.success(
             _FileStateOutput(value=validated_input.value),
             evidence=(
                 # The value is a synthetic test fixture, not model context.
                 ToolEvidence("state", f"state={validated_input.value}"),
+                ToolEvidence("sha256", f"sha256={state_hash}"),
             ),
         )
 
@@ -819,6 +842,8 @@ async def _runtime(
     fixture: RuntimeTestFixture | None = None,
     credential_vault: object | None = None,
     browser_backend: BrowserAdapter | None = None,
+    permission_policy: PolicyEngine | None = None,
+    trusted_application_tools: tuple[Tool[Any, Any], ...] = (),
 ) -> ApplicationRuntime:
     return ApplicationRuntime.create(
         Settings(
@@ -829,6 +854,8 @@ async def _runtime(
         test_fixture=fixture,
         credential_vault=credential_vault,  # type: ignore[arg-type]
         browser_backend=browser_backend,
+        permission_policy=permission_policy,
+        trusted_application_tools=trusted_application_tools,
     )
 
 
@@ -2062,6 +2089,128 @@ async def test_v1_acceptance_production_compensation_verifies_and_traces(
 
 
 @pytest.mark.asyncio
+async def test_v1_acceptance_production_composed_compensation_uses_trusted_observer(
+    tmp_path: Path,
+) -> None:
+    """The normal composition owns observation; no RuntimeTestFixture is used."""
+
+    data_root = tmp_path / "jarvis-data"
+    state_path = data_root / "synthetic-compensation-state.txt"
+    data_root.mkdir(parents=True)
+    state_path.write_text("old", encoding="utf-8")
+    old_hash = hashlib.sha256(state_path.read_bytes()).hexdigest()
+    policy = PolicyEngine(
+        (
+            PolicyRule(
+                "allow-production-composed-synthetic-state",
+                Permission.FILESYSTEM_WRITE,
+                Decision.ALLOW,
+                ScopeConstraint(
+                    paths=(str(data_root),),
+                    tools=frozenset({"synthetic-state"}),
+                ),
+                frozenset({"write-state"}),
+            ),
+        )
+    )
+    runtime = await _runtime(
+        tmp_path,
+        permission_policy=policy,
+        trusted_application_tools=(_FileStateTool(),),
+    )
+    assert runtime.container is not None
+    assert runtime.container.compensation_observer_registry.sealed
+    proposal = PlanProposal.model_validate(
+        {
+            "goal": "write production-composed synthetic state",
+            "required_capabilities": ["filesystem"],
+            "required_permissions": [Permission.FILESYSTEM_WRITE.value],
+            "completion_criteria": ["state=new"],
+            "steps": [
+                {
+                    "key": "write",
+                    "tool_id": "synthetic-state",
+                    "capability": "filesystem",
+                    "input": {"path": str(state_path), "value": "new"},
+                    "required_permissions": [Permission.FILESYSTEM_WRITE.value],
+                    "expected_output": "state output",
+                    "verification_rule": "evidence_contains_all",
+                    "expected_evidence": ["state=new"],
+                }
+            ],
+        }
+    )
+    original = await runtime.container.task_controller.submit_proposal(
+        proposal,
+        provenance=("v1.acceptance.production-composed-compensation",),
+    )
+    assert original.status is PlanningTaskStatus.COMPLETED
+    original_plan = runtime.container.planning_engine.inspect_plan(original.task_id)
+    assert original_plan is not None
+    original_step = original_plan.steps[0]
+    after_hash = hashlib.sha256(state_path.read_bytes()).hexdigest()
+    await runtime.aclose()
+
+    # Restart before compensation: the durable task/evidence and runtime-owned
+    # observer must be enough to revalidate the exact original effect.
+    runtime = await _runtime(
+        tmp_path,
+        permission_policy=policy,
+        trusted_application_tools=(_FileStateTool(),),
+    )
+    assert runtime.container is not None
+    compensation_definition = CompensationDefinition(
+        "filesystem",
+        "synthetic-state",
+        {"path": str(state_path), "value": "old"},
+        VerificationPlan(
+            "synthetic file restored",
+            (f"sha256={old_hash}",),
+            frozenset({EvidenceType.FILE}),
+            VerificationLevel.INTEGRATION_VERIFIED,
+        ),
+    )
+    effect = EffectPreview(
+        str(state_path),
+        {"operation": "write", "before": "old", "after": "new"},
+        ("disk",),
+        (
+            PermissionRequest(
+                Permission.FILESYSTEM_WRITE,
+                PermissionScope(paths=(str(state_path),)),
+            ),
+        ),
+        Reversibility.COMPENSATABLE,
+        (),
+        compensation_definition.verification,
+        compensation_definition,
+        uuid4(),
+        after_hash,
+    )
+    binding = runtime.container.compensation_service.bind_original_effect(
+        effect,
+        task_id=original.task_id,
+        plan_revision=original_plan.version,
+        step_id=original_step.step_id,
+        target=str(state_path),
+        scope=str(state_path),
+    )
+    compensation_request = CompensationRequest(
+        uuid4(),
+        original.task_id,
+        uuid4(),
+        effect,
+        after_hash,
+        original_effect=binding,
+    )
+    result = await runtime.container.compensation_service.compensate(compensation_request)
+    assert result.status is CompensationStatus.VERIFIED
+    assert state_path.read_text(encoding="utf-8") == "old"
+    assert result.trace_event_ids
+    await runtime.aclose()
+
+
+@pytest.mark.asyncio
 async def test_v1_acceptance_golden_gate_and_recovery_lkg_are_composed(tmp_path: Path) -> None:
     runtime = await _runtime(tmp_path)
     assert runtime.container is not None
@@ -2155,3 +2304,230 @@ async def test_v1_acceptance_graceful_shutdown_and_no_isolated_authority(tmp_pat
     await runtime.aclose()
     await runtime.aclose()
     assert runtime.status is RuntimeStatus.STOPPED
+
+
+@pytest.mark.asyncio
+async def test_v1_production_composition_acquires_randomized_capability_and_restores_it(
+    tmp_path: Path,
+) -> None:
+    """Exercise the real production graph without a RuntimeTestFixture.
+
+    The provider is synthetic, but it is registered through the same trusted
+    ProviderRegistry used by production.  The package still must traverse the
+    real reviewer, AppContainer sandbox, certification, staged activation,
+    hot-load, and verification boundaries.
+    """
+
+    suffix = uuid4().hex[:12]
+    capability = f"synthetic-capability-{suffix}"
+    response = json.dumps(
+        {
+            "kind": "response",
+            "content": json.dumps(
+                {
+                    "name": f"Synthetic capability {suffix}",
+                    "description": "A bounded randomized local capability",
+                },
+                sort_keys=True,
+            ),
+        },
+        sort_keys=True,
+    )
+    provider_registry = ProviderRegistry(
+        (
+            ProviderDefinition(
+                ProviderMetadata("synthetic-local", "Synthetic local provider", "1", True),
+                lambda _configuration: FakeAIProvider((response,)),
+                (
+                    ModelMetadata(
+                        "synthetic-model",
+                        4_096,
+                        frozenset({"structured_output"}),
+                    ),
+                ),
+            ),
+        )
+    )
+    settings = Settings(
+        environment="production",
+        app_data_dir=tmp_path / "production-data",
+        ai_provider="synthetic-local",
+        ai_model="synthetic-model",
+        _env_file=None,
+    )
+    recovery_backend = TestOnlyInMemorySecretBackend()
+    runtime = ApplicationRuntime.create(
+        settings,
+        provider_registry=provider_registry,
+        recovery_key_backend=recovery_backend,
+    )
+    assert runtime.status is RuntimeStatus.READY, runtime.error
+    assert runtime.container is not None
+    container = runtime.container
+    assert container.package_store.root == RuntimePaths.from_root(settings.app_data_dir).packages
+    assert container.production_sandbox is not None
+    assert container.capability_acquisition.__class__.__name__ == (
+        "CapabilityAcquisitionCoordinator"
+    )
+    # This is the normal production graph, not the RuntimeTestFixture seam.
+    assert not hasattr(runtime, "test_fixture")
+    assert container.capability_factory.__class__.__name__ == "CapabilityFactory"
+    assert container.package_store.__class__.__name__ == "ProductionPackageStore"
+    assert container.hot_load.__class__.__name__ == "HotLoadManager"
+    assert container.environment_discovery.__class__.__name__ == ("EnvironmentDiscoveryService")
+    assert container.setup_conductor.__class__.__name__ == "SetupConductor"
+    assert container.provisioning_engine.__class__.__name__ == "ProvisioningEngine"
+    assert container.package_certifier.__class__.__name__ == "PackageCertifier"
+    assert container.package_activation.__class__.__name__ == "PackageActivationService"
+    assert container.verification_engine.__class__.__name__ == "VerificationEngine"
+    assert container.compensation_service.__class__.__name__ == "CompensationService"
+    assert container.compensation_observer_registry.sealed
+    assert container.capability_lifecycle_restorer is not None
+    assert container.component_doctor.__class__.__name__ == "ComponentDoctor"
+
+    # Proactive preparation uses the production OpportunityEngine and the same
+    # coordinator, but stops before activation or authority.  The second
+    # verified observation is required by the normal evidence policy.
+    from jarvis.capability_opportunities import (
+        OpportunityEvidence,
+        OpportunityEvidenceSource,
+        OpportunityPreparationState,
+        OpportunityStatus,
+    )
+
+    opportunity = container.opportunity_engine.observe(
+        f"synthetic proactive capability {suffix}",
+        tuple(
+            OpportunityEvidence(
+                OpportunityEvidenceSource.REPEATED_WORKFLOW,
+                f"production-opportunity-{suffix}-{index}",
+                "verified synthetic local workflow evidence",
+                0.9,
+                datetime.now(UTC),
+                True,
+            )
+            for index in (1, 2)
+        ),
+        expected_benefit="prepare a bounded generic capability",
+        privacy_impact="no private credentials",
+        estimated_resource_cost="bounded local model and sandbox",
+        likely_required_authority=("trusted activation approval",),
+        workspace="production-v1-workspace",
+    )
+    assert opportunity is not None
+    prepared_opportunity = await container.opportunity_engine.prepare(opportunity.opportunity_id)
+    assert prepared_opportunity.status is OpportunityStatus.READY_TO_PROPOSE
+    assert prepared_opportunity.preparation_state is OpportunityPreparationState.READY
+    assert prepared_opportunity.decision.value == "propose"
+    assert prepared_opportunity.remaining_authority == ("trusted activation approval",)
+    assert container.capability_acquisition.last_run is not None
+    assert container.capability_acquisition.last_run.stage is AcquisitionStage.CERTIFYING
+    assert container.capability_registry.manifests() == ()
+
+    # Declining the prepared proposal records cooldown and does not activate it.
+    declined = container.opportunity_engine.decline(opportunity.opportunity_id)
+    assert declined.status is OpportunityStatus.DECLINED
+    assert declined.cooldown_until is not None
+
+    from jarvis.goal_supervisor import GoalBudget, GoalIntent, GoalStatus
+
+    intent = GoalIntent(
+        "calculate 25% of 800",
+        required_capabilities=(capability,),
+    )
+    state = await container.goal_supervisor.start(intent, GoalBudget(max_model_calls=2))
+    assert state.status is GoalStatus.COMPLETED, state.last_error
+    assert state.capability_id is not None
+    assert state.capability_id.startswith("generated.")
+    report = container.capability_acquisition.last_run
+    assert report is not None
+    assert report.stage is AcquisitionStage.ACTIVE
+    capability_id = state.capability_id
+    run = container.capability_acquisition.last_run
+    assert run is not None
+    assert run.activation is not None
+    assert run.activation.state is ActivationState.ACTIVE
+    assert run.setup is not None
+    assert run.setup.state is SetupRunState.COMPLETED
+    assert run.certification is not None
+    assert run.verification is not None
+    assert run.verification.passed
+
+    manifest = container.capability_registry.inspect(capability_id)
+    assert manifest.lifecycle is CapabilityLifecycle.ACTIVE
+    assert manifest.integration_owner.startswith("generated.")
+    lifecycle = container.capability_lifecycle_store.load(
+        manifest.integration_owner,
+        str(manifest.version),
+    )
+    assert lifecycle is not None
+    assert lifecycle.record.state is ActivationState.ACTIVE
+    assert lifecycle.record.package_hash == manifest.content_hash
+    assert (
+        container.invoke_capability(capability_id, "inspect", {"input": "safe"})["status"]
+        == "observed"
+    )
+    await runtime.aclose()
+
+    restarted = ApplicationRuntime.create(
+        settings,
+        provider_registry=provider_registry,
+        recovery_key_backend=recovery_backend,
+    )
+    assert restarted.status is RuntimeStatus.READY, restarted.error
+    assert restarted.container is not None
+    assert restarted.container.capability_lifecycle_restorer is not None
+    restore_results = restarted.container.capability_lifecycle_restorer.results
+    assert any(
+        item.package_id == manifest.integration_owner
+        and item.resulting_state is ActivationState.ACTIVE
+        and item.restored
+        for item in restore_results
+    )
+    restored = restarted.container.capability_registry.inspect(capability_id)
+    assert restored.integration_owner == manifest.integration_owner
+    assert restored.content_hash == manifest.content_hash
+    assert (
+        restarted.container.invoke_capability(capability_id, "inspect", {})["capability"]
+        == capability_id
+    )
+    baseline = restarted.container.capability_health.baseline(capability_id)
+    assert baseline.package_version == str(manifest.version)
+    assert baseline.activation_state is ActivationState.ACTIVE
+    restored_package = restarted.container.package_store.load(
+        manifest.integration_owner,
+        str(manifest.version),
+        manifest.content_hash,
+    )
+    restored_package_directory = restarted.container.package_store.package_directory(
+        restored_package
+    )
+    await restarted.aclose()
+
+    # A missing immutable package is contained locally.  Production startup
+    # remains available and the durable row records quarantine; no registry
+    # projection or package runtime is resurrected from an incomplete state.
+    shutil.rmtree(restored_package_directory)
+    negative = ApplicationRuntime.create(
+        settings,
+        provider_registry=provider_registry,
+        recovery_key_backend=recovery_backend,
+    )
+    assert negative.status is RuntimeStatus.READY, negative.error
+    assert negative.container is not None
+    assert negative.container.capability_lifecycle_restorer is not None
+    negative_record = negative.container.capability_lifecycle_store.load(
+        manifest.integration_owner,
+        str(manifest.version),
+    )
+    assert negative_record is not None
+    assert negative_record.record.state is ActivationState.QUARANTINED
+    with pytest.raises(KeyError):
+        negative.container.capability_registry.inspect(capability_id)
+    assert any(
+        item.package_id == manifest.integration_owner
+        and item.resulting_state is ActivationState.QUARANTINED
+        and not item.restored
+        for item in negative.container.capability_lifecycle_restorer.results
+    )
+    await negative.aclose()

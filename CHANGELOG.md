@@ -19,12 +19,22 @@ Release-candidate preparation for the minimal adaptive core.
 - Capability discovery and acquisition contracts using discover, adopt, reuse,
   build, review, sandbox, certify, Shadow, Canary, Active and verification
   stages.
+- Production composition now connects the generic acquisition flow through the
+  ProviderRegistry/ProviderRouter, bounded AgentLoop, hash-addressed package
+  store, native sandbox, trusted staged activation, and restart restoration;
+  no RuntimeTestFixture or product-specific adapter is used on that path.
 - Integration Package validation, sandbox host brokers, lifecycle state,
   effect attestation, hot-loading and behavior-drift containment.
+- Production startup now owns `CapabilityLifecycleRestorer`: exact package,
+  certification, UI-evidence, configuration, adoption, and AppContainer checks
+  restore valid ACTIVE versions and locally quarantine invalid rows without
+  taking unrelated JARVIS services into Safe Mode.
 - Event Automation, Skills, WorkflowTemplates, ArtifactStore, User Model,
   documentary Knowledge Libraries, EnvironmentDiscovery and ResourceGovernor.
 - PresenceProjection, PresentationSurface, UI simulation evidence,
   PlanStudio, human-readable Trace, effect preview/compensation and
+  production-owned trusted compensation observation with bounded filesystem
+  state evidence.
   ComponentDoctor contracts.
 - Encrypted backup/migration, recovery/LKG handling, UpdatePreview,
   SetupConductor, AttentionPolicy, Golden Workflow regressions and the

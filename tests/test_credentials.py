@@ -25,6 +25,7 @@ from jarvis.credentials import (
     GenericAuthenticationService,
     TestOnlyInMemorySecretBackend,
     UnavailableSecretBackend,
+    WindowsCredentialManagerBackend,
 )
 from jarvis.events import CredentialChanged, EventEnvelope, EventPayload, EventType
 
@@ -35,6 +36,14 @@ class Clock:
 
     def __call__(self) -> datetime:
         return self.value
+
+
+def test_windows_backend_hashes_overlong_logical_targets() -> None:
+    logical = "jarvis:credential:recovery-lkg:v1:" + "a" * 64
+    bounded = WindowsCredentialManagerBackend._target(logical)  # noqa: SLF001
+    assert bounded.startswith("jarvis:credential:alias:")
+    assert len(bounded) <= 64
+    assert bounded == WindowsCredentialManagerBackend._target(logical)  # noqa: SLF001
 
 
 class EventSink:

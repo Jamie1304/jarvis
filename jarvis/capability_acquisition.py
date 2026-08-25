@@ -215,12 +215,16 @@ class SolutionDiscovery:
         adoption_provider: Callable[[CapabilityGap, EnvironmentGraph], AdoptionCandidates]
         | None = None,
         setup_step_provider: Callable[[DiscoveryCandidate], SetupStep | None] | None = None,
+        build_setup_step: SetupStep | None = None,
     ) -> None:
         self._discovery = discovery
         self._adoption_provider = adoption_provider or (
             lambda _gap, _environment: AdoptionCandidates()
         )
         self._setup_step_provider = setup_step_provider or (lambda _candidate: None)
+        if build_setup_step is not None and not isinstance(build_setup_step, SetupStep):
+            raise CapabilityAcquisitionError("Build setup step is malformed")
+        self._build_setup_step = build_setup_step
 
     async def discover(
         self, gap: CapabilityGap, environment: EnvironmentGraph
@@ -254,6 +258,8 @@ class SolutionDiscovery:
                     strategy=FactoryStrategy.GENERATE_ADAPTER,
                     capability_id=_safe_id(gap.desired_capability),
                     evidence=("no safe reusable candidate was discovered",),
+                    requires_setup=self._build_setup_step is not None,
+                    setup_step=self._build_setup_step,
                 )
             )
             evidence.append("fallback:build only after discovery found no safe reusable option")
@@ -398,6 +404,111 @@ class CapabilityAcquisitionCoordinator:
             )
         return await self._certify_and_activate(request, result)
 
+    async def prepare(self, request: CapabilityAcquisitionRequest) -> CapabilityAcquisitionReport:
+        """Build and certify a candidate without registering or activating it.
+
+        Opportunity preparation uses this path.  It deliberately stops before
+        ``PackageActivationService`` and therefore cannot create authority.
+        The package content itself is owned by the production package store so
+        an accepted opportunity can resume from the same reviewed candidate.
+        """
+
+        if not isinstance(request, CapabilityAcquisitionRequest):
+            raise GoalSupervisorValidationError("Capability preparation request is malformed")
+        result = await self._services.factory.acquire(
+            request.gap,
+            request.solution,
+            request.adoption_candidates,
+            request.workspace,
+            request.environment,
+            request.preferences,
+        )
+        self._last_run = AcquisitionRun(
+            result.run_id,
+            request.goal_id or UUID(int=0),
+            request.gap.current_task,
+            result.capability_id,
+            self._factory_stage(result),
+            result.strategy,
+            result.package.package.package_id if result.package is not None else None,
+            str(result.package.package.version) if result.package is not None else None,
+            result.package.package.package_hash if result.package is not None else None,
+            setup=result.setup_run,
+            reason=result.reason,
+            evidence=(result.reason,),
+        )
+        self._record_trace(self._last_run)
+        if result.package is None:
+            return CapabilityAcquisitionReport(
+                False,
+                result.capability_id,
+                evidence=(result.reason or "no candidate was generated",),
+                detail=result.reason or "No inactive capability candidate is available",
+            )
+        if self._sources is None or self._certification_hooks is None:
+            return CapabilityAcquisitionReport(
+                False,
+                result.capability_id,
+                evidence=("trusted preparation boundaries are unavailable",),
+                detail=(
+                    "Capability preparation remains inactive because trusted package "
+                    "boundaries are unavailable"
+                ),
+            )
+        package = result.package.package
+        source_files = self._sources.sources(package)
+        review = self._services.package_reviewer.review(
+            package,
+            source_files=source_files,
+            surface=self._review_surface,
+            policy=self._review_policy,
+        )
+        if review.decision in {ReviewDecision.REJECT, ReviewDecision.MANUAL_REVIEW_REQUIRED}:
+            return CapabilityAcquisitionReport(
+                False,
+                result.capability_id,
+                evidence=("package preparation review failed",),
+                detail="Capability preparation was rejected by the trusted package reviewer",
+            )
+        try:
+            certification = self._services.package_certifier.certify(
+                CertificationRequest(
+                    package,
+                    f"preparation:{package.package_id}",
+                    ("local-runtime",),
+                    (request.gap.current_task,),
+                    review_surface=self._review_surface,
+                    review_policy=self._review_policy,
+                    sandbox_security_status=self._sandbox_security_status,
+                ),
+                self._certification_hooks.hooks(package),
+            )
+        except Exception as error:
+            return CapabilityAcquisitionReport(
+                False,
+                package.package_id,
+                evidence=("package preparation certification failed",),
+                detail=(
+                    f"Capability preparation failed closed at certification: {type(error).__name__}"
+                ),
+            )
+        self._update(
+            stage=AcquisitionStage.CERTIFYING,
+            certification=certification,
+            reason="candidate certified for later trusted activation; no authority granted",
+        )
+        return CapabilityAcquisitionReport(
+            False,
+            package.package_id,
+            evidence=(
+                "package reviewed",
+                "sandbox tested",
+                "certified for later activation",
+                "activation intentionally not attempted",
+            ),
+            detail="Capability candidate was prepared and certified without activation",
+        )
+
     async def _verify_reused(
         self, request: CapabilityAcquisitionRequest, result: CapabilityFactoryResult
     ) -> CapabilityAcquisitionReport:
@@ -489,6 +600,15 @@ class CapabilityAcquisitionCoordinator:
             return self._failed_report(
                 factory_result, "trusted activation request builder is unavailable"
             )
+        if self._manifest_provider is None:
+            return self._failed_report(
+                factory_result, "capability manifest provider is unavailable"
+            )
+        # The manifest is prepared before Shadow/Canary so the trusted hot-load
+        # surface can atomically refresh the registry projection.  Registration
+        # still happens only after ACTIVE; persisting this inactive metadata is
+        # not an authority grant.
+        manifest = self._manifest_provider.manifest(package, request)
         self._update(stage=AcquisitionStage.SHADOW)
         try:
             activation_request = self._activation_requests.request(
@@ -506,20 +626,25 @@ class CapabilityAcquisitionCoordinator:
             )
             if canary.state is not ActivationState.CANARY:
                 return self._failed_report(factory_result, "Canary activation failed")
+            self._update(stage=AcquisitionStage.CANARY, activation=canary)
             active = self._services.package_activation.promote(package.package_id, package.version)
             if active.state is not ActivationState.ACTIVE:
                 return self._failed_report(factory_result, "Activation did not reach ACTIVE")
+            self._update(stage=AcquisitionStage.ACTIVE, activation=active)
         except Exception as error:
             return self._failed_report(
                 factory_result, f"staged activation failed: {type(error).__name__}: {error}"
             )
-        if self._manifest_provider is None:
-            return self._failed_report(
-                factory_result, "capability manifest provider is unavailable"
-            )
         try:
-            manifest = self._manifest_provider.manifest(package, request)
-            self._services.registry.register(manifest)
+            try:
+                existing = self._services.registry.inspect(manifest.capability_id)
+            except KeyError:
+                self._services.registry.register(manifest)
+            else:
+                if existing != manifest:
+                    return self._failed_report(
+                        factory_result, "active capability registration collided"
+                    )
         except Exception:
             return self._failed_report(factory_result, "active capability registration failed")
         self._update(stage=AcquisitionStage.VERIFYING, activation=active)

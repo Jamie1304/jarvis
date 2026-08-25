@@ -34,6 +34,7 @@ class StartupSecurityConfiguration:
     improvement_enabled: bool
     remote_approval_enabled: bool
     autonomous_scheduling_enabled: bool
+    ai_provider_local_only: bool = True
 
 
 class StartupSecurityValidator:
@@ -84,11 +85,12 @@ class StartupSecurityValidator:
                         code, "A capability without a trusted production path was enabled"
                     )
                 )
-        if config.ai_provider.casefold() != "ollama":
+        if config.ai_provider.casefold() != "ollama" and not config.ai_provider_local_only:
             violations.append(
                 SecurityViolation(
                     SecurityViolationCode.MODEL_PROVIDER_UNSUPPORTED,
-                    "The configured model provider is outside the v1 trusted policy",
+                    "The configured model provider is not declared local-only by the "
+                    "trusted provider registry",
                 )
             )
         if not local_model_endpoint_is_safe(config.ai_endpoint):

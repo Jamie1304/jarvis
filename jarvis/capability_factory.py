@@ -18,6 +18,7 @@ from jarvis.capabilities import (
 )
 from jarvis.discovery.models import CapabilityGap
 from jarvis.integration_package import IntegrationPackage, PackageLifecycle
+from jarvis.package_reviewer import PackageSourceFile
 from jarvis.resources import (
     ReservationReleaseReason,
     ResourceBudget,
@@ -183,6 +184,7 @@ class GeneratedCapabilityPackage:
     sandbox_tested: bool
     security_checked: bool
     generated_by: str
+    source_files: tuple[PackageSourceFile, ...] = ()
 
     def __post_init__(self) -> None:
         if not isinstance(self.package, IntegrationPackage):
@@ -195,6 +197,12 @@ class GeneratedCapabilityPackage:
         ):
             raise CapabilityFactoryValidationError("Generated package checks are malformed")
         _text(self.generated_by, "Generator provenance", 512)
+        if type(self.source_files) is not tuple or any(
+            not isinstance(value, PackageSourceFile) for value in self.source_files
+        ):
+            raise CapabilityFactoryValidationError(
+                "Generated package source snapshots are malformed"
+            )
 
 
 class CapabilityGenerator(Protocol):

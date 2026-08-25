@@ -142,6 +142,12 @@ class EnvironmentDiscoveryService:
         self._candidate_sink = candidate_sink
         self._candidates: dict[str, EnvironmentCandidate] = {}
 
+    @property
+    def provider_count(self) -> int:
+        """Return the number of configured passive/read-only providers."""
+
+        return len(self._providers)
+
     def discover(self, mode: DiscoveryMode) -> tuple[EnvironmentCandidate, ...]:
         for provider in self._providers:
             if not isinstance(provider.source, DiscoverySource):

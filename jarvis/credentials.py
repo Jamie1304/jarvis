@@ -334,6 +334,12 @@ class WindowsCredentialManagerBackend:  # pragma: no cover - opt-in native Windo
         _text(target, "Credential backend target", 256)
         if not target.startswith("jarvis:credential:"):
             raise CredentialVaultError("Credential backend target is invalid")
+        # Windows Credential Manager rejects generic target names above its
+        # effective host limit. Recovery namespaces contain a long descriptive
+        # prefix plus a digest, so keep the logical target private while using
+        # a bounded, collision-resistant OS target.
+        if len(target) > 64:
+            target = "jarvis:credential:alias:" + hashlib.sha256(target.encode()).hexdigest()[:32]
         return target
 
     def put(self, target: str, secret: bytes) -> None:

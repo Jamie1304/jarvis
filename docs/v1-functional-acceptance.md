@@ -7,16 +7,48 @@ external network, account, device, donor runtime, or product-specific adapter.
 
 ## Composition contract
 
-The suite starts JARVIS with `ApplicationRuntime.create(Settings(...))`. Test-only package,
-discovery, activation, certification, and package-runtime observations enter only through
-the explicit `RuntimeTestFixture` seam. The composition root still constructs and owns the
-`PermissionBroker`, `ToolRegistry`, planning engine, lifecycle store, activation service,
+The suite starts JARVIS with `ApplicationRuntime.create(Settings(...))`. Lower-level
+deterministic scenarios use the explicit `RuntimeTestFixture` seam for synthetic
+package/discovery/activation observations; those scenarios are deterministic contract
+evidence only, not production-composition proof. The composition root still constructs and owns the
+`PermissionBroker`, `ToolRegistry`, PlanningEngine, lifecycle store, activation service,
 effect-attestation store, acquisition coordinator, setup/provisioning services, opportunity
 engine, attention policy, trace/golden stores, ArtifactStore, and optional services.
+
+The production-growth and compensation scenarios deliberately supply no `RuntimeTestFixture`.
+They register only deterministic trusted application test inputs through the normal
+composition boundary (a fake model, and a generic synthetic file tool), then use the production
+`ProviderRouter` -> `AgentLoop` -> `CapabilityFactory` -> package review/sandbox/certification
+-> Setup/Provision -> Shadow/Canary -> activation/hot-load -> verification path. The fake
+provider and file tool are test inputs; they are not production capability adapters. The
+compensation scenario additionally uses the runtime-owned sealed `EffectStateObserverRegistry`
+and generic bounded `FilesystemStateObserver`; no callback or package assertion supplies trusted
+state or verification.
 
 The suite does not call a standalone `CapabilityFactory` to certify or activate a package and
 does not write `ACTIVE` directly. The anti-shortcut assertions check that the production
 coordinator and runtime-owned lifecycle store are used.
+
+The production-composition evidence is intentionally narrower and explicit:
+
+- `test_v1_production_composition_acquires_randomized_capability_and_restores_it` uses
+  `Settings(environment="production")`, a registry-registered synthetic provider, no
+  `RuntimeTestFixture`, and the concrete generator, package store/runtime, sandbox,
+  reviewer/certifier, setup/provisioning, staged activation, hot-load, registry, verifier,
+  lifecycle-restorer, trace, and ComponentDoctor services created by `ApplicationRuntime`.
+  It proves the generic BUILD path and exact restart restoration; it does not claim that an
+  arbitrary external package or an adopted machine binary is universally safe.
+- The same test exercises `CapabilityOpportunityEngine.prepare()` through the production
+  coordinator. It reaches `READY_TO_PROPOSE`/`CERTIFYING`, records remaining authority,
+  leaves the capability registry inactive, and records decline cooldown. Preparation does not
+  grant authority or activate a package.
+- `test_v1_acceptance_production_composed_compensation_uses_trusted_observer` is the
+  production-composed compensation/verification proof. It uses the sealed application-owned
+  observer registry after restart; the fixture callback path is compatibility-only.
+
+All other rows that cite fixture helpers remain `PROVEN_DETERMINISTICALLY`; they must not be
+read as evidence that a fresh production runtime has a configured browser companion, MCP
+server, physical voice/camera/audio path, desktop renderer, or adopted external installation.
 
 ## Scenario results
 
@@ -40,7 +72,7 @@ coordinator and runtime-owned lifecycle store are used.
 | 16 | EnvironmentDiscovery lifecycle | PASS | Runtime-owned discovery service consumes a synthetic local observation and exposes evidence only |
 | 17 | BrowserSemanticBridge production broker | PASS | Runtime composition installs the broker adapter; the fake backend is reached only through the bridge or the call fails closed |
 | 18 | Trace attached across canonical boundaries | PASS | `test_v1_acceptance_composed_runtime_and_task_controller` and `test_v1_acceptance_unknown_capability_certifies_activates_verifies_and_restarts` assert goal/task lineage, plan/step/completion, acquisition package metadata, trusted attestation references, and stable trace reload after restart |
-| 19 | EffectPreview/Compensation integration | PASS | `test_v1_acceptance_production_compensation_verifies_and_traces` uses the runtime-owned CompensationService, survives restart between the original effect and compensation, revalidates stale state, executes through PlanningEngine/PermissionBroker, persists lifecycle metadata, and requires independent VerificationEngine evidence |
+| 19 | EffectPreview/Compensation integration | PASS | `test_v1_acceptance_production_composed_compensation_uses_trusted_observer` uses no RuntimeTestFixture: the runtime-owned sealed observer registry and generic filesystem observer revalidate the exact target/state after restart, compensation executes through PlanningEngine/PermissionBroker, and hash-only trusted evidence reaches VerificationEngine; the callback-based case also remains covered for compatibility |
 | 20 | UI simulation evidence attached to UI certification | PASS | `test_v1_acceptance_ui_certification_is_bound_through_composed_activation` runs the runtime-owned harness against a randomized package, captures ArtifactStore evidence, certifies the attestation, stages Shadow/Canary/Active, persists the digest, and restores it after restart |
 | 21 | Presence/Presentation service composition | PASS | Runtime-owned PresenceProjection and ArtifactStore-backed PresentationSurface are exercised |
 | 22 | ResourceGovernor admission for background/model work | PASS | Runtime-owned governor returns bounded `ALLOW`/`REDUCE` decision for a background request |
@@ -51,29 +83,41 @@ coordinator and runtime-owned lifecycle store are used.
 | 27 | Safe Mode composition | PASS | Three synthetic failed starts cause the composed runtime to enter Safe Mode without creating the normal container |
 | 28 | Graceful shutdown/restart | PASS | Container shutdown is idempotent and the application can be restarted from the same data root |
 | 29 | Adoption identity/provenance | PASS | Synthetic tests bind stable file identity, content hash, signer status, independent dependency provenance, exact scope/expiry, and reject reparse, stale, changed, forged, or unavailable evidence |
+| 30 | Complete production capability growth | PASS | `test_v1_production_composition_acquires_randomized_capability_and_restores_it` uses no fixture, reaches generated package ACTIVE through the real AppContainer/certification/attestation path, invokes only the safe local worker contract, and restores the exact package/version/hash after restart |
 
 ## Current run
 
-The focused acceptance test currently contains 21 deterministic tests covering the rows above.
+The focused acceptance file contains 23 deterministic tests covering the rows above; the
+matrix has 30 scenarios because several tests prove multiple boundaries. The production
+growth proof enters through `GoalSupervisor.start()`, rather than calling the acquisition
+coordinator directly, and the supervisor then delegates the ordinary task to the canonical
+`PlanningTaskController`/`PlanningEngine` path.
 The registered system-test command is:
 
 ```text
-python scripts/run_system_tests.py --suite v1-acceptance
+  python scripts/run_system_tests.py --suite v1-acceptance
 ```
 
-Recorded checks:
+Recorded checks (current mutable tree):
 
-- `v1-acceptance`: PASS, 21 passed; run `0ac58287-a1c2-4e88-a3dc-a37295fc6298`;
-- `deterministic-workflows`: PASS, 26 passed; run `a6ccfbfe-9d5d-4079-b7da-62dae9dda1cb`;
-- `deterministic-permissions`: PASS, 72 passed, 1 skipped; run `01b7e1f3-408c-4691-a230-8fe0981fab2b`;
-- `quality.py`: PASS, 1,360 passed and 6 skipped, 90% combined statement/branch coverage;
-  formatting, ruff, and mypy passed.
+- `v1-acceptance`: PASS, 23 passed; run `43956212-db86-4d12-a5eb-562262524984`;
+- `deterministic-workflows`: PASS, 26 passed; run `d828ec43-0620-48d3-9045-a38da95af545`;
+- `deterministic-permissions`: PASS, 72 passed, 1 skipped; run
+  `e120061d-1a3f-4775-b125-8fff9fb4ca71`;
+- `quality.py` with explicit `JARVIS_ENVIRONMENT=test`: PASS, 1,394 passed and
+  7 skipped; Ruff format/check, mypy, and 90% combined statement/branch
+  coverage passed. The default local run is blocked on this host by Windows
+  Credential Manager Win32 error 8 during secure recovery-key creation; no
+  plaintext fallback is used;
+- the production-growth test is a native Windows AppContainer check and is still distinct
+  from the deterministic fixture scenarios.
 
 The suite distinguishes deterministic composition proof from platform evidence. Active
-restoration, registry projection, provisioning resume, setup rerun, and crash-loop Safe Mode
-are now proven through `ApplicationRuntime.create`; changed package hashes fail closed. The
-trusted lifecycle restore callback is a deterministic local package-resolution seam, not a
-donor runtime or a second lifecycle authority.
+restoration, registry projection, provisioning resume, setup rerun, crash-loop Safe Mode, and
+the complete generic package acquisition path are proven through `ApplicationRuntime.create`;
+changed package hashes fail closed. The fixture lifecycle restore callback remains a
+deterministic local package-resolution seam, not a donor runtime or a second lifecycle
+authority.
 
 ## Evidence classification
 
@@ -105,5 +149,6 @@ hardware/manual evidence for:
 - actual desktop trusted approval presentation and Safe Mode UI;
 - model/provider/resource behavior under measured CPU, GPU/VRAM, battery, and disk pressure.
 
-The remaining `NOT_PROVEN` rows above require implementation or a separately accepted v1 scope decision
-before v1 can be called complete. No release authorization is implied by this record.
+The rows above are deterministic PASS results. The separately listed platform/manual items
+remain `NOT_EXECUTED`/`NOT_PROVEN` until the owned Windows and hardware evidence is collected;
+no release authorization is implied by this record.

@@ -48,7 +48,10 @@ def create_deterministic_suite_catalog() -> TestSuiteCatalog:
                     sys.executable,
                     ("-m", "pytest", "tests/test_v1_acceptance.py", "-q"),
                 ),
-                timeout_seconds=180,
+                # Production-composition package generation, sandbox
+                # certification, and restart evidence are intentionally
+                # slower than the lower-level deterministic suites.
+                timeout_seconds=300,
                 output_format=SuiteOutputFormat.PYTEST_TEXT,
                 description=(
                     "Deterministic v1 acceptance through the default application composition root."

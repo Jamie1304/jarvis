@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+import hashlib
+from collections.abc import Callable, Mapping
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -14,14 +16,19 @@ from jarvis.capabilities import Reversibility
 from jarvis.effects import (
     CompensationDefinition,
     CompensationExecutor,
+    CompensationObservationPhase,
+    CompensationObservationUnavailable,
     CompensationRequest,
     CompensationResult,
     CompensationService,
+    CompensationStateObservation,
     CompensationStatus,
     CompensationStore,
     EffectError,
     EffectPreview,
+    EffectStateObserverRegistry,
     EffectTraceRecord,
+    FilesystemStateObserver,
     OriginalEffectReference,
     PlanStudioEffectProjection,
 )
@@ -646,9 +653,11 @@ def _service_request(
     task_id: UUID | None = None,
     original_task_id: UUID | None = None,
     effect: EffectPreview | None = None,
+    target: str | None = None,
 ) -> CompensationRequest:
     selected_effect = effect or preview(compensation=definition())
     selected_task_id = task_id or uuid4()
+    selected_target = target or selected_effect.target
     original = OriginalEffectReference(
         selected_effect.effect_id,
         selected_effect.fingerprint,
@@ -658,8 +667,8 @@ def _service_request(
         uuid4(),
         "restore.tool",
         "restore",
-        "settings.json",
-        "settings.json",
+        selected_target,
+        selected_target,
         ("canonical-step-evidence",),
         "verification:canonical-step",
     )
@@ -675,6 +684,252 @@ def _service_request(
 
 async def _empty_observation(*_args: object) -> tuple[EvidenceRecord, ...]:
     return ()
+
+
+class _BoundStateObserver:
+    def __init__(
+        self,
+        request: CompensationRequest,
+        *,
+        target: str | None = None,
+        observed_at: datetime = NOW,
+    ) -> None:
+        assert request.original_effect is not None
+        self.request = request
+        self.target = target or request.original_effect.target
+        self.observed_at = observed_at
+
+    async def observe(
+        self,
+        request: CompensationRequest,
+        phase: CompensationObservationPhase,
+    ) -> CompensationStateObservation:
+        del phase
+        assert request.original_effect is not None
+        return CompensationStateObservation(
+            request.request_id,
+            request.effect.effect_id,
+            request.task_id,
+            request.original_effect.tool_id,
+            request.original_effect.capability,
+            self.target,
+            BASELINE,
+            (),
+            self.observed_at,
+            "synthetic.trusted.observer",
+        )
+
+
+@pytest.mark.asyncio
+async def test_compensation_observer_registry_binds_and_rejects_forged_state() -> None:
+    request = _service_request()
+    assert request.original_effect is not None
+    registry = EffectStateObserverRegistry()
+    registry.register_tool(request.original_effect.tool_id, _BoundStateObserver(request))
+    registry.seal()
+    observation = await registry.observe(
+        request,
+        CompensationObservationPhase.BEFORE,
+        now=NOW,
+    )
+    assert observation.state_fingerprint == BASELINE
+    assert registry.sealed
+    with pytest.raises(CompensationObservationUnavailable):
+        await EffectStateObserverRegistry().observe(
+            request,
+            CompensationObservationPhase.BEFORE,
+            now=NOW,
+        )
+
+    forged = EffectStateObserverRegistry()
+    forged.register_tool(
+        request.original_effect.tool_id,
+        _BoundStateObserver(request, target="wrong-target"),
+    )
+    forged.seal()
+    with pytest.raises(CompensationObservationUnavailable):
+        await forged.observe(request, CompensationObservationPhase.BEFORE, now=NOW)
+
+
+@pytest.mark.asyncio
+async def test_compensation_observer_registry_fails_closed_for_malformed_stale_and_unavailable(
+    tmp_path: Path,
+) -> None:
+    request = _service_request()
+    assert request.original_effect is not None
+
+    class MalformedObserver:
+        async def observe(
+            self, _request: CompensationRequest, _phase: CompensationObservationPhase
+        ) -> object:
+            return object()
+
+    class RaisingObserver:
+        async def observe(
+            self, _request: CompensationRequest, _phase: CompensationObservationPhase
+        ) -> CompensationStateObservation:
+            raise RuntimeError("synthetic trusted observer failure")
+
+    class UnavailableObserver:
+        async def observe(
+            self, _request: CompensationRequest, _phase: CompensationObservationPhase
+        ) -> CompensationStateObservation:
+            raise CompensationObservationUnavailable("synthetic unavailable")
+
+    for provider in (MalformedObserver(), RaisingObserver(), UnavailableObserver()):
+        registry = EffectStateObserverRegistry()
+        registry.register_tool(request.original_effect.tool_id, provider)  # type: ignore[arg-type]
+        registry.seal()
+        with pytest.raises(CompensationObservationUnavailable):
+            await registry.observe(request, CompensationObservationPhase.BEFORE, now=NOW)
+
+    stale = EffectStateObserverRegistry()
+    stale.register_tool(
+        request.original_effect.tool_id,
+        _BoundStateObserver(request, observed_at=NOW - timedelta(minutes=10)),
+    )
+    stale.seal()
+    with pytest.raises(CompensationObservationUnavailable):
+        await stale.observe(request, CompensationObservationPhase.BEFORE, now=NOW)
+    future = EffectStateObserverRegistry()
+    future.register_tool(
+        request.original_effect.tool_id,
+        _BoundStateObserver(request, observed_at=NOW + timedelta(minutes=10)),
+    )
+    future.seal()
+    with pytest.raises(CompensationObservationUnavailable):
+        await future.observe(request, CompensationObservationPhase.BEFORE, now=NOW)
+
+    duplicate = EffectStateObserverRegistry()
+    duplicate.register_tool(request.original_effect.tool_id, _BoundStateObserver(request))
+    with pytest.raises(EffectError):
+        duplicate.register_tool(request.original_effect.tool_id, _BoundStateObserver(request))
+    duplicate.register_capability("restore", _BoundStateObserver(request))
+    with pytest.raises(EffectError):
+        duplicate.register_capability("restore", _BoundStateObserver(request))
+    duplicate.seal()
+    assert duplicate.has_observer(tool_id=request.original_effect.tool_id, capability="other")
+    assert not duplicate.has_observer(tool_id="other", capability="other")
+    with pytest.raises(EffectError):
+        duplicate.register_tool("other", _BoundStateObserver(request))
+    with pytest.raises(EffectError):
+        duplicate.register_capability("other", _BoundStateObserver(request))
+
+    with pytest.raises(EffectError):
+        await duplicate.observe(object(), CompensationObservationPhase.BEFORE, now=NOW)  # type: ignore[arg-type]
+    no_original = CompensationRequest(
+        request.request_id,
+        request.task_id,
+        request.correlation_id,
+        request.effect,
+        request.current_state_fingerprint,
+    )
+    with pytest.raises(CompensationObservationUnavailable):
+        await duplicate.observe(no_original, CompensationObservationPhase.BEFORE, now=NOW)
+
+    with pytest.raises(EffectError):
+        duplicate.register_tool("bad", object())  # type: ignore[arg-type]
+    with pytest.raises(EffectError):
+        duplicate.register_capability("bad", object())  # type: ignore[arg-type]
+
+    valid_registry = EffectStateObserverRegistry()
+    valid_registry.register_tool(request.original_effect.tool_id, _BoundStateObserver(request))
+    valid_registry.seal()
+    valid_observation = await valid_registry.observe(
+        request,
+        CompensationObservationPhase.BEFORE,
+        now=NOW,
+    )
+    malformed_factories: tuple[Callable[[], object], ...] = (
+        lambda: replace(valid_observation, request_id=cast(Any, "bad")),
+        lambda: replace(valid_observation, evidence=cast(Any, [])),
+        lambda: replace(valid_observation, observed_at=datetime.now()),
+    )
+    for malformed_factory in malformed_factories:
+        with pytest.raises(EffectError):
+            malformed_factory()
+
+    state_file = tmp_path / "state.txt"
+    state_file.write_text("bounded", encoding="utf-8")
+    filesystem_request = _service_request(
+        effect=preview(target=str(state_file)),
+        target=str(state_file),
+    )
+    filesystem = FilesystemStateObserver((tmp_path,))
+    filesystem_registry = EffectStateObserverRegistry()
+    filesystem_registry.register_tool("restore.tool", filesystem)
+    filesystem_registry.seal()
+    observed = await filesystem_registry.observe(
+        filesystem_request,
+        CompensationObservationPhase.BEFORE,
+        now=datetime.now(UTC),
+    )
+    assert observed.state_fingerprint == hashlib.sha256(b"bounded").hexdigest()
+
+    with pytest.raises(EffectError):
+        FilesystemStateObserver(())
+    with pytest.raises(EffectError):
+        FilesystemStateObserver((tmp_path / "missing",))
+    with pytest.raises(EffectError):
+        FilesystemStateObserver((state_file,))
+    with pytest.raises(EffectError):
+        FilesystemStateObserver((tmp_path,), max_bytes=0)
+    with pytest.raises(EffectError):
+        FilesystemStateObserver((tmp_path,), max_bytes=4 * 1024 * 1024 + 1)
+    missing_request = _service_request(
+        effect=preview(target=str(tmp_path / "missing.txt")),
+        target=str(tmp_path / "missing.txt"),
+    )
+    with pytest.raises(CompensationObservationUnavailable):
+        await filesystem.observe(missing_request, CompensationObservationPhase.BEFORE)
+    outside_path = tmp_path.parent / "outside.txt"
+    outside_path.write_text("outside", encoding="utf-8")
+    outside = _service_request(
+        effect=preview(target=str(outside_path)),
+        target=str(outside_path),
+    )
+    with pytest.raises(CompensationObservationUnavailable):
+        await filesystem.observe(outside, CompensationObservationPhase.BEFORE)
+    with pytest.raises(CompensationObservationUnavailable):
+        await filesystem.observe(no_original, CompensationObservationPhase.BEFORE)
+    small = FilesystemStateObserver((tmp_path,), max_bytes=1)
+    with pytest.raises(CompensationObservationUnavailable):
+        await small.observe(filesystem_request, CompensationObservationPhase.BEFORE)
+
+
+@pytest.mark.asyncio
+async def test_compensation_service_reports_unavailable_trusted_observation(tmp_path: Path) -> None:
+    request = _service_request()
+    service = _new_service(tmp_path, _PlanningStub(), state_provider=None)
+    service._observer_registry = EffectStateObserverRegistry()
+    unavailable = await service.compensate(request)
+    assert unavailable.status is CompensationStatus.OBSERVATION_UNAVAILABLE
+    assert unavailable.planning_task_id is None
+    service.close()
+
+    class AfterUnavailableObserver(_BoundStateObserver):
+        async def observe(
+            self,
+            observed_request: CompensationRequest,
+            phase: CompensationObservationPhase,
+        ) -> CompensationStateObservation:
+            if phase is CompensationObservationPhase.AFTER:
+                raise CompensationObservationUnavailable("synthetic after observation unavailable")
+            return await super().observe(observed_request, phase)
+
+    observed_service = _new_service(tmp_path, _PlanningStub(), state_provider=None)
+    registry = EffectStateObserverRegistry()
+    assert request.original_effect is not None
+    registry.register_tool(
+        request.original_effect.tool_id,
+        AfterUnavailableObserver(request),
+    )
+    registry.seal()
+    observed_service._observer_registry = registry
+    after_unavailable = await observed_service.compensate(request)
+    assert after_unavailable.status is CompensationStatus.OBSERVATION_UNAVAILABLE
+    assert after_unavailable.planning_task_id is not None
+    observed_service.close()
 
 
 def _new_service(

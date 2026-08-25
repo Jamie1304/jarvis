@@ -379,6 +379,12 @@ class AgentLoop:
         self._logger = logger or logging.getLogger("jarvis.agent_runtime")
         self._context_manager = context_manager or ContextManager()
 
+    @property
+    def context_limit(self) -> int:
+        """Return the trusted provider context limit used by this loop."""
+
+        return self._context_limit
+
     async def run(
         self,
         task_id: UUID,

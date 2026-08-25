@@ -281,12 +281,18 @@ class PackageCertifier:
         *,
         clock: Callable[[], datetime] | None = None,
         require_executable_isolation: bool = False,
+        sandbox_security_status_provider: Callable[[], SandboxSecurityStatus | None] | None = None,
     ) -> None:
         self._reviewer = reviewer or GeneratedPackageReviewer()
         self._clock = clock or (lambda: datetime.now(UTC))
         if type(require_executable_isolation) is not bool:
             raise CertificationValidationError("Executable isolation policy is malformed")
         self._require_executable_isolation = require_executable_isolation
+        if sandbox_security_status_provider is not None and not callable(
+            sandbox_security_status_provider
+        ):
+            raise CertificationValidationError("Sandbox security status provider is malformed")
+        self._sandbox_security_status_provider = sandbox_security_status_provider
 
     def certify(
         self,
@@ -318,7 +324,11 @@ class PackageCertifier:
             evidence,
         )
         self._run_hook(CertificationStage.UNIT_TESTS, hooks.unit_tests, package, evidence)
-        if self._require_executable_isolation and package.requires_executable_isolation:
+        if (
+            self._require_executable_isolation
+            and package.requires_executable_isolation
+            and self._sandbox_security_status_provider is None
+        ):
             status = request.sandbox_security_status
             if status is None or not status.executable_isolation:
                 self._record_or_fail(
@@ -336,6 +346,22 @@ class PackageCertifier:
             package,
             evidence,
         )
+        if self._require_executable_isolation and package.requires_executable_isolation:
+            status = (
+                self._sandbox_security_status_provider()
+                if self._sandbox_security_status_provider is not None
+                else request.sandbox_security_status
+            )
+            if status is None or not status.executable_isolation:
+                self._record_or_fail(
+                    CertificationStage.SANDBOX_INTEGRATION_TEST,
+                    False,
+                    (
+                        "Executable package requires a trusted capability-free "
+                        "Windows AppContainer launch with scoped ACLs and Job Object",
+                    ),
+                    evidence,
+                )
         self._run_hook(
             CertificationStage.PERMISSION_DIFF,
             hooks.permission_diff,

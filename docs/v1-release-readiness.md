@@ -65,6 +65,13 @@ listed above; it does not claim that unexecuted hardware, physical UI, live
 voice, or browser-companion tests passed, and it does not resolve the remaining
 adoption or other release blockers.
 
+The later mutable R4F production-composition sweep reconciles the historical
+criteria without rewriting this NO-GO snapshot. It records the exact concrete
+production implementations, the no-fixture unknown-capability and proactive
+preparation evidence, the restart/lifecycle and compensation evidence, and the
+remaining adoption/onboarding/repair/optional-platform limitations:
+[`docs/releases/v1.0.0-r4f-production-sweep.md`](releases/v1.0.0-r4f-production-sweep.md).
+
 ## Release artifact state
 
 This checkout is not a releasable artifact:

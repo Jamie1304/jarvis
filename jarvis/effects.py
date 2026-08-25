@@ -13,10 +13,11 @@ import hashlib
 import json
 import logging
 import math
+import os
 import sqlite3
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from pathlib import Path
 from types import MappingProxyType
@@ -39,7 +40,9 @@ from jarvis.tools.models import (
 from jarvis.tools.registry import ToolRegistry
 from jarvis.verification import (
     EvidenceRecord,
+    EvidenceType,
     VerificationEngine,
+    VerificationLevel,
     VerificationPlan,
     VerificationResult,
 )
@@ -58,6 +61,7 @@ class CompensationStatus(StrEnum):
     VERIFICATION_FAILED = "verification_failed"
     UNKNOWN_OUTCOME = "unknown_outcome"
     NOT_AVAILABLE = "not_available"
+    OBSERVATION_UNAVAILABLE = "observation_unavailable"
 
 
 class CompensationLifecycle(StrEnum):
@@ -71,6 +75,13 @@ class CompensationLifecycle(StrEnum):
     COMPENSATION_FAILED = "compensation_failed"
     COMPENSATION_UNKNOWN = "compensation_unknown"
     COMPENSATION_STALE = "compensation_stale"
+
+
+class CompensationObservationPhase(StrEnum):
+    """Whether a trusted observer is checking the precondition or the result."""
+
+    BEFORE = "before"
+    AFTER = "after"
 
 
 _MAX_TEXT: Final = 2_000
@@ -406,6 +417,231 @@ class CompensationRequest:
 
 
 @dataclass(frozen=True, slots=True)
+class CompensationStateObservation:
+    """A bounded observation issued by an application-owned trusted observer.
+
+    The provider is not a package callback.  The registry binds the returned
+    record to the exact request before it is admitted to ``VerificationEngine``.
+    """
+
+    request_id: UUID
+    effect_id: UUID
+    task_id: UUID
+    tool_id: str
+    capability: str
+    target: str
+    state_fingerprint: str
+    evidence: tuple[EvidenceRecord, ...]
+    observed_at: datetime
+    observer_id: str
+
+    def __post_init__(self) -> None:
+        for id_value, name in (
+            (self.request_id, "Observation request ID"),
+            (self.effect_id, "Observation effect ID"),
+            (self.task_id, "Observation task ID"),
+        ):
+            if not isinstance(id_value, UUID):
+                raise EffectError(f"{name} is malformed")
+        for text_value, name in (
+            (self.tool_id, "Observation tool ID"),
+            (self.capability, "Observation capability"),
+            (self.target, "Observation target"),
+            (self.observer_id, "Observation observer ID"),
+        ):
+            _text(text_value, name, 512)
+        _hash(self.state_fingerprint, "Observation state fingerprint")
+        if (
+            not isinstance(self.evidence, tuple)
+            or len(self.evidence) > _MAX_ITEMS
+            or any(not isinstance(item, EvidenceRecord) for item in self.evidence)
+        ):
+            raise EffectError("Observation evidence is malformed or unbounded")
+        if not isinstance(self.observed_at, datetime) or self.observed_at.tzinfo is None:
+            raise EffectError("Observation timestamp must be timezone-aware")
+
+
+class CompensationObservationUnavailable(EffectError):
+    """No trusted application observer can establish the requested state."""
+
+
+class EffectStateObserverProvider(Protocol):
+    async def observe(
+        self,
+        request: CompensationRequest,
+        phase: CompensationObservationPhase,
+    ) -> CompensationStateObservation: ...
+
+
+class EffectStateObserverRegistry:
+    """Sealed application-owned registry for trusted compensation observers.
+
+    Registration occurs during the trusted composition phase, before the tool
+    registry is sealed.  Generated packages and sandbox processes receive no
+    reference to this registry and can only use their normal broker surface.
+    """
+
+    def __init__(self) -> None:
+        self._tool_observers: dict[str, EffectStateObserverProvider] = {}
+        self._capability_observers: dict[str, EffectStateObserverProvider] = {}
+        self._sealed = False
+
+    def register_tool(self, tool_id: str, provider: EffectStateObserverProvider) -> None:
+        if self._sealed:
+            raise EffectError("Compensation observer registry is sealed")
+        _text(tool_id, "Compensation observer tool ID", 256)
+        if not hasattr(provider, "observe"):
+            raise EffectError("Compensation observer provider is malformed")
+        if tool_id in self._tool_observers:
+            raise EffectError("Compensation observer tool ID is already registered")
+        self._tool_observers[tool_id] = provider
+
+    def register_capability(self, capability: str, provider: EffectStateObserverProvider) -> None:
+        if self._sealed:
+            raise EffectError("Compensation observer registry is sealed")
+        _text(capability, "Compensation observer capability", 256)
+        if not hasattr(provider, "observe"):
+            raise EffectError("Compensation observer provider is malformed")
+        if capability in self._capability_observers:
+            raise EffectError("Compensation observer capability is already registered")
+        self._capability_observers[capability] = provider
+
+    def seal(self) -> None:
+        self._sealed = True
+
+    @property
+    def sealed(self) -> bool:
+        return self._sealed
+
+    def has_observer(self, *, tool_id: str, capability: str) -> bool:
+        return tool_id in self._tool_observers or capability in self._capability_observers
+
+    async def observe(
+        self,
+        request: CompensationRequest,
+        phase: CompensationObservationPhase,
+        *,
+        now: datetime,
+        max_age: timedelta = timedelta(minutes=5),
+    ) -> CompensationStateObservation:
+        if not isinstance(request, CompensationRequest) or not isinstance(
+            phase, CompensationObservationPhase
+        ):
+            raise EffectError("Compensation observation request is malformed")
+        original = request.original_effect
+        if original is None:
+            raise CompensationObservationUnavailable("Original effect binding is unavailable")
+        provider = self._tool_observers.get(original.tool_id)
+        if provider is None:
+            provider = self._capability_observers.get(original.capability)
+        if provider is None:
+            raise CompensationObservationUnavailable(
+                "No trusted observer is registered for the compensating action"
+            )
+        try:
+            observation = await provider.observe(request, phase)
+        except CompensationObservationUnavailable:
+            raise
+        except Exception as error:
+            raise CompensationObservationUnavailable(
+                "Trusted compensation observation failed"
+            ) from error
+        if not isinstance(observation, CompensationStateObservation):
+            raise CompensationObservationUnavailable("Trusted observer returned malformed data")
+        if (
+            observation.request_id != request.request_id
+            or observation.effect_id != request.effect.effect_id
+            or observation.task_id != request.task_id
+            or observation.tool_id != original.tool_id
+            or observation.capability != original.capability
+            or observation.target != original.target
+            or observation.target != request.effect.target
+        ):
+            raise CompensationObservationUnavailable(
+                "Trusted observation is not bound to the original effect"
+            )
+        observed_at = observation.observed_at.astimezone(UTC)
+        current = now.astimezone(UTC)
+        # Providers commonly timestamp immediately after the caller sampled
+        # ``now``.  Allow only a small local clock skew; a materially future
+        # observation still fails closed.
+        if observed_at - current > timedelta(seconds=5) or current - observed_at > max_age:
+            raise CompensationObservationUnavailable("Trusted compensation observation is stale")
+        return observation
+
+
+class FilesystemStateObserver:
+    """Generic bounded observer for explicitly approved application file roots."""
+
+    def __init__(self, roots: tuple[Path, ...], *, max_bytes: int = 64 * 1024) -> None:
+        if (
+            not isinstance(roots, tuple)
+            or not roots
+            or any(not isinstance(root, Path) for root in roots)
+            or type(max_bytes) is not int
+            or not 0 < max_bytes <= 4 * 1024 * 1024
+        ):
+            raise EffectError("Filesystem observer configuration is malformed")
+        try:
+            resolved = tuple(root.resolve(strict=True) for root in roots)
+        except (OSError, RuntimeError) as error:
+            raise EffectError("Filesystem observer roots are unavailable") from error
+        if any(not root.is_dir() for root in resolved):
+            raise EffectError("Filesystem observer roots must be directories")
+        self._roots = resolved
+        self._max_bytes = max_bytes
+
+    async def observe(
+        self,
+        request: CompensationRequest,
+        phase: CompensationObservationPhase,
+    ) -> CompensationStateObservation:
+        del phase
+        if request.original_effect is None:
+            raise CompensationObservationUnavailable("Original effect binding is unavailable")
+        target = Path(request.original_effect.target)
+        try:
+            resolved = target.resolve(strict=True)
+            if not resolved.is_file() or not any(
+                os.path.commonpath((str(resolved), str(root))) == str(root) for root in self._roots
+            ):
+                raise CompensationObservationUnavailable(
+                    "Filesystem target is outside observer roots"
+                )
+            data = await asyncio.to_thread(resolved.read_bytes)
+        except CompensationObservationUnavailable:
+            raise
+        except (OSError, RuntimeError, ValueError) as error:
+            raise CompensationObservationUnavailable("Filesystem state is unavailable") from error
+        if len(data) > self._max_bytes:
+            raise CompensationObservationUnavailable("Filesystem state exceeds observer bound")
+        digest = hashlib.sha256(data).hexdigest()
+        return CompensationStateObservation(
+            request.request_id,
+            request.effect.effect_id,
+            request.task_id,
+            request.original_effect.tool_id,
+            request.original_effect.capability,
+            request.original_effect.target,
+            digest,
+            (
+                EvidenceRecord(
+                    EvidenceType.FILE,
+                    "trusted.filesystem.state",
+                    datetime.now(UTC),
+                    timedelta(minutes=5),
+                    1.0,
+                    f"sha256={digest}",
+                    f"sha256={digest}",
+                    level=VerificationLevel.INTEGRATION_VERIFIED,
+                ),
+            ),
+            datetime.now(UTC),
+            "trusted.filesystem.state",
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class CompensationResult:
     request_id: UUID
     status: CompensationStatus
@@ -605,9 +841,10 @@ class CompensationStore:
         self._connection.commit()
 
 
-CompensationObservationProvider = Callable[
+LegacyCompensationObservationProvider = Callable[
     [CompensationRequest, PlanningTask], Awaitable[tuple[EvidenceRecord, ...]]
 ]
+CompensationObservationProvider = LegacyCompensationObservationProvider
 CompensationStateProvider = Callable[[CompensationRequest], str]
 
 
@@ -621,8 +858,9 @@ class CompensationService:
         verification: VerificationEngine,
         store: CompensationStore,
         *,
-        observation_provider: CompensationObservationProvider | None = None,
+        observation_provider: LegacyCompensationObservationProvider | None = None,
         state_provider: CompensationStateProvider | None = None,
+        observer_registry: EffectStateObserverRegistry | None = None,
         trace: object | None = None,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
@@ -638,6 +876,11 @@ class CompensationService:
         self._store = store
         self._observation_provider = observation_provider
         self._state_provider = state_provider
+        if observer_registry is not None and not isinstance(
+            observer_registry, EffectStateObserverRegistry
+        ):
+            raise EffectError("Compensation observer registry is malformed")
+        self._observer_registry = observer_registry
         self._trace = trace
         self._clock = clock or (lambda: datetime.now(UTC))
 
@@ -661,6 +904,8 @@ class CompensationService:
 
         if not isinstance(effect, EffectPreview) or not effect.can_offer_undo:
             raise EffectError("Only real reversible or compensatable effects can be bound")
+        if target != effect.target:
+            raise EffectError("Original effect target must match the trusted preview")
         task = self._planning.get_task(task_id)
         plan = self._planning.inspect_plan(task_id)
         if task is None or plan is None or task.status is not PlanningTaskStatus.COMPLETED:
@@ -715,6 +960,13 @@ class CompensationService:
                 CompensationStatus.STALE_STATE,
                 "Compensation binding does not match the effect",
             )
+        if original.target != effect.target:
+            return await self._finish(
+                request,
+                CompensationLifecycle.COMPENSATION_STALE,
+                CompensationStatus.STALE_STATE,
+                "Compensation target does not match the original effect",
+            )
         if original.task_id != request.task_id:
             return await self._finish(
                 request,
@@ -748,22 +1000,39 @@ class CompensationService:
                 CompensationLifecycle.COMPENSATION_FAILED,
             }:
                 return self._result_from_record(existing)
-        if self._state_provider is None:
-            return await self._finish(
-                request,
-                CompensationLifecycle.COMPENSATION_STALE,
-                CompensationStatus.STALE_STATE,
-                "No trusted state observer is configured",
-            )
-        try:
-            current = self._state_provider(request)
-        except Exception:
-            return await self._finish(
-                request,
-                CompensationLifecycle.COMPENSATION_STALE,
-                CompensationStatus.STALE_STATE,
-                "Current state could not be revalidated",
-            )
+        observer_registry = getattr(self, "_observer_registry", None)
+        if observer_registry is not None:
+            try:
+                state_observation = await observer_registry.observe(
+                    request,
+                    CompensationObservationPhase.BEFORE,
+                    now=self._clock(),
+                )
+                current = state_observation.state_fingerprint
+            except CompensationObservationUnavailable:
+                return await self._finish(
+                    request,
+                    CompensationLifecycle.COMPENSATION_STALE,
+                    CompensationStatus.OBSERVATION_UNAVAILABLE,
+                    "No fresh trusted state observation is available",
+                )
+        else:
+            if self._state_provider is None:
+                return await self._finish(
+                    request,
+                    CompensationLifecycle.COMPENSATION_STALE,
+                    CompensationStatus.STALE_STATE,
+                    "No trusted state observer is configured",
+                )
+            try:
+                current = self._state_provider(request)
+            except Exception:
+                return await self._finish(
+                    request,
+                    CompensationLifecycle.COMPENSATION_STALE,
+                    CompensationStatus.STALE_STATE,
+                    "Current state could not be revalidated",
+                )
         if current != request.current_state_fingerprint or current != effect.base_state_fingerprint:
             return await self._finish(
                 request,
@@ -793,7 +1062,9 @@ class CompensationService:
                 proposal,
                 budgets=ExecutionBudgets(
                     max_steps=1,
-                    max_model_calls=0,
+                    # PlanningEngine uses one bounded advisor call to validate
+                    # this deterministic proposal; no model inference is used.
+                    max_model_calls=1,
                     max_expensive_actions=1,
                     max_retries=0,
                 ),
@@ -858,26 +1129,45 @@ class CompensationService:
                 planning_task_id=task.task_id,
                 persist_existing=existing,
             )
-        if self._observation_provider is None:
-            return await self._finish(
-                request,
-                CompensationLifecycle.COMPENSATION_EXECUTED,
-                CompensationStatus.VERIFICATION_FAILED,
-                "Independent compensation observation is unavailable",
-                planning_task_id=task.task_id,
-                persist_existing=existing,
-            )
-        try:
-            evidence = await self._observation_provider(request, task)
-        except Exception:
-            return await self._finish(
-                request,
-                CompensationLifecycle.COMPENSATION_UNKNOWN,
-                CompensationStatus.UNKNOWN_OUTCOME,
-                "Compensation verification observation is unavailable",
-                planning_task_id=task.task_id,
-                persist_existing=existing,
-            )
+        observer_registry = getattr(self, "_observer_registry", None)
+        if observer_registry is not None:
+            try:
+                state_observation = await observer_registry.observe(
+                    request,
+                    CompensationObservationPhase.AFTER,
+                    now=self._clock(),
+                )
+                evidence = state_observation.evidence
+            except CompensationObservationUnavailable:
+                return await self._finish(
+                    request,
+                    CompensationLifecycle.COMPENSATION_EXECUTED,
+                    CompensationStatus.OBSERVATION_UNAVAILABLE,
+                    "Independent trusted compensation observation is unavailable",
+                    planning_task_id=task.task_id,
+                    persist_existing=existing,
+                )
+        else:
+            if self._observation_provider is None:
+                return await self._finish(
+                    request,
+                    CompensationLifecycle.COMPENSATION_EXECUTED,
+                    CompensationStatus.VERIFICATION_FAILED,
+                    "Independent compensation observation is unavailable",
+                    planning_task_id=task.task_id,
+                    persist_existing=existing,
+                )
+            try:
+                evidence = await self._observation_provider(request, task)
+            except Exception:
+                return await self._finish(
+                    request,
+                    CompensationLifecycle.COMPENSATION_UNKNOWN,
+                    CompensationStatus.UNKNOWN_OUTCOME,
+                    "Compensation verification observation is unavailable",
+                    planning_task_id=task.task_id,
+                    persist_existing=existing,
+                )
         verification = self._verification.evaluate(
             effect.compensation.verification, evidence, now=self._clock()
         )

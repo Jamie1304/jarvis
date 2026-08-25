@@ -27,6 +27,7 @@ from jarvis.adoption import (
 from jarvis.agent_runtime import AgentLoop
 from jarvis.ai.model_manager import LocalModelManager
 from jarvis.ai.providers.base import AIProvider
+from jarvis.ai.providers.registry import ProviderRegistry
 from jarvis.ai.routing import ProviderRouter
 from jarvis.ai.sessions import AgentSessionStore
 from jarvis.artifacts import ArtifactStore
@@ -105,7 +106,7 @@ from jarvis.desktop_shell import (
     WarmupComponent,
 )
 from jarvis.discovery.models import CapabilityGap
-from jarvis.discovery.providers import InternalToolCatalogProvider
+from jarvis.discovery.providers import DiscoveryProvider, InternalToolCatalogProvider
 from jarvis.discovery.service import (
     CandidateEvaluator,
     CapabilityDiscoveryService,
@@ -117,8 +118,12 @@ from jarvis.effects import (
     CompensationService,
     CompensationStateProvider,
     CompensationStore,
+    EffectStateObserverProvider,
+    EffectStateObserverRegistry,
+    FilesystemStateObserver,
 )
 from jarvis.environment_discovery import (
+    DiscoveryMode,
     EnvironmentDiscoveryProvider,
     EnvironmentDiscoveryService,
 )
@@ -150,19 +155,14 @@ from jarvis.package_activation import (
     ActivationHooks,
     ActivationRequest,
     ActivationState,
-    CanaryExecution,
-    CanaryLimits,
     PackageActivationService,
-    ShadowExecution,
 )
 from jarvis.package_certification import PackageCertifier
 from jarvis.package_reviewer import GeneratedPackageReviewer
 from jarvis.package_runtime import (
-    HotLoadError,
     HotLoadManager,
     PackageRegistrationSurface,
     PackageRuntimeFactory,
-    PreparedPackageRuntime,
 )
 from jarvis.permissions import (
     AuditStoreError,
@@ -184,14 +184,27 @@ from jarvis.planning.store import PlanningStoreError, SQLitePlanningStore
 from jarvis.planning.validation import PlanValidator
 from jarvis.presence import PresenceProjection
 from jarvis.presentation import PresentationSurface
+from jarvis.production_capability import (
+    AgentRuntimeCapabilityGenerator,
+    CapabilityLifecycleRestorer,
+    ProductionActivationBoundary,
+    ProductionCertificationProvider,
+    ProductionLocalCandidateProvider,
+    ProductionLocalDiscoveryProvider,
+    ProductionOpportunityPreparation,
+    ProductionPackageRegistrationSurface,
+    ProductionPackageRuntimeFactory,
+    ProductionPackageStore,
+    ProductionProvisioningProvider,
+    ProductionSandboxRunner,
+    ProductionSetupHandler,
+    ProductionVerificationEvidence,
+)
 from jarvis.provisioning import (
     BrokerProvisioningAuthorizer,
-    ProvisioningApplyResult,
     ProvisioningAuthorization,
-    ProvisioningEffectOutcome,
     ProvisioningEngine,
     ProvisioningError,
-    ProvisioningObservation,
     ProvisioningProvider,
     SQLiteProvisioningStore,
 )
@@ -218,7 +231,7 @@ from jarvis.setup_conductor import (
     DecisionCollector,
     SetupConductor,
     SetupHandler,
-    SetupInspection,
+    SetupStep,
     SQLiteSetupStore,
 )
 from jarvis.skills import SkillRegistry
@@ -243,22 +256,6 @@ from jarvis.workflows import (
     WorkflowProcedureStoreError,
     WorkflowTemplateRegistry,
 )
-
-
-class _UnavailableCapabilityGenerator:
-    """Safe default: generation needs an explicitly configured trusted service."""
-
-    async def generate(
-        self,
-        gap: CapabilityGap,
-        solution: SolutionReport,
-        workspace: WorkspaceContext,
-        environment: EnvironmentGraph,
-        preferences: Mapping[str, object],
-        strategy: FactoryStrategy,
-    ) -> GeneratedCapabilityPackage:
-        del gap, solution, workspace, environment, preferences, strategy
-        raise CapabilityAcquisitionError("Capability generation is not configured")
 
 
 class _OpportunityResearchPreparation:
@@ -292,69 +289,22 @@ class _OpportunityResearchPreparation:
         )
 
 
-class _UnavailableProvisioningProvider:
-    async def inspect(self, action: object) -> ProvisioningObservation:
-        del action
-        return ProvisioningObservation(False, evidence="No provisioning provider is configured")
+class _TestOnlyUnconfiguredCapabilityGenerator:
+    """Explicit test-environment seam; never selected by production startup."""
 
-    async def apply(self, action: object, cancellation: asyncio.Event) -> ProvisioningApplyResult:
-        del action, cancellation
-        return ProvisioningApplyResult(
-            ProvisioningEffectOutcome.PRE_EFFECT_FAILURE,
-            detail="No provisioning provider is configured",
+    async def generate(
+        self,
+        gap: CapabilityGap,
+        solution: SolutionReport,
+        workspace: WorkspaceContext,
+        environment: EnvironmentGraph,
+        preferences: Mapping[str, object],
+        strategy: FactoryStrategy,
+    ) -> GeneratedCapabilityPackage:
+        del gap, solution, workspace, environment, preferences, strategy
+        raise CapabilityAcquisitionError(
+            "Capability generation is unavailable outside production composition"
         )
-
-    async def rollback(
-        self, action: object, cancellation: asyncio.Event
-    ) -> ProvisioningApplyResult:
-        del action, cancellation
-        return ProvisioningApplyResult(
-            ProvisioningEffectOutcome.PRE_EFFECT_FAILURE,
-            detail="No provisioning provider is configured",
-        )
-
-    async def health_check(self, action: object) -> bool:
-        del action
-        return False
-
-
-class _UnavailableSetupHandler:
-    async def inspect(self, step: object, context: object) -> SetupInspection:
-        del step, context
-        return SetupInspection(detail="No setup handler is configured")
-
-    async def prepare(self, step: object, context: object, decision: object) -> None:
-        del step, context, decision
-        return None
-
-    async def configure(self, step: object, context: object) -> None:
-        del step, context
-
-    async def verify(self, step: object, context: object) -> bool:
-        del step, context
-        return False
-
-    async def first_start(self, step: object, context: object) -> bool:
-        del step, context
-        return False
-
-
-class _UnavailablePackageRuntimeFactory:
-    def prepare(self, package: IntegrationPackage) -> PreparedPackageRuntime:
-        del package
-        raise HotLoadError("Package runtime is not configured")
-
-
-class _UnavailablePackageRegistrationSurface:
-    def atomic_swap(self, package: IntegrationPackage, runtime: PreparedPackageRuntime) -> None:
-        del package, runtime
-        raise HotLoadError("Package registration is not configured")
-
-    def rollback(self, package: IntegrationPackage, runtime: PreparedPackageRuntime | None) -> None:
-        del package, runtime
-
-    def remove(self, package: IntegrationPackage, runtime: PreparedPackageRuntime) -> None:
-        del package, runtime
 
 
 class RuntimeStatus(StrEnum):
@@ -413,6 +363,8 @@ class RuntimePaths:
     models: Path
     recovery: Path
     backups: Path
+    packages: Path
+    sandboxes: Path
 
     @classmethod
     def from_root(cls, root: Path) -> RuntimePaths:
@@ -447,6 +399,8 @@ class RuntimePaths:
             base / "models",
             base / "recovery",
             base / "backups",
+            base / "packages",
+            base / "sandboxes",
         )
 
     def ensure_directories(self) -> None:
@@ -460,6 +414,8 @@ class RuntimePaths:
             self.models,
             self.recovery,
             self.backups,
+            self.packages,
+            self.sandboxes,
             self.artifacts,
         ):
             path.mkdir(parents=True, exist_ok=True)
@@ -480,6 +436,8 @@ class RuntimePaths:
             self.models,
             self.recovery,
             self.backups,
+            self.packages,
+            self.sandboxes,
         )
         databases = (
             self.state_database,
@@ -677,6 +635,7 @@ class RuntimeContainer:
     presence_projection: PresenceProjection
     presentation_surface: PresentationSurface
     compensation_service: CompensationService
+    compensation_observer_registry: EffectStateObserverRegistry
     workflow_templates: WorkflowTemplateRegistry
     discovery: CapabilityGapDetector
     capability_gap_detector: CapabilityGapDetector
@@ -694,6 +653,9 @@ class RuntimeContainer:
     provisioning_store: SQLiteProvisioningStore
     effect_attestation_store: EffectAttestationStore
     capability_lifecycle_store: SQLiteCapabilityLifecycleStore
+    capability_lifecycle_restorer: CapabilityLifecycleRestorer | None
+    package_store: ProductionPackageStore
+    production_sandbox: ProductionSandboxRunner
     opportunity_store: SQLiteOpportunityStore
     opportunity_engine: CapabilityOpportunityEngine
     attention_store: SQLiteAttentionStore
@@ -771,10 +733,16 @@ class RuntimeContainer:
         if service_id == "environment_discovery":
             return RuntimeServiceStatus(
                 service_id,
-                RuntimeServiceAvailability.DEGRADED,
+                (
+                    RuntimeServiceAvailability.AVAILABLE
+                    if self.environment_discovery.provider_count
+                    else RuntimeServiceAvailability.DEGRADED
+                ),
                 (
                     "observation service is owned by the runtime; "
-                    "no discovery providers are configured"
+                    "generic local providers are configured"
+                    if self.environment_discovery.provider_count
+                    else "no discovery providers are configured"
                 ),
             )
         if service_id == "presentation":
@@ -839,6 +807,30 @@ class RuntimeContainer:
             workspace_id=workspace_id,
         )
 
+    def invoke_capability(
+        self, capability_id: str, kind: str, payload: Mapping[str, object]
+    ) -> dict[str, object]:
+        """Invoke an active generated capability through the app boundary.
+
+        The caller receives a bounded JSON-like result.  It never receives the
+        package process, IPC streams, PermissionBroker, or CredentialVault.
+        Effectful capabilities still require their normal typed broker path;
+        this generic v1 worker is observation-only.
+        """
+
+        def invoke(runtime: object) -> dict[str, object]:
+            operation = getattr(runtime, "invoke", None)
+            if not callable(operation):
+                raise CapabilityAcquisitionError(
+                    "Active capability does not expose a production invocation boundary"
+                )
+            result = operation(kind, payload)
+            if type(result) is not dict:
+                raise CapabilityAcquisitionError("Capability result is malformed")
+            return result
+
+        return self.hot_load.invoke(capability_id, invoke)
+
     async def aclose(self) -> None:
         async with self._close_lock:
             if self._closed:
@@ -871,6 +863,8 @@ class RuntimeContainer:
                 self.effect_attestation_store,
                 self.compensation_service,
                 self.capability_lifecycle_store,
+                self.package_store,
+                self.production_sandbox,
                 self.opportunity_store,
                 self.attention_store,
                 self.planning_store,
@@ -994,6 +988,11 @@ class ApplicationRuntime:
         browser_backend: BrowserAdapter | None = None,
         credential_vault: CredentialVault | None = None,
         test_fixture: RuntimeTestFixture | None = None,
+        provider_registry: ProviderRegistry | None = None,
+        recovery_key_backend: SecretBackend | None = None,
+        permission_policy: PolicyEngine | None = None,
+        trusted_application_tools: tuple[Tool[Any, Any], ...] = (),
+        trusted_compensation_observers: Mapping[str, EffectStateObserverProvider] | None = None,
     ) -> ApplicationRuntime:
         if test_fixture is not None and settings.environment != "test":
             return cls(
@@ -1001,6 +1000,22 @@ class ApplicationRuntime:
                 status=RuntimeStatus.SAFE_MODE,
                 error="deterministic runtime fixtures require the test environment",
             )
+        production_mode = settings.environment == "production"
+        configured_provider_registry = provider_registry or create_provider_registry(
+            model_id=settings.ai_model, context_limit=settings.ai_context_limit
+        )
+        if not isinstance(configured_provider_registry, ProviderRegistry):
+            return cls(
+                None,
+                status=RuntimeStatus.SAFE_MODE,
+                error="trusted provider registry is malformed",
+            )
+        try:
+            provider_local_only = configured_provider_registry.definition(
+                settings.ai_provider
+            ).metadata.local_only
+        except KeyError:
+            provider_local_only = False
         trusted_project_root = project_root or Path(__file__).resolve().parents[1]
         startup_config = StartupSecurityConfiguration(
             policy_version=settings.security_policy_version,
@@ -1019,6 +1034,7 @@ class ApplicationRuntime:
             improvement_enabled=settings.improvement_enabled,
             remote_approval_enabled=settings.remote_approval_enabled,
             autonomous_scheduling_enabled=settings.autonomous_scheduling_enabled,
+            ai_provider_local_only=provider_local_only,
         )
         startup_validator = StartupSecurityValidator()
         security_report = startup_validator.validate(startup_config)
@@ -1057,6 +1073,7 @@ class ApplicationRuntime:
         recovery_coordinator: RecoveryCoordinator | None = None
         browser_service: BrowserSemanticBridge | None = None
         capability_lifecycle_store: SQLiteCapabilityLifecycleStore | None = None
+        capability_lifecycle_restorer: CapabilityLifecycleRestorer | None = None
         provisioning_store: SQLiteProvisioningStore | None = None
         opportunity_store: SQLiteOpportunityStore | None = None
         attention_store: SQLiteAttentionStore | None = None
@@ -1100,10 +1117,10 @@ class ApplicationRuntime:
                 recovery_backend = (
                     test_fixture.recovery_key_backend
                     if test_fixture is not None and test_fixture.recovery_key_backend is not None
-                    else _TEST_RECOVERY_BACKEND
+                    else recovery_key_backend or _TEST_RECOVERY_BACKEND
                 )
             else:
-                recovery_backend = WindowsCredentialManagerBackend()
+                recovery_backend = recovery_key_backend or WindowsCredentialManagerBackend()
             recovery_authority = TrustedRecoveryAuthority(
                 backup.installation_id,
                 recovery_backend,
@@ -1142,10 +1159,16 @@ class ApplicationRuntime:
             audit = SQLiteAuditSink(paths.audit_database)
             paths.validate_storage_layout()
             policy = (
-                test_fixture.permission_policy
-                if test_fixture is not None and test_fixture.permission_policy is not None
-                else PolicyEngine()
+                permission_policy
+                if permission_policy is not None
+                else (
+                    test_fixture.permission_policy
+                    if test_fixture is not None and test_fixture.permission_policy is not None
+                    else PolicyEngine()
+                )
             )
+            if not isinstance(policy, PolicyEngine):
+                raise ConfigurationError("Trusted permission policy is malformed")
             broker = PermissionBroker(
                 policy,
                 audit_sink=audit,
@@ -1167,6 +1190,8 @@ class ApplicationRuntime:
             if test_fixture is not None:
                 for additional_tool in test_fixture.additional_tools:
                     registry.register(additional_tool)
+            for trusted_tool in trusted_application_tools:
+                registry.register(trusted_tool)
             if browser_backend is not None:
                 try:
                     browser_broker = BrowserBrokerAdapter(
@@ -1220,11 +1245,8 @@ class ApplicationRuntime:
             )
             root = resolved_project_root
             knowledge = KnowledgeStore.load(root / "knowledge" / "generated" / "project-index.json")
-            provider_registry = create_provider_registry(
-                model_id=settings.ai_model, context_limit=settings.ai_context_limit
-            )
             try:
-                provider = provider_registry.create(
+                provider = configured_provider_registry.create(
                     settings.ai_provider,
                     {
                         "model": settings.ai_model,
@@ -1238,8 +1260,14 @@ class ApplicationRuntime:
                     f"Unsupported AI provider: {settings.ai_provider}"
                 ) from error
             resource_governor = ResourceGovernor(SystemResourceTelemetry())
-            provider_router = ProviderRouter(provider_registry, resource_governor)
+            provider_router = ProviderRouter(configured_provider_registry, resource_governor)
             model_manager = LocalModelManager(paths.models)
+            agent_loop = AgentLoop(
+                provider,
+                registry,
+                model=settings.ai_model,
+                context_limit=settings.ai_context_limit,
+            )
             conversation_memory = ConversationContextService()
             system_memory = ProjectSystemMemory(knowledge, root)
             capability_registry = CapabilityRegistry()
@@ -1254,20 +1282,45 @@ class ApplicationRuntime:
             control_center = ControlCenterService()
             task_controller = PlanningTaskController(engine, broker)
             capability_gap_detector = CapabilityGapDetector(frozenset({"calculator", "local_time"}))
-            environment_discovery = EnvironmentDiscoveryService(
-                test_fixture.discovery_providers if test_fixture is not None else ()
+            package_store = ProductionPackageStore(paths.packages)
+            production_sandbox = ProductionSandboxRunner(
+                package_store,
+                paths.sandboxes,
+                resource_governor,
+            )
+            discovery_providers: tuple[EnvironmentDiscoveryProvider, ...] = (
+                test_fixture.discovery_providers
+                if test_fixture is not None
+                else (ProductionLocalDiscoveryProvider(),)
+                if production_mode
+                else ()
+            )
+            environment_discovery = EnvironmentDiscoveryService(discovery_providers)
+            discovery_sources: tuple[DiscoveryProvider, ...] = (
+                InternalToolCatalogProvider(registry),
+            )
+            if production_mode and test_fixture is None:
+                discovery_sources = (
+                    *discovery_sources,
+                    ProductionLocalCandidateProvider(
+                        lambda: tuple(
+                            environment_discovery.discover(DiscoveryMode.READ_ONLY_LOCAL_DISCOVERY)
+                        )
+                    ),
+                )
+            build_setup_step = (
+                SetupStep("generic-package-setup", "generic") if production_mode else None
             )
             solution_discovery = SolutionDiscovery(
-                CapabilityDiscoveryService(
-                    (InternalToolCatalogProvider(registry),), CandidateEvaluator()
-                )
+                CapabilityDiscoveryService(discovery_sources, CandidateEvaluator()),
+                build_setup_step=build_setup_step,
             )
             setup_store = SQLiteSetupStore(paths.setup_database)
             provisioning_store = SQLiteProvisioningStore(paths.provisioning_database)
             provisioning_engine = ProvisioningEngine(
                 test_fixture.provisioning_providers
                 if test_fixture is not None and test_fixture.provisioning_providers is not None
-                else {"unconfigured": _UnavailableProvisioningProvider()},
+                else {"generic": ProductionProvisioningProvider()},
                 test_fixture.provisioning_authorization
                 if test_fixture is not None and test_fixture.provisioning_authorization is not None
                 else BrokerProvisioningAuthorizer(broker),
@@ -1285,7 +1338,7 @@ class ApplicationRuntime:
             setup_conductor = SetupConductor(
                 test_fixture.setup_handlers
                 if test_fixture is not None and test_fixture.setup_handlers is not None
-                else {"unconfigured": _UnavailableSetupHandler()},
+                else {"generic": ProductionSetupHandler()},
                 setup_store,
                 provisioning_engine.run,
                 decision_collector=(
@@ -1298,7 +1351,17 @@ class ApplicationRuntime:
                 setup_conductor,
                 test_fixture.capability_generator
                 if test_fixture is not None
-                else _UnavailableCapabilityGenerator(),
+                else (
+                    AgentRuntimeCapabilityGenerator(
+                        agent_loop,
+                        package_store,
+                        router=provider_router,
+                        provider_id=settings.ai_provider,
+                        model_id=settings.ai_model,
+                    )
+                    if production_mode
+                    else _TestOnlyUnconfiguredCapabilityGenerator()
+                ),
                 resource_governor=resource_governor,
             )
             capability_lifecycle_store = SQLiteCapabilityLifecycleStore(
@@ -1307,10 +1370,12 @@ class ApplicationRuntime:
             hot_load = HotLoadManager(
                 test_fixture.package_runtime_factory
                 if test_fixture is not None
-                else _UnavailablePackageRuntimeFactory(),
+                else ProductionPackageRuntimeFactory(
+                    package_store, paths.sandboxes, resource_governor
+                ),
                 test_fixture.package_registration_surface
                 if test_fixture is not None
-                else _UnavailablePackageRegistrationSurface(),
+                else ProductionPackageRegistrationSurface(capability_registry, package_store),
                 lifecycle_store=capability_lifecycle_store,
             )
             effect_attestation_store = EffectAttestationStore(
@@ -1320,26 +1385,17 @@ class ApplicationRuntime:
             paths.validate_storage_layout()
             trace_store = TraceStore(paths.trace_database)
             trace_service = TraceService(trace_store, events)
+            verification_engine = VerificationEngine()
 
             if test_fixture is not None:
                 activation_hooks = test_fixture.activation_hooks(effect_attestation_store)
             else:
-
-                def unavailable_shadow(
-                    package: IntegrationPackage, observer: TrustedEffectObserver
-                ) -> ShadowExecution:
-                    del package, observer
-                    raise CapabilityAcquisitionError("Shadow activation is not configured")
-
-                def unavailable_canary(
-                    package: IntegrationPackage,
-                    limits: CanaryLimits,
-                    observer: TrustedEffectObserver,
-                ) -> CanaryExecution:
-                    del package, limits, observer
-                    raise CapabilityAcquisitionError("Canary activation is not configured")
-
-                activation_hooks = ActivationHooks(unavailable_shadow, unavailable_canary)
+                activation_hooks = ProductionActivationBoundary(
+                    package_store,
+                    production_sandbox,
+                    effect_attestation_store,
+                    verification_engine,
+                ).hooks(effect_attestation_store)
 
             package_activation = PackageActivationService(
                 hot_load,
@@ -1348,6 +1404,7 @@ class ApplicationRuntime:
                 lifecycle_store=capability_lifecycle_store,
                 require_executable_isolation=True,
             )
+
             if test_fixture is not None and test_fixture.lifecycle_restore is not None:
                 for stored in capability_lifecycle_store.list():
                     if stored.record.state not in {
@@ -1364,8 +1421,34 @@ class ApplicationRuntime:
                             "Restored lifecycle package hash does not match durable state"
                         )
                     if restored.state in {ActivationState.ACTIVE, ActivationState.DEGRADED}:
-                        capability_registry.register(restored_manifest)
-            verification_engine = VerificationEngine()
+                        try:
+                            existing = capability_registry.inspect(restored_manifest.capability_id)
+                        except KeyError:
+                            capability_registry.register(restored_manifest)
+                        else:
+                            if existing != restored_manifest:
+                                raise CapabilityAcquisitionError(
+                                    "Restored capability projection collides with "
+                                    "durable package state"
+                                )
+            elif production_mode:
+                capability_lifecycle_restorer = CapabilityLifecycleRestorer(
+                    capability_lifecycle_store,
+                    package_store,
+                    production_sandbox,
+                    package_activation,
+                    capability_registry,
+                )
+                capability_lifecycle_restorer.restore_all()
+            compensation_observer_registry = EffectStateObserverRegistry()
+            compensation_observer_registry.register_capability(
+                "filesystem",
+                FilesystemStateObserver((paths.root,)),
+            )
+            if trusted_compensation_observers is not None:
+                for tool_id, observer in trusted_compensation_observers.items():
+                    compensation_observer_registry.register_tool(tool_id, observer)
+            compensation_observer_registry.seal()
             compensation_store = CompensationStore(paths.compensation_database)
             compensation_service = CompensationService(
                 engine,
@@ -1380,12 +1463,25 @@ class ApplicationRuntime:
                 state_provider=(
                     test_fixture.compensation_state_provider if test_fixture is not None else None
                 ),
+                observer_registry=(
+                    compensation_observer_registry if test_fixture is None else None
+                ),
                 trace=trace_service,
             )
             package_reviewer = GeneratedPackageReviewer()
             package_certifier = PackageCertifier(
                 package_reviewer,
                 require_executable_isolation=True,
+                sandbox_security_status_provider=(
+                    production_sandbox.status if production_mode else None
+                ),
+            )
+            production_certification = (
+                ProductionCertificationProvider(
+                    package_store, production_sandbox, verification_engine
+                )
+                if production_mode
+                else None
             )
 
             class _DefaultScopeProvider:
@@ -1419,21 +1515,35 @@ class ApplicationRuntime:
                 ),
                 scope_provider=_DefaultScopeProvider(),
                 source_provider=(
-                    test_fixture.source_provider if test_fixture is not None else None
+                    test_fixture.source_provider
+                    if test_fixture is not None
+                    else production_certification
                 ),
                 certification_hooks=(
-                    test_fixture.certification_hooks if test_fixture is not None else None
+                    test_fixture.certification_hooks
+                    if test_fixture is not None
+                    else production_certification
                 ),
                 activation_requests=(
-                    test_fixture.activation_requests if test_fixture is not None else None
+                    test_fixture.activation_requests
+                    if test_fixture is not None
+                    else production_certification
                 ),
                 manifest_provider=(
-                    test_fixture.manifest_provider if test_fixture is not None else None
+                    test_fixture.manifest_provider
+                    if test_fixture is not None
+                    else production_certification
                 ),
                 verification_evidence=(
                     test_fixture.verification_evidence
                     if test_fixture is not None
-                    else _NoVerificationEvidence()
+                    else (
+                        ProductionVerificationEvidence(
+                            capability_registry, capability_lifecycle_store, package_store
+                        )
+                        if production_mode
+                        else _NoVerificationEvidence()
+                    )
                 ),
                 sandbox_security_status=(
                     test_fixture.sandbox_security_status if test_fixture is not None else None
@@ -1444,7 +1554,11 @@ class ApplicationRuntime:
             opportunity_engine = CapabilityOpportunityEngine(
                 opportunity_store,
                 capability_acquisition,
-                preparation=_OpportunityResearchPreparation(capability_acquisition),
+                preparation=(
+                    _OpportunityResearchPreparation(capability_acquisition)
+                    if not production_mode
+                    else ProductionOpportunityPreparation(capability_acquisition)
+                ),
             )
             attention_store = SQLiteAttentionStore(paths.attention_database)
             attention_policy = AttentionPolicy(attention_store)
@@ -1509,6 +1623,8 @@ class ApplicationRuntime:
                 trace=trace_service.get(correlation_id=UUID(int=0)),
                 attention_sink=health_attention_sink,
             )
+            if capability_lifecycle_restorer is not None:
+                capability_lifecycle_restorer.bind_health(capability_health)
             component_doctor = ComponentDoctor(capability_health)
             presence_projection = PresenceProjection(events)
             try:
@@ -1918,7 +2034,9 @@ class ApplicationRuntime:
             startup_warmup = StartupWarmupRegistry(resource_governor)
             startup_warmup.register(WarmupComponent("default-model", warmup_provider))
             try:
-                automation_start_task = asyncio.create_task(automation_service.start())
+                automation_start_task = asyncio.get_running_loop().create_task(
+                    automation_service.start()
+                )
             except RuntimeError:
                 automation_start_task = None
             assert backup is not None
@@ -1978,6 +2096,7 @@ class ApplicationRuntime:
                 presence_projection=presence_projection,
                 presentation_surface=presentation_surface,
                 compensation_service=compensation_service,
+                compensation_observer_registry=compensation_observer_registry,
                 workflow_templates=workflow_templates,
                 discovery=capability_gap_detector,
                 capability_gap_detector=capability_gap_detector,
@@ -1995,6 +2114,9 @@ class ApplicationRuntime:
                 provisioning_store=provisioning_store,
                 effect_attestation_store=effect_attestation_store,
                 capability_lifecycle_store=capability_lifecycle_store,
+                capability_lifecycle_restorer=capability_lifecycle_restorer,
+                package_store=package_store,
+                production_sandbox=production_sandbox,
                 opportunity_store=opportunity_store,
                 opportunity_engine=opportunity_engine,
                 attention_store=attention_store,
@@ -2007,12 +2129,7 @@ class ApplicationRuntime:
                 recovery=recovery,
                 trusted_recovery_authority=recovery_authority,
                 controlled_self_update=ControlledSelfUpdate(),
-                agent_loop=AgentLoop(
-                    provider,
-                    registry,
-                    model=settings.ai_model,
-                    context_limit=settings.ai_context_limit,
-                ),
+                agent_loop=agent_loop,
                 launch_profiles=LaunchProfileRegistry(),
                 test_drive=test_drive,
                 startup_warmup=startup_warmup,

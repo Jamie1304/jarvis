@@ -1,7 +1,7 @@
 # Runtime composition and service ownership
 
 **Status:** v1 composition contract
-**Updated:** 2026-08-24
+**Updated:** 2026-08-25
 
 `ApplicationRuntime` is the composition root. `RuntimeContainer` owns the
 application services it creates and owns their shutdown. UI adapters receive
@@ -21,17 +21,18 @@ Optional services are either configured explicitly or remain unavailable.
 | `PlanningEngine` / `TaskController` | `PRODUCTION_OWNED` | `planning.sqlite3` and `RuntimeContainer.task_controller` | Canonical durable task/control plane |
 | `GoalSupervisor` | `PRODUCTION_OWNED` | `goals.sqlite3` and `RuntimeContainer.goal_supervisor` | Supervises intent and acquisition; delegates execution to PlanningEngine |
 | `CapabilityAcquisitionCoordinator` | `PRODUCTION_OWNED` | `RuntimeContainer.capability_acquisition` | One coordinator delegates gap, discovery, build, certification and activation |
-| `CapabilityRegistry` / `CapabilityFactory` | `PRODUCTION_OWNED` | `RuntimeContainer.capability_registry` / `.capability_factory` | Factory output is inactive until trusted certification and activation |
+| `CapabilityRegistry` / `CapabilityFactory` | `PRODUCTION_OWNED` | `RuntimeContainer.capability_registry` / `.capability_factory`; generation uses `ProviderRouter` -> bounded `AgentLoop` | Factory output is inactive until trusted certification and activation |
 | `PackageReviewer` / `PackageCertifier` | `PRODUCTION_OWNED` | `RuntimeContainer.package_reviewer` / `.package_certifier` | Generated packages cannot write review or certification evidence |
-| `ProvisioningEngine` / `SetupConductor` | `PRODUCTION_OWNED` | `RuntimeContainer.provisioning_engine` / `.setup_conductor` | Default provider/handler is explicit unavailable; no arbitrary shell fallback |
-| `CapabilityLifecycleStore` | `PRODUCTION_OWNED` | `capability-lifecycle.sqlite3` and `RuntimeContainer.capability_lifecycle_store` | Sole durable package/certification/activation lifecycle truth |
+| `ProvisioningEngine` / `SetupConductor` | `PRODUCTION_OWNED` | `RuntimeContainer.provisioning_engine` / `.setup_conductor` | Generic typed provider/handler is composed; unsupported provisioning fails closed and has no arbitrary shell fallback |
+| `CapabilityLifecycleStore` / `CapabilityLifecycleRestorer` | `PRODUCTION_OWNED` | `capability-lifecycle.sqlite3` and `RuntimeContainer.capability_lifecycle_store` / `.capability_lifecycle_restorer` | Store is the sole durable package/certification/activation truth; restorer rebuilds runtime/registry projections only after exact validation |
+| `ProductionPackageStore` / package runtime | `PRODUCTION_OWNED` | `packages/` content store plus `RuntimeContainer.package_store` / `production_sandbox` | Hash-addressed immutable package metadata/source; exact AppContainer runtime is prepared only for certified versions |
 | `PackageActivationService` / `HotLoadManager` | `PRODUCTION_OWNED` | `RuntimeContainer.package_activation` / `.hot_load` | Activation uses the same lifecycle store; fresh versions do not inherit ACTIVE |
-| `EnvironmentDiscoveryService` | `PRODUCTION_OWNED` | `RuntimeContainer.environment_discovery` | Evidence-only service; v1 default has no discovery providers and reports degraded |
+| `EnvironmentDiscoveryService` | `PRODUCTION_OWNED` | `RuntimeContainer.environment_discovery` with bounded local observation provider | Evidence-only service; default local composition is available, and discovery never authenticates/adopts/grants authority |
 | `BrowserSemanticBridge` / `BrowserBrokerAdapter` | `PRODUCTION_OPTIONAL` | Runtime-created only when an explicit supported backend is supplied | Missing companion/backend is unavailable/degraded; no uncontrolled fallback |
 | `AgentSessionStore` / voice binding | `PRODUCTION_OWNED` / `PRODUCTION_OPTIONAL` | `sessions.sqlite3`; live `VoiceRuntime` is configured separately | Session records are production-owned; voice hardware/providers are opt-in |
 | `TraceService` / `TraceStore` / execution trace | `PRODUCTION_OWNED` | Runtime-owned event projection over `trace.sqlite3` (schema v2) and `RuntimeContainer.trace_service`/`.trace_store` | Derived sanitized observability only; never completion, credential resolution, or authority |
 | `SQLiteWorkflowProcedureStore` | `PRODUCTION_OWNED` | `workflow-procedures.sqlite3` and `RuntimeContainer.workflow_procedure_store` | Sole durable owner for template versions, sanitized learning state, linkage, and user lifecycle |
-| `EffectPreview` / `CompensationService` | `PRODUCTION_OWNED` | `RuntimeContainer.compensation_service` over `compensation.sqlite3`, the shared PlanningEngine/registry/broker/verifier, and the original-effect binding | One-step compensation is a normal PlanningEngine task; lifecycle metadata is durable, approval is fresh, and independent evidence is required |
+| `EffectPreview` / `CompensationService` / `EffectStateObserverRegistry` | `PRODUCTION_OWNED` | `RuntimeContainer.compensation_service` and `.compensation_observer_registry` over `compensation.sqlite3`, the shared PlanningEngine/registry/broker/verifier, and sealed trusted observers | One-step compensation is a normal PlanningEngine task; lifecycle metadata is durable, fresh state is revalidated by application-owned observers, approval is fresh, and independent evidence is required |
 | `PresenceProjection` | `PRODUCTION_OWNED` | `RuntimeContainer.presence_projection` | Derived from EventBus; never task, permission, or runtime truth |
 | `PresentationSurface` | `PRODUCTION_OWNED` | `RuntimeContainer.presentation_surface` | Typed artifact/declarative surface; physical renderer is optional |
 | `UISimulationHarness` | `PRODUCTION_OPTIONAL` | Package-scoped certification service, created only for a package test | No global harness is needed; simulated actions have no real effects |
@@ -61,12 +62,19 @@ The composition root follows this dependency order:
 4. Open the authoritative planning, memory, User Model, knowledge, session,
    artifact, trace, automation, goal, setup, effect-attestation, compensation, lifecycle,
    opportunity, attention, and golden-workflow stores.
-5. Reconcile durable task and lifecycle state before exposing READY. A changed
-   package hash, invalid certification, future schema, or incomplete lifecycle
-   transaction remains failed/recovering rather than becoming ACTIVE.
+5. Reconcile durable task and lifecycle state before exposing READY. The
+   runtime-owned `CapabilityLifecycleRestorer` resolves each exact
+   package/version/hash, revalidates source/certification/UI bindings and the
+   mandatory AppContainer contract, then restores ACTIVE runtime state and the
+   registry projection. A bad package is quarantined in its own lifecycle row;
+   it does not put the JARVIS core into Safe Mode. Shadow/Canary remain staged
+   with zero automatic effect replay. Future schema and migration failures
+   still fail the owning store closed.
 6. Construct PlanningEngine, TaskController, GoalSupervisor, capability
    acquisition, review/certification, setup/provisioning, activation/hot-load,
-   verification, compensation, health/doctor, opportunity, and attention
+   verification, the sealed compensation observation registry (including the
+   bounded application-data filesystem observer), compensation, health/doctor,
+   opportunity, and attention
    services using those already-owned dependencies.
 7. Construct derived PresenceProjection and PresentationSurface. Presence
    subscribes to canonical events only; the subscription is cancelled by the
@@ -92,7 +100,10 @@ application-owned availability views. In the default configuration:
 - voice is `UNAVAILABLE` when voice providers are not configured;
 - camera is `UNAVAILABLE` when camera providers are not configured;
 - browser is `UNAVAILABLE` when no supported trusted companion/backend exists;
-- environment discovery is `DEGRADED` when the evidence service has no sources;
+    - environment discovery is `AVAILABLE` in the default local/production composition because its bounded local observation provider is present; an explicitly empty provider set is `DEGRADED`;
+    - compensation is unavailable for an effect when no trusted observer is
+      registered for its exact tool/capability; there is no callback or model
+      fallback that can authorize or verify compensation;
 - the typed presentation and package-scoped UI simulation contracts are
   available even when no physical renderer is installed.
 
@@ -137,11 +148,19 @@ acceptance is implied by these composition tests.
 - `.venv\\Scripts\\python.exe -m pytest tests/test_runtime.py -q`: **5 passed**
 - `.venv\\Scripts\\python.exe scripts/run_system_tests.py --suite deterministic-workflows`:
   **26 passed**
-- `.venv\\Scripts\\python.exe scripts/quality.py`: Ruff format/check, strict
-  mypy, and the full suite **passed**; **1,335 passed, 6 skipped**, with 90%
-  combined statement/branch coverage. No coverage exclusion or security-test
-  weakening was added in this composition change.
+- `.venv\\Scripts\\python.exe scripts/run_system_tests.py --suite deterministic-permissions`:
+  **72 passed, 1 skipped**
+- `.venv\\Scripts\\python.exe scripts/run_system_tests.py --suite v1-acceptance`:
+  **22 passed**
+- `$env:JARVIS_ENVIRONMENT=test; .venv\\Scripts\\python.exe scripts/quality.py`:
+  Ruff format/check, strict mypy, and the full suite **passed**; **1,390
+  passed, 7 skipped**, with 90% combined statement/branch coverage. No
+  coverage exclusion or security-test weakening was added in this composition
+  change.
 
-The system Python invocation of `python scripts/quality.py` cannot import the
-repository's development tools on this host; the repository `.venv` was used
-for the equivalent quality run above.
+The default local invocation was also attempted. On this host, Windows
+Credential Manager returned Win32 error 8 while creating the secure recovery
+authority, so default-runtime tests fail closed with `RecoveryAuthorityUnavailable`;
+the code does not substitute plaintext or an implicit in-memory backend. The
+explicit test environment uses the repository's safe `TestOnlyInMemorySecretBackend`
+and is the deterministic quality evidence above.
