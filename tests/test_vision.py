@@ -337,9 +337,15 @@ def test_visual_models_reject_malformed_bounds_geometry_confidence_and_actions()
     with pytest.raises(ValueError):
         NormalizedBounds(0.9, 0.1, 0.2, 0.1)
     with pytest.raises(ValueError):
+        NormalizedBounds(float("nan"), 0, 0.1, 0.1)
+    with pytest.raises(ValueError):
+        NormalizedBounds(0, 0, float("inf"), 0.1)
+    with pytest.raises(ValueError):
         DisplayGeometry(800, 600, 1200, 900, 1.0, 1.5)
     with pytest.raises(ValueError):
         VisibleElement("", "Button", NormalizedBounds(0, 0, 0.1, 0.1), 0.9)
+    with pytest.raises(ValueError):
+        VisibleElement("Save", "Button", NormalizedBounds(0, 0, 0.1, 0.1), float("nan"))
     with pytest.raises(ValueError):
         VisionAnalysis((), (), 1.1)
     with pytest.raises(ValueError):

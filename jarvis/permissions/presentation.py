@@ -10,13 +10,18 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from enum import StrEnum
-from uuid import UUID
+from uuid import UUID, uuid4
 
+from jarvis.permissions.approval import (
+    TrustedApprovalAuthenticator,
+)
 from jarvis.permissions.models import (
     ActionDescriptor,
     ApprovalChoice,
+    ApprovalDecisionResult,
+    ApprovalIdentity,
     ApprovalRequest,
     ApprovalSource,
     ApprovalStatus,
@@ -60,6 +65,48 @@ class SpokenApprovalResult(StrEnum):
     NO_RESPONSE = "no_response"
 
 
+class ApprovalChannelClass(StrEnum):
+    """Trust level required before an approval channel may authorize."""
+
+    NON_PRIVILEGED_CONFIRMATION = "non_privileged_confirmation"
+    PRIVILEGED_APPROVAL = "privileged_approval"
+    HIGH_RISK_APPROVAL = "high_risk_approval"
+
+
+class ApprovalChannelPolicy:
+    """Central v1 policy for approval-channel trust.
+
+    Speech recognition is a transport for untrusted text.  It is never an
+    owner-authentication channel.  The only voice authorization allowed by
+    this policy is the explicitly non-privileged confirmation class; trusted
+    desktop composition must authenticate the owner for the other classes.
+    """
+
+    @staticmethod
+    def classify(
+        risk: Risk,
+        safety_class: SafetyClass = SafetyClass.ORDINARY,
+        *,
+        permission: Permission | None = None,
+    ) -> ApprovalChannelClass:
+        if (
+            not isinstance(risk, Risk)
+            or not isinstance(safety_class, SafetyClass)
+            or permission is not None
+            and not isinstance(permission, Permission)
+        ):
+            raise ValueError("Approval channel metadata is malformed")
+        if risk is Risk.CRITICAL or safety_class is not SafetyClass.ORDINARY:
+            return ApprovalChannelClass.HIGH_RISK_APPROVAL
+        if permission is not None or risk is Risk.HIGH or risk is Risk.MEDIUM:
+            return ApprovalChannelClass.PRIVILEGED_APPROVAL
+        return ApprovalChannelClass.NON_PRIVILEGED_CONFIRMATION
+
+    @staticmethod
+    def voice_may_authorize(channel_class: ApprovalChannelClass) -> bool:
+        return channel_class is ApprovalChannelClass.NON_PRIVILEGED_CONFIRMATION
+
+
 def parse_spoken_approval(text: str | None) -> SpokenApprovalResult:
     """Accept only exact, policy-approved phrases; never infer conditions."""
 
@@ -80,10 +127,27 @@ def parse_spoken_approval(text: str | None) -> SpokenApprovalResult:
     return SpokenApprovalResult.AMBIGUOUS
 
 
-def approval_choice_from_spoken(text: str | None) -> ApprovalChoice | None:
-    """Map only an unambiguous result to a broker choice; all else is unapproved."""
+def approval_choice_from_spoken(
+    text: str | None,
+    *,
+    channel_class: ApprovalChannelClass = ApprovalChannelClass.PRIVILEGED_APPROVAL,
+) -> ApprovalChoice | None:
+    """Map speech to a choice only for an explicitly permitted channel.
+
+    The secure default is the privileged class, so an affirmative transcript
+    cannot become a broker approval merely because a caller forgot to supply
+    channel metadata.  Denial remains safe to accept for every class.
+    """
+
+    if not isinstance(channel_class, ApprovalChannelClass):
+        raise ValueError("Approval channel class is malformed")
 
     result = parse_spoken_approval(text)
+    if (
+        result is SpokenApprovalResult.APPROVE_ONCE
+        and not ApprovalChannelPolicy.voice_may_authorize(channel_class)
+    ):
+        return None
     return {
         SpokenApprovalResult.APPROVE_ONCE: ApprovalChoice.APPROVE_ONCE,
         SpokenApprovalResult.DENY_ONCE: ApprovalChoice.DENY_ONCE,
@@ -170,6 +234,14 @@ class TrustedPermissionPresentation:
             or self.risk is not self.operation.risk
         ):
             raise ValueError("Voice permission choices must use the fixed trusted contract")
+
+    @property
+    def approval_channel_class(self) -> ApprovalChannelClass:
+        return ApprovalChannelPolicy.classify(
+            self.risk,
+            self.operation.safety_class or SafetyClass.ORDINARY,
+            permission=self.permission_requested,
+        )
 
 
 class TrustedActionNarrator:
@@ -270,11 +342,113 @@ class ExactOperationRenderer:
         return trusted.short_explanation
 
     def render_voice(self, presentation: TrustedPermissionPresentation | object) -> str:
-        """Return a prompt with fixed labels; it does not interpret a response."""
+        """Return trusted voice UX without implying speech is owner approval."""
 
         trusted = _require_presentation(presentation)
+        if not ApprovalChannelPolicy.voice_may_authorize(trusted.approval_channel_class):
+            if trusted.approval_channel_class is ApprovalChannelClass.HIGH_RISK_APPROVAL:
+                label = "high-risk"
+            else:
+                label = "privileged"
+            return (
+                f"{trusted.short_explanation} Say DETAILS or NO. To approve this {label} action, "
+                "use the trusted approval control on your desktop."
+            )
         choices = " / ".join(choice.value for choice in trusted.voice_choices)
         return f"{trusted.short_explanation} Choose {choices}."
+
+
+@dataclass(frozen=True, slots=True)
+class DesktopApprovalHandoff:
+    """Immutable voice-to-desktop reference for one broker approval request.
+
+    This object contains no approval authority.  It is only a bounded,
+    fingerprinted reference that lets the trusted desktop surface display and
+    approve the exact request that voice narrated.
+    """
+
+    handoff_id: UUID
+    request_id: UUID
+    task_id: UUID
+    argument_fingerprint: str
+    action_fingerprint: str
+    permission: Permission
+    scope: PermissionScope
+    expires_at: datetime
+
+    @classmethod
+    def create(cls, request: ApprovalRequest) -> DesktopApprovalHandoff:
+        _validate_approval_request(request)
+        if request.status is not ApprovalStatus.PENDING:
+            raise ValueError("Only a pending approval can be handed off")
+        return cls(
+            handoff_id=uuid4(),
+            request_id=request.request_id,
+            task_id=request.task_id,
+            argument_fingerprint=request.argument_fingerprint,
+            action_fingerprint=request.action_fingerprint,
+            permission=request.permission,
+            scope=request.scope,
+            expires_at=request.expires_at,
+        )
+
+    def matches(self, request: ApprovalRequest, *, now: datetime | None = None) -> bool:
+        if type(request) is not ApprovalRequest:
+            return False
+        if request.status is not ApprovalStatus.PENDING:
+            return False
+        comparison_time = now or datetime.now(UTC)
+        if comparison_time.tzinfo is None or self.expires_at <= comparison_time:
+            return False
+        return (
+            self.request_id == request.request_id
+            and self.task_id == request.task_id
+            and self.argument_fingerprint == request.argument_fingerprint
+            and self.action_fingerprint == request.action_fingerprint
+            and self.permission is request.permission
+            and self.scope == request.scope
+            and self.expires_at == request.expires_at
+        )
+
+
+class TrustedDesktopApprovalSurface:
+    """Authenticate and consume a handoff through the normal PermissionBroker."""
+
+    async def decide(
+        self,
+        handoff: DesktopApprovalHandoff,
+        request: ApprovalRequest,
+        *,
+        choice: ApprovalChoice,
+        authenticator: TrustedApprovalAuthenticator,
+        identity: ApprovalIdentity,
+        broker: object,
+        now: datetime | None = None,
+    ) -> ApprovalDecisionResult:
+        if not isinstance(handoff, DesktopApprovalHandoff) or not isinstance(
+            authenticator, TrustedApprovalAuthenticator
+        ):
+            raise TypeError("Desktop approval requires trusted typed objects")
+        if choice not in {ApprovalChoice.APPROVE_ONCE, ApprovalChoice.DENY_ONCE}:
+            raise ValueError("Desktop surface supports only one-time approve or deny")
+        if not handoff.matches(request, now=now):
+            return ApprovalDecisionResult(
+                False, DecisionReason.MALFORMED_APPROVAL_DECISION, request
+            )
+        decide = getattr(broker, "decide", None)
+        if not callable(decide):
+            raise TypeError("Desktop approval requires the application PermissionBroker")
+        context = authenticator.issue_context(
+            request_id=request.request_id,
+            choice=choice,
+            identity=identity,
+        )
+        if context.source is not ApprovalSource.TRUSTED_UI:
+            return ApprovalDecisionResult(False, DecisionReason.UNTRUSTED_APPROVER, request)
+        result = await decide(context)
+        if not isinstance(result, ApprovalDecisionResult):
+            raise TypeError("PermissionBroker returned malformed approval result")
+        return result
 
 
 def _validate_approval_request(request: ApprovalRequest) -> None:

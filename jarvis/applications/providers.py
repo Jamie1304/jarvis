@@ -20,6 +20,11 @@ from jarvis.applications.models import (
     InstallationCandidate,
     PackageOperationError,
 )
+from jarvis.computer.process import (
+    ProcessIdentityError,
+    resolve_trusted_executable,
+    trusted_process_environment,
+)
 
 _PACKAGE_TOKEN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 _VERSION_TOKEN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]{0,63}$")
@@ -191,8 +196,28 @@ class WindowsRegistryInventoryProvider(ApplicationInventoryProvider):  # pragma:
 class WingetPackageProvider(PackageProvider):  # pragma: no cover
     """Optional package provider with a trusted candidate catalog and no shell strings."""
 
-    def __init__(self, candidates: Iterable[InstallationCandidate]) -> None:
+    def __init__(
+        self,
+        candidates: Iterable[InstallationCandidate],
+        *,
+        executable: str | None = None,
+        timeout_seconds: float = 300.0,
+    ) -> None:
         self._candidates = tuple(candidates)
+        if (
+            type(timeout_seconds) not in {int, float}
+            or isinstance(timeout_seconds, bool)
+            or not 0 < timeout_seconds <= 1_800
+        ):
+            raise ValueError("Winget timeout is outside the safe bound")
+        if executable is None:
+            self._executable = None
+        else:
+            try:
+                self._executable = resolve_trusted_executable(executable)
+            except (OSError, RuntimeError, ProcessIdentityError) as error:
+                raise ValueError("Winget executable must be an absolute regular file") from error
+        self._timeout_seconds = float(timeout_seconds)
         for candidate in self._candidates:
             if candidate.source.casefold() != "winget":
                 raise ValueError("Winget provider candidates must use the winget source")
@@ -240,6 +265,10 @@ class WingetPackageProvider(PackageProvider):  # pragma: no cover
         self._validate_candidate(candidate)
         if candidate not in self._candidates:
             raise PackageOperationError("Package candidate was not issued by this provider")
+        if self._executable is None:
+            raise PackageOperationError(
+                "Winget executable must be explicitly configured with a trusted file identity"
+            )
         arguments = (
             operation,
             "--id",
@@ -255,11 +284,12 @@ class WingetPackageProvider(PackageProvider):  # pragma: no cover
         )
         try:
             process = await asyncio.create_subprocess_exec(
-                "winget.exe",
+                os.fspath(self._executable),
                 *arguments,
                 stdin=asyncio.subprocess.DEVNULL,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                env=trusted_process_environment(),
             )
         except OSError as error:
             raise PackageOperationError("Windows package manager is unavailable") from error
@@ -267,20 +297,27 @@ class WingetPackageProvider(PackageProvider):  # pragma: no cover
         cancelled_task = asyncio.create_task(cancellation.wait())
         try:
             done, _ = await asyncio.wait(
-                {wait_task, cancelled_task}, return_when=asyncio.FIRST_COMPLETED
+                {wait_task, cancelled_task},
+                timeout=self._timeout_seconds,
+                return_when=asyncio.FIRST_COMPLETED,
             )
             if cancelled_task in done:
                 if process.returncode is None:
-                    process.terminate()
+                    process.kill()
                 await wait_task
                 raise asyncio.CancelledError
+            if wait_task not in done:
+                if process.returncode is None:
+                    process.kill()
+                await wait_task
+                raise PackageOperationError("Windows package manager timed out")
             _, stderr = await wait_task
             if process.returncode != 0:
                 detail = stderr.decode("utf-8", errors="replace")[:512]
                 raise PackageOperationError(f"Package manager failed: {detail}")
         except asyncio.CancelledError:
             if process.returncode is None:
-                process.terminate()
+                process.kill()
             await asyncio.gather(wait_task, return_exceptions=True)
             raise
         finally:

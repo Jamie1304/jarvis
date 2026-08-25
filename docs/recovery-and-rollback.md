@@ -13,17 +13,20 @@ An owner-controlled change follows:
 `PREPARE -> SNAPSHOT -> APPLY -> START -> HEALTH_CHECK -> COMMIT`
 
 The snapshot manifest records an opaque transaction ID, application revision,
-non-secret configuration metadata, database/schema metadata, migration IDs,
-integration version metadata, generated-package state, and explicitly selected
-regular-file artifacts. Manifests are schema-versioned and future schemas are
-refused. Writes use a temporary file plus `fsync` and atomic replacement.
+the exact application build-tree hash, non-secret configuration metadata,
+database/schema metadata, migration IDs, integration version metadata,
+generated-package state, and explicitly selected regular-file artifacts.
+Manifests are schema-versioned and future schemas are refused. Writes use a
+temporary file plus `fsync` and atomic replacement.
 
 `RecoveryCoordinator.boot_candidate()` writes a typed startup attempt before
 starting a candidate. The attempt binds the candidate build and snapshot to the
 transaction, records the current LKG, migration references, and a bounded
-health deadline. A committed startup clears the marker and advances the LKG
-pointer only to a validated snapshot. Retention is bounded and never removes
-the LKG restore point.
+health deadline. A committed startup clears the marker and advances LKG only
+through `TrustedRecoveryAuthority`, which writes an HMAC-authenticated record
+bound to the exact snapshot manifest, build hash, transaction, installation,
+and schema compatibility. Retention is bounded and never removes the LKG
+restore point.
 
 ## Failure behavior
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import sqlite3
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -15,6 +16,7 @@ from jarvis.credentials import (
     AuthTokenSet,
     CredentialMetadata,
     CredentialNotFound,
+    CredentialRef,
     CredentialStatus,
     CredentialUseDenied,
     CredentialVault,
@@ -155,6 +157,152 @@ def test_metadata_only_storage_and_scoped_use(tmp_path: Path) -> None:
         instance.scoped_use(metadata.credential_id, association="example", scope=("admin",))
     with pytest.raises(CredentialNotFound):
         instance.metadata(uuid4())
+
+
+def test_close_releases_metadata_database_handle(tmp_path: Path) -> None:
+    path = tmp_path / "credentials.sqlite3"
+    instance = CredentialVault(path, backend=TestOnlyInMemorySecretBackend())
+    instance.create(
+        label="Close check",
+        association="test",
+        scope=("read",),
+        auth_method=AuthenticationMethod.API_TOKEN,
+        secret="close-check-secret",
+    )
+    instance.close()
+    path.unlink()
+    assert not path.exists()
+
+
+def test_typed_credential_reference_binds_exact_host_operation_and_expiry(tmp_path: Path) -> None:
+    clock = Clock()
+    backend = TestOnlyInMemorySecretBackend()
+    instance = CredentialVault(
+        tmp_path / "credentials.sqlite3",
+        backend=backend,
+        clock=clock,
+    )
+    metadata = instance.create(
+        label="Bound token",
+        association="synthetic-service",
+        scope=("read",),
+        auth_method=AuthenticationMethod.API_TOKEN,
+        secret="bound-secret",
+    )
+    reference = instance.issue_ref(
+        metadata.credential_id,
+        integration_id="synthetic.integration",
+        package_version="1.0.0",
+        package_hash="a" * 64,
+        operation="network.request",
+        destination="https://service.synthetic.test:443",
+        workspace_id="workspace-a",
+        scope=("read",),
+    )
+    assert isinstance(reference, CredentialRef)
+    assert (
+        instance.resolve_ref(
+            reference,
+            integration_id="synthetic.integration",
+            package_version="1.0.0",
+            package_hash="a" * 64,
+            operation="network.request",
+            destination="https://service.synthetic.test:443",
+            workspace_id="workspace-a",
+            scope=("read",),
+        )
+        == b"bound-secret"
+    )
+    with pytest.raises(CredentialUseDenied):
+        instance.resolve_ref(
+            replace(reference, _proof=b"\0" * 32),
+            integration_id="synthetic.integration",
+            package_version="1.0.0",
+            package_hash="a" * 64,
+            operation="network.request",
+            destination="https://service.synthetic.test:443",
+            workspace_id="workspace-a",
+            scope=("read",),
+        )
+    mismatches = (
+        (
+            "b" * 64,
+            "network.request",
+            "https://service.synthetic.test:443",
+            "workspace-a",
+            ("read",),
+        ),
+        (
+            "a" * 64,
+            "network.request",
+            "https://other.synthetic.test:443",
+            "workspace-a",
+            ("read",),
+        ),
+        (
+            "a" * 64,
+            "network.request",
+            "https://service.synthetic.test:443",
+            "workspace-b",
+            ("read",),
+        ),
+        (
+            "a" * 64,
+            "filesystem.read",
+            "https://service.synthetic.test:443",
+            "workspace-a",
+            ("read",),
+        ),
+        (
+            "a" * 64,
+            "network.request",
+            "https://service.synthetic.test:443",
+            "workspace-a",
+            ("write",),
+        ),
+    )
+    for package_hash, operation, destination, workspace_id, scope in mismatches:
+        with pytest.raises(CredentialUseDenied):
+            instance.resolve_ref(
+                reference,
+                integration_id="synthetic.integration",
+                package_version="1.0.0",
+                package_hash=package_hash,
+                operation=operation,
+                destination=destination,
+                workspace_id=workspace_id,
+                scope=scope,
+            )
+    instance.close()
+    restarted = CredentialVault(
+        tmp_path / "credentials.sqlite3",
+        backend=backend,
+        clock=clock,
+    )
+    with pytest.raises(CredentialUseDenied):
+        restarted.resolve_ref(
+            reference,
+            integration_id="synthetic.integration",
+            package_version="1.0.0",
+            package_hash="a" * 64,
+            operation="network.request",
+            destination="https://service.synthetic.test:443",
+            workspace_id="workspace-a",
+            scope=("read",),
+        )
+    clock.value += timedelta(minutes=6)
+    with pytest.raises(CredentialUseDenied):
+        restarted.resolve_ref(
+            reference,
+            integration_id="synthetic.integration",
+            package_version="1.0.0",
+            package_hash="a" * 64,
+            operation="network.request",
+            destination="https://service.synthetic.test:443",
+            workspace_id="workspace-a",
+            scope=("read",),
+        )
+    restarted.close()
 
 
 def test_update_rotate_revoke_delete_and_expiry(tmp_path: Path) -> None:

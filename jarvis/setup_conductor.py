@@ -5,15 +5,23 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import re
 import sqlite3
 from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
 from typing import Protocol
 from uuid import UUID, uuid4
 
+from jarvis.adoption import (
+    AdoptionAttestation,
+    AdoptionIdentityError,
+    AdoptionIdentityEvidence,
+    AdoptionOutcome,
+    AdoptionPolicy,
+)
 from jarvis.provisioning import ProvisioningPlan, ProvisioningPlanState, ProvisioningResult
 
 
@@ -57,6 +65,7 @@ class SetupRunState(StrEnum):
 _MAX_TEXT = 512
 _MAX_JSON_BYTES = 65_536
 _SECRET_KEYS = frozenset({"secret", "password", "token", "private_key", "credential_value"})
+_SHA256 = re.compile(r"^[0-9a-f]{64}$")
 
 
 def _text(value: object, field_name: str, limit: int = _MAX_TEXT) -> str:
@@ -182,6 +191,9 @@ class AdoptionCandidate:
     has_configuration: bool = False
     has_user_data: bool = False
     evidence: str = ""
+    identity_digest: str | None = None
+    identity_evidence: AdoptionIdentityEvidence | None = None
+    adoption_attestation: AdoptionAttestation | None = None
 
     def __post_init__(self) -> None:
         _id(self.candidate_id, "Adoption candidate ID")
@@ -197,6 +209,36 @@ class AdoptionCandidate:
             raise SetupValidationError("Adoption candidate flags are malformed")
         if self.evidence:
             _text(self.evidence, "Adoption evidence", 2_048)
+        if self.identity_digest is not None and (
+            type(self.identity_digest) is not str or _SHA256.fullmatch(self.identity_digest) is None
+        ):
+            raise SetupValidationError("Adoption candidate identity is malformed")
+        if self.identity_evidence is not None and not isinstance(
+            self.identity_evidence, AdoptionIdentityEvidence
+        ):
+            raise SetupValidationError("Adoption candidate identity evidence is malformed")
+        if self.adoption_attestation is not None and not isinstance(
+            self.adoption_attestation, AdoptionAttestation
+        ):
+            raise SetupValidationError("Adoption candidate attestation is malformed")
+        if self.identity_evidence is not None:
+            derived = self.identity_evidence.fingerprint
+            if self.identity_digest is None:
+                object.__setattr__(self, "identity_digest", derived)
+            elif self.identity_digest != derived:
+                raise SetupValidationError("Adoption identity digest is not evidence-derived")
+        if self.adoption_attestation is not None:
+            if self.identity_evidence is None:
+                raise SetupValidationError("Adoption attestation has no identity evidence")
+            if self.adoption_attestation.candidate_id != self.candidate_id:
+                raise SetupValidationError("Adoption attestation candidate does not match")
+            if self.adoption_attestation.identity_fingerprint != self.identity_evidence.fingerprint:
+                raise SetupValidationError("Adoption attestation identity does not match")
+            if self.adoption_attestation.policy_outcome not in {
+                AdoptionOutcome.ADOPT_VERIFIED,
+                AdoptionOutcome.ADOPT_WITH_RESTRICTIONS,
+            }:
+                raise SetupValidationError("Adoption attestation outcome is not adoptable")
 
 
 @dataclass(frozen=True, slots=True)
@@ -247,6 +289,27 @@ class SetupStepResult:
     detail: str = ""
     candidate_id: str | None = None
     provisioning: ProvisioningResult | None = None
+    identity_digest: str | None = None
+    adoption_attestation: AdoptionAttestation | None = None
+
+    def __post_init__(self) -> None:
+        _id(self.step_id, "Setup result step ID")
+        if not isinstance(self.state, SetupStepState):
+            raise SetupValidationError("Setup result state is malformed")
+        if self.detail:
+            _text(self.detail, "Setup result detail", 2_048)
+        if self.candidate_id is not None:
+            _id(self.candidate_id, "Setup result candidate ID")
+        if self.provisioning is not None and not isinstance(self.provisioning, ProvisioningResult):
+            raise SetupValidationError("Setup result provisioning result is malformed")
+        if self.identity_digest is not None and (
+            type(self.identity_digest) is not str or _SHA256.fullmatch(self.identity_digest) is None
+        ):
+            raise SetupValidationError("Setup result candidate identity is malformed")
+        if self.adoption_attestation is not None and not isinstance(
+            self.adoption_attestation, AdoptionAttestation
+        ):
+            raise SetupValidationError("Setup result adoption attestation is malformed")
 
 
 @dataclass(frozen=True, slots=True)
@@ -375,6 +438,12 @@ def _run_to_json(run: SetupRun) -> dict[str, object]:
                 "state": item.state.value,
                 "detail": item.detail,
                 "candidate_id": item.candidate_id,
+                "identity_digest": item.identity_digest,
+                "adoption_attestation": (
+                    item.adoption_attestation.to_dict()
+                    if item.adoption_attestation is not None
+                    else None
+                ),
             }
             for item in run.steps
         ],
@@ -392,16 +461,29 @@ def _run_from_json(payload: Mapping[str, object]) -> SetupRun:
     decisions_raw = data.get("decisions", [])
     if not isinstance(steps_raw, list) or not isinstance(decisions_raw, list):
         raise SetupError("Persisted setup collections are malformed")
-    steps = tuple(
-        SetupStepResult(
-            str(item["step_id"]),
-            SetupStepState(str(item["state"])),
-            str(item.get("detail", "")),
-            str(item["candidate_id"]) if item.get("candidate_id") else None,
+    steps: list[SetupStepResult] = []
+    for item in steps_raw:
+        if not isinstance(item, dict):
+            continue
+        identity_digest = item.get("identity_digest")
+        if identity_digest is not None and type(identity_digest) is not str:
+            raise SetupError("Persisted setup candidate identity is malformed")
+        adoption_attestation_raw = item.get("adoption_attestation")
+        adoption_attestation = None
+        if adoption_attestation_raw is not None:
+            if not isinstance(adoption_attestation_raw, Mapping):
+                raise SetupError("Persisted setup attestation is malformed")
+            adoption_attestation = AdoptionAttestation.from_dict(adoption_attestation_raw)
+        steps.append(
+            SetupStepResult(
+                str(item["step_id"]),
+                SetupStepState(str(item["state"])),
+                str(item.get("detail", "")),
+                str(item["candidate_id"]) if item.get("candidate_id") else None,
+                identity_digest=identity_digest,
+                adoption_attestation=adoption_attestation,
+            )
         )
-        for item in steps_raw
-        if isinstance(item, dict)
-    )
     decisions = tuple(
         SetupDecision(
             str(item["requirement_id"]),
@@ -416,7 +498,7 @@ def _run_from_json(payload: Mapping[str, object]) -> SetupRun:
         str(data["setup_kind"]),
         str(data["context_fingerprint"]) if data.get("context_fingerprint") else None,
         SetupRunState(str(data["state"])),
-        steps,
+        tuple(steps),
         decisions,
         datetime.fromisoformat(str(data["updated_at"])),
         str(data["error"]) if data.get("error") else None,
@@ -454,6 +536,7 @@ class SetupConductor:
         *,
         decision_collector: DecisionCollector | None = None,
         clock: Callable[[], datetime] | None = None,
+        adoption_policy: AdoptionPolicy | None = None,
     ) -> None:
         if not handlers:
             raise SetupValidationError("At least one setup handler is required")
@@ -462,6 +545,7 @@ class SetupConductor:
         self._provision = provision
         self._collect = decision_collector
         self._clock = clock or (lambda: datetime.now(UTC))
+        self._adoption_policy = adoption_policy
 
     async def run(
         self,
@@ -509,6 +593,7 @@ class SetupConductor:
                     "cancelled",
                 )
             inspection = await self._handlers[step.component_id].inspect(step, context)
+            inspection = self._enrich_inspection(inspection)
             inspections[step.step_id] = inspection
             all_requirements.extend(step.requirements)
             all_candidates.extend(inspection.candidates)
@@ -565,23 +650,38 @@ class SetupConductor:
                     "dependency is not verified",
                 )
             inspection = inspections[step.step_id]
-            decision = self._decision_for(step, inspection, decisions)
+            decision = self._decision_for(step, inspection, decisions, run_id)
             if decision is not None and decision.choice is AdoptionChoice.IGNORE:
                 results[step.step_id] = SetupStepResult(
                     step.step_id, SetupStepState.DECLINED, "adoption declined"
                 )
                 continue
-            if inspection.completed or (
-                decision is not None and decision.choice is AdoptionChoice.USE_IN_PLACE
-            ):
+            candidate = self._candidate_for_decision(step, inspection, decision, run_id)
+            if candidate is not None:
+                if decision is not None and decision.choice is AdoptionChoice.USE_IN_PLACE:
+                    # Re-inspect immediately before the existing installation is
+                    # used.  The handler owns the platform-specific identity
+                    # measurement; this second observation prevents a stale
+                    # candidate record from authorizing a replacement.
+                    current = await self._handlers[step.component_id].inspect(step, context)
+                    current = self._enrich_inspection(current)
+                    current_candidate = self._candidate_for_decision(
+                        step, current, decision, run_id
+                    )
+                    if not self._same_candidate(current_candidate, candidate):
+                        raise SetupError("adoption candidate changed before verification")
                 if await self._handlers[step.component_id].verify(step, context):
                     results[step.step_id] = SetupStepResult(
                         step.step_id,
                         SetupStepState.ADOPTED,
                         "existing installation adopted",
-                        str(decision.values["candidate_id"])
-                        if decision is not None and "candidate_id" in decision.values
-                        else None,
+                        candidate.candidate_id if candidate is not None else None,
+                        identity_digest=(
+                            candidate.identity_digest if candidate is not None else None
+                        ),
+                        adoption_attestation=(
+                            candidate.adoption_attestation if candidate is not None else None
+                        ),
                     )
                     continue
             results[step.step_id] = SetupStepResult(
@@ -649,18 +749,136 @@ class SetupConductor:
             decisions.values(),
         )
 
-    @staticmethod
     def _decision_for(
-        step: SetupStep, inspection: SetupInspection, decisions: Mapping[str, SetupDecision]
+        self,
+        step: SetupStep,
+        inspection: SetupInspection,
+        decisions: Mapping[str, SetupDecision],
+        run_id: UUID,
     ) -> SetupDecision | None:
-        candidate = next((item for item in inspection.candidates if item.compatible), None)
         for requirement in step.requirements:
             decision = decisions.get(requirement.requirement_id)
             if decision is not None:
-                if decision.choice is AdoptionChoice.USE_IN_PLACE and candidate is None:
-                    raise SetupError("No compatible adoption candidate exists")
+                self._candidate_for_decision(step, inspection, decision, run_id)
                 return decision
         return None
+
+    def _candidate_for_decision(
+        self,
+        step: SetupStep,
+        inspection: SetupInspection,
+        decision: SetupDecision | None,
+        run_id: UUID,
+    ) -> AdoptionCandidate | None:
+        if decision is None:
+            if step.requirements:
+                return None
+            candidate = next((item for item in inspection.candidates if item.compatible), None)
+            if candidate is None:
+                return None
+            return self._validate_adoption_candidate(candidate, run_id, explicit=False)
+        if decision.choice is not AdoptionChoice.USE_IN_PLACE:
+            return None
+        candidate = next((item for item in inspection.candidates if item.compatible), None)
+        if candidate is None:
+            raise SetupError("No compatible adoption candidate exists")
+        if candidate.identity_digest is None:
+            raise SetupError("Adoption candidate has no identity proof")
+        candidate_id = decision.values.get("candidate_id")
+        if type(candidate_id) is not str or candidate_id != candidate.candidate_id:
+            raise SetupError("Adoption decision references an unknown candidate")
+        identity_digest = decision.values.get("identity_digest")
+        if type(identity_digest) is not str or identity_digest != candidate.identity_digest:
+            raise SetupError("Adoption decision identity does not match candidate")
+        return self._validate_adoption_candidate(candidate, run_id, explicit=True)
+
+    def _validate_adoption_candidate(
+        self, candidate: AdoptionCandidate, run_id: UUID, *, explicit: bool
+    ) -> AdoptionCandidate:
+        if candidate.identity_evidence is None or candidate.adoption_attestation is None:
+            if not explicit or candidate.identity_evidence is None or self._adoption_policy is None:
+                raise SetupError("Adoption requires trusted identity and provenance attestation")
+            try:
+                candidate = replace(
+                    candidate,
+                    adoption_attestation=self._adoption_policy.attest(
+                        candidate.candidate_id,
+                        candidate.identity_evidence,
+                        version=candidate.version,
+                        compatibility_fingerprint=hashlib.sha256(
+                            f"{candidate.component_id}:{candidate.version}".encode()
+                        ).hexdigest(),
+                        workspace_scope="setup",
+                        setup_run_id=str(run_id),
+                        acquisition_id=str(run_id),
+                        compatible=candidate.compatible,
+                        read_only=True,
+                        user_confirmed=True,
+                    ),
+                )
+            except AdoptionIdentityError as error:
+                raise SetupError(str(error)) from error
+        if self._adoption_policy is None:
+            raise SetupError("Trusted adoption policy is unavailable")
+        assert candidate.identity_evidence is not None
+        assert candidate.adoption_attestation is not None
+        try:
+            self._adoption_policy.validate(
+                candidate.candidate_id,
+                candidate.identity_evidence,
+                candidate.adoption_attestation,
+                version=candidate.version,
+                now=self._clock(),
+            )
+        except AdoptionIdentityError as error:
+            raise SetupError(str(error)) from error
+        return candidate
+
+    def _enrich_inspection(self, inspection: SetupInspection) -> SetupInspection:
+        if self._adoption_policy is None:
+            return inspection
+        candidates: list[AdoptionCandidate] = []
+        for candidate in inspection.candidates:
+            if not candidate.compatible:
+                candidates.append(candidate)
+                continue
+            try:
+                evidence = self._adoption_policy.inspect(candidate.location)
+            except AdoptionIdentityError:
+                candidates.append(candidate)
+                continue
+            attestation = candidate.adoption_attestation
+            if (
+                candidate.identity_evidence is not None
+                and candidate.identity_evidence.fingerprint != evidence.fingerprint
+            ):
+                attestation = None
+            candidates.append(
+                replace(
+                    candidate,
+                    identity_digest=evidence.fingerprint,
+                    identity_evidence=evidence,
+                    adoption_attestation=attestation,
+                )
+            )
+        return replace(inspection, candidates=tuple(candidates))
+
+    @staticmethod
+    def _same_candidate(left: AdoptionCandidate | None, right: AdoptionCandidate | None) -> bool:
+        if left is None or right is None:
+            return left is right
+        return (
+            left.candidate_id == right.candidate_id
+            and left.location == right.location
+            and left.identity_digest == right.identity_digest
+            and left.identity_evidence is not None
+            and right.identity_evidence is not None
+            and left.identity_evidence.fingerprint == right.identity_evidence.fingerprint
+            and left.adoption_attestation is not None
+            and right.adoption_attestation is not None
+            and left.adoption_attestation.identity_fingerprint
+            == right.adoption_attestation.identity_fingerprint
+        )
 
     @staticmethod
     def _validate_steps(steps: tuple[SetupStep, ...]) -> None:

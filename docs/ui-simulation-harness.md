@@ -51,6 +51,24 @@ may provide a bounded screenshot renderer, but pixel equality is not the
 acceptance authority. Semantic/control-tree checks and targeted visual evidence
 are primary. `run_all()` executes every declared state, including custom states.
 
+`UISimulationHarness.attest(source_hash)` is the only certification-facing
+operation. It runs every declared state, aggregates the semantic, binding,
+security, asset, layout, determinism, and zero-effect checks, and returns a
+trusted `UISimulationAttestation`. The attestation binds:
+
+- package ID, version, package hash, and the built source hash;
+- the UI manifest fingerprint, manifest schema version, harness version, and
+  simulation policy version;
+- every tested state, action-binding/security/asset check, zero-effect result,
+  timestamp, and opaque ArtifactRefs for captured render evidence; and
+- `PASS`, `PASS_WITH_RESTRICTIONS`, `FAIL`, `INVALID`, or `STALE`.
+
+The attestation carries an application-issued self-digest and cannot be created
+by package metadata, model output, a UI callback, or a caller-provided boolean.
+The certifier accepts only a fresh harness-issued passing result whose package,
+version, source binding, and digest still validate. Altering the package,
+source snapshot, UI manifest, or version requires a new simulation run.
+
 When configured with an app-owned `ArtifactStore` and workspace, the shot is
 stored as an internal artifact with package/version provenance. Package assets
 must be declared immutable entries below the package asset root with matching
@@ -60,9 +78,16 @@ rendered, and credential secrets cannot become UI evidence.
 
 ## Certification and activation
 
-`PackageCertifier` requires UI simulation evidence for packages declaring UI
-assets or profiles. The evidence is appended to the verification record, but it
-does not certify package code by itself and does not make the package active.
+`PackageCertifier` deterministically treats validated packages with UI assets or
+profiles as UI-bearing. It requires a fresh `UISimulationAttestation` supplied
+by the trusted application composition hook. The old harness-available flag and
+free-form evidence strings are metadata only and cannot satisfy this gate. A
+missing, malformed, failed, stale, or mismatched attestation rejects
+`VERIFICATION` and therefore cannot produce `CERTIFIED`.
+
+The attestation is appended to the verification record and its reference/digest
+is persisted in the canonical lifecycle certification record, but it does not
+certify package code by itself and does not make the package active.
 Static review, unit tests, sandbox integration, permission diff, trusted
 authority decision, health, verification, Shadow, Canary, and activation gates
 remain separate.

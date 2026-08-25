@@ -45,9 +45,13 @@ one immutable `TrustedPermissionPresentation` with the short explanation, exact
 details, target, scope, effect, risk, and permission requested. The renderer is
 pure and receives that same object; desktop and future voice surfaces must not
 ask the model to restate the permission. Voice labels are fixed `YES`, `NO`, and
-`DETAILS` choices for presentation only. They never represent a broker decision,
-and conditional or ambiguous speech must be rejected by a future authenticated
-voice ingress.
+`DETAILS` choices for presentation only. For v1, privileged and high-risk voice
+approval is disabled by design: STT is not owner authentication, so an
+affirmative transcript never represents a broker decision. Voice may read
+details or deny/cancel. A trusted desktop surface may consume a
+`DesktopApprovalHandoff` only after authenticating the owner and revalidating
+the same request, expiry, normalized scope, and exact fingerprints through
+`PermissionBroker`.
 
 A trusted human may approve or deny once, cancel a pending request, or create a
 limited remembered grant. One-time approval is bound to the exact canonical

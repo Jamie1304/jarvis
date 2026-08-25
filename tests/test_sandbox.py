@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 import json
 import math
+import os
+import socket
 import sys
 from collections.abc import Mapping
 from datetime import UTC, datetime
@@ -18,13 +20,16 @@ from jarvis.resources import ReservationStatus, ResourceGovernor, ResourceSnapsh
 from jarvis.sandbox import (
     SandboxCancelled,
     SandboxConfigurationError,
+    SandboxIsolationUnavailable,
     SandboxLimits,
     SandboxMessage,
     SandboxProcess,
     SandboxProcessError,
     SandboxProtocolError,
     SandboxTimeout,
+    WindowsContainmentMode,
 )
+from jarvis.windows_sandbox import WindowsAppContainerLauncher
 
 WORKER = """
 import json
@@ -82,6 +87,41 @@ for line in sys.stdin:
     elif kind == "oversized-response":
         print("x" * 70000, flush=True)
         continue
+    elif kind == "probe-handle":
+        visible = False
+        if os.name == "nt":
+            import ctypes
+            kernel32 = ctypes.WinDLL("kernel32.dll", use_last_error=True)
+            kernel32.GetFileType.argtypes = [ctypes.c_void_p]
+            kernel32.GetFileType.restype = ctypes.c_uint
+            handle = int(message["payload"]["handle"])
+            visible = kernel32.GetFileType(handle) != 0
+        payload = {"visible": visible}
+    elif kind == "read-path":
+        try:
+            from pathlib import Path
+
+            payload = {"read": Path(message["payload"]["path"]).read_text(encoding="utf-8")}
+        except (OSError, UnicodeError, ValueError) as error:
+            payload = {"read": None, "error": type(error).__name__}
+    elif kind == "write-path":
+        try:
+            from pathlib import Path
+
+            Path(message["payload"]["path"]).write_text("sandbox-write", encoding="utf-8")
+            payload = {"written": True}
+        except (OSError, UnicodeError, ValueError) as error:
+            payload = {"written": False, "error": type(error).__name__}
+    elif kind == "network-probe":
+        try:
+            import socket
+
+            with socket.create_connection(
+                (message["payload"]["host"], message["payload"]["port"]), 0.5
+            ):
+                payload = {"connected": True}
+        except OSError as error:
+            payload = {"connected": False, "error": type(error).__name__}
     elif kind == "malformed-response":
         print("{", flush=True)
         break
@@ -104,7 +144,13 @@ def sandbox(tmp_path: Path, *, limits: SandboxLimits | None = None) -> SandboxPr
         ("-c", WORKER),
         integration_id="test.integration",
         parent_directory=tmp_path / "owned-sandboxes",
-        limits=limits or SandboxLimits(timeout_seconds=1, max_message_bytes=65_536, max_restarts=2),
+        limits=limits
+        or SandboxLimits(
+            timeout_seconds=1,
+            max_message_bytes=65_536,
+            max_restarts=2,
+            windows_containment=WindowsContainmentMode.RESTRICTED_TOKEN,
+        ),
     )
 
 
@@ -151,6 +197,190 @@ async def test_environment_source_boundary_and_cleanup(
 
 
 @pytest.mark.asyncio
+async def test_windows_restricted_token_and_explicit_handle_boundary(
+    tmp_path: Path,
+) -> None:
+    if sys.platform != "win32":
+        pytest.skip("Windows native containment test")
+    import msvcrt
+
+    trusted_handle_file = tmp_path / "trusted-handle.txt"
+    trusted_handle_file.write_text("trusted-only", encoding="utf-8")
+    file_descriptor = os.open(trusted_handle_file, os.O_RDONLY)
+    os.set_handle_inheritable(file_descriptor, True)
+    process = sandbox(tmp_path)
+    try:
+        await process.start()
+        status = process.security_status
+        assert status is not None
+        assert status.mode.value == "restricted_token"
+        assert status.token_restricted
+        assert status.disabled_privileges
+        assert status.explicit_handle_list
+        assert status.inherited_handle_count == 3
+        assert status.job_object
+        assert status.max_processes == 1
+        assert status.max_memory_bytes == SandboxLimits().max_memory_bytes
+        assert not status.filesystem_acl_restricted
+        assert not status.network_restricted
+        result = await process.request(
+            "probe-handle",
+            {"handle": int(msvcrt.get_osfhandle(file_descriptor))},
+        )
+        assert result["visible"] is False
+    finally:
+        os.close(file_descriptor)
+        await process.close()
+
+
+@pytest.mark.asyncio
+async def test_mandatory_windows_containment_unavailable_fails_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    if sys.platform != "win32":
+        pytest.skip("Windows native containment test")
+
+    async def fail_launch(*args: object, **kwargs: object) -> None:
+        del args, kwargs
+        raise SandboxIsolationUnavailable("synthetic mandatory feature failure")
+
+    process = sandbox(tmp_path)
+    sandbox_any: Any = sandbox_module
+    with monkeypatch.context() as context:
+        context.setattr(sandbox_any.WindowsRestrictedLauncher, "launch", fail_launch)
+        with pytest.raises(SandboxIsolationUnavailable):
+            await process.start()
+    assert process.security_status is None
+    await process.close()
+
+
+@pytest.mark.asyncio
+async def test_appcontainer_boundary_is_explicit_and_observable(tmp_path: Path) -> None:
+    if sys.platform != "win32":
+        pytest.skip("Windows AppContainer test")
+    if not WindowsAppContainerLauncher.available():
+        pytest.skip("AppContainer APIs are unavailable on this host")
+    process = SandboxProcess(
+        Path(sys.base_prefix) / "python.exe",
+        ("-c", WORKER),
+        integration_id="test.integration",
+        parent_directory=tmp_path / "owned-sandboxes",
+        limits=SandboxLimits(
+            timeout_seconds=1,
+            windows_containment=WindowsContainmentMode.APPCONTAINER,
+            appcontainer_runtime_root=Path(sys.base_prefix),
+        ),
+    )
+    await process.start()
+    status = process.security_status
+    assert status is not None
+    assert status.mode is WindowsContainmentMode.APPCONTAINER
+    assert status.executable_isolation
+    assert status.appcontainer_profile
+    assert status.filesystem_acl_restricted
+    assert status.network_restricted
+    result = await process.request("inspect", {})
+    assert result["sandbox_marker"] == "1"
+    owned_file = process.paths.data / "owned.txt"
+    owned_write = await process.request("write-path", {"path": str(owned_file)})
+    assert owned_write["written"] is True
+    outside_file = tmp_path / "outside.txt"
+    outside_file.write_text("outside", encoding="utf-8")
+    outside_read = await process.request("read-path", {"path": str(outside_file)})
+    assert outside_read["read"] is None
+    assert outside_read["error"] in {"PermissionError", "OSError"}
+    trusted_source = Path(__file__).resolve().parents[1] / "jarvis" / "__init__.py"
+    trusted_read = await process.request("read-path", {"path": str(trusted_source)})
+    assert trusted_read["read"] is None
+    assert trusted_read["error"] in {"PermissionError", "OSError"}
+    outside_write = await process.request("write-path", {"path": str(tmp_path / "new.txt")})
+    assert outside_write["written"] is False
+    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    server.bind(("127.0.0.1", 0))
+    server.listen(1)
+    try:
+        network = await process.request(
+            "network-probe",
+            {"host": "127.0.0.1", "port": server.getsockname()[1]},
+        )
+        assert network["connected"] is False
+    finally:
+        server.close()
+    await process.close()
+
+
+@pytest.mark.asyncio
+async def test_appcontainer_unavailable_fails_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    if sys.platform != "win32":
+        pytest.skip("Windows AppContainer test")
+    if not WindowsAppContainerLauncher.available():
+        pytest.skip("AppContainer APIs are unavailable on this host")
+
+    async def fail_launch(*args: object, **kwargs: object) -> None:
+        del args, kwargs
+        raise SandboxIsolationUnavailable("synthetic AppContainer failure")
+
+    process = SandboxProcess(
+        Path(sys.base_prefix) / "python.exe",
+        ("-c", WORKER),
+        integration_id="test.integration",
+        parent_directory=tmp_path / "owned-sandboxes",
+        limits=SandboxLimits(
+            timeout_seconds=1,
+            windows_containment=WindowsContainmentMode.APPCONTAINER,
+            appcontainer_runtime_root=Path(sys.base_prefix),
+        ),
+    )
+    monkeypatch.setattr(WindowsAppContainerLauncher, "launch", fail_launch)
+    with pytest.raises(SandboxIsolationUnavailable):
+        await process.start()
+    assert process.security_status is None
+    await process.close()
+
+
+@pytest.mark.asyncio
+async def test_appcontainer_missing_runtime_root_fails_closed(tmp_path: Path) -> None:
+    if sys.platform != "win32":
+        pytest.skip("Windows AppContainer test")
+    process = SandboxProcess(
+        Path(sys.base_prefix) / "python.exe",
+        ("-c", WORKER),
+        integration_id="test.integration",
+        parent_directory=tmp_path / "owned-sandboxes",
+        limits=SandboxLimits(
+            timeout_seconds=1,
+            windows_containment=WindowsContainmentMode.APPCONTAINER,
+        ),
+    )
+    with pytest.raises(SandboxIsolationUnavailable, match="runtime root"):
+        await process.start()
+    assert process.security_status is None
+    await process.close()
+
+
+@pytest.mark.asyncio
+async def test_explicit_job_only_mode_is_observable_as_degraded(tmp_path: Path) -> None:
+    if sys.platform != "win32":
+        pytest.skip("Windows native containment test")
+    process = sandbox(
+        tmp_path,
+        limits=SandboxLimits(
+            timeout_seconds=1,
+            windows_containment=WindowsContainmentMode.JOB_OBJECT_ONLY,
+        ),
+    )
+    await process.start()
+    status = process.security_status
+    assert status is not None
+    assert status.mode is WindowsContainmentMode.JOB_OBJECT_ONLY
+    assert not status.token_restricted
+    assert status.detail.startswith("explicit degraded mode")
+    await process.close()
+
+
+@pytest.mark.asyncio
 async def test_sandbox_uses_governor_and_releases_on_close(tmp_path: Path) -> None:
     class Telemetry:
         def snapshot(self) -> ResourceSnapshot:
@@ -169,7 +399,10 @@ async def test_sandbox_uses_governor_and_releases_on_close(tmp_path: Path) -> No
         integration_id="test.integration",
         parent_directory=tmp_path / "owned-sandboxes",
         resource_governor=governor,
-        limits=SandboxLimits(timeout_seconds=1),
+        limits=SandboxLimits(
+            timeout_seconds=1,
+            windows_containment=WindowsContainmentMode.RESTRICTED_TOKEN,
+        ),
     )
     await process.start()
     assert process.is_running
@@ -179,7 +412,13 @@ async def test_sandbox_uses_governor_and_releases_on_close(tmp_path: Path) -> No
 
 @pytest.mark.asyncio
 async def test_identity_spoof_oversized_response_and_crash_are_contained(tmp_path: Path) -> None:
-    process = sandbox(tmp_path, limits=SandboxLimits(max_restarts=4))
+    process = sandbox(
+        tmp_path,
+        limits=SandboxLimits(
+            max_restarts=4,
+            windows_containment=WindowsContainmentMode.RESTRICTED_TOKEN,
+        ),
+    )
     await process.start()
     with pytest.raises(SandboxProtocolError):
         await process.request("spoof-request", {})
@@ -198,7 +437,14 @@ async def test_identity_spoof_oversized_response_and_crash_are_contained(tmp_pat
 
 @pytest.mark.asyncio
 async def test_timeout_cancellation_and_restart_bound(tmp_path: Path) -> None:
-    process = sandbox(tmp_path, limits=SandboxLimits(timeout_seconds=0.1, max_restarts=1))
+    process = sandbox(
+        tmp_path,
+        limits=SandboxLimits(
+            timeout_seconds=0.1,
+            max_restarts=1,
+            windows_containment=WindowsContainmentMode.RESTRICTED_TOKEN,
+        ),
+    )
     await process.start()
     with pytest.raises(SandboxTimeout):
         await process.request("hang", {})
@@ -235,6 +481,8 @@ def test_limits_and_paths_fail_closed(tmp_path: Path) -> None:
     assert SandboxLimits().native_resource_controls is (sys.platform == "win32")
     with pytest.raises(SandboxConfigurationError):
         SandboxLimits(max_processes=0)
+    with pytest.raises(SandboxConfigurationError):
+        SandboxLimits(windows_containment=cast(Any, "job_object_only"))
     with pytest.raises(SandboxConfigurationError):
         SandboxProcess(
             Path(sys.executable),
@@ -404,8 +652,12 @@ async def test_process_start_failure_and_malformed_response_are_contained(
 
     sandbox_any: Any = sandbox_module
     with monkeypatch.context() as context:
-        context.setattr(sandbox_any.asyncio, "create_subprocess_exec", fail_start)
-        with pytest.raises(SandboxProcessError):
+        expected_error: type[Exception] = SandboxProcessError
+        if sys.platform == "win32":
+            context.setattr(sandbox_any.WindowsRestrictedLauncher, "launch", fail_start)
+        else:
+            context.setattr(sandbox_any.asyncio, "create_subprocess_exec", fail_start)
+        with pytest.raises(expected_error):
             await process.start()
 
     process = sandbox(tmp_path)

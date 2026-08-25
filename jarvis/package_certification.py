@@ -26,6 +26,11 @@ from jarvis.package_reviewer import (
 )
 from jarvis.permissions.models import Permission
 from jarvis.tools.models import SemanticVersion
+from jarvis.ui_simulation import (
+    UISimulationAttestation,
+    UISimulationAttestationStatus,
+)
+from jarvis.windows_sandbox import SandboxSecurityStatus
 
 
 class CertificationError(RuntimeError):
@@ -118,6 +123,7 @@ class CertificationRequest:
     review_policy: PackageReviewPolicy = _DEFAULT_REVIEW_POLICY
     ui_simulation_harness_available: bool = False
     ui_simulation_evidence: tuple[str, ...] = ()
+    sandbox_security_status: SandboxSecurityStatus | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.package, IntegrationPackage):
@@ -132,6 +138,10 @@ class CertificationRequest:
         if type(self.ui_simulation_harness_available) is not bool:
             raise CertificationValidationError("UI simulation harness flag is malformed")
         _labels(self.ui_simulation_evidence, "UI simulation evidence", 64, 2_000)
+        if self.sandbox_security_status is not None and not isinstance(
+            self.sandbox_security_status, SandboxSecurityStatus
+        ):
+            raise CertificationValidationError("Sandbox security status is malformed")
 
 
 StageHook = Callable[[IntegrationPackage], CertificationStageResult]
@@ -149,6 +159,7 @@ class CertificationHooks:
     install: StageHook
     healthcheck: StageHook
     verification: StageHook
+    ui_simulation: Callable[[IntegrationPackage, str], UISimulationAttestation] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -174,6 +185,8 @@ class CertificationRecord:
     expected_behavior_baseline: tuple[str, ...]
     stages: tuple[CertificationStageEvidence, ...]
     certified_at: datetime
+    ui_simulation_attestation_ref: str | None = None
+    ui_simulation_attestation_digest: str | None = None
 
     def __post_init__(self) -> None:
         _text(self.package_id, "Certification package ID", 128)
@@ -211,6 +224,16 @@ class CertificationRecord:
             raise CertificationValidationError("Certification record contains a failed stage")
         if self.certified_at.tzinfo is None:
             raise CertificationValidationError("Certification timestamp must be timezone-aware")
+        if (self.ui_simulation_attestation_ref is None) != (
+            self.ui_simulation_attestation_digest is None
+        ):
+            raise CertificationValidationError("UI simulation attestation binding is incomplete")
+        if self.ui_simulation_attestation_ref is not None:
+            _text(self.ui_simulation_attestation_ref, "UI simulation attestation reference", 512)
+            _validate_digest(
+                self.ui_simulation_attestation_digest,
+                "UI simulation attestation digest",
+            )
 
     def matches(
         self,
@@ -257,9 +280,13 @@ class PackageCertifier:
         reviewer: GeneratedPackageReviewer | None = None,
         *,
         clock: Callable[[], datetime] | None = None,
+        require_executable_isolation: bool = False,
     ) -> None:
         self._reviewer = reviewer or GeneratedPackageReviewer()
         self._clock = clock or (lambda: datetime.now(UTC))
+        if type(require_executable_isolation) is not bool:
+            raise CertificationValidationError("Executable isolation policy is malformed")
+        self._require_executable_isolation = require_executable_isolation
 
     def certify(
         self,
@@ -291,6 +318,18 @@ class PackageCertifier:
             evidence,
         )
         self._run_hook(CertificationStage.UNIT_TESTS, hooks.unit_tests, package, evidence)
+        if self._require_executable_isolation and package.requires_executable_isolation:
+            status = request.sandbox_security_status
+            if status is None or not status.executable_isolation:
+                self._record_or_fail(
+                    CertificationStage.SANDBOX_INTEGRATION_TEST,
+                    False,
+                    (
+                        "Executable package requires a trusted capability-free "
+                        "Windows AppContainer launch with scoped ACLs and Job Object",
+                    ),
+                    evidence,
+                )
         self._run_hook(
             CertificationStage.SANDBOX_INTEGRATION_TEST,
             hooks.sandbox_integration_test,
@@ -329,21 +368,12 @@ class PackageCertifier:
             package,
             evidence,
         )
-        if package.ui_assets or package.profiles:
-            if not request.ui_simulation_harness_available:
-                self._record_or_fail(
-                    CertificationStage.VERIFICATION,
-                    False,
-                    ("UI-bearing package requires the native simulation harness",),
-                    evidence,
-                )
-            if not request.ui_simulation_evidence:
-                self._record_or_fail(
-                    CertificationStage.VERIFICATION,
-                    False,
-                    ("UI-bearing package lacks required simulation-harness evidence",),
-                    evidence,
-                )
+        ui_attestation = self._run_ui_simulation(
+            request, hooks, package, built.source_files, evidence
+        )
+        verification_evidence = verification.verification
+        if ui_attestation is not None:
+            verification_evidence += ui_attestation.certification_strings()
         final = CertificationStageEvidence(
             CertificationStage.CERTIFIED,
             True,
@@ -351,25 +381,99 @@ class PackageCertifier:
             self._clock(),
         )
         evidence.append(final)
-        return CertificationRecord(
-            package.package_id,
-            package.version,
-            package.package_hash,
-            *package_fingerprints(package, built.source_files),
-            (evidence[2], evidence[3]),
-            (evidence[1],),
-            package.permissions,
-            authority.approval_ref,
-            request.environment_compatibility,
-            health.health,
-            verification.verification + request.ui_simulation_evidence,
-            request.rollback_target,
-            authority.shadow_eligible,
-            authority.canary_eligible,
-            request.expected_behavior_baseline,
-            tuple(evidence),
-            self._clock(),
+        source_hash, dependency_hash, manifest_hash = package_fingerprints(
+            package, built.source_files
         )
+        return CertificationRecord(
+            package_id=package.package_id,
+            version=package.version,
+            package_hash=package.package_hash,
+            source_hash=source_hash,
+            dependency_hash=dependency_hash,
+            manifest_hash=manifest_hash,
+            test_evidence=(evidence[2], evidence[3]),
+            audit=(evidence[1],),
+            permissions=package.permissions,
+            approval_ref=authority.approval_ref,
+            environment_compatibility=request.environment_compatibility,
+            health=health.health,
+            verification=verification_evidence,
+            rollback_target=request.rollback_target,
+            shadow_eligible=authority.shadow_eligible,
+            canary_eligible=authority.canary_eligible,
+            expected_behavior_baseline=request.expected_behavior_baseline,
+            stages=tuple(evidence),
+            certified_at=self._clock(),
+            ui_simulation_attestation_ref=(
+                ui_attestation.certification_reference() if ui_attestation is not None else None
+            ),
+            ui_simulation_attestation_digest=(
+                ui_attestation.attestation_digest if ui_attestation is not None else None
+            ),
+        )
+
+    def _run_ui_simulation(
+        self,
+        request: CertificationRequest,
+        hooks: CertificationHooks,
+        package: IntegrationPackage,
+        source_files: tuple[PackageSourceFile, ...],
+        evidence: list[CertificationStageEvidence],
+    ) -> UISimulationAttestation | None:
+        """Require fresh trusted harness evidence for data-bearing UI packages."""
+
+        if not (package.ui_assets or package.profiles):
+            return None
+        if not package.ui_manifest_hash:
+            self._record_or_fail(
+                CertificationStage.VERIFICATION,
+                False,
+                ("UI-bearing package lacks a validated UI manifest hash",),
+                evidence,
+            )
+            raise CertificationError("UI manifest binding did not terminate")
+        if hooks.ui_simulation is None:
+            self._record_or_fail(
+                CertificationStage.VERIFICATION,
+                False,
+                ("UI-bearing package requires a trusted simulation-harness attestation",),
+                evidence,
+            )
+            raise CertificationError("UI simulation hook is unavailable")
+        source_hash, _, _ = package_fingerprints(package, source_files)
+        simulation_hook = hooks.ui_simulation
+        if simulation_hook is None:
+            raise CertificationError("UI simulation hook is unavailable")
+        try:
+            attestation = simulation_hook(package, source_hash)
+            if not isinstance(attestation, UISimulationAttestation):
+                raise CertificationValidationError("UI simulation hook returned malformed evidence")
+            if not attestation.valid_for(package, source_hash):
+                raise CertificationValidationError(
+                    "UI simulation attestation is stale, failed, or not package-bound"
+                )
+            if attestation.result not in {
+                UISimulationAttestationStatus.PASS,
+                UISimulationAttestationStatus.PASS_WITH_RESTRICTIONS,
+            }:
+                raise CertificationValidationError("UI simulation attestation did not pass")
+        except Exception as error:
+            self._record_or_fail(
+                CertificationStage.VERIFICATION,
+                False,
+                (f"UI simulation attestation rejected: {type(error).__name__}",),
+                evidence,
+            )
+            raise CertificationError("UI simulation stage did not terminate") from None
+        if not evidence or evidence[-1].stage is not CertificationStage.VERIFICATION:
+            raise CertificationValidationError("UI evidence is not attached to verification")
+        evidence[-1] = CertificationStageEvidence(
+            CertificationStage.VERIFICATION,
+            True,
+            evidence[-1].evidence + attestation.certification_strings(),
+            evidence[-1].recorded_at,
+        )
+        return attestation
 
     def _run_build(
         self,

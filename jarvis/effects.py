@@ -13,17 +13,22 @@ import hashlib
 import json
 import logging
 import math
+import sqlite3
 from collections.abc import Awaitable, Callable, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from enum import StrEnum
+from pathlib import Path
 from types import MappingProxyType
-from typing import Final, Protocol, cast
+from typing import Any, Final, Protocol, cast
 from uuid import UUID, uuid4
 
 from jarvis.capabilities import Reversibility
 from jarvis.permissions.models import Permission, PermissionRequest, PermissionScope
 from jarvis.planning.editing import PlanInspection
+from jarvis.planning.engine import PlanningEngine
+from jarvis.planning.models import ExecutionBudgets, PlanningTask, PlanningTaskStatus
+from jarvis.planning.validation import PlanProposal
 from jarvis.tools.models import (
     ToolCaller,
     ToolEffectDisposition,
@@ -53,6 +58,19 @@ class CompensationStatus(StrEnum):
     VERIFICATION_FAILED = "verification_failed"
     UNKNOWN_OUTCOME = "unknown_outcome"
     NOT_AVAILABLE = "not_available"
+
+
+class CompensationLifecycle(StrEnum):
+    """Durable orchestration state; it is not a second execution engine."""
+
+    REQUESTED = "requested"
+    EXECUTING = "executing"
+    WAITING_FOR_APPROVAL = "waiting_for_approval"
+    COMPENSATION_EXECUTED = "compensation_executed"
+    COMPENSATION_VERIFIED = "compensation_verified"
+    COMPENSATION_FAILED = "compensation_failed"
+    COMPENSATION_UNKNOWN = "compensation_unknown"
+    COMPENSATION_STALE = "compensation_stale"
 
 
 _MAX_TEXT: Final = 2_000
@@ -258,6 +276,78 @@ class EffectPreview:
 
 
 @dataclass(frozen=True, slots=True)
+class OriginalEffectReference:
+    """Trusted references to one completed canonical planning step."""
+
+    effect_id: UUID
+    effect_fingerprint: str
+    task_id: UUID
+    plan_id: UUID
+    plan_revision: int
+    step_id: UUID
+    tool_id: str
+    capability: str
+    target: str
+    scope: str
+    evidence_references: tuple[str, ...]
+    verification_reference: str
+    effect_attestation_reference: str | None = None
+
+    def __post_init__(self) -> None:
+        for value, name in (
+            (self.effect_id, "Original effect ID"),
+            (self.task_id, "Original task ID"),
+            (self.plan_id, "Original plan ID"),
+            (self.step_id, "Original step ID"),
+        ):
+            if not isinstance(value, UUID):
+                raise EffectError(f"{name} is malformed")
+        _hash(self.effect_fingerprint, "Original effect fingerprint")
+        if type(self.plan_revision) is not int or self.plan_revision <= 0:
+            raise EffectError("Original plan revision is malformed")
+        for text_value, name in (
+            (self.tool_id, "Original tool ID"),
+            (self.capability, "Original capability"),
+            (self.target, "Original target"),
+            (self.scope, "Original scope"),
+            (self.verification_reference, "Original verification reference"),
+        ):
+            _text(text_value, name, 1_000)
+        if (
+            not isinstance(self.evidence_references, tuple)
+            or not self.evidence_references
+            or len(self.evidence_references) > _MAX_ITEMS
+            or any(
+                type(item) is not str or not item.strip() or len(item) > 1_000
+                for item in self.evidence_references
+            )
+        ):
+            raise EffectError("Original effect evidence references are malformed")
+        if self.effect_attestation_reference is not None:
+            _text(self.effect_attestation_reference, "Effect attestation reference", 512)
+
+    @property
+    def fingerprint(self) -> str:
+        return _fingerprint(
+            {
+                "effect_id": str(self.effect_id),
+                "effect_fingerprint": self.effect_fingerprint,
+                "task_id": str(self.task_id),
+                "plan_id": str(self.plan_id),
+                "plan_revision": self.plan_revision,
+                "step_id": str(self.step_id),
+                "tool_id": self.tool_id,
+                "capability": self.capability,
+                "target": self.target,
+                "scope": self.scope,
+                "evidence_references": self.evidence_references,
+                "verification_reference": self.verification_reference,
+                "effect_attestation_reference": self.effect_attestation_reference,
+            }
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class CompensationRequest:
     """One user/application request to perform an exact compensation."""
 
@@ -268,6 +358,7 @@ class CompensationRequest:
     current_state_fingerprint: str
     prior_state: Mapping[str, object] | None = None
     evidence: tuple[EvidenceRecord, ...] = ()
+    original_effect: OriginalEffectReference | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.request_id, UUID) or not isinstance(self.task_id, UUID):
@@ -292,6 +383,26 @@ class CompensationRequest:
             not isinstance(item, EvidenceRecord) for item in self.evidence
         ):
             raise EffectError("Compensation evidence is malformed or unbounded")
+        if self.original_effect is not None and not isinstance(
+            self.original_effect, OriginalEffectReference
+        ):
+            raise EffectError("Original effect reference is malformed")
+
+    @property
+    def fingerprint(self) -> str:
+        return _fingerprint(
+            {
+                "request_id": str(self.request_id),
+                "task_id": str(self.task_id),
+                "correlation_id": str(self.correlation_id),
+                "effect": self.effect.fingerprint,
+                "current_state_fingerprint": self.current_state_fingerprint,
+                "prior_state": self.prior_state,
+                "original_effect": (
+                    self.original_effect.fingerprint if self.original_effect is not None else None
+                ),
+            }
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -303,6 +414,8 @@ class CompensationResult:
     verification: VerificationResult | None = None
     approval_request_ids: tuple[UUID, ...] = ()
     trace_event_ids: tuple[UUID, ...] = ()
+    planning_task_id: UUID | None = None
+    lifecycle: CompensationLifecycle | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.request_id, UUID) or not isinstance(self.status, CompensationStatus):
@@ -316,6 +429,10 @@ class CompensationResult:
             not isinstance(item, UUID) for item in self.trace_event_ids
         ):
             raise EffectError("Compensation trace IDs are malformed")
+        if self.planning_task_id is not None and not isinstance(self.planning_task_id, UUID):
+            raise EffectError("Compensation planning task ID is malformed")
+        if self.lifecycle is not None and not isinstance(self.lifecycle, CompensationLifecycle):
+            raise EffectError("Compensation lifecycle is malformed")
 
 
 @dataclass(frozen=True, slots=True)
@@ -371,6 +488,529 @@ class PlanStudioEffectProjection:
             for step in inspection.steps
             if step.key in previews
         )
+
+
+@dataclass(frozen=True, slots=True)
+class CompensationRecord:
+    """Durable metadata for one compensation request and its planning task."""
+
+    request_id: UUID
+    request_fingerprint: str
+    original_effect: OriginalEffectReference
+    planning_task_id: UUID
+    lifecycle: CompensationLifecycle
+    status: CompensationStatus
+    detail: str
+    approval_request_ids: tuple[UUID, ...] = ()
+    trace_event_ids: tuple[UUID, ...] = ()
+    updated_at: datetime = field(default_factory=lambda: datetime.now(UTC))
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.request_id, UUID) or not isinstance(self.planning_task_id, UUID):
+            raise EffectError("Compensation record IDs are malformed")
+        _hash(self.request_fingerprint, "Compensation request fingerprint")
+        if not isinstance(self.original_effect, OriginalEffectReference):
+            raise EffectError("Compensation record effect reference is malformed")
+        if not isinstance(self.lifecycle, CompensationLifecycle) or not isinstance(
+            self.status, CompensationStatus
+        ):
+            raise EffectError("Compensation record state is malformed")
+        _text(self.detail, "Compensation record detail", 2_000)
+        if len(self.approval_request_ids) > _MAX_ITEMS or any(
+            not isinstance(item, UUID) for item in self.approval_request_ids
+        ):
+            raise EffectError("Compensation record approval IDs are malformed")
+        if len(self.trace_event_ids) > _MAX_ITEMS or any(
+            not isinstance(item, UUID) for item in self.trace_event_ids
+        ):
+            raise EffectError("Compensation record trace IDs are malformed")
+        if self.updated_at.tzinfo is None:
+            raise EffectError("Compensation record timestamp must be timezone-aware")
+
+
+class CompensationStore:
+    """Sole durable owner for compensation lifecycle metadata."""
+
+    _SCHEMA = 1
+
+    def __init__(self, path: Path) -> None:
+        if not isinstance(path, Path):
+            raise EffectError("Compensation database path is malformed")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        self._connection = sqlite3.connect(path, timeout=5.0, check_same_thread=False)
+        self._connection.execute("PRAGMA foreign_keys = ON")
+        self._connection.execute("PRAGMA busy_timeout = 5000")
+        self._connection.execute("PRAGMA journal_mode = WAL")
+        self._connection.execute(
+            "CREATE TABLE IF NOT EXISTS compensation_schema "
+            "(version INTEGER PRIMARY KEY, name TEXT NOT NULL)"
+        )
+        versions = tuple(
+            int(row[0])
+            for row in self._connection.execute("SELECT version FROM compensation_schema")
+        )
+        if any(version > self._SCHEMA for version in versions):
+            self.close()
+            raise EffectError("Compensation database uses a future schema")
+        self._connection.execute(
+            "CREATE TABLE IF NOT EXISTS compensation_records "
+            "(request_id TEXT PRIMARY KEY, request_fingerprint TEXT NOT NULL, "
+            "record_json TEXT NOT NULL, updated_at TEXT NOT NULL)"
+        )
+        if not versions:
+            self._connection.execute(
+                "INSERT INTO compensation_schema(version, name) VALUES (?, ?)",
+                (self._SCHEMA, "create_compensation_records"),
+            )
+        self._connection.commit()
+
+    @property
+    def database_path(self) -> Path:
+        return Path(str(self._connection.execute("PRAGMA database_list").fetchone()[2]))
+
+    def close(self) -> None:
+        self._connection.close()
+
+    def load(self, request_id: UUID) -> CompensationRecord | None:
+        if not isinstance(request_id, UUID):
+            raise EffectError("Compensation request ID is malformed")
+        row = self._connection.execute(
+            "SELECT record_json FROM compensation_records WHERE request_id=?", (str(request_id),)
+        ).fetchone()
+        if row is None:
+            return None
+        return _compensation_record_from_json(json.loads(str(row[0])))
+
+    def save(self, record: CompensationRecord) -> None:
+        if not isinstance(record, CompensationRecord):
+            raise EffectError("Compensation record is malformed")
+        payload = json.dumps(
+            _compensation_record_to_json(record), sort_keys=True, separators=(",", ":")
+        )
+        if len(payload.encode()) > _MAX_STATE_BYTES:
+            raise EffectError("Compensation record is too large")
+        existing = self.load(record.request_id)
+        if existing is not None and existing.request_fingerprint != record.request_fingerprint:
+            raise EffectError("Compensation request fingerprint cannot be rebound")
+        self._connection.execute(
+            "INSERT OR REPLACE INTO compensation_records "
+            "(request_id, request_fingerprint, record_json, updated_at) VALUES (?, ?, ?, ?)",
+            (
+                str(record.request_id),
+                record.request_fingerprint,
+                payload,
+                record.updated_at.isoformat(),
+            ),
+        )
+        self._connection.commit()
+
+
+CompensationObservationProvider = Callable[
+    [CompensationRequest, PlanningTask], Awaitable[tuple[EvidenceRecord, ...]]
+]
+CompensationStateProvider = Callable[[CompensationRequest], str]
+
+
+class CompensationService:
+    """Application-owned compensation orchestration over PlanningEngine."""
+
+    def __init__(
+        self,
+        planning: PlanningEngine,
+        registry: ToolRegistry,
+        verification: VerificationEngine,
+        store: CompensationStore,
+        *,
+        observation_provider: CompensationObservationProvider | None = None,
+        state_provider: CompensationStateProvider | None = None,
+        trace: object | None = None,
+        clock: Callable[[], datetime] | None = None,
+    ) -> None:
+        if not isinstance(planning, PlanningEngine) or not isinstance(registry, ToolRegistry):
+            raise EffectError("Compensation service requires canonical planning and tools")
+        if not isinstance(verification, VerificationEngine) or not isinstance(
+            store, CompensationStore
+        ):
+            raise EffectError("Compensation service dependencies are malformed")
+        self._planning = planning
+        self._registry = registry
+        self._verification = verification
+        self._store = store
+        self._observation_provider = observation_provider
+        self._state_provider = state_provider
+        self._trace = trace
+        self._clock = clock or (lambda: datetime.now(UTC))
+
+    def close(self) -> None:
+        """Close the authoritative compensation store exactly once."""
+
+        self._store.close()
+
+    def bind_original_effect(
+        self,
+        effect: EffectPreview,
+        *,
+        task_id: UUID,
+        plan_revision: int,
+        step_id: UUID,
+        target: str,
+        scope: str,
+        effect_attestation_reference: str | None = None,
+    ) -> OriginalEffectReference:
+        """Derive a binding only from a completed canonical planning step."""
+
+        if not isinstance(effect, EffectPreview) or not effect.can_offer_undo:
+            raise EffectError("Only real reversible or compensatable effects can be bound")
+        task = self._planning.get_task(task_id)
+        plan = self._planning.inspect_plan(task_id)
+        if task is None or plan is None or task.status is not PlanningTaskStatus.COMPLETED:
+            raise EffectError("Original effect has no completed canonical task")
+        if plan.version != plan_revision:
+            raise EffectError("Original effect plan revision is stale")
+        step = next((item for item in plan.steps if item.step_id == step_id), None)
+        if step is None or step.status.value != "succeeded" or step.result is None:
+            raise EffectError("Original effect step is not a verified success")
+        if not step.result.evidence:
+            raise EffectError("Original effect has no trusted evidence")
+        compensation = effect.compensation
+        if compensation is None or (
+            compensation.tool_id != step.tool_id or compensation.capability != step.capability
+        ):
+            raise EffectError(
+                "Compensation must use the exact capability/tool that produced the effect"
+            )
+        return OriginalEffectReference(
+            effect.effect_id,
+            effect.fingerprint,
+            task_id,
+            plan.plan_id,
+            plan_revision,
+            step_id,
+            step.tool_id,
+            step.capability,
+            target,
+            scope,
+            step.result.evidence,
+            f"planning-step:{task_id}:{step_id}:verified",
+            effect_attestation_reference,
+        )
+
+    async def compensate(
+        self,
+        request: CompensationRequest,
+        *,
+        cancellation: asyncio.Event | None = None,
+    ) -> CompensationResult:
+        if not isinstance(request, CompensationRequest) or request.original_effect is None:
+            raise EffectError("Compensation requires a trusted original effect reference")
+        effect = request.effect
+        original = request.original_effect
+        if (
+            original.effect_id != effect.effect_id
+            or original.effect_fingerprint != effect.fingerprint
+        ):
+            return await self._finish(
+                request,
+                CompensationLifecycle.COMPENSATION_STALE,
+                CompensationStatus.STALE_STATE,
+                "Compensation binding does not match the effect",
+            )
+        if original.task_id != request.task_id:
+            return await self._finish(
+                request,
+                CompensationLifecycle.COMPENSATION_STALE,
+                CompensationStatus.STALE_STATE,
+                "Compensation task binding is invalid",
+            )
+        if not effect.can_offer_undo or effect.compensation is None:
+            return await self._finish(
+                request,
+                CompensationLifecycle.COMPENSATION_FAILED,
+                CompensationStatus.NOT_AVAILABLE,
+                "No real compensation is available",
+            )
+        existing = self._store.load(request.request_id)
+        if existing is not None:
+            if existing.request_fingerprint != request.fingerprint:
+                return await self._finish(
+                    request,
+                    CompensationLifecycle.COMPENSATION_STALE,
+                    CompensationStatus.STALE_STATE,
+                    "Compensation request fingerprint changed",
+                )
+            if existing.lifecycle in {
+                CompensationLifecycle.COMPENSATION_UNKNOWN,
+                CompensationLifecycle.COMPENSATION_STALE,
+            }:
+                return self._result_from_record(existing)
+            if existing.lifecycle in {
+                CompensationLifecycle.COMPENSATION_VERIFIED,
+                CompensationLifecycle.COMPENSATION_FAILED,
+            }:
+                return self._result_from_record(existing)
+        if self._state_provider is None:
+            return await self._finish(
+                request,
+                CompensationLifecycle.COMPENSATION_STALE,
+                CompensationStatus.STALE_STATE,
+                "No trusted state observer is configured",
+            )
+        try:
+            current = self._state_provider(request)
+        except Exception:
+            return await self._finish(
+                request,
+                CompensationLifecycle.COMPENSATION_STALE,
+                CompensationStatus.STALE_STATE,
+                "Current state could not be revalidated",
+            )
+        if current != request.current_state_fingerprint or current != effect.base_state_fingerprint:
+            return await self._finish(
+                request,
+                CompensationLifecycle.COMPENSATION_STALE,
+                CompensationStatus.STALE_STATE,
+                "Current state no longer matches the compensation baseline",
+            )
+        if existing is not None:
+            planning_task_id = existing.planning_task_id
+        else:
+            planning_task_id = uuid4()
+            existing = CompensationRecord(
+                request.request_id,
+                request.fingerprint,
+                original,
+                planning_task_id,
+                CompensationLifecycle.REQUESTED,
+                CompensationStatus.NOT_AVAILABLE,
+                "Compensation request accepted",
+                updated_at=self._clock(),
+            )
+            self._store.save(existing)
+        task = self._planning.get_task(planning_task_id)
+        if task is None:
+            proposal = self._proposal(request)
+            task = await self._planning.create_proposal_task(
+                proposal,
+                budgets=ExecutionBudgets(
+                    max_steps=1,
+                    max_model_calls=0,
+                    max_expensive_actions=1,
+                    max_retries=0,
+                ),
+                provenance=("compensation.service", original.verification_reference),
+            )
+            if task.task_id != planning_task_id:
+                planning_task_id = task.task_id
+                existing = replace(existing, planning_task_id=planning_task_id)
+                self._store.save(existing)
+        if self._trace is not None:
+            try:
+                cast(Any, self._trace).bind_goal_task(original.task_id, task.task_id)
+            except Exception:
+                # Trace is a derived projection; compensation safety must not
+                # depend on its availability.
+                pass
+        if task.status is PlanningTaskStatus.RECOVERING:
+            return await self._finish(
+                request,
+                CompensationLifecycle.COMPENSATION_UNKNOWN,
+                CompensationStatus.UNKNOWN_OUTCOME,
+                "Compensation task has an unknown outcome and cannot be replayed",
+                planning_task_id=task.task_id,
+                persist_existing=existing,
+            )
+        if task.status not in {
+            PlanningTaskStatus.COMPLETED,
+            PlanningTaskStatus.FAILED,
+            PlanningTaskStatus.CANCELLED,
+            PlanningTaskStatus.BUDGET_EXHAUSTED,
+        }:
+            task = (
+                await self._planning.resume(task.task_id)
+                if task.status is PlanningTaskStatus.WAITING_FOR_PERMISSION
+                else await self._planning.run(task.task_id)
+            )
+        if task.status is PlanningTaskStatus.WAITING_FOR_PERMISSION:
+            return await self._finish(
+                request,
+                CompensationLifecycle.WAITING_FOR_APPROVAL,
+                CompensationStatus.PERMISSION_REQUIRED,
+                "Fresh permission is required for the compensating action",
+                planning_task_id=task.task_id,
+                approval_request_ids=task.waiting_request_ids,
+                persist_existing=existing,
+            )
+        if task.status is PlanningTaskStatus.RECOVERING:
+            return await self._finish(
+                request,
+                CompensationLifecycle.COMPENSATION_UNKNOWN,
+                CompensationStatus.UNKNOWN_OUTCOME,
+                "Compensation execution outcome is unknown",
+                planning_task_id=task.task_id,
+                persist_existing=existing,
+            )
+        if task.status is not PlanningTaskStatus.COMPLETED:
+            return await self._finish(
+                request,
+                CompensationLifecycle.COMPENSATION_FAILED,
+                CompensationStatus.FAILED,
+                "Compensation plan did not complete",
+                planning_task_id=task.task_id,
+                persist_existing=existing,
+            )
+        if self._observation_provider is None:
+            return await self._finish(
+                request,
+                CompensationLifecycle.COMPENSATION_EXECUTED,
+                CompensationStatus.VERIFICATION_FAILED,
+                "Independent compensation observation is unavailable",
+                planning_task_id=task.task_id,
+                persist_existing=existing,
+            )
+        try:
+            evidence = await self._observation_provider(request, task)
+        except Exception:
+            return await self._finish(
+                request,
+                CompensationLifecycle.COMPENSATION_UNKNOWN,
+                CompensationStatus.UNKNOWN_OUTCOME,
+                "Compensation verification observation is unavailable",
+                planning_task_id=task.task_id,
+                persist_existing=existing,
+            )
+        verification = self._verification.evaluate(
+            effect.compensation.verification, evidence, now=self._clock()
+        )
+        if verification.passed:
+            return await self._finish(
+                request,
+                CompensationLifecycle.COMPENSATION_VERIFIED,
+                CompensationStatus.VERIFIED,
+                "Compensation effect was independently verified",
+                verification=verification,
+                planning_task_id=task.task_id,
+                persist_existing=existing,
+            )
+        return await self._finish(
+            request,
+            CompensationLifecycle.COMPENSATION_EXECUTED,
+            CompensationStatus.VERIFICATION_FAILED,
+            "Compensation executed but its requested outcome was not proven",
+            verification=verification,
+            planning_task_id=task.task_id,
+            persist_existing=existing,
+        )
+
+    def _proposal(self, request: CompensationRequest) -> PlanProposal:
+        definition = request.effect.compensation
+        if definition is None:
+            raise EffectError("Compensation definition is unavailable")
+        record = self._registry.inspect(definition.tool_id)
+        criteria = list(definition.verification.criteria)
+        if not criteria:
+            raise EffectError("Compensation verification criteria are required")
+        permissions = sorted(
+            permission.value for permission in record.manifest.declared_permissions
+        )
+        return PlanProposal.model_validate(
+            {
+                "goal": f"compensate effect {request.effect.effect_id}",
+                "assumptions": ["trusted original effect binding is valid"],
+                "constraints": ["do not replay unknown outcomes"],
+                "required_capabilities": [definition.capability],
+                "required_permissions": permissions,
+                "completion_criteria": criteria,
+                "steps": [
+                    {
+                        "key": "compensate",
+                        "tool_id": definition.tool_id,
+                        "capability": definition.capability,
+                        "input": dict(definition.arguments),
+                        "dependencies": [],
+                        "required_permissions": permissions,
+                        "expected_output": "compensation result",
+                        "verification_rule": "evidence_contains_all",
+                        "expected_evidence": criteria,
+                        "expensive_action": bool(record.manifest.declared_permissions),
+                        "max_retries": 0,
+                    }
+                ],
+            }
+        )
+
+    async def _finish(
+        self,
+        request: CompensationRequest,
+        lifecycle: CompensationLifecycle,
+        status: CompensationStatus,
+        detail: str,
+        *,
+        verification: VerificationResult | None = None,
+        planning_task_id: UUID | None = None,
+        approval_request_ids: tuple[UUID, ...] = (),
+        persist_existing: CompensationRecord | None = None,
+    ) -> CompensationResult:
+        trace_ids = self._trace_event(request, status, lifecycle)
+        existing = persist_existing or self._store.load(request.request_id)
+        if existing is not None:
+            record = replace(
+                existing,
+                lifecycle=lifecycle,
+                status=status,
+                detail=detail,
+                approval_request_ids=approval_request_ids,
+                trace_event_ids=existing.trace_event_ids + trace_ids,
+                updated_at=self._clock(),
+            )
+            self._store.save(record)
+            planning_task_id = record.planning_task_id
+        return CompensationResult(
+            request.request_id,
+            status,
+            detail,
+            verification=verification,
+            approval_request_ids=approval_request_ids,
+            trace_event_ids=trace_ids,
+            planning_task_id=planning_task_id,
+            lifecycle=lifecycle,
+        )
+
+    def _result_from_record(self, record: CompensationRecord) -> CompensationResult:
+        return CompensationResult(
+            record.request_id,
+            record.status,
+            record.detail,
+            approval_request_ids=record.approval_request_ids,
+            trace_event_ids=record.trace_event_ids,
+            planning_task_id=record.planning_task_id,
+            lifecycle=record.lifecycle,
+        )
+
+    def _trace_event(
+        self,
+        request: CompensationRequest,
+        status: CompensationStatus,
+        lifecycle: CompensationLifecycle,
+    ) -> tuple[UUID, ...]:
+        if self._trace is None:
+            return ()
+        try:
+            from jarvis.trace import TraceEventType
+
+            event = cast(Any, self._trace).record(
+                TraceEventType.RESULT,
+                f"Compensation {lifecycle.value}",
+                task_id=request.task_id,
+                correlation_id=request.correlation_id,
+                result={
+                    "compensation_request_id": str(request.request_id),
+                    "status": status.value,
+                    "lifecycle": lifecycle.value,
+                },
+            )
+            return (event.event_id,)
+        except Exception:
+            return ()
 
 
 EffectObservationProvider = Callable[
@@ -586,16 +1226,104 @@ def _is_uuid(value: str) -> bool:
     return True
 
 
+def _original_effect_to_json(value: OriginalEffectReference) -> dict[str, object]:
+    return {
+        "effect_id": str(value.effect_id),
+        "effect_fingerprint": value.effect_fingerprint,
+        "task_id": str(value.task_id),
+        "plan_id": str(value.plan_id),
+        "plan_revision": value.plan_revision,
+        "step_id": str(value.step_id),
+        "tool_id": value.tool_id,
+        "capability": value.capability,
+        "target": value.target,
+        "scope": value.scope,
+        "evidence_references": value.evidence_references,
+        "verification_reference": value.verification_reference,
+        "effect_attestation_reference": value.effect_attestation_reference,
+    }
+
+
+def _original_effect_from_json(value: object) -> OriginalEffectReference:
+    if not isinstance(value, Mapping):
+        raise EffectError("Persisted original effect reference is malformed")
+    try:
+        return OriginalEffectReference(
+            UUID(str(value["effect_id"])),
+            str(value["effect_fingerprint"]),
+            UUID(str(value["task_id"])),
+            UUID(str(value["plan_id"])),
+            int(value["plan_revision"]),
+            UUID(str(value["step_id"])),
+            str(value["tool_id"]),
+            str(value["capability"]),
+            str(value["target"]),
+            str(value["scope"]),
+            tuple(str(item) for item in cast(Sequence[object], value["evidence_references"])),
+            str(value["verification_reference"]),
+            str(value["effect_attestation_reference"])
+            if value.get("effect_attestation_reference") is not None
+            else None,
+        )
+    except (KeyError, TypeError, ValueError) as error:
+        raise EffectError("Persisted original effect reference is malformed") from error
+
+
+def _compensation_record_to_json(value: CompensationRecord) -> dict[str, object]:
+    return {
+        "request_id": str(value.request_id),
+        "request_fingerprint": value.request_fingerprint,
+        "original_effect": _original_effect_to_json(value.original_effect),
+        "planning_task_id": str(value.planning_task_id),
+        "lifecycle": value.lifecycle.value,
+        "status": value.status.value,
+        "detail": value.detail,
+        "approval_request_ids": [str(item) for item in value.approval_request_ids],
+        "trace_event_ids": [str(item) for item in value.trace_event_ids],
+        "updated_at": value.updated_at.isoformat(),
+    }
+
+
+def _compensation_record_from_json(value: object) -> CompensationRecord:
+    if not isinstance(value, Mapping):
+        raise EffectError("Persisted compensation record is malformed")
+    try:
+        return CompensationRecord(
+            UUID(str(value["request_id"])),
+            str(value["request_fingerprint"]),
+            _original_effect_from_json(value["original_effect"]),
+            UUID(str(value["planning_task_id"])),
+            CompensationLifecycle(str(value["lifecycle"])),
+            CompensationStatus(str(value["status"])),
+            str(value["detail"]),
+            tuple(
+                UUID(str(item))
+                for item in cast(Sequence[object], value.get("approval_request_ids", ()))
+            ),
+            tuple(
+                UUID(str(item)) for item in cast(Sequence[object], value.get("trace_event_ids", ()))
+            ),
+            datetime.fromisoformat(str(value["updated_at"])),
+        )
+    except (KeyError, TypeError, ValueError) as error:
+        raise EffectError("Persisted compensation record is malformed") from error
+
+
 __all__ = [
     "CompensationDefinition",
     "CompensationExecutor",
+    "CompensationLifecycle",
     "CompensationRequest",
     "CompensationResult",
+    "CompensationRecord",
+    "CompensationService",
+    "CompensationStore",
     "CompensationStatus",
     "EffectError",
     "EffectPreview",
     "EffectTraceRecord",
     "EffectTraceSink",
+    "OriginalEffectReference",
     "PlanStudioEffectProjection",
     "PlanStudioEffectView",
 ]

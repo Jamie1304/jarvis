@@ -33,6 +33,8 @@ An immutable `CertificationRecord` binds:
 - environment compatibility, health, verification, rollback target, and
   expected behavior baseline; and
 - completed stage evidence plus Shadow/Canary eligibility.
+- for UI-bearing packages, the trusted UI simulation attestation reference and
+  digest (never screenshots or arbitrary UI content).
 
 `CertificationRecord.matches()` invalidates the record if code/source,
 dependencies, manifest, version, package hash, or permissions change. A
@@ -45,9 +47,18 @@ adapts a valid record to the existing hot-load gate, while
 atomic registration, Shadow/Canary gates, and active registration. No package
 is active merely because it is certified.
 
-UI-bearing packages are not certifiable without evidence from the native
-`UISimulationHarness`. The harness must render declared states, validate
-bindings and safe assets, inspect semantic controls, and prove zero simulated
-external effects. A caller-provided string is evidence metadata only; the
-trusted composition root must obtain it from the harness run. This certifier
-does not invent unexecuted UI evidence.
+UI-bearing packages are not certifiable without a current
+`UISimulationAttestation` from the native `UISimulationHarness`. The harness
+must render every declared state, validate bindings and safe assets, inspect
+semantic controls, and prove zero simulated external effects. The certifier
+derives UI-bearing status from validated package structure (`ui_assets` or
+`profiles`); a package cannot turn the requirement off with a false boolean.
+
+The attestation binds package ID/version/hash, the built source hash, UI
+manifest hash/schema, harness and policy versions, tested states, check results,
+zero-effect evidence, and ArtifactRefs. Missing, failed, malformed, stale,
+mismatched, or caller-fabricated evidence fails the `VERIFICATION` stage.
+`CertificationRecord` stores only the opaque attestation reference and digest;
+render artifacts remain owned by ArtifactStore. Any package/source/UI manifest
+change requires a fresh attestation. Activation applies the same certification
+record and has an additional fail-closed UI-attestation binding check.

@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import hashlib
 import json
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import uuid4
 
 import pytest
+from jarvis.credentials import TestOnlyInMemorySecretBackend
 from jarvis.recovery import (
     RecoveryCoordinator,
     RecoveryError,
@@ -14,13 +17,36 @@ from jarvis.recovery import (
     RecoveryPhase,
     RecoveryStore,
     StartupAttemptStatus,
+    TrustedRecoveryAuthority,
 )
+
+
+def _application_hash(revision: str) -> str:
+    return hashlib.sha256(revision.encode("utf-8")).hexdigest()
+
+
+def _store(
+    root: Path,
+    *,
+    retention: int = 5,
+    clock: Callable[[], datetime] | None = None,
+) -> RecoveryStore:
+    backend = TestOnlyInMemorySecretBackend()
+    authority = TrustedRecoveryAuthority("synthetic-installation", backend)
+    authority.initialize()
+    return RecoveryStore(
+        root,
+        retention=retention,
+        clock=clock,
+        trusted_authority=authority,
+    )
 
 
 def _snapshot(store: RecoveryStore, tx: str | None = None) -> str:
     return store.create_snapshot(
         transaction_id=tx or str(uuid4()),
         app_revision="rev-1",
+        application_hash=_application_hash("rev-1"),
         configuration={"voice": False},
         database_schema={"planning": 4},
         integration_versions={},
@@ -48,10 +74,11 @@ def _build_pair(root: Path, clock: FakeClock) -> tuple[RecoveryStore, str, str, 
     state = recovery_root / "state.txt"
     state.parent.mkdir(parents=True)
     state.write_text("known-good", encoding="utf-8")
-    store = RecoveryStore(recovery_root, clock=clock)
+    store = _store(recovery_root, clock=clock)
     lkg = store.create_snapshot(
         transaction_id="lkg-tx",
         app_revision="build-lkg",
+        application_hash=_application_hash("build-lkg"),
         configuration={"mode": "safe"},
         database_schema={"planning": 4},
         integration_versions={"core": "lkg"},
@@ -64,6 +91,7 @@ def _build_pair(root: Path, clock: FakeClock) -> tuple[RecoveryStore, str, str, 
     candidate = store.create_snapshot(
         transaction_id="candidate-tx",
         app_revision="build-candidate",
+        application_hash=_application_hash("build-candidate"),
         configuration={"mode": "candidate"},
         database_schema={"planning": 5},
         integration_versions={"core": "candidate"},
@@ -74,7 +102,7 @@ def _build_pair(root: Path, clock: FakeClock) -> tuple[RecoveryStore, str, str, 
 
 
 def test_snapshot_manifest_tracks_revision_schema_migrations_and_lkg(tmp_path: Path) -> None:
-    store = RecoveryStore(tmp_path / "recovery", retention=2)
+    store = _store(tmp_path / "recovery", retention=2)
     tx = str(uuid4())
     snapshot_id = _snapshot(store, tx)
     store.begin_start(tx)
@@ -92,10 +120,11 @@ def test_snapshot_copies_and_restores_selected_file(tmp_path: Path) -> None:
     source = root / "state.txt"
     source.parent.mkdir(parents=True)
     source.write_text("known-good", encoding="utf-8")
-    store = RecoveryStore(root)
+    store = _store(root)
     manifest = store.create_snapshot(
         transaction_id="tx",
         app_revision="rev",
+        application_hash=_application_hash("rev"),
         configuration={},
         database_schema={},
         integration_versions={},
@@ -105,35 +134,60 @@ def test_snapshot_copies_and_restores_selected_file(tmp_path: Path) -> None:
     source.write_text("changed", encoding="utf-8")
     store.restore(manifest.snapshot_id, destinations={"state.txt": destination})
     assert destination.read_text(encoding="utf-8") == "known-good"
+    assert dict(manifest.file_hashes)["state.txt"]
     with pytest.raises(RecoveryError, match="regular file"):
         store.restore(manifest.snapshot_id, destinations={"state.txt": destination.parent})
 
 
+def test_snapshot_file_tampering_is_rejected_before_restore(tmp_path: Path) -> None:
+    root = tmp_path / "recovery"
+    source = root / "state.txt"
+    source.parent.mkdir(parents=True)
+    source.write_text("known-good", encoding="utf-8")
+    store = _store(root)
+    manifest = store.create_snapshot(
+        transaction_id="tx",
+        app_revision="rev",
+        application_hash=_application_hash("rev"),
+        configuration={},
+        database_schema={},
+        integration_versions={},
+        files=(source,),
+    )
+    stored = store.snapshots / manifest.snapshot_id / "files" / "state.txt"
+    stored.write_text("tampered", encoding="utf-8")
+
+    with pytest.raises(RecoveryError, match="integrity"):
+        store.load(manifest.snapshot_id)
+
+
 def test_snapshot_rejects_unsafe_sources_and_malformed_identifiers(tmp_path: Path) -> None:
-    store = RecoveryStore(tmp_path / "recovery")
+    store = _store(tmp_path / "recovery")
     outside = tmp_path / "outside.txt"
     outside.write_text("no", encoding="utf-8")
     with pytest.raises(RecoveryError, match="escaped"):
         store.create_snapshot(
             transaction_id="tx",
             app_revision="rev",
+            application_hash=_application_hash("rev"),
             configuration={},
             database_schema={},
             integration_versions={},
             files=(outside,),
         )
     with pytest.raises(ValueError, match="retention"):
-        RecoveryStore(tmp_path / "other", retention=0)
+        _store(tmp_path / "other", retention=0)
     with pytest.raises(RecoveryError, match="malformed"):
         store.load("../escape")
 
 
 def test_snapshot_rejects_secret_metadata_and_future_schema(tmp_path: Path) -> None:
-    store = RecoveryStore(tmp_path / "recovery")
+    store = _store(tmp_path / "recovery")
     with pytest.raises(RecoveryError):
         store.create_snapshot(
             transaction_id="tx",
             app_revision="rev",
+            application_hash=_application_hash("rev"),
             configuration={"access_token": "never"},
             database_schema={},
             integration_versions={},
@@ -155,7 +209,7 @@ def test_restore_is_atomic_and_rejects_unlisted_file(tmp_path: Path) -> None:
     source = root / "state.txt"
     source.parent.mkdir(parents=True)
     source.write_text("known-good", encoding="utf-8")
-    store = RecoveryStore(root)
+    store = _store(root)
     snapshot_id = _snapshot(store)
     # A snapshot without a file cannot be used to restore an arbitrary path.
     with pytest.raises(RecoveryError, match="absent"):
@@ -163,7 +217,7 @@ def test_restore_is_atomic_and_rejects_unlisted_file(tmp_path: Path) -> None:
 
 
 def test_failed_start_is_recorded_and_safe_mode_disables_effects(tmp_path: Path) -> None:
-    store = RecoveryStore(tmp_path / "recovery")
+    store = _store(tmp_path / "recovery")
     coordinator = RecoveryCoordinator(store)
     assert store.begin_start("first") is False
     assert store.begin_start("second") is True
@@ -180,7 +234,7 @@ def test_failed_start_is_recorded_and_safe_mode_disables_effects(tmp_path: Path)
 
 
 def test_crash_loop_threshold_and_malformed_evidence_fail_closed(tmp_path: Path) -> None:
-    store = RecoveryStore(tmp_path / "recovery")
+    store = _store(tmp_path / "recovery")
     coordinator = RecoveryCoordinator(store, crash_loop_limit=2)
     assert coordinator.begin_start("one") is False
     assert coordinator.begin_start("two") is True
@@ -194,7 +248,7 @@ def test_crash_loop_threshold_and_malformed_evidence_fail_closed(tmp_path: Path)
 
 
 def test_successful_commit_resets_consecutive_crash_loop_count(tmp_path: Path) -> None:
-    store = RecoveryStore(tmp_path / "recovery")
+    store = _store(tmp_path / "recovery")
     first = _snapshot(store, "first")
     store.record(
         RecoveryEvidence(
@@ -217,7 +271,7 @@ def _now_for_test() -> str:
 
 
 def test_retention_keeps_lkg_restore_point(tmp_path: Path) -> None:
-    store = RecoveryStore(tmp_path / "recovery", retention=1)
+    store = _store(tmp_path / "recovery", retention=1)
     first = _snapshot(store, "one")
     store.begin_start("one")
     store.commit_start("one", first)
@@ -227,8 +281,9 @@ def test_retention_keeps_lkg_restore_point(tmp_path: Path) -> None:
 
 
 def test_lkg_and_transaction_mismatches_fail_closed(tmp_path: Path) -> None:
-    store = RecoveryStore(tmp_path / "recovery")
+    store = _store(tmp_path / "recovery")
     snapshot_id = _snapshot(store, "one")
+    store.begin_start("one")
     with pytest.raises(RecoveryError, match="does not match"):
         store.commit_start("two", snapshot_id)
     store.lkg.write_text(json.dumps({"snapshot_id": "missing"}), encoding="utf-8")
@@ -241,10 +296,11 @@ def test_failure_rolls_back_lkg_and_safe_modes_on_bad_health(tmp_path: Path) -> 
     source = root / "state.txt"
     source.parent.mkdir(parents=True)
     source.write_text("good", encoding="utf-8")
-    store = RecoveryStore(root)
+    store = _store(root)
     manifest = store.create_snapshot(
         transaction_id="good-tx",
         app_revision="rev",
+        application_hash=_application_hash("rev"),
         configuration={},
         database_schema={},
         integration_versions={},
@@ -269,7 +325,7 @@ def test_failure_rolls_back_lkg_and_safe_modes_on_bad_health(tmp_path: Path) -> 
 
 
 def test_failure_without_lkg_enters_safe_mode(tmp_path: Path) -> None:
-    coordinator = RecoveryCoordinator(RecoveryStore(tmp_path / "recovery"))
+    coordinator = RecoveryCoordinator(_store(tmp_path / "recovery"))
     assert (
         coordinator.fail_and_restore("tx", failed_phase=RecoveryPhase.APPLY, detail="apply failed")
         is None
@@ -451,7 +507,7 @@ def test_migration_reconciliation_failure_is_fail_closed(tmp_path: Path) -> None
 
 def test_malformed_active_marker_fails_closed(tmp_path: Path) -> None:
     clock = FakeClock()
-    store = RecoveryStore(tmp_path / "recovery", clock=clock)
+    store = _store(tmp_path / "recovery", clock=clock)
     store.active.write_text("not-json", encoding="utf-8")
     with pytest.raises(RecoveryError, match="active startup marker"):
         RecoveryCoordinator(store, clock=clock).begin_start("tx")

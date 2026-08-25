@@ -49,7 +49,9 @@ async def test_real_notepad_semantic_computer_acceptance() -> None:
         process_id = launched.process_id
         windows: tuple[WindowInfo, ...] = ()
         for _ in range(30):
-            windows = await adapter.discover_windows("notepad")
+            # The installed Notepad title is localized; ownership is established by
+            # the exact PID returned by the trusted launch, not a display-title match.
+            windows = await adapter.discover_windows(None)
             if any(item.process_id == process_id for item in windows):
                 break
             await asyncio.sleep(0.2)

@@ -5,6 +5,7 @@ from hashlib import sha256
 from uuid import uuid4
 
 import pytest
+from jarvis.adoption import AdoptionPolicy
 from jarvis.capabilities import (
     CapabilityHealth,
     CapabilityLifecycle,
@@ -51,14 +52,22 @@ from jarvis.setup_conductor import (
 )
 from jarvis.tools.models import SemanticVersion, ToolHealthStatus, ToolPlatform
 
+from tests.adoption_fixtures import adoption_candidate
+
 
 class SetupFixture:
-    def __init__(self, *, completed: bool = True) -> None:
+    def __init__(
+        self, *, completed: bool = True, candidate: SetupAdoptionCandidate | None = None
+    ) -> None:
         self.completed = completed
+        self.candidate = candidate
 
     async def inspect(self, step: SetupStep, context: SetupContext) -> SetupInspection:
         del step, context
-        return SetupInspection(completed=self.completed)
+        return SetupInspection(
+            completed=self.completed,
+            candidates=(self.candidate,) if self.candidate is not None else (),
+        )
 
     async def prepare(
         self, step: SetupStep, context: SetupContext, decision: SetupDecision | None
@@ -123,11 +132,14 @@ def factory(
     registry: CapabilityRegistry | None = None,
     *,
     setup_completed: bool = True,
+    setup_candidate: SetupAdoptionCandidate | None = None,
+    adoption_policy: AdoptionPolicy | None = None,
 ) -> CapabilityFactory:
     setup = SetupConductor(
-        {"runtime": SetupFixture(completed=setup_completed)},
+        {"runtime": SetupFixture(completed=setup_completed, candidate=setup_candidate)},
         InMemorySetupStore(),
         lambda plan: _provision(plan),
+        adoption_policy=adoption_policy,
     )
     return CapabilityFactory(registry or CapabilityRegistry(), setup, generator)
 
@@ -186,13 +198,15 @@ async def test_acquisition_order_reuses_active_jarvis_capability_before_build() 
 
 @pytest.mark.asyncio
 async def test_adoption_precedes_external_reuse_and_uses_setup_conductor() -> None:
-    setup_candidate = SetupAdoptionCandidate(
-        "machine", "runtime", "unknown:/runtime", compatible=True
-    )
+    setup_candidate, adoption_policy = adoption_candidate("machine", location="unknown:/runtime")
     adoption = AdoptionCandidate(setup_candidate, SetupStep("adopt", "runtime"))
     generator = Generator(generated())
     current_gap = gap()
-    result = await factory(generator).acquire(
+    result = await factory(
+        generator,
+        setup_candidate=setup_candidate,
+        adoption_policy=adoption_policy,
+    ).acquire(
         current_gap,
         SolutionReport(
             current_gap, (SolutionOption("api", FactoryStrategy.REUSE_API_LIBRARY_MCP_CLI, "api"),)
@@ -337,7 +351,7 @@ async def test_incomplete_adoption_and_reuse_setup_do_not_become_active() -> Non
         {},
     )
     assert result.lifecycle is FactoryLifecycle.ADOPTING
-    assert result.setup_run is not None
+    assert result.setup_run is None
     reuse = SolutionOption(
         "api",
         FactoryStrategy.REUSE_API_LIBRARY_MCP_CLI,

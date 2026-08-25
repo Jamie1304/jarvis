@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from dataclasses import replace
 from hashlib import sha256
 from pathlib import Path
 from typing import cast
@@ -23,6 +24,7 @@ from jarvis.ui_simulation import (
     UISimulatedView,
     UISimulationAction,
     UISimulationAsset,
+    UISimulationAttestationStatus,
     UISimulationCheck,
     UISimulationComponent,
     UISimulationComponentKind,
@@ -201,6 +203,32 @@ def test_approval_spoof_is_rejected_by_security_evidence() -> None:
         )
     )
     shot = harness.shot("WAITING_PERMISSION")
+    assert not shot.evidence.passed
+    assert any(
+        name is UISimulationCheck.SECURITY and not passed
+        for name, passed, _ in shot.evidence.checks
+    )
+
+
+def test_semantic_authority_spoof_is_rejected_even_without_known_button_names() -> None:
+    harness = UISimulationHarness(package())
+    harness.load_manifest(
+        manifest(
+            components=(
+                UISimulationComponent("root", UISimulationComponentKind.CONTAINER),
+                UISimulationComponent(
+                    "security-request",
+                    UISimulationComponentKind.CONTROL,
+                    title="Authorize this security request",
+                    action_id="continue",
+                ),
+            ),
+            actions=(UISimulationAction("continue", "settings.write"),),
+        )
+    )
+
+    shot = harness.shot("WAITING_PERMISSION")
+
     assert not shot.evidence.passed
     assert any(
         name is UISimulationCheck.SECURITY and not passed
@@ -405,13 +433,86 @@ def test_artifact_asset_and_evidence_serialization(tmp_path: Path) -> None:
         classification=ArtifactClassification.INTERNAL,
         producer="test",
     )
-    harness = UISimulationHarness(package(), artifact_store=store, workspace_id="workspace")
-    harness.load_manifest(
-        manifest(
-            assets=(UISimulationAsset("input", sha256(content).hexdigest(), artifact=artifact),)
-        )
+    simulation_manifest = manifest(
+        assets=(UISimulationAsset("input", sha256(content).hexdigest(), artifact=artifact),)
     )
+    bound_package = replace(package(), ui_manifest_hash=simulation_manifest.manifest_hash)
+    harness = UISimulationHarness(bound_package, artifact_store=store, workspace_id="workspace")
+    harness.load_manifest(simulation_manifest)
     shot = harness.shot("IDLE")
     assert shot.evidence.passed
     assert any("ui-simulation:artifact=" in item for item in shot.evidence.certification_strings())
+    attestation = harness.attest("a" * 64)
+    assert attestation.result is UISimulationAttestationStatus.PASS
+    assert attestation.zero_real_effect
+    assert attestation.artifact_refs
+    assert attestation.valid_for(bound_package, "a" * 64)
+    assert not attestation.valid_for(bound_package, "b" * 64)
     store.close()
+
+
+def test_attestation_is_not_caller_constructible_and_failed_ui_cannot_certify() -> None:
+    harness = UISimulationHarness(package())
+    harness.load_manifest(manifest())
+    attestation = harness.attest("a" * 64)
+    assert attestation.attestation_digest == attestation.attestation_digest
+    with pytest.raises(UISimulationValidationError):
+        type(attestation)(
+            attestation.attestation_id,
+            attestation.package_id,
+            attestation.version,
+            attestation.package_hash,
+            attestation.source_hash,
+            attestation.ui_manifest_hash,
+            attestation.schema_version,
+            attestation.harness_version,
+            attestation.policy_version,
+            attestation.tested_states,
+            attestation.semantic_checks,
+            attestation.security_checks,
+            attestation.asset_checks,
+            attestation.action_bindings,
+            attestation.zero_real_effect,
+            attestation.artifact_refs,
+            attestation.issued_at,
+            attestation.result,
+            attestation.attestation_digest,
+        )
+
+
+def test_manifest_hash_change_invalidates_the_previous_attestation() -> None:
+    original_manifest = manifest(states=("IDLE",))
+    bound_package = replace(package(), ui_manifest_hash=original_manifest.manifest_hash)
+    harness = UISimulationHarness(bound_package)
+    harness.load_manifest(original_manifest)
+    attestation = harness.attest("a" * 64)
+    changed_manifest = manifest(
+        components=(
+            UISimulationComponent("root", UISimulationComponentKind.CONTAINER),
+            UISimulationComponent("text", UISimulationComponentKind.TEXT, text="changed"),
+        ),
+        states=("IDLE",),
+    )
+    changed_package = replace(bound_package, ui_manifest_hash=changed_manifest.manifest_hash)
+    assert not attestation.valid_for(changed_package, "a" * 64)
+    with pytest.raises(UISimulationValidationError):
+        harness.load_manifest(changed_manifest)
+
+
+def test_attestation_input_and_package_identity_validation_is_fail_closed() -> None:
+    simulation_manifest = manifest(states=("IDLE",))
+    bound_package = replace(package(), ui_manifest_hash=simulation_manifest.manifest_hash)
+    harness = UISimulationHarness(bound_package)
+    with pytest.raises(UISimulationError):
+        harness.attest("a" * 64)
+    harness.load_manifest(simulation_manifest)
+    with pytest.raises(UISimulationValidationError):
+        harness.attest("not-a-digest")
+    attestation = harness.attest("a" * 64)
+    assert attestation.status is UISimulationAttestationStatus.PASS
+    assert not attestation.valid_for(replace(bound_package, package_id="other.example"), "a" * 64)
+    assert not attestation.valid_for(
+        replace(bound_package, version=SemanticVersion(2, 0, 0)), "a" * 64
+    )
+    assert not attestation.valid_for(replace(bound_package, package_hash="b" * 64), "a" * 64)
+    assert not attestation.valid_for(replace(bound_package, ui_manifest_hash="b" * 64), "a" * 64)

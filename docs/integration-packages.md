@@ -34,7 +34,10 @@ Before staged activation, a generated package must complete the native
 [`package-certification.md`](package-certification.md). Certification binds
 the exact package/source/dependency/manifest hashes, test and audit evidence,
 permissions, trusted authority decision, install/health/verification evidence,
-and rollback target. `CERTIFIED` is not `ACTIVE`; `PackageActivationService`
+and rollback target. UI-bearing packages additionally require the trusted
+`UISimulationAttestation` reference/digest produced by the application-owned
+harness; free-form package claims cannot replace it. `CERTIFIED` is not
+`ACTIVE`; `PackageActivationService`
 owns the trusted version lifecycle and gates Shadow, bounded Canary, promotion,
 quarantine, and rollback before the serialized hot-load manager registers a
 runtime. Generated package code cannot self-promote.

@@ -108,6 +108,10 @@ _SCHEMA = (
 def _analysis(value: object) -> VisionAnalysis:
     if not isinstance(value, dict):
         raise ValueError("Vision result must be an object")
+    confidence = value.get("confidence")
+    if type(confidence) not in {int, float}:
+        raise ValueError("Vision confidence must be numeric")
+    numeric_confidence = cast(int | float, confidence)
     return VisionAnalysis(
         cast(
             tuple[VisibleElement, ...],
@@ -117,7 +121,7 @@ def _analysis(value: object) -> VisionAnalysis:
             tuple[VisionCandidate, ...],
             _elements(value.get("candidate_targets", []), VisionCandidate),
         ),
-        float(value["confidence"]),
+        float(numeric_confidence),
     )
 
 
@@ -130,15 +134,20 @@ def _elements(
     for item in value:
         if not isinstance(item, dict) or set(item) != {"label", "role", "bounds", "confidence"}:
             raise ValueError("Vision element is malformed")
+        label = item["label"]
+        role = item["role"]
+        confidence = item["confidence"]
+        if type(label) is not str or type(role) is not str or type(confidence) not in {int, float}:
+            raise ValueError("Vision element fields are malformed")
         bounds = item["bounds"]
         if not isinstance(bounds, list) or len(bounds) != 4:
             raise ValueError("Vision bounds are malformed")
         items.append(
             kind(
-                str(item["label"]),
-                str(item["role"]),
+                label,
+                role,
                 NormalizedBounds(*bounds),
-                float(item["confidence"]),
+                confidence,
             )
         )
     return tuple(items)

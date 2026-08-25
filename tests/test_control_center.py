@@ -155,7 +155,8 @@ def test_trusted_permission_surface_shares_one_authority_object() -> None:
         == TrustedActionNarrator().narrate(request, descriptor).short_explanation
     )
     assert "permission=filesystem.write" in prompt.desktop_details
-    assert "YES / NO / DETAILS" in prompt.voice_prompt
+    assert "Say DETAILS or NO" in prompt.voice_prompt
+    assert "trusted approval control" in prompt.voice_prompt
     assert prompt.desktop_choices == ("Allow once", "Deny")
     with pytest.raises(TypeError):
         TrustedPermissionSurface().present("YES")  # type: ignore[arg-type]

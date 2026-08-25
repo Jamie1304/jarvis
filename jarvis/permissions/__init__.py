@@ -30,9 +30,13 @@ from jarvis.permissions.models import (
 )
 from jarvis.permissions.policy import PolicyEngine, normalize_path, path_is_within
 from jarvis.permissions.presentation import (
+    ApprovalChannelClass,
+    ApprovalChannelPolicy,
+    DesktopApprovalHandoff,
     ExactOperationRenderer,
     SpokenApprovalResult,
     TrustedActionNarrator,
+    TrustedDesktopApprovalSurface,
     TrustedOperation,
     TrustedPermissionPresentation,
     VoiceApprovalChoice,
@@ -42,6 +46,8 @@ from jarvis.permissions.presentation import (
 
 __all__ = [
     "ActionDescriptor",
+    "ApprovalChannelClass",
+    "ApprovalChannelPolicy",
     "ApprovalActorKind",
     "ApprovalChoice",
     "ApprovalContextVerifier",
@@ -55,6 +61,7 @@ __all__ = [
     "AuthorizationReceipt",
     "Decision",
     "DecisionReason",
+    "DesktopApprovalHandoff",
     "ExactOperationRenderer",
     "InMemoryAuditSink",
     "SQLiteAuditSink",
@@ -71,6 +78,7 @@ __all__ = [
     "TrustedApprovalAuthenticator",
     "TrustedApprovalContext",
     "TrustedActionNarrator",
+    "TrustedDesktopApprovalSurface",
     "TrustedOperation",
     "TrustedPermissionPresentation",
     "VoiceApprovalChoice",

@@ -11,10 +11,13 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import sqlite3
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import StrEnum
+from pathlib import Path
+from threading import RLock
 from typing import Protocol
 from uuid import UUID
 
@@ -374,6 +377,113 @@ class ProvisioningResult:
     detail: str = ""
 
 
+class SQLiteProvisioningStore:
+    """Durable owner for resumable typed provisioning action state."""
+
+    _SCHEMA_VERSION = 1
+
+    def __init__(self, database_path: str | Path) -> None:
+        self._path = str(database_path)
+        if self._path != ":memory:":
+            Path(self._path).parent.mkdir(parents=True, exist_ok=True)
+        self._connection = sqlite3.connect(self._path, timeout=5.0, check_same_thread=False)
+        self._connection.execute("PRAGMA foreign_keys=ON")
+        self._connection.execute("PRAGMA busy_timeout=5000")
+        self._connection.execute("PRAGMA journal_mode=WAL")
+        self._lock = RLock()
+        try:
+            with self._connection:
+                self._connection.execute(
+                    "CREATE TABLE IF NOT EXISTS provisioning_schema "
+                    "(version INTEGER PRIMARY KEY, name TEXT NOT NULL)"
+                )
+                versions = {
+                    int(row[0]): str(row[1])
+                    for row in self._connection.execute(
+                        "SELECT version, name FROM provisioning_schema"
+                    ).fetchall()
+                }
+                if any(version > self._SCHEMA_VERSION for version in versions):
+                    raise ProvisioningError("Provisioning database uses a future schema")
+                if not versions:
+                    self._connection.execute(
+                        "CREATE TABLE provisioning_runs "
+                        "(plan_id TEXT PRIMARY KEY, results_json TEXT NOT NULL, "
+                        "updated_at TEXT NOT NULL)"
+                    )
+                    self._connection.execute(
+                        "INSERT INTO provisioning_schema(version, name) VALUES (1, ?)",
+                        ("create_provisioning_runs",),
+                    )
+                elif versions.get(1) != "create_provisioning_runs":
+                    raise ProvisioningError("Provisioning migration identity mismatch")
+        except (sqlite3.DatabaseError, OSError) as error:
+            self.close()
+            raise ProvisioningError("Provisioning database is unavailable") from error
+
+    def load(self, plan_id: UUID) -> dict[str, ProvisioningActionResult]:
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT results_json FROM provisioning_runs WHERE plan_id=?", (str(plan_id),)
+            ).fetchone()
+        if row is None:
+            return {}
+        try:
+            payload = json.loads(str(row[0]))
+            if not isinstance(payload, list):
+                raise ValueError
+            results: dict[str, ProvisioningActionResult] = {}
+            for item in payload:
+                if not isinstance(item, dict):
+                    raise ValueError
+                result = ProvisioningActionResult(
+                    str(item["action_id"]),
+                    ProvisioningActionState(str(item["state"])),
+                    (
+                        ProvisioningEffectOutcome(str(item["outcome"]))
+                        if item.get("outcome") is not None
+                        else None
+                    ),
+                    _safe_detail(str(item.get("detail", "persisted"))),
+                    int(item.get("attempts", 0)),
+                )
+                results[result.action_id] = result
+            return results
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
+            raise ProvisioningError("Persisted provisioning state is malformed") from error
+
+    def save(self, plan_id: UUID, results: Mapping[str, ProvisioningActionResult]) -> None:
+        payload = [
+            {
+                "action_id": result.action_id,
+                "state": result.state.value,
+                "outcome": result.outcome.value if result.outcome is not None else None,
+                "detail": _safe_detail(result.detail),
+                "attempts": result.attempts,
+            }
+            for result in results.values()
+        ]
+        encoded = json.dumps(payload, sort_keys=True)
+        with self._lock, self._connection:
+            self._connection.execute(
+                "INSERT INTO provisioning_runs(plan_id, results_json, updated_at) VALUES (?, ?, ?) "
+                "ON CONFLICT(plan_id) DO UPDATE SET results_json=excluded.results_json, "
+                "updated_at=excluded.updated_at",
+                (str(plan_id), encoded, datetime.now(UTC).isoformat()),
+            )
+
+    def close(self) -> None:
+        with self._lock:
+            self._connection.close()
+
+
+def _safe_detail(value: str) -> str:
+    text = " ".join(value.split())[:2_048]
+    if any(marker in text.casefold() for marker in ("secret=", "password=", "token=", "api_key=")):
+        return "provider detail redacted"
+    return text or "persisted"
+
+
 class ProvisioningProvider(Protocol):
     async def inspect(self, action: ProvisioningAction) -> ProvisioningObservation: ...
 
@@ -464,12 +574,14 @@ class ProvisioningEngine:
         authorizer: ProvisioningAuthorization,
         *,
         clock: Callable[[], datetime] | None = None,
+        store: SQLiteProvisioningStore | None = None,
     ) -> None:
         if not isinstance(providers, Mapping) or not providers:
             raise ProvisioningValidationError("At least one provisioning provider is required")
         self._providers = dict(providers)
         self._authorizer = authorizer
         self._clock = clock or (lambda: datetime.now(UTC))
+        self._store = store
         self._states: dict[UUID, dict[str, ProvisioningActionResult]] = {}
 
     async def run(
@@ -483,7 +595,10 @@ class ProvisioningEngine:
         if now >= plan.expires_at:
             raise ProvisioningError("Provisioning plan is expired")
         cancel = cancellation or asyncio.Event()
-        state = self._states.setdefault(plan.plan_id, {})
+        state = self._states.get(plan.plan_id)
+        if state is None:
+            state = self._store.load(plan.plan_id) if self._store is not None else {}
+            self._states[plan.plan_id] = state
         if (
             not resume
             and state
@@ -574,6 +689,7 @@ class ProvisioningEngine:
                 attempts,
             )
             state[action.action_id] = ready
+            self._persist_state(plan, state)
             try:
                 receipt = await self._authorizer.authorize(plan, action)
                 await self._authorizer.begin(receipt)
@@ -587,6 +703,7 @@ class ProvisioningEngine:
                 attempts + 1,
             )
             state[action.action_id] = applying
+            self._persist_state(plan, state)
             try:
                 applied = await provider.apply(action, cancel)
             except asyncio.CancelledError:
@@ -702,7 +819,15 @@ class ProvisioningEngine:
         state: ProvisioningPlanState,
         detail: str,
     ) -> ProvisioningResult:
+        if self._store is not None:
+            self._store.save(plan.plan_id, {item.action_id: item for item in results})
         return ProvisioningResult(plan.plan_id, state, tuple(results), detail)
+
+    def _persist_state(
+        self, plan: ProvisioningPlan, state: Mapping[str, ProvisioningActionResult]
+    ) -> None:
+        if self._store is not None:
+            self._store.save(plan.plan_id, state)
 
     @staticmethod
     def _failed(
@@ -760,6 +885,7 @@ __all__ = [
     "ProvisioningPlanState",
     "ProvisioningProvider",
     "ProvisioningResult",
+    "SQLiteProvisioningStore",
     "ProvisioningRollbackPlan",
     "ProvisioningValidationError",
 ]

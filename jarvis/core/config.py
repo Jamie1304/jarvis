@@ -7,6 +7,8 @@ from typing import Literal
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from jarvis.version import __version__
+
 
 class Settings(BaseSettings):
     """Application settings read from explicit process configuration and safe defaults."""
@@ -23,7 +25,7 @@ class Settings(BaseSettings):
     port: int = 8000
     log_level: str = "INFO"
     log_json: bool = False
-    version: str = "0.1.0"
+    version: str = __version__
     ai_provider: str = "ollama"
     ai_model: str = "llama3.2:3b"
     ai_endpoint: str = "http://127.0.0.1:11434"

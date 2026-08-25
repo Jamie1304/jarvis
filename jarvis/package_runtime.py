@@ -13,6 +13,7 @@ from enum import StrEnum
 from threading import RLock
 from typing import Protocol, TypeVar
 
+from jarvis.capability_lifecycle import SQLiteCapabilityLifecycleStore
 from jarvis.integration_package import IntegrationPackage
 from jarvis.package_certification import CertificationRecord
 from jarvis.tools.models import SemanticVersion
@@ -136,10 +137,16 @@ class HotLoadManager:
         surface: PackageRegistrationSurface,
         *,
         watcher: PackageWatcher | None = None,
+        lifecycle_store: SQLiteCapabilityLifecycleStore | None = None,
     ) -> None:
         self._factory = factory
         self._surface = surface
         self._watcher = watcher
+        if lifecycle_store is not None and not isinstance(
+            lifecycle_store, SQLiteCapabilityLifecycleStore
+        ):
+            raise HotLoadError("Capability lifecycle store is malformed")
+        self._lifecycle = lifecycle_store
         self._active: dict[str, ActivePackage] = {}
         self._lock = RLock()
 
@@ -253,6 +260,14 @@ class HotLoadManager:
         allow_rollback: bool = False,
     ) -> ActivePackage:
         self._validate_certification(package, certification)
+        if self._lifecycle is not None:
+            durable = self._lifecycle.load(package.package_id, str(package.version))
+            if durable is None or durable.record.package_hash != package.package_hash:
+                raise HotLoadError("Package has no matching durable lifecycle state")
+            if durable.record.state.value != "ACTIVE" and not (
+                durable.transaction_state == "RECOVERING" and durable.pending_target == "ACTIVE"
+            ):
+                raise HotLoadError("Runtime swap is not authorized by durable lifecycle state")
         previous = self._active.get(package.package_id)
         if previous is not None:
             comparison = compare_package_versions(package.version, previous.package.version)

@@ -57,6 +57,8 @@ class TestProcessAdapter(ABC):
         working_directory: Path,
         timeout_seconds: float,
         cancellation: asyncio.Event,
+        *,
+        allow_hardware: bool = False,
     ) -> ProcessCapture:
         """Run one explicit executable/argv command without a shell."""
 
@@ -70,6 +72,8 @@ class SubprocessTestAdapter(TestProcessAdapter):
         working_directory: Path,
         timeout_seconds: float,
         cancellation: asyncio.Event,
+        *,
+        allow_hardware: bool = False,
     ) -> ProcessCapture:
         try:
             process = await asyncio.create_subprocess_exec(
@@ -79,7 +83,7 @@ class SubprocessTestAdapter(TestProcessAdapter):
                 stdin=asyncio.subprocess.DEVNULL,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
-                env=self._safe_environment(),
+                env=self._safe_environment(allow_hardware=allow_hardware),
             )
         except OSError as error:
             return ProcessCapture(None, "", "", launch_error=type(error).__name__)
@@ -127,7 +131,7 @@ class SubprocessTestAdapter(TestProcessAdapter):
         return await communication
 
     @staticmethod
-    def _safe_environment() -> dict[str, str]:
+    def _safe_environment(*, allow_hardware: bool = False) -> dict[str, str]:
         """Keep only process bootstrap values; tests never receive user credentials."""
 
         values = {
@@ -137,6 +141,10 @@ class SubprocessTestAdapter(TestProcessAdapter):
         }
         values["PYTHONUTF8"] = "1"
         values["PYTHONDONTWRITEBYTECODE"] = "1"
+        if allow_hardware:
+            values["JARVIS_WINDOWS_INTEGRATION"] = "true"
+            if os.environ.get("JARVIS_CAMERA_INTEGRATION") == "true":
+                values["JARVIS_CAMERA_INTEGRATION"] = "true"
         return values
 
 
@@ -214,7 +222,11 @@ class ControlledTestRunner:
         run_id = uuid4()
         started = datetime.now(UTC)
         capture = await self._adapter.execute(
-            suite.command, working_directory, suite.timeout_seconds, cancellation
+            suite.command,
+            working_directory,
+            suite.timeout_seconds,
+            cancellation,
+            allow_hardware=allow_hardware,
         )
         artifacts = (
             self._artifacts.write(run_id, "stdout", capture.stdout),

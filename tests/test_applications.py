@@ -22,7 +22,11 @@ from jarvis.applications.models import (
     VerificationError,
 )
 from jarvis.applications.plans import InstallationPlanStore
-from jarvis.applications.providers import ApplicationInventoryProvider, PackageProvider
+from jarvis.applications.providers import (
+    ApplicationInventoryProvider,
+    PackageProvider,
+    WingetPackageProvider,
+)
 from jarvis.applications.runtime import ApplicationRuntime
 from jarvis.applications.tools import (
     CloseManagedApplicationTool,
@@ -246,6 +250,15 @@ async def test_plan_install_is_idempotent_for_existing_valid_application() -> No
     assert plan is None
     assert existing == record()
     assert packages.install_calls == []
+
+
+@pytest.mark.asyncio
+async def test_winget_provider_requires_explicit_trusted_executable() -> None:
+    item = candidate()
+    provider = WingetPackageProvider((item,))
+
+    with pytest.raises(PackageOperationError, match="explicitly configured"):
+        await provider.install(item, asyncio.Event())
 
 
 @pytest.mark.asyncio

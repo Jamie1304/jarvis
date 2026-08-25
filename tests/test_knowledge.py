@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -154,3 +155,93 @@ def test_refresh_writes_only_generated_knowledge_artifact(tmp_path: Path) -> Non
     loaded = KnowledgeStore.load(output)
     assert loaded.snapshot.revision is None
     assert loaded.search("broker architecture")
+
+
+def test_knowledge_store_rejects_malformed_or_unbounded_generated_snapshot(
+    tmp_path: Path,
+) -> None:
+    _fixture_project(tmp_path)
+    output = tmp_path / "knowledge" / "generated" / "project-index.json"
+    builder = ProjectKnowledgeBuilder(tmp_path)
+    builder.refresh(output)
+
+    valid = json.loads(output.read_text(encoding="utf-8"))
+    malformed = dict(valid)
+    malformed["items"] = [*valid["items"], {"id": "not-an-item"}]
+    output.write_text(json.dumps(malformed), encoding="utf-8")
+    with pytest.raises(ValueError, match="malformed"):
+        KnowledgeStore.load(output)
+
+    future = dict(valid)
+    future["schema_version"] = 2
+    output.write_text(json.dumps(future), encoding="utf-8")
+    with pytest.raises(ValueError, match="future"):
+        KnowledgeStore.load(output)
+
+    oversized = dict(valid)
+    oversized["items"] = list(valid["items"]) * 5000
+    output.write_text(json.dumps(oversized), encoding="utf-8")
+    with pytest.raises(ValueError, match="too large|too many"):
+        KnowledgeStore.load(output)
+
+    unsafe_provenance = dict(valid)
+    unsafe_provenance["items"] = [dict(valid["items"][0])]
+    unsafe_provenance["items"][0]["provenance"] = dict(unsafe_provenance["items"][0]["provenance"])
+    unsafe_provenance["items"][0]["provenance"]["source_files"] = ["../outside.md"]
+    output.write_text(json.dumps(unsafe_provenance), encoding="utf-8")
+    with pytest.raises(ValueError, match="malformed|unsafe"):
+        KnowledgeStore.load(output)
+
+
+def test_knowledge_store_rejects_invalid_types_and_supports_bounded_queries(
+    tmp_path: Path,
+) -> None:
+    _fixture_project(tmp_path)
+    output = tmp_path / "knowledge" / "generated" / "project-index.json"
+    builder = ProjectKnowledgeBuilder(tmp_path)
+    builder.refresh(output)
+    valid = json.loads(output.read_text(encoding="utf-8"))
+
+    with pytest.raises(ValueError, match="path is invalid"):
+        KnowledgeStore.load("not-a-path")  # type: ignore[arg-type]
+
+    outside_generated = tmp_path / "other" / "index.json"
+    outside_generated.parent.mkdir()
+    outside_generated.write_text(json.dumps(valid), encoding="utf-8")
+    with pytest.raises(ValueError, match="generated root"):
+        KnowledgeStore.load(outside_generated)
+
+    cases: list[tuple[str, object, str]] = [
+        ("schema_version", 0, "unsupported"),
+        ("revision", 17, "malformed"),
+        ("items", {}, "malformed"),
+    ]
+    for field, value, message in cases:
+        malformed = json.loads(json.dumps(valid))
+        malformed[field] = value
+        output.write_text(json.dumps(malformed), encoding="utf-8")
+        with pytest.raises(ValueError, match=message):
+            KnowledgeStore.load(output)
+
+    malformed_item = json.loads(json.dumps(valid))
+    malformed_item["items"][0]["content"] = {"not": "text"}
+    output.write_text(json.dumps(malformed_item), encoding="utf-8")
+    with pytest.raises(ValueError, match="malformed"):
+        KnowledgeStore.load(output)
+
+    malformed_provenance = json.loads(json.dumps(valid))
+    malformed_provenance["items"][0]["provenance"]["source_hashes"] = []
+    output.write_text(json.dumps(malformed_provenance), encoding="utf-8")
+    with pytest.raises(ValueError, match="malformed"):
+        KnowledgeStore.load(output)
+
+    bad_digest = json.loads(json.dumps(valid))
+    first_hash = next(iter(bad_digest["items"][0]["provenance"]["source_hashes"]))
+    bad_digest["items"][0]["provenance"]["source_hashes"][first_hash] = "not-a-digest"
+    output.write_text(json.dumps(bad_digest), encoding="utf-8")
+    with pytest.raises(ValueError, match="malformed"):
+        KnowledgeStore.load(output)
+
+    valid_store = KnowledgeStore(builder.refresh(output))
+    assert valid_store.search(" ", limit=10) == ()
+    assert valid_store.search("broker", limit=0) == ()

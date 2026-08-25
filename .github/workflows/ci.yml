@@ -26,3 +26,7 @@ jobs:
         run: python scripts/quality.py
       - name: Run deterministic system self-tests
         run: python scripts/run_system_tests.py --suite deterministic-workflows
+      - name: Run deterministic permission self-tests
+        run: python scripts/run_system_tests.py --suite deterministic-permissions
+      - name: Run v1 acceptance suite
+        run: python scripts/run_system_tests.py --suite v1-acceptance

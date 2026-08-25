@@ -9,6 +9,7 @@ from enum import StrEnum
 from typing import Protocol
 from uuid import UUID, uuid4
 
+from jarvis.adoption import AdoptionOutcome
 from jarvis.capabilities import (
     CapabilityLifecycle,
     CapabilityManifest,
@@ -222,6 +223,7 @@ class CapabilityFactoryResult:
     trace: tuple[FactoryLifecycle, ...] = ()
     reason: str = ""
     resource_decision: ResourceDecision | None = None
+    adoption_attestation_reference: str | None = None
 
 
 class CapabilityFactory:
@@ -350,7 +352,17 @@ class CapabilityFactory:
         adoption = self._choose_adoption(adoption_candidates, preferences)
         if adoption is not None:
             setup = await self._run_setup(gap, adoption.setup_step, workspace, preferences, run_id)
-            if setup.state is SetupRunState.COMPLETED:
+            adopted_step = next(
+                (
+                    item
+                    for item in setup.steps
+                    if item.state.value == "adopted"
+                    and item.candidate_id == adoption.candidate.candidate_id
+                    and item.adoption_attestation is not None
+                ),
+                None,
+            )
+            if setup.state is SetupRunState.COMPLETED and adopted_step is not None:
                 trace.extend((FactoryLifecycle.CERTIFIED, FactoryLifecycle.ACTIVE))
                 return self._result(
                     run_id,
@@ -362,6 +374,11 @@ class CapabilityFactory:
                     "compatible machine capability adopted",
                     adopted=adoption.candidate.candidate_id,
                     setup=setup,
+                    adoption_attestation_reference=(
+                        "adoption-attestation:" + adopted_step.adoption_attestation.attestation_id
+                        if adopted_step.adoption_attestation is not None
+                        else None
+                    ),
                 )
             return self._result(
                 run_id,
@@ -373,6 +390,28 @@ class CapabilityFactory:
                 "adoption setup is incomplete",
                 adopted=adoption.candidate.candidate_id,
                 setup=setup,
+            )
+        revalidation = next(
+            (
+                candidate
+                for candidate in adoption_candidates.candidates
+                if candidate.safe
+                and candidate.candidate.compatible
+                and self._choice_for(candidate.candidate.candidate_id, preferences)
+                is not AdoptionChoice.IGNORE
+            ),
+            None,
+        )
+        if revalidation is not None:
+            return self._result(
+                run_id,
+                gap,
+                FactoryLifecycle.ADOPTING,
+                FactoryStrategy.ADOPT_MACHINE,
+                None,
+                trace,
+                "existing capability requires trusted identity/provenance revalidation",
+                adopted=revalidation.candidate.candidate_id,
             )
         trace.append(FactoryLifecycle.RESEARCHING)
         reuse = self._choose_option(
@@ -534,17 +573,31 @@ class CapabilityFactory:
         candidates: AdoptionCandidates, preferences: Mapping[str, object]
     ) -> AdoptionCandidate | None:
         for candidate in candidates.candidates:
+            choice = CapabilityFactory._choice_for(candidate.candidate.candidate_id, preferences)
             if (
                 candidate.safe
                 and candidate.candidate.compatible
-                and CapabilityFactory._choice_for(candidate.candidate.candidate_id, preferences)
+                and choice
                 in {
                     None,
                     AdoptionChoice.USE_IN_PLACE,
                     AdoptionChoice.IMPORT_COPY,
                     AdoptionChoice.RECONFIGURE,
                 }
+                and (
+                    candidate.candidate.adoption_attestation is not None
+                    or choice is AdoptionChoice.USE_IN_PLACE
+                )
             ):
+                if (
+                    candidate.candidate.adoption_attestation is not None
+                    and candidate.candidate.adoption_attestation.policy_outcome
+                    not in {
+                        AdoptionOutcome.ADOPT_VERIFIED,
+                        AdoptionOutcome.ADOPT_WITH_RESTRICTIONS,
+                    }
+                ):
+                    continue
                 return candidate
         return None
 
@@ -611,6 +664,7 @@ class CapabilityFactory:
         adopted: str | None = None,
         package: GeneratedCapabilityPackage | None = None,
         setup: SetupRun | None = None,
+        adoption_attestation_reference: str | None = None,
     ) -> CapabilityFactoryResult:
         return CapabilityFactoryResult(
             run_id,
@@ -624,6 +678,7 @@ class CapabilityFactory:
             setup,
             tuple(trace),
             reason,
+            adoption_attestation_reference=adoption_attestation_reference,
         )
 
 

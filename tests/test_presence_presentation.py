@@ -38,6 +38,7 @@ from jarvis.presentation import (
     PackageAssetReference,
     PresentationContent,
     PresentationEntry,
+    PresentationError,
     PresentationKind,
     PresentationSurface,
     PresentationValidationError,
@@ -339,6 +340,21 @@ async def test_presentation_rejects_asset_escape_and_untrusted_executable_conten
         {"content": "Untrusted page text is data"},
     )
     assert safe.data is not None
+
+
+@pytest.mark.asyncio
+async def test_presentation_observer_rejects_snapshot_for_another_surface() -> None:
+    requested_surface = PresentationSurface("desktop")
+    requested = await requested_surface.present(
+        PresentationContent.declarative(PresentationKind.DECLARATIVE_VIEW, {"state": "idle"})
+    )
+
+    async def wrong_surface(_surface_id: str) -> UiStateSnapshot:
+        return replace(requested, surface_id="other")
+
+    observed_surface = PresentationSurface("desktop", observer=wrong_surface)
+    with pytest.raises(PresentationError, match="another surface"):
+        await observed_surface.query_state()
 
 
 async def _unsafe_observed(entry: PresentationEntry) -> tuple[PresentationEntry, ...]:

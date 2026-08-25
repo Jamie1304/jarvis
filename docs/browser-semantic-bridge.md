@@ -1,16 +1,18 @@
 # Generic browser semantic bridge
 
-The native browser boundary is provider-neutral. A future browser adapter may
-use an API or protocol first, then semantic DOM/accessibility, OS accessibility,
-vision, and coordinates only as progressively weaker fallbacks. No external
+The native browser boundary is provider-neutral. A configured browser backend
+may use an API or protocol first, then semantic DOM/accessibility, OS
+accessibility, vision, and coordinates only as progressively weaker fallbacks.
+No external
 agent-browser runtime is required or imported by JARVIS.
 
-`BrowserSemanticBridge` accepts a trusted application-supplied adapter and a
-trusted permission gate. The default gate denies every operation. The bridge
-does not instantiate a browser, discover credentials, or decide policy. An
-application composition root must connect the gate to the normal
-`Tool -> PermissionBroker -> Policy -> approval` path before registering a
-browser capability.
+`BrowserSemanticBridge` accepts the canonical application-owned
+`BrowserBrokerAdapter` when the capability is configured. The default gate
+denies every operation. The bridge does not instantiate a browser, discover
+credentials, or decide policy. The composition root connects the adapter to
+the normal `ToolRegistry -> PermissionBroker -> Policy -> approval` path before
+registering a browser capability; an arbitrary low-level adapter is not a
+production authorization path.
 
 The exposed scope is bounded to a tab, URL/origin, title, same-origin semantic
 structure, forms, roles, labels, stable per-document semantic IDs, and bounded

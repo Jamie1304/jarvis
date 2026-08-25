@@ -1,7 +1,18 @@
+import tomllib
 from pathlib import Path
 
+from jarvis import __version__
 from jarvis.core.config import Settings
 from pytest import MonkeyPatch
+
+
+def test_release_version_is_consistent() -> None:
+    with Path("pyproject.toml").open("rb") as stream:
+        project = tomllib.load(stream)["project"]
+
+    assert __version__ == "1.0.0"
+    assert Settings(_env_file=None).version == __version__
+    assert project["dynamic"] == ["version"]
 
 
 def test_settings_have_safe_local_defaults(monkeypatch: MonkeyPatch) -> None:

@@ -16,6 +16,24 @@ confidence history. Consistency findings do not become instructions or approvals
 They do not decide task completion. EventBus is in-process only and is never a
 persistence or authorization source.
 
+The authoritative-state map is the normative domain inventory. Durable owners
+are used only where restart changes correctness or user-visible continuity.
+Permission requests and receipts remain authoritative only inside the current
+`PermissionBroker` process: restart invalidates them and the durable task/step
+state causes a fresh exact request. Conversation context, live health,
+provisioning action state, hardware/model measurements, and resource
+reservations are intentionally ephemeral because they can be safely
+reconstructed by re-reading reality. Workflow templates, learned procedure
+candidates, workspace/profile definitions, and standalone provisioning
+transactions are not production-owned v1 persistence domains.
+
+`AgentSessionStore` and `ArtifactStore` now have explicit version-1 migration
+markers. They preserve compatible pre-marker databases and refuse future schema
+versions. Their stores remain separate: session synchronization/usage is not
+task truth, and artifact metadata/content is not evidence, memory, audit, or
+backup truth. Credential metadata is durable in `CredentialVault`, while raw
+secret bytes remain owned by the external Windows secure credential authority.
+
 Installation-specific regression definitions and run evidence are a separate
 durable domain owned by `GoldenWorkflowStore`. Golden workflows are immutable
 fingerprint-bound definitions; `GoldenWorkflowService` delegates outcome
@@ -79,14 +97,16 @@ permission, scope, and expiry. No approval, receipt, remembered grant, or model
 claim is restored from a process restart.
 
 Candidate-build startup is owned by `RecoveryStore` and `RecoveryCoordinator`.
-Each attempt records the candidate and LKG build/snapshot references, transaction,
+Each attempt records the candidate and LKG build/snapshot/hash references, transaction,
 deadline, migration references, health result, and incident evidence. A failed
 candidate is not retried blindly: the coordinator performs one bounded
 `FAIL -> ROLLBACK -> RESTORE_LAST_KNOWN_GOOD -> START -> HEALTH_CHECK` path,
 reconciling migration state before restarting LKG. LKG failure enters Safe Mode;
 the crash-loop guard prevents indefinite restart. Recovery callbacks remain
-composition-root hooks and cannot grant permission or bypass policy. No second
-store owns startup or rollback truth.
+composition-root hooks and cannot grant permission or bypass policy. LKG is
+selected only through the `TrustedRecoveryAuthority` authenticated record;
+unsigned, stale, future, or unrelated records fail closed. No second store owns
+startup or rollback truth.
 
 ## Audit and idempotency
 

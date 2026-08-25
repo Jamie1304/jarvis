@@ -12,9 +12,11 @@ import hashlib
 import json
 import re
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass, fields, is_dataclass
+from dataclasses import dataclass, field, fields, is_dataclass
+from datetime import UTC, datetime
 from enum import StrEnum
 from types import MappingProxyType
+from uuid import UUID, uuid4
 
 from jarvis.artifacts import (
     ArtifactClassification,
@@ -35,6 +37,21 @@ class UISimulationError(RuntimeError):
 
 class UISimulationValidationError(UISimulationError, ValueError):
     """Declarative UI data failed strict simulation validation."""
+
+
+class UISimulationAttestationStatus(StrEnum):
+    """Trusted result of a complete declarative UI simulation run."""
+
+    PASS = "PASS"
+    PASS_WITH_RESTRICTIONS = "PASS_WITH_RESTRICTIONS"
+    FAIL = "FAIL"
+    INVALID = "INVALID"
+    STALE = "STALE"
+
+
+_HARNESS_VERSION = "jarvis-ui-harness-v1"
+_POLICY_VERSION = "jarvis-ui-policy-v1"
+_ATTESTATION_ISSUER = object()
 
 
 class UISimulationState(StrEnum):
@@ -95,6 +112,9 @@ _APPROVAL_ACTIONS = frozenset(
         "trusted.approve",
     }
 )
+_AUTHORITY_MARKERS = frozenset(
+    {"allow", "approve", "authorize", "consent", "grant", "permission", "trusted", "yes"}
+)
 _MAX_COMPONENTS = 128
 _MAX_ASSETS = 128
 _MAX_ACTIONS = 128
@@ -104,6 +124,21 @@ def _id(value: object, field: str) -> str:
     if type(value) is not str or not _ID.fullmatch(value):
         raise UISimulationValidationError(f"{field} is malformed")
     return value
+
+
+def _labels(values: object, name: str, limit: int, item_limit: int) -> None:
+    if (
+        type(values) is not tuple
+        or len(values) > limit
+        or any(
+            type(value) is not str
+            or not value.strip()
+            or len(value) > item_limit
+            or "\x00" in value
+            for value in values
+        )
+    ):
+        raise UISimulationValidationError(f"{name} are malformed")
 
 
 def _text(value: object, field: str, limit: int = 512, *, empty: bool = False) -> str:
@@ -149,6 +184,10 @@ def _data(value: object, *, field: str = "data", depth: int = 0) -> object:
 def _jsonable(value: object) -> object:
     if isinstance(value, StrEnum):
         return value.value
+    if isinstance(value, UUID):
+        return str(value)
+    if isinstance(value, datetime):
+        return value.isoformat()
     if is_dataclass(value):
         return {item.name: _jsonable(getattr(value, item.name)) for item in fields(value)}
     if isinstance(value, Mapping):
@@ -237,11 +276,13 @@ class UISimulationManifest:
     assets: tuple[UISimulationAsset, ...] = ()
     actions: tuple[UISimulationAction, ...] = ()
     states: tuple[str, ...] = _DEFAULT_STATES
+    schema_version: str = "1"
 
     def __post_init__(self) -> None:
         _id(self.package_id, "Simulation package ID")
         _text(self.version, "Simulation package version")
         _id(self.root_component_id, "Simulation root component ID")
+        _text(self.schema_version, "Simulation manifest schema version", 32)
         if type(self.components) is not tuple or not self.components:
             raise UISimulationValidationError("Simulation components are required")
         if len(self.components) > _MAX_COMPONENTS or any(
@@ -281,6 +322,10 @@ class UISimulationManifest:
             state not in known_states for item in self.components for state in item.visible_states
         ):
             raise UISimulationValidationError("Component references an undeclared state")
+
+    @property
+    def manifest_hash(self) -> str:
+        return _fingerprint(self)
 
 
 @dataclass(frozen=True, slots=True)
@@ -384,6 +429,118 @@ class UISimulationEvidence:
 
 
 @dataclass(frozen=True, slots=True)
+class UISimulationAttestation:
+    """Application-owned proof that the harness actually evaluated a UI.
+
+    The private issuer marker and self-checking digest prevent ordinary package
+    metadata, model output, or a caller-provided result from being accepted as
+    trusted simulation evidence.  The marker is an application boundary, not a
+    cryptographic signature; the attestation is trusted only inside the
+    application-owned certification path.
+    """
+
+    attestation_id: UUID
+    package_id: str
+    version: str
+    package_hash: str
+    source_hash: str
+    ui_manifest_hash: str
+    schema_version: str
+    harness_version: str
+    policy_version: str
+    tested_states: tuple[str, ...]
+    semantic_checks: tuple[str, ...]
+    security_checks: tuple[str, ...]
+    asset_checks: tuple[str, ...]
+    action_bindings: tuple[str, ...]
+    zero_real_effect: bool
+    artifact_refs: tuple[str, ...]
+    issued_at: datetime
+    result: UISimulationAttestationStatus
+    attestation_digest: str
+    _issuer: object | None = field(default=None, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.attestation_id, UUID):
+            raise UISimulationValidationError("UI attestation ID is malformed")
+        _id(self.package_id, "UI attestation package ID")
+        _text(self.version, "UI attestation version", 128)
+        for value, name in (
+            (self.package_hash, "UI attestation package hash"),
+            (self.source_hash, "UI attestation source hash"),
+            (self.ui_manifest_hash, "UI attestation manifest hash"),
+            (self.attestation_digest, "UI attestation digest"),
+        ):
+            if type(value) is not str or not _HASH.fullmatch(value):
+                raise UISimulationValidationError(f"{name} is malformed")
+        _text(self.schema_version, "UI attestation schema version", 32)
+        _text(self.harness_version, "UI harness version", 64)
+        _text(self.policy_version, "UI policy version", 64)
+        for values, name in (
+            (self.tested_states, "UI tested states"),
+            (self.semantic_checks, "UI semantic checks"),
+            (self.security_checks, "UI security checks"),
+            (self.asset_checks, "UI asset checks"),
+            (self.action_bindings, "UI action bindings"),
+            (self.artifact_refs, "UI artifact references"),
+        ):
+            _labels(values, name, 256, 512)
+        if type(self.zero_real_effect) is not bool:
+            raise UISimulationValidationError("UI zero-effect result is malformed")
+        if self.issued_at.tzinfo is None:
+            raise UISimulationValidationError("UI attestation timestamp must be timezone-aware")
+        if not isinstance(self.result, UISimulationAttestationStatus):
+            raise UISimulationValidationError("UI attestation result is malformed")
+        if self._issuer is not _ATTESTATION_ISSUER:
+            raise UISimulationValidationError("UI attestation is not harness-issued")
+        if self.attestation_digest != "0" * 64 and self.attestation_digest != _attestation_digest(
+            self
+        ):
+            raise UISimulationValidationError("UI attestation digest is invalid")
+
+    def valid_for(self, package: IntegrationPackage, source_hash: str) -> bool:
+        """Validate identity and freshness against the built package revision."""
+
+        return (
+            isinstance(package, IntegrationPackage)
+            and package.package_id == self.package_id
+            and str(package.version) == self.version
+            and package.package_hash == self.package_hash
+            and (
+                not (package.ui_assets or package.profiles)
+                or package.ui_manifest_hash == self.ui_manifest_hash
+            )
+            and source_hash == self.source_hash
+            and self.result
+            in {
+                UISimulationAttestationStatus.PASS,
+                UISimulationAttestationStatus.PASS_WITH_RESTRICTIONS,
+            }
+            and self.zero_real_effect
+            and self._issuer is _ATTESTATION_ISSUER
+            and self.attestation_digest == _attestation_digest(self)
+        )
+
+    def certification_reference(self) -> str:
+        return f"ui-simulation-attestation:{self.attestation_id}"
+
+    @property
+    def status(self) -> UISimulationAttestationStatus:
+        """Compatibility alias for callers that use status-oriented evidence APIs."""
+
+        return self.result
+
+    def certification_strings(self) -> tuple[str, ...]:
+        return (
+            self.certification_reference(),
+            f"ui-simulation-attestation:digest={self.attestation_digest}",
+            f"ui-simulation-attestation:result={self.result.value}",
+            *tuple(f"ui-simulation-attestation:state={state}" for state in self.tested_states),
+            *tuple(f"ui-simulation-attestation:artifact={ref}" for ref in self.artifact_refs),
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class UISimulationShot:
     view: UISimulatedView
     evidence: UISimulationEvidence
@@ -403,6 +560,7 @@ class UISimulationHarness:
         artifact_store: ArtifactStore | None = None,
         workspace_id: str | None = None,
         screenshot_renderer: ScreenshotRenderer | None = None,
+        clock: Callable[[], datetime] | None = None,
     ) -> None:
         if not isinstance(package, IntegrationPackage):
             raise UISimulationValidationError("Simulation package is malformed")
@@ -412,6 +570,7 @@ class UISimulationHarness:
         self._artifact_store = artifact_store
         self._workspace_id = workspace_id
         self._screenshot_renderer = screenshot_renderer
+        self._clock = clock or (lambda: datetime.now(UTC))
         self._manifest: UISimulationManifest | None = None
         self._capabilities = FakeCapabilityRegistry()
 
@@ -422,6 +581,11 @@ class UISimulationHarness:
             self._package.version
         ):
             raise UISimulationValidationError("Simulation manifest does not match package")
+        if (
+            self._package.ui_manifest_hash
+            and manifest.manifest_hash != self._package.ui_manifest_hash
+        ):
+            raise UISimulationValidationError("Simulation manifest hash does not match package")
         self._capabilities = FakeCapabilityRegistry()
         for action in manifest.actions:
             self._capabilities.register(action)
@@ -464,7 +628,7 @@ class UISimulationHarness:
         checks: list[tuple[UISimulationCheck, bool, str]] = []
         checks.append(self._bindings_check(view))
         checks.append(self._assets_check(view, manifest))
-        checks.append(self._security_check(view))
+        checks.append(self._security_check(view, manifest))
         checks.append(
             (
                 UISimulationCheck.DETERMINISM,
@@ -497,6 +661,87 @@ class UISimulationHarness:
     def run_all(self) -> tuple[UISimulationShot, ...]:
         manifest = self._require_manifest()
         return tuple(self.shot(state) for state in manifest.states)
+
+    def attest(self, source_hash: str) -> UISimulationAttestation:
+        """Run every declared state and issue trusted certification evidence.
+
+        This is the only supported way to obtain a simulation attestation.  A
+        package or model can provide UI data to the harness, but cannot provide
+        the resulting attestation or its security conclusions.
+        """
+
+        manifest = self._require_manifest()
+        if type(source_hash) is not str or not _HASH.fullmatch(source_hash):
+            raise UISimulationValidationError("UI attestation source hash is malformed")
+        shots = self.run_all()
+        checks = {
+            check: all(
+                passed
+                for shot in shots
+                for check_name, passed, _ in shot.evidence.checks
+                if check_name.value == check
+            )
+            for check in {item.value for shot in shots for item, _, _ in shot.evidence.checks}
+        }
+        artifact_refs = tuple(
+            sorted(
+                {
+                    f"{shot.evidence.artifact.artifact_id}:{shot.evidence.artifact.version}"
+                    for shot in shots
+                    if shot.evidence.artifact is not None
+                }
+            )
+        )
+        result = (
+            UISimulationAttestationStatus.PASS
+            if all(checks.values()) and all(shot.evidence.passed for shot in shots)
+            else UISimulationAttestationStatus.FAIL
+        )
+        semantic = tuple(
+            sorted(
+                check
+                for check in checks
+                if check in {UISimulationCheck.BINDINGS.value, UISimulationCheck.LAYOUT.value}
+            )
+        )
+        security = tuple(
+            sorted(
+                check
+                for check in checks
+                if check in {UISimulationCheck.SECURITY.value, UISimulationCheck.ZERO_EFFECTS.value}
+            )
+        )
+        assets = (
+            (UISimulationCheck.ASSETS.value,) if UISimulationCheck.ASSETS.value in checks else ()
+        )
+        bindings = (
+            (UISimulationCheck.BINDINGS.value,)
+            if UISimulationCheck.BINDINGS.value in checks
+            else ()
+        )
+        unsigned = UISimulationAttestation(
+            uuid4(),
+            self._package.package_id,
+            str(self._package.version),
+            self._package.package_hash,
+            source_hash,
+            _fingerprint(manifest),
+            manifest.schema_version,
+            _HARNESS_VERSION,
+            _POLICY_VERSION,
+            manifest.states,
+            semantic,
+            security,
+            assets,
+            bindings,
+            self._capabilities.effect_count == 0,
+            artifact_refs,
+            self._clock(),
+            result,
+            "0" * 64,
+            _ATTESTATION_ISSUER,
+        )
+        return _with_attestation_digest(unsigned)
 
     def invoke_simulated_action(self, action_id: str) -> SimulationActionResult:
         """Exercise a fake endpoint; this method cannot reach a real Tool."""
@@ -582,13 +827,13 @@ class UISimulationHarness:
     @staticmethod
     def _security_check(
         view: UISimulatedView,
+        manifest: UISimulationManifest,
     ) -> tuple[UISimulationCheck, bool, str]:
+        actions = {item.action_id: item for item in manifest.actions}
         spoofed = tuple(
             item.component_id
             for item in view.controls
-            if item.action_id is not None
-            and item.action_id.casefold() in {value.casefold() for value in _APPROVAL_ACTIONS}
-            and item.title.casefold() in {"allow", "allow once", "approve", "yes"}
+            if _looks_like_authority_control(item, actions)
         )
         return (
             UISimulationCheck.SECURITY,
@@ -625,6 +870,79 @@ def _fingerprint(value: object) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
+def _attestation_payload(value: UISimulationAttestation) -> dict[str, object]:
+    return {
+        "attestation_id": str(value.attestation_id),
+        "package_id": value.package_id,
+        "version": value.version,
+        "package_hash": value.package_hash,
+        "source_hash": value.source_hash,
+        "ui_manifest_hash": value.ui_manifest_hash,
+        "schema_version": value.schema_version,
+        "harness_version": value.harness_version,
+        "policy_version": value.policy_version,
+        "tested_states": value.tested_states,
+        "semantic_checks": value.semantic_checks,
+        "security_checks": value.security_checks,
+        "asset_checks": value.asset_checks,
+        "action_bindings": value.action_bindings,
+        "zero_real_effect": value.zero_real_effect,
+        "artifact_refs": value.artifact_refs,
+        "issued_at": value.issued_at.isoformat(),
+        "result": value.result.value,
+    }
+
+
+def _attestation_digest(value: UISimulationAttestation) -> str:
+    encoded = json.dumps(
+        _jsonable(_attestation_payload(value)), sort_keys=True, separators=(",", ":")
+    ).encode()
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _with_attestation_digest(value: UISimulationAttestation) -> UISimulationAttestation:
+    return UISimulationAttestation(
+        value.attestation_id,
+        value.package_id,
+        value.version,
+        value.package_hash,
+        value.source_hash,
+        value.ui_manifest_hash,
+        value.schema_version,
+        value.harness_version,
+        value.policy_version,
+        value.tested_states,
+        value.semantic_checks,
+        value.security_checks,
+        value.asset_checks,
+        value.action_bindings,
+        value.zero_real_effect,
+        value.artifact_refs,
+        value.issued_at,
+        value.result,
+        _attestation_digest(value),
+        _ATTESTATION_ISSUER,
+    )
+
+
+def _looks_like_authority_control(
+    item: UISimulatedNode,
+    actions: Mapping[str, UISimulationAction],
+) -> bool:
+    if item.action_id is None:
+        return False
+    action = actions.get(item.action_id)
+    values: tuple[str, ...] = (item.action_id, item.title, item.text)
+    if action is not None:
+        values += (action.capability_id,)
+    normalized = tuple(
+        token for value in values for token in re.split(r"[^a-z0-9]+", value.casefold()) if token
+    )
+    return any(token in _AUTHORITY_MARKERS for token in normalized) or any(
+        item.action_id.casefold() == value.casefold() for value in _APPROVAL_ACTIONS
+    )
+
+
 __all__ = [
     "FakeCapabilityCall",
     "FakeCapabilityRegistry",
@@ -633,6 +951,8 @@ __all__ = [
     "UISimulatedView",
     "UISimulationAction",
     "UISimulationAsset",
+    "UISimulationAttestation",
+    "UISimulationAttestationStatus",
     "UISimulationCheck",
     "UISimulationComponent",
     "UISimulationComponentKind",

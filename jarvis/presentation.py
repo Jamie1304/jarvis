@@ -267,6 +267,7 @@ class UiStateSnapshot:
     captured_at: datetime
     references: tuple[UiStateReference, ...]
     state_fingerprint: str
+    observed: bool = False
 
     def __post_init__(self) -> None:
         _id(self.surface_id, "Presentation surface ID")
@@ -282,6 +283,8 @@ class UiStateSnapshot:
             raise PresentationValidationError("UI state references are not unique")
         if type(self.state_fingerprint) is not str or not _HASH.fullmatch(self.state_fingerprint):
             raise PresentationValidationError("UI state fingerprint is malformed")
+        if type(self.observed) is not bool:
+            raise PresentationValidationError("UI state observation status is malformed")
 
 
 PresentationRenderer = Callable[[str, tuple[PresentationEntry, ...]], Awaitable[None]]
@@ -349,7 +352,7 @@ class PresentationSurface:
             await self._renderer(self._surface_id, candidate)
         self._entries = candidate
         self._revision += 1
-        return _snapshot(self._surface_id, self._revision, candidate)
+        return _snapshot(self._surface_id, self._revision, candidate, observed=False)
 
     async def query_state(self) -> UiStateSnapshot:
         """Return observed actual state, not merely the last requested state."""
@@ -366,8 +369,8 @@ class PresentationSurface:
                 raise PresentationError("Presentation observer returned malformed state")
             for item in observed:
                 self._validate_reference(item.content)
-            return _snapshot(self._surface_id, self._revision, observed)
-        return _snapshot(self._surface_id, self._revision, self._entries)
+            return _snapshot(self._surface_id, self._revision, observed, observed=True)
+        return _snapshot(self._surface_id, self._revision, self._entries, observed=False)
 
     def _validate_reference(self, content: PresentationContent) -> None:
         if content.artifact is None:
@@ -424,7 +427,8 @@ class VerificationEngine:
         status = (
             PresentationVerificationStatus.VERIFIED
             if (
-                intended.state_fingerprint == actual.state_fingerprint
+                actual.observed
+                and intended.state_fingerprint == actual.state_fingerprint
                 and not missing
                 and not unexpected
             )
@@ -478,6 +482,8 @@ def _snapshot(
     surface_id: str,
     revision: int,
     entries: tuple[PresentationEntry, ...],
+    *,
+    observed: bool,
 ) -> UiStateSnapshot:
     references = tuple(
         UiStateReference(
@@ -504,7 +510,14 @@ def _snapshot(
     fingerprint = hashlib.sha256(
         json.dumps(fingerprint_payload, sort_keys=True, separators=(",", ":")).encode()
     ).hexdigest()
-    return UiStateSnapshot(surface_id, revision, datetime.now(UTC), references, fingerprint)
+    return UiStateSnapshot(
+        surface_id,
+        revision,
+        datetime.now(UTC),
+        references,
+        fingerprint,
+        observed,
+    )
 
 
 __all__ = [

@@ -489,6 +489,15 @@ class BrowserSemanticBridge:
         document = self.document(tab_id)
         return tuple(document.reference(node.semantic_id) for node in document.semantic_nodes)
 
+    async def aclose(self) -> None:
+        """Close a trusted browser adapter when the composition root shuts down."""
+
+        close = getattr(self._adapter, "aclose", None) or getattr(self._adapter, "close", None)
+        if callable(close):
+            result = close()
+            if hasattr(result, "__await__"):
+                await result
+
     def _tab_for(self, value: BrowserReference | str) -> BrowserTab:
         tab_id = value.tab_id if isinstance(value, BrowserReference) else value
         current = self.tab(tab_id)

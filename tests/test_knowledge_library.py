@@ -3,17 +3,23 @@
 from __future__ import annotations
 
 import sqlite3
+from datetime import UTC, datetime
 from pathlib import Path
 from uuid import uuid4
 
 import pytest
 from jarvis.knowledge import (
+    DocumentChunk,
+    IndexedDocument,
+    KnowledgeCitation,
     KnowledgeLibrary,
     KnowledgeLibraryMigrationError,
+    KnowledgeMigration,
     KnowledgeRetrievalMode,
     KnowledgeSource,
     KnowledgeSourceKind,
     KnowledgeSyncStatus,
+    SyncState,
 )
 from jarvis.multi_agent.models import DataClassification
 
@@ -251,3 +257,64 @@ def test_future_schema_is_refused(tmp_path: Path) -> None:
     connection.close()
     with pytest.raises(KnowledgeLibraryMigrationError, match="future"):
         KnowledgeLibrary(database, workspace_roots={})
+
+
+def test_knowledge_models_and_migrations_fail_closed(tmp_path: Path) -> None:
+    now = datetime.now(UTC)
+    with pytest.raises(ValueError):
+        KnowledgeSource("bad", "x", "workspace")  # type: ignore[arg-type]
+    with pytest.raises(ValueError):
+        KnowledgeSource(
+            KnowledgeSourceKind.APPROVED_FILE, "x", "workspace", DataClassification.SECRET
+        )
+    with pytest.raises(ValueError):
+        KnowledgeSource(
+            KnowledgeSourceKind.INTEGRATION,
+            "https://user:pass@example.invalid/source",
+            "workspace",
+        )
+    with pytest.raises(ValueError):
+        IndexedDocument(
+            uuid4(),
+            uuid4(),
+            "workspace",
+            "source",
+            "file.md",
+            "file.md",
+            "text/plain",
+            -1,
+            "hash",
+            now,
+            DataClassification.INTERNAL,
+        )
+    with pytest.raises(ValueError):
+        DocumentChunk(uuid4(), uuid4(), 0, "text", "hash", 2, 3)
+    with pytest.raises(ValueError):
+        KnowledgeCitation(uuid4(), uuid4(), uuid4(), uuid4(), "source", "file", "hash", "")
+    with pytest.raises(ValueError):
+        SyncState(uuid4(), indexed_count=-1)
+    with pytest.raises(KnowledgeLibraryMigrationError):
+        KnowledgeLibrary(
+            tmp_path / "invalid-migrations.sqlite3",
+            migrations=(KnowledgeMigration(2, "gap", "SELECT 1"),),
+        )
+
+
+def test_disabled_and_unknown_knowledge_sources_are_safe(tmp_path: Path) -> None:
+    root = tmp_path / "workspace"
+    root.mkdir()
+    with KnowledgeLibrary(tmp_path / "library.sqlite3", workspace_roots={"a": root}) as library:
+        disabled = library.register_source(_source(root, "a"))
+        with sqlite3.connect(library.database_path) as connection:
+            connection.execute(
+                "UPDATE knowledge_sources SET enabled=0 WHERE source_id=?",
+                (str(disabled.source_id),),
+            )
+        skipped = library.sync(disabled.source_id)
+        assert skipped.skipped == 1
+        assert skipped.errors == ("source_disabled",)
+        with pytest.raises(KeyError):
+            library.sync(uuid4())
+        with pytest.raises(ValueError):
+            library.list_sources(workspace_id="")
+        assert library.list_documents() == ()

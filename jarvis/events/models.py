@@ -39,6 +39,7 @@ class EventType(StrEnum):
     BROWSER_MUTATED = "browser.mutated"
     BROWSER_TAB_CLOSED = "browser.tab_closed"
     CREDENTIAL_CHANGED = "credential.changed"
+    EFFECT_ATTESTATION_RECORDED = "effect_attestation.recorded"
     SYSTEM_ERROR = "system.error"
     ARTIFACT_CREATED = "artifact.created"
 
@@ -324,6 +325,36 @@ class CredentialChanged(EventPayload):
 
 
 @dataclass(frozen=True, slots=True)
+class EffectAttestationRecorded(EventPayload):
+    """Trusted broker observation/attestation metadata; never a secret/result body."""
+
+    observation_id: UUID | None
+    attestation_id: UUID | None
+    integration_id: str
+    integration_version: str
+    activation_state: str
+    status: str
+    allowed: bool | None = None
+    dispatched: bool | None = None
+
+    def __post_init__(self) -> None:
+        if self.observation_id is None and self.attestation_id is None:
+            raise ValueError("effect attestation event requires an identity")
+        if self.observation_id is not None and not isinstance(self.observation_id, UUID):
+            raise ValueError("invalid observation id")
+        if self.attestation_id is not None and not isinstance(self.attestation_id, UUID):
+            raise ValueError("invalid attestation id")
+        _text(self.integration_id)
+        _text(self.integration_version)
+        _text(self.activation_state)
+        _text(self.status)
+        if self.allowed is not None and type(self.allowed) is not bool:
+            raise ValueError("invalid attestation authorization flag")
+        if self.dispatched is not None and type(self.dispatched) is not bool:
+            raise ValueError("invalid attestation dispatch flag")
+
+
+@dataclass(frozen=True, slots=True)
 class SystemError(EventPayload):
     code: str
     summary: str
@@ -359,6 +390,7 @@ _PAYLOAD_TYPES: dict[EventType, type[EventPayload]] = {
     EventType.BROWSER_MUTATED: BrowserMutated,
     EventType.BROWSER_TAB_CLOSED: BrowserTabClosed,
     EventType.CREDENTIAL_CHANGED: CredentialChanged,
+    EventType.EFFECT_ATTESTATION_RECORDED: EffectAttestationRecorded,
     EventType.SYSTEM_ERROR: SystemError,
     EventType.ARTIFACT_CREATED: ArtifactCreated,
 }

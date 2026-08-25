@@ -17,6 +17,12 @@ Vault master access, approval authentication, mutation authority, the trusted
 audit writer, `RuntimeContainer`, open application handles, or an inherited
 application environment.
 
+On Windows the default executable launch additionally uses a capability-free
+AppContainer, scoped ACLs, an explicit standard-handle list, and a Job Object.
+Restricted-token and Job-only modes are explicit diagnostic/degraded modes, not
+silent fallbacks. The exact native claims and residual limits are recorded in
+`docs/security/windows-integration-isolation.md`.
+
 ## IPC contract
 
 `SandboxMessage` is a strict version-1 envelope containing a protocol version,
@@ -42,14 +48,13 @@ UTF-8 settings, and a JARVIS sandbox marker. `PATH`, `PYTHONPATH`, user profile,
 proxy, credential, Vault, application, and arbitrary `JARVIS_` variables are not
 forwarded. Stderr is discarded rather than merged into unbounded IPC or logs.
 
-On Windows the manager creates a native Job Object before launch, assigns the
-child immediately after creation, enables kill-on-job-close, and configures
-active-process and per-process memory limits. Termination uses the Job Object,
-so descendants created by the child are terminated during cleanup. A small
-post-launch assignment race exists because the current asyncio subprocess API
-does not expose a suspended `CreateProcess`/`STARTUPINFOEX` launch; a future
-stronger boundary can close it with native suspended launch and process
-mitigation attributes.
+On Windows the manager creates a native Job Object before launch. The canonical
+AppContainer launcher creates the child suspended, applies the capability-free
+security context and scoped ACLs, assigns it to the Job Object before resume,
+and configures kill-on-job-close, active-process and per-process memory limits.
+Standard-handle inheritance is explicit. Shutdown also performs bounded cleanup
+of locally observable descendants that broke away from the Job Object. That
+cleanup is lifecycle hygiene, not a guarantee against every breakaway.
 
 On non-Windows, the manager uses a new process session/group and bounded
 termination, but does not claim equivalent OS resource enforcement. Windows Job
@@ -59,27 +64,23 @@ fallback on Windows.
 ## What this does not guarantee
 
 Windows Job Objects provide process-tree ownership and resource accounting, not
-a complete security sandbox. The current boundary keeps the child in the same
-Windows user identity and does not enforce filesystem ACL isolation, network
-denial, registry isolation, token reduction, AppContainer capabilities, code
-signing, or a full broker-mediated child-process denial. A malicious child that
-already knows a path readable by the same user may still read it, and it may
-attempt network or OS operations allowed to that user. The manager does not pass
-source paths, but absence of a passed path is not filesystem protection.
+a complete security sandbox. The canonical executable boundary uses a
+capability-free AppContainer and scoped ACLs, but it does not claim VM/kernel
+isolation, code-signing enforcement, universal TOCTOU protection, or safety of
+uncomposed direct MCP/terminal process paths. The manager does not pass source
+paths, but absence of a passed path is not filesystem protection by itself.
 
-Therefore this is a native out-of-process containment boundary and a required
-integration lifecycle primitive, not a claim that arbitrary malicious Python is
-already safe to activate. Production certification of hostile or unreviewed
-code still requires a separately evaluated Windows AppContainer/restricted-token
-launch, Windows Sandbox/VM boundary, or equivalent OS policy. Such a mechanism
-must grant access only to staged package code and the dedicated data directory,
-deny source/config/Vault access, and be verified with owned malicious fixtures.
+Therefore the canonical executable package path has a native Windows boundary,
+but it remains subject to certification, broker policy, Shadow/Canary, drift,
+and independent verification. If AppContainer/profile/ACL setup is unavailable,
+production executable activation is refused; there is no weaker fallback.
 
 ## Security tests
 
 `tests/test_sandbox.py` covers JSON/type validation, environment minimization,
 dedicated paths, response identity spoofing, oversized request/response,
 crash/timeout/cancellation containment, bounded restart, process-tree cleanup,
-and malformed configuration. The process-tree test demonstrates descendant
-cleanup on the current Windows host; it does not certify filesystem, network, or
-AppContainer isolation. No donor project is imported or required at runtime.
+explicit handle non-inheritance, restricted-token status, capability-free
+AppContainer identity, outside-root filesystem denial, local loopback denial,
+fail-closed mandatory setup, and malformed configuration. No donor project is
+imported or required at runtime.

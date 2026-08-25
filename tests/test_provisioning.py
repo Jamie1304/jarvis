@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import sqlite3
 from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from uuid import uuid4
 
 import pytest
@@ -26,6 +28,7 @@ from jarvis.provisioning import (
     ProvisioningPlanState,
     ProvisioningRollbackPlan,
     ProvisioningValidationError,
+    SQLiteProvisioningStore,
 )
 
 
@@ -159,6 +162,35 @@ async def test_already_satisfied_does_not_request_approval_or_apply() -> None:
     assert result.actions[0].state is ProvisioningActionState.ALREADY_SATISFIED
     assert provider.apply_calls == 0
     assert auth.authorized == []
+
+
+@pytest.mark.asyncio
+async def test_provisioning_store_survives_restart_and_refuses_future_schema(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "provisioning.sqlite3"
+    provider = Provider()
+    store = SQLiteProvisioningStore(database)
+    current_plan = plan((action(),))
+    result = await ProvisioningEngine({"fixture": provider}, Authorizer(), store=store).run(
+        current_plan
+    )
+    assert result.state is ProvisioningPlanState.VERIFIED
+    store.close()
+
+    reopened = SQLiteProvisioningStore(database)
+    persisted = reopened.load(current_plan.plan_id)
+    assert persisted["write"].state is ProvisioningActionState.VERIFIED
+    reopened.close()
+
+    future = tmp_path / "future-provisioning.sqlite3"
+    with sqlite3.connect(future) as connection:
+        connection.execute(
+            "CREATE TABLE provisioning_schema(version INTEGER PRIMARY KEY, name TEXT NOT NULL)"
+        )
+        connection.execute("INSERT INTO provisioning_schema(version, name) VALUES (99, 'future')")
+    with pytest.raises(ProvisioningError, match="future schema"):
+        SQLiteProvisioningStore(future)
 
 
 @pytest.mark.asyncio

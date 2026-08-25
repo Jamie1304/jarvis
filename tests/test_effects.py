@@ -4,7 +4,9 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
-from typing import cast
+from pathlib import Path
+from types import SimpleNamespace
+from typing import Any, cast
 from uuid import UUID, uuid4
 
 import pytest
@@ -14,14 +16,18 @@ from jarvis.effects import (
     CompensationExecutor,
     CompensationRequest,
     CompensationResult,
+    CompensationService,
     CompensationStatus,
+    CompensationStore,
     EffectError,
     EffectPreview,
     EffectTraceRecord,
+    OriginalEffectReference,
     PlanStudioEffectProjection,
 )
 from jarvis.permissions.models import Permission, PermissionRequest, PermissionScope
 from jarvis.planning.editing import PlanInspection, PlanStepView
+from jarvis.planning.engine import PlanningEngine
 from jarvis.planning.models import (
     BudgetUsage,
     ExecutionBudgets,
@@ -43,7 +49,13 @@ from jarvis.tools.models import (
     ToolResultStatus,
 )
 from jarvis.tools.registry import ToolRegistry
-from jarvis.verification import EvidenceRecord, EvidenceType, VerificationLevel, VerificationPlan
+from jarvis.verification import (
+    EvidenceRecord,
+    EvidenceType,
+    VerificationEngine,
+    VerificationLevel,
+    VerificationPlan,
+)
 from pydantic import BaseModel, ConfigDict
 
 NOW = datetime(2026, 8, 23, 12, tzinfo=UTC)
@@ -574,3 +586,335 @@ async def test_compensation_permission_unknown_observation_and_trace_failure() -
         ToolRegistry((_CompensationTool(),)), trace=BrokenTrace(), clock=lambda: NOW
     ).compensate(request(preview(compensation=definition())))
     assert traced.status is CompensationStatus.VERIFIED
+
+
+class _PlanningStub:
+    def __init__(
+        self,
+        *,
+        created_status: PlanningTaskStatus = PlanningTaskStatus.READY,
+        final_status: PlanningTaskStatus = PlanningTaskStatus.COMPLETED,
+    ) -> None:
+        self.created_status = created_status
+        self.final_status = final_status
+        self.tasks: dict[UUID, Any] = {}
+
+    def get_task(self, task_id: UUID) -> Any | None:
+        return self.tasks.get(task_id)
+
+    async def create_proposal_task(self, *_args: object, **_kwargs: object) -> Any:
+        task = SimpleNamespace(
+            task_id=uuid4(),
+            status=self.created_status,
+            waiting_request_ids=(
+                (uuid4(),)
+                if self.created_status is PlanningTaskStatus.WAITING_FOR_PERMISSION
+                else ()
+            ),
+        )
+        self.tasks[task.task_id] = task
+        return task
+
+    async def run(self, task_id: UUID, **_kwargs: object) -> Any:
+        task = self.tasks[task_id]
+        task.status = self.final_status
+        return task
+
+    async def resume(self, task_id: UUID, **_kwargs: object) -> Any:
+        return await self.run(task_id)
+
+
+class _ServiceTrace:
+    def __init__(self, *, fail_bind: bool = False, fail_record: bool = False) -> None:
+        self.fail_bind = fail_bind
+        self.fail_record = fail_record
+
+    def bind_goal_task(self, _goal_id: UUID, _task_id: UUID) -> None:
+        if self.fail_bind:
+            raise RuntimeError("synthetic trace projection failure")
+
+    def record(self, *_args: object, **_kwargs: object) -> Any:
+        if self.fail_record:
+            raise RuntimeError("synthetic trace write failure")
+        return SimpleNamespace(event_id=uuid4())
+
+
+def _service_request(
+    *,
+    state: str = BASELINE,
+    request_id: UUID | None = None,
+    task_id: UUID | None = None,
+    original_task_id: UUID | None = None,
+    effect: EffectPreview | None = None,
+) -> CompensationRequest:
+    selected_effect = effect or preview(compensation=definition())
+    selected_task_id = task_id or uuid4()
+    original = OriginalEffectReference(
+        selected_effect.effect_id,
+        selected_effect.fingerprint,
+        original_task_id or selected_task_id,
+        uuid4(),
+        1,
+        uuid4(),
+        "restore.tool",
+        "restore",
+        "settings.json",
+        "settings.json",
+        ("canonical-step-evidence",),
+        "verification:canonical-step",
+    )
+    return CompensationRequest(
+        request_id or uuid4(),
+        selected_task_id,
+        uuid4(),
+        selected_effect,
+        state,
+        original_effect=original,
+    )
+
+
+async def _empty_observation(*_args: object) -> tuple[EvidenceRecord, ...]:
+    return ()
+
+
+def _new_service(
+    tmp_path: Path,
+    planning: _PlanningStub,
+    *,
+    state_provider: Any = lambda _request: BASELINE,
+    observation_provider: Any = None,
+    trace: Any = None,
+) -> CompensationService:
+    service: Any = object.__new__(CompensationService)
+    service._planning = planning
+    service._registry = SimpleNamespace(
+        inspect=lambda _tool_id: SimpleNamespace(
+            manifest=SimpleNamespace(declared_permissions=frozenset())
+        )
+    )
+    service._verification = VerificationEngine()
+    service._store = CompensationStore(tmp_path / f"compensation-{uuid4().hex}.sqlite3")
+    service._observation_provider = observation_provider
+    service._state_provider = state_provider
+    service._trace = trace
+    service._clock = lambda: NOW
+    return cast(CompensationService, service)
+
+
+def test_compensation_service_rejects_malformed_dependencies(tmp_path: Path) -> None:
+    store = CompensationStore(tmp_path / "malformed.sqlite3")
+    with pytest.raises(EffectError):
+        CompensationService(object(), ToolRegistry(), VerificationEngine(), store)  # type: ignore[arg-type]
+    with pytest.raises(EffectError):
+        CompensationService(
+            cast(Any, object.__new__(PlanningEngine)),
+            ToolRegistry(),
+            object(),  # type: ignore[arg-type]
+            store,
+        )
+    store.close()
+
+
+@pytest.mark.asyncio
+async def test_compensation_service_fail_closed_paths_and_durable_idempotency(
+    tmp_path: Path,
+) -> None:
+    malformed = _service_request()
+    no_reference = CompensationRequest(
+        malformed.request_id,
+        malformed.task_id,
+        malformed.correlation_id,
+        malformed.effect,
+        malformed.current_state_fingerprint,
+    )
+    service = _new_service(tmp_path, _PlanningStub())
+    with pytest.raises(EffectError):
+        await service.compensate(no_reference)
+
+    mismatched = _service_request()
+    mismatched_reference = OriginalEffectReference(
+        mismatched.effect.effect_id,
+        "b" * 64,
+        mismatched.task_id,
+        uuid4(),
+        1,
+        uuid4(),
+        "restore.tool",
+        "restore",
+        "settings.json",
+        "settings.json",
+        ("proof",),
+        "verification",
+    )
+    mismatched = CompensationRequest(
+        mismatched.request_id,
+        mismatched.task_id,
+        mismatched.correlation_id,
+        mismatched.effect,
+        mismatched.current_state_fingerprint,
+        original_effect=mismatched_reference,
+    )
+    result = await service.compensate(mismatched)
+    assert result.status is CompensationStatus.STALE_STATE
+
+    task_id = uuid4()
+    step_id = uuid4()
+    bind_task = SimpleNamespace(status=PlanningTaskStatus.COMPLETED)
+    bind_plan = SimpleNamespace(
+        version=1,
+        plan_id=uuid4(),
+        steps=(
+            SimpleNamespace(
+                step_id=step_id,
+                status=PlanningStepStatus.SUCCEEDED,
+                result=SimpleNamespace(evidence=("proof",)),
+                tool_id="restore.tool",
+                capability="restore",
+            ),
+        ),
+    )
+    bind_planning = SimpleNamespace(
+        get_task=lambda _task_id: bind_task,
+        inspect_plan=lambda _task_id: bind_plan,
+    )
+    cast(Any, service)._planning = bind_planning
+    with pytest.raises(EffectError):
+        service.bind_original_effect(
+            preview(reversibility=Reversibility.REVERSIBLE, include_compensation=False),
+            task_id=task_id,
+            plan_revision=1,
+            step_id=step_id,
+            target="settings.json",
+            scope="settings.json",
+        )
+    with pytest.raises(EffectError):
+        service.bind_original_effect(
+            preview(),
+            task_id=task_id,
+            plan_revision=2,
+            step_id=step_id,
+            target="settings.json",
+            scope="settings.json",
+        )
+    bind_task.status = PlanningTaskStatus.FAILED
+    with pytest.raises(EffectError):
+        service.bind_original_effect(
+            preview(),
+            task_id=task_id,
+            plan_revision=1,
+            step_id=step_id,
+            target="settings.json",
+            scope="settings.json",
+        )
+    bind_task.status = PlanningTaskStatus.COMPLETED
+    bind_plan.version = 1
+    bind_plan.steps = (SimpleNamespace(step_id=step_id, status=PlanningStepStatus.QUEUED),)
+    with pytest.raises(EffectError):
+        service.bind_original_effect(
+            preview(),
+            task_id=task_id,
+            plan_revision=1,
+            step_id=step_id,
+            target="settings.json",
+            scope="settings.json",
+        )
+    bind_plan.steps = (
+        SimpleNamespace(
+            step_id=step_id,
+            status=PlanningStepStatus.SUCCEEDED,
+            result=SimpleNamespace(evidence=()),
+            tool_id="restore.tool",
+            capability="restore",
+        ),
+    )
+    with pytest.raises(EffectError):
+        service.bind_original_effect(
+            preview(),
+            task_id=task_id,
+            plan_revision=1,
+            step_id=step_id,
+            target="settings.json",
+            scope="settings.json",
+        )
+    no_undo_effect = preview(reversibility=Reversibility.REVERSIBLE, include_compensation=False)
+    no_undo_request = _service_request(effect=no_undo_effect)
+    assert (await service.compensate(no_undo_request)).status is CompensationStatus.NOT_AVAILABLE
+    with pytest.raises(EffectError):
+        cast(Any, service)._proposal(no_undo_request)
+    assert (
+        await service.compensate(_service_request(original_task_id=uuid4()))
+    ).status is CompensationStatus.STALE_STATE
+    service.close()
+
+    async def raising_observation(*_args: object) -> tuple[EvidenceRecord, ...]:
+        raise RuntimeError("synthetic observer failure")
+
+    scenarios = (
+        (
+            _PlanningStub(final_status=PlanningTaskStatus.WAITING_FOR_PERMISSION),
+            None,
+            CompensationStatus.PERMISSION_REQUIRED,
+        ),
+        (
+            _PlanningStub(created_status=PlanningTaskStatus.RECOVERING),
+            None,
+            CompensationStatus.UNKNOWN_OUTCOME,
+        ),
+        (
+            _PlanningStub(final_status=PlanningTaskStatus.FAILED),
+            None,
+            CompensationStatus.FAILED,
+        ),
+        (
+            _PlanningStub(final_status=PlanningTaskStatus.RECOVERING),
+            None,
+            CompensationStatus.UNKNOWN_OUTCOME,
+        ),
+        (_PlanningStub(), None, CompensationStatus.VERIFICATION_FAILED),
+        (_PlanningStub(), raising_observation, CompensationStatus.UNKNOWN_OUTCOME),
+        (_PlanningStub(), _empty_observation, CompensationStatus.VERIFICATION_FAILED),
+    )
+    for index, (planning, observer, expected) in enumerate(scenarios):
+        trace = _ServiceTrace(fail_bind=index == 4, fail_record=index == 5)
+        scenario = _new_service(
+            tmp_path,
+            planning,
+            observation_provider=observer,
+            trace=trace,
+        )
+        request_value = _service_request()
+        outcome = await scenario.compensate(request_value)
+        assert outcome.status is expected
+        repeated = await scenario.compensate(request_value)
+        assert repeated.status is expected
+        scenario.close()
+
+    def failing_state(_request: CompensationRequest) -> str:
+        raise RuntimeError("synthetic state observer failure")
+
+    state_failure = _new_service(tmp_path, _PlanningStub(), state_provider=failing_state)
+    assert (
+        await state_failure.compensate(_service_request())
+    ).status is CompensationStatus.STALE_STATE
+    state_failure.close()
+
+    denied_state = _new_service(tmp_path, _PlanningStub(), state_provider=None)
+    assert (
+        await denied_state.compensate(_service_request())
+    ).status is CompensationStatus.STALE_STATE
+    denied_state.close()
+
+    terminal = _new_service(tmp_path, _PlanningStub(), observation_provider=_empty_observation)
+    terminal_request = _service_request()
+    terminal_result = await terminal.compensate(terminal_request)
+    changed = CompensationRequest(
+        terminal_request.request_id,
+        terminal_request.task_id,
+        terminal_request.correlation_id,
+        terminal_request.effect,
+        "c" * 64,
+        original_effect=terminal_request.original_effect,
+    )
+    assert (await terminal.compensate(changed)).status is CompensationStatus.STALE_STATE
+    assert terminal_result.status is CompensationStatus.VERIFICATION_FAILED
+    terminal.close()

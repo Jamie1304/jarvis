@@ -16,7 +16,7 @@ def test_health_reports_canonical_runtime_readiness(tmp_path: Path) -> None:
     assert response.status_code == 200
     assert response.json() == {
         "status": "ok",
-        "version": "0.1.0",
+        "version": "1.0.0",
         "startup_complete": True,
     }
 
@@ -26,7 +26,7 @@ def test_version_endpoint(tmp_path: Path) -> None:
     with TestClient(app) as client:
         response = client.get("/version")
 
-    assert response.json() == {"version": "0.1.0"}
+    assert response.json() == {"version": "1.0.0"}
 
 
 def test_health_reports_safe_mode_for_rejected_security_configuration(tmp_path: Path) -> None:
@@ -60,7 +60,7 @@ def test_malformed_environment_is_redacted_as_safe_mode(
         assert response.status_code == 503
         assert response.json() == {
             "status": "safe_mode",
-            "version": "0.1.0",
+            "version": "1.0.0",
             "startup_complete": False,
         }
     finally:

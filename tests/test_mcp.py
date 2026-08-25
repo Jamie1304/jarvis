@@ -70,6 +70,18 @@ class MaliciousSchemaClient(FakeClient):
         return await super().request(method, params)
 
 
+class DuplicateToolsClient(FakeClient):
+    async def request(self, method: str, params: dict[str, object]) -> dict[str, object]:
+        if method == "tools/list":
+            descriptor = {
+                "name": "duplicate",
+                "description": "synthetic duplicate",
+                "inputSchema": {"type": "object"},
+            }
+            return {"tools": [descriptor, descriptor.copy()]}
+        return await super().request(method, params)
+
+
 class BrokenClient(FakeClient):
     async def start(self) -> None:
         raise RuntimeError("fake transport failure")
@@ -171,6 +183,20 @@ async def test_mcp_malicious_schema_fails_closed() -> None:
     status = await manager.start("hostile")
     assert status.state is MCPExtensionState.FAILED
     assert registry.manifests() == ()
+
+
+@pytest.mark.asyncio
+async def test_mcp_namespace_collision_fails_closed_without_partial_registration() -> None:
+    registry = ToolRegistry()
+    manager = MCPExtensionManager(
+        registry,
+        client_factory=lambda item: cast(MCPClient, DuplicateToolsClient(item)),
+    )
+    manager.discover((config("collision"),))
+    status = await manager.start("collision")
+    assert status.state is MCPExtensionState.FAILED
+    assert registry.manifests() == ()
+    await manager.close()
 
 
 @pytest.mark.asyncio
@@ -281,7 +307,7 @@ async def test_mcp_http_failures_and_invalid_requests() -> None:
 
 
 @pytest.mark.asyncio
-async def test_mcp_stdio_round_trip_and_protocol_failures() -> None:
+async def test_mcp_stdio_round_trip_and_protocol_failures(tmp_path: Path) -> None:
     server = (
         "import sys,json\n"
         "for line in sys.stdin:\n"
@@ -292,6 +318,7 @@ async def test_mcp_stdio_round_trip_and_protocol_failures() -> None:
         "stdio",
         MCPServerTransport.STDIO,
         command=(sys.executable, "-c", server),
+        working_directory=tmp_path,
     )
     client = MCPClient(config_value)
     await client.start()
@@ -299,6 +326,44 @@ async def test_mcp_stdio_round_trip_and_protocol_failures() -> None:
     await client.close()
     with pytest.raises(MCPProtocolError):
         await client.request("ping", {})
+
+
+@pytest.mark.asyncio
+async def test_mcp_stdio_rejects_ambiguous_process_identity_and_cwd(tmp_path: Path) -> None:
+    relative = MCPClient(
+        MCPExtensionConfig(
+            "relative",
+            MCPServerTransport.STDIO,
+            command=("python.exe",),
+            working_directory=tmp_path,
+        )
+    )
+    with pytest.raises(MCPProtocolError, match="identity"):
+        await relative.start()
+
+    missing_cwd = MCPClient(
+        MCPExtensionConfig("no-cwd", MCPServerTransport.STDIO, command=(sys.executable,))
+    )
+    with pytest.raises(MCPProtocolError, match="working directory"):
+        await missing_cwd.start()
+
+
+@pytest.mark.asyncio
+async def test_mcp_start_failure_closes_started_process(tmp_path: Path) -> None:
+    server = "import time; print('{}', flush=True); time.sleep(60)"
+    client = MCPClient(
+        MCPExtensionConfig(
+            "bad-init",
+            MCPServerTransport.STDIO,
+            command=(sys.executable, "-c", server),
+            working_directory=tmp_path,
+        )
+    )
+
+    with pytest.raises(MCPProtocolError):
+        await client.start()
+
+    assert client._process is None
 
 
 def test_mcp_schema_validation_and_config_states(tmp_path: Path) -> None:

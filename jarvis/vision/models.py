@@ -1,5 +1,6 @@
 """Strict visual-state records; provider output is never execution authority."""
 
+import math
 from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
@@ -50,7 +51,9 @@ class NormalizedBounds:
 
     def __post_init__(self) -> None:
         values = (self.x, self.y, self.width, self.height)
-        if any(not isinstance(value, int | float) for value in values):
+        if any(
+            type(value) not in {int, float} or not math.isfinite(float(value)) for value in values
+        ):
             raise ValueError("Normalized bounds must be numeric")
         if self.width <= 0 or self.height <= 0 or self.x < 0 or self.y < 0:
             raise ValueError("Normalized bounds must be non-negative with positive dimensions")
@@ -114,7 +117,15 @@ class VisibleElement:
     confidence: float
 
     def __post_init__(self) -> None:
-        if not self.label.strip() or not self.role.strip() or not 0 <= self.confidence <= 1:
+        if (
+            type(self.label) is not str
+            or type(self.role) is not str
+            or not self.label.strip()
+            or not self.role.strip()
+            or type(self.confidence) not in {int, float}
+            or not math.isfinite(float(self.confidence))
+            or not 0 <= self.confidence <= 1
+        ):
             raise ValueError("Visible elements require bounded labels, roles, and confidence")
 
 
@@ -128,7 +139,15 @@ class VisionCandidate:
     confidence: float
 
     def __post_init__(self) -> None:
-        if not self.label.strip() or not self.role.strip() or not 0 <= self.confidence <= 1:
+        if (
+            type(self.label) is not str
+            or type(self.role) is not str
+            or not self.label.strip()
+            or not self.role.strip()
+            or type(self.confidence) not in {int, float}
+            or not math.isfinite(float(self.confidence))
+            or not 0 <= self.confidence <= 1
+        ):
             raise ValueError("Vision candidates require bounded labels, roles, and confidence")
 
 

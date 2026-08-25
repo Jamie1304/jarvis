@@ -30,17 +30,30 @@ from jarvis.automations import (
     SQLiteAutomationStore,
     TriggerDefinition,
 )
-from jarvis.events import EventEnvelope, EventPayload, EventType, InMemoryEventBus, SystemError
+from jarvis.events import (
+    EventEnvelope,
+    EventPayload,
+    EventType,
+    InMemoryEventBus,
+    PermissionGranted,
+    SystemError,
+)
 from jarvis.planning.models import BudgetUsage, ExecutionBudgets, PlanningTask, PlanningTaskStatus
 from jarvis.task_controller import TaskController
 
 
-def _event(message: str) -> EventEnvelope[EventPayload]:
+def _event(
+    message: str, *, event_type: EventType = EventType.SYSTEM_ERROR
+) -> EventEnvelope[EventPayload]:
     return cast(
         EventEnvelope[EventPayload],
         EventEnvelope.create(
-            EventType.SYSTEM_ERROR,
-            SystemError("automation-test", message),
+            event_type,
+            (
+                PermissionGranted(uuid4(), "filesystem.write")
+                if event_type is EventType.PERMISSION_GRANTED
+                else SystemError("automation-test", message)
+            ),
             source="tests",
             correlation_id=uuid4(),
         ),
@@ -71,9 +84,11 @@ class _Controller:
         self.created: list[PlanningTask] = []
         self.ran: list[UUID] = []
         self.tasks: dict[UUID, PlanningTask] = {}
+        self.create_kwargs: list[dict[str, object]] = []
         self.release = asyncio.Event()
 
     async def create_task(self, goal: str, **_: object) -> PlanningTask:
+        self.create_kwargs.append(dict(_))
         del goal
         task = _task(self.initial_status)
         self.created.append(task)
@@ -104,10 +119,11 @@ def _definition(
     condition: Condition | None = None,
     debounce_seconds: float = 0.0,
     cooldown_seconds: float = 0.0,
+    event_type: EventType = EventType.SYSTEM_ERROR,
 ) -> AutomationDefinition:
     trigger = TriggerDefinition(
         uuid4(),
-        (EventType.SYSTEM_ERROR,),
+        (event_type,),
         (() if condition is None else (condition,)),
         debounce_seconds=debounce_seconds,
         cooldown_seconds=cooldown_seconds,
@@ -163,6 +179,29 @@ async def test_trigger_condition_and_normal_planning_dispatch(tmp_path: Path) ->
         assert run.status is AutomationRunStatus.COMPLETED
         assert len(controller.created) == 1
         assert controller.ran == [controller.created[0].task_id]
+    finally:
+        await _close(service, store, bus)
+
+
+@pytest.mark.asyncio
+async def test_event_payload_cannot_smuggle_trusted_approval_into_normal_goal(
+    tmp_path: Path,
+) -> None:
+    controller = _Controller()
+    definition = _definition(event_type=EventType.PERMISSION_GRANTED)
+    service, store, bus = await _service(tmp_path, controller, definition)
+    try:
+        accepted = await service.handle_event(
+            _event("synthetic approval payload", event_type=EventType.PERMISSION_GRANTED)
+        )
+        assert len(accepted) == 1
+        controller.release.set()
+        await asyncio.sleep(0.02)
+        run = service.runs(definition.automation_id)[0]
+        assert run.task_id is not None
+        assert run.status is AutomationRunStatus.COMPLETED
+        assert controller.ran == [run.task_id]
+        assert all("approval" not in kwargs for kwargs in controller.create_kwargs)
     finally:
         await _close(service, store, bus)
 

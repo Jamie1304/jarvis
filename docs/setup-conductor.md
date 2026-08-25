@@ -22,7 +22,8 @@ inspect -> detect/adopt -> one setup interview -> SetupContext
   all missing requirements and adoption candidates for the run, preventing
   independent component interviews from asking the same question repeatedly.
 - `AdoptionCandidate` records existing location, compatibility, configuration,
-  and user-data evidence. It is evidence, not trust or ownership.
+  and user-data evidence. It is evidence, not trust or ownership. A compatible
+  executable is not adoptable from a path or caller-supplied digest alone.
 - `SetupStep` names a component and explicit dependencies. Its handler inspects,
   prepares a typed provisioning plan, configures, verifies, and runs a
   first-start check.
@@ -35,6 +36,16 @@ Compatible existing installations are preferred. `USE_IN_PLACE` does not move,
 copy, or overwrite them. `IMPORT_COPY`, `RECONFIGURE`, and `INSTALL_NEW` are
 explicit choices; `IGNORE` leaves an existing candidate untouched. Existing
 user folders are never imported implicitly.
+
+Before `USE_IN_PLACE` can complete, trusted application code must bind the
+candidate to a `WindowsFileIdentity`, bounded content hash, Authenticode status,
+and independently observed dependency provenance. `AdoptionPolicy` produces a
+short-lived `AdoptionAttestation` with exact candidate/version/workspace/setup
+scope and expiry. Setup re-inspects immediately before use and rejects changed
+file identity, content, canonical path, reparse state, signer evidence, or
+dependency provenance. An unsigned local tool may require explicit confirmation
+and restrictions; it is never silently trusted. The attestation is setup
+evidence, not a permission grant or certification.
 
 Only missing effects reach the injected provisioning callback. That callback
 must use the typed `ProvisioningPlan`/`ProvisioningEngine` path, so destructive

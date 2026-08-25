@@ -6,6 +6,7 @@ from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
 import pytest
+from jarvis.permissions import ApprovalChannelClass, ApprovalChannelPolicy, Risk
 from jarvis.speech.stt import AudioData, SttProvider, Transcription
 from jarvis.speech.tts import TextToSpeechService, TtsProvider
 from jarvis.state import ApplicationStateMachine
@@ -225,8 +226,98 @@ async def _record(values: list[str], value: str) -> None:
 
 
 def test_microphone_modes_are_explicit_and_not_authority_modes() -> None:
-    config = VoiceConfig(microphone_mode=MicrophoneMode.PUSH_TO_TALK)
-    assert config.microphone_mode is MicrophoneMode.PUSH_TO_TALK
+    for mode in MicrophoneMode:
+        config = VoiceConfig(microphone_mode=mode)
+        assert config.microphone_mode is mode
+        assert ApprovalChannelPolicy.classify(Risk.HIGH) is ApprovalChannelClass.PRIVILEGED_APPROVAL
+
+
+def test_voice_input_models_and_capture_bounds_fail_closed() -> None:
+    with pytest.raises(ValueError):
+        VoiceConfig(wake_word=" ")
+    with pytest.raises(ValueError):
+        VoiceConfig(wake_confidence_threshold=1.1)
+    with pytest.raises(ValueError):
+        VoiceConfig(speech_timeout_seconds=0)
+    with pytest.raises(ValueError):
+        VoiceConfig(preroll_frames=-1)
+    with pytest.raises(ValueError):
+        VoiceConfig(interruption_commands=("",))
+    with pytest.raises(ValueError):
+        AudioFrame((1.1,), 16_000)
+    with pytest.raises(ValueError):
+        AudioFrame((), 0)
+    with pytest.raises(ValueError):
+        WakeDetection(False, -0.1, "Jarvis")
+
+
+@pytest.mark.asyncio
+async def test_voice_interruption_commands_cancel_wait_and_ignore_ambiguous_text() -> None:
+    runner = FakeRunner()
+    tts_provider = FakeTts()
+    tts_provider.release.set()
+    controller = LocalVoiceController(
+        FakeWake(),
+        FakeVad(),
+        FakeStt("do work"),
+        task_runner=runner,
+        tts=TextToSpeechService(tts_provider, enabled=True),
+        config=VoiceConfig(cooldown_seconds=0),
+    )
+    await drive_and_get(controller)
+    assert await controller.interrupt("maybe") is None
+    assert await controller.interrupt("wait") is InterruptionCommand.WAIT
+    assert await controller.interrupt("cancel") is InterruptionCommand.CANCEL
+    assert runner.cancelled == []
+
+
+@pytest.mark.asyncio
+async def test_voice_capture_without_task_and_stream_failure_degrade_safely() -> None:
+    controller = LocalVoiceController(FakeWake(), FakeVad(), FakeStt(""))
+    await controller.handle_frame(frame(0.9))
+    await controller.handle_frame(frame(0.5))
+    await controller.handle_frame(frame(0.5))
+    await controller.handle_frame(frame(-0.5))
+    await controller.handle_frame(frame(-0.5))
+    assert controller.status.state is VoiceState.IDLE
+
+    class BrokenSource(AudioSource):
+        async def start(self) -> None:
+            pass
+
+        def frames(self) -> AsyncIterator[AudioFrame]:
+            async def broken() -> AsyncIterator[AudioFrame]:
+                raise RuntimeError("synthetic stream failure")
+                yield frame(0.0)
+
+            return broken()
+
+        async def stop(self) -> None:
+            pass
+
+    await controller.run(BrokenSource())
+    assert controller.status.state.name == VoiceState.ERROR.name
+
+
+@pytest.mark.asyncio
+async def test_voice_close_cancels_pending_task_and_tts() -> None:
+    runner = FakeRunner()
+    tts_provider = FakeTts()
+    controller = LocalVoiceController(
+        FakeWake(),
+        FakeVad(),
+        FakeStt("work"),
+        task_runner=runner,
+        tts=TextToSpeechService(tts_provider, enabled=True),
+        config=VoiceConfig(cooldown_seconds=0),
+    )
+    await controller.handle_frame(frame(0.9))
+    controller._task_handle = VoiceTaskHandle(
+        uuid4(), asyncio.create_task(asyncio.sleep(10, result=runner.outcome))
+    )
+    await controller.aclose()
+    assert tts_provider.stopped >= 1
+    assert runner.cancelled
 
 
 @pytest.mark.asyncio

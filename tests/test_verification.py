@@ -179,6 +179,25 @@ async def test_presentation_query_state_is_screen_evidence_not_request_echo() ->
     assert verified.evidence[0].source == "surface:desktop"
 
 
+@pytest.mark.asyncio
+async def test_unobserved_presentation_state_cannot_prove_screen_outcome() -> None:
+    surface = PresentationSurface("desktop")
+    expected = await surface.present(
+        PresentationContent.declarative(PresentationKind.DECLARATIVE_VIEW, {"state": "active"})
+    )
+    actual = await surface.query_state()
+    assert not actual.observed
+    result = await VerificationEngine().verify_surface(
+        plan(expected.state_fingerprint, required=VerificationLevel.INTEGRATION_VERIFIED),
+        surface,
+        expected,
+        now=expected.captured_at + timedelta(seconds=1),
+    )
+    assert not result.passed
+    assert result.contradictions
+    assert result.evidence[0].observed == f"unobserved:{actual.state_fingerprint}"
+
+
 def test_unobservable_physical_result_requests_user_confirmation() -> None:
     result = VerificationEngine().evaluate(plan(), (), now=NOW)
     assert not result.passed

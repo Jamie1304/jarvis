@@ -42,6 +42,19 @@ def create_deterministic_suite_catalog() -> TestSuiteCatalog:
                 description="Permission broker policy, approval, and audit boundary tests.",
             ),
             TestSuite(
+                suite_id="v1-acceptance",
+                category=TestCategory.INTEGRATION,
+                command=TestCommand(
+                    sys.executable,
+                    ("-m", "pytest", "tests/test_v1_acceptance.py", "-q"),
+                ),
+                timeout_seconds=180,
+                output_format=SuiteOutputFormat.PYTEST_TEXT,
+                description=(
+                    "Deterministic v1 acceptance through the default application composition root."
+                ),
+            ),
+            TestSuite(
                 suite_id="windows-hardware-manual",
                 category=TestCategory.UI,
                 command=TestCommand(

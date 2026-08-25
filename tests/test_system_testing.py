@@ -64,8 +64,11 @@ class FakeAdapter(ProcessAdapter):
         working_directory: Path,
         timeout_seconds: float,
         cancellation: asyncio.Event,
+        *,
+        allow_hardware: bool = False,
     ) -> ProcessCapture:
         del timeout_seconds
+        del allow_hardware
         self.calls.append((command, working_directory))
         if self.wait_for_cancel:
             await cancellation.wait()
@@ -187,6 +190,10 @@ async def test_runner_honors_cancellation_and_partial_hardware_and_scope_boundar
         "sample-suite", "build", asyncio.Event()
     )
     assert hardware.status is RunStatus.SKIPPED
+    allowed_hardware = await _runner(
+        tmp_path, ProcessCapture(0, "1 passed", ""), hardware=True
+    ).run("sample-suite", "build", asyncio.Event(), allow_hardware=True)
+    assert allowed_hardware.status is RunStatus.PASSED
     escaped = await _runner(
         tmp_path, ProcessCapture(0, "1 passed", ""), working_directory=".."
     ).run("sample-suite", "build", asyncio.Event())

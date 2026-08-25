@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "jarvis"
-version = "0.1.0"
+dynamic = ["version"]
 description = "Local-first desktop AI agent engineering foundation"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -39,6 +39,9 @@ speech = [
 
 [tool.setuptools.packages.find]
 include = ["jarvis*"]
+
+[tool.setuptools.dynamic]
+version = {attr = "jarvis.version.__version__"}
 
 [tool.ruff]
 target-version = "py312"

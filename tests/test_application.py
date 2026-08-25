@@ -126,4 +126,5 @@ def test_ui_service_uses_one_trusted_permission_surface_for_both_channels() -> N
     prompt = service.render_permission_prompt(request, descriptor)
     assert prompt.presentation.operation.permission_request is request
     assert prompt.desktop_details.endswith("permission=filesystem.write")
-    assert "YES / NO / DETAILS" in prompt.voice_prompt
+    assert "Say DETAILS or NO" in prompt.voice_prompt
+    assert "trusted approval control" in prompt.voice_prompt

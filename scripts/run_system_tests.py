@@ -30,7 +30,7 @@ def _revision(project_root: Path) -> str:
     return revision if revision else "unknown"
 
 
-async def _run(suite_id: str) -> int:
+async def _run(suite_id: str, *, allow_hardware: bool = False) -> int:
     from jarvis.testing.catalog import create_deterministic_suite_catalog
     from jarvis.testing.runner import ControlledTestRunner, TestArtifactStore
 
@@ -40,7 +40,12 @@ async def _run(suite_id: str) -> int:
         project_root,
         TestArtifactStore(project_root / "build" / "system-test-artifacts"),
     )
-    run = await runner.run(suite_id, _revision(project_root), asyncio.Event())
+    run = await runner.run(
+        suite_id,
+        _revision(project_root),
+        asyncio.Event(),
+        allow_hardware=allow_hardware,
+    )
     print(json.dumps(run.to_dict(), sort_keys=True))
     return 0 if run.status.value in {"passed", "skipped"} else 1
 
@@ -53,8 +58,13 @@ def main() -> int:
     parser.add_argument(
         "--suite", required=True, choices=tuple(suite.suite_id for suite in catalog.all())
     )
+    parser.add_argument(
+        "--allow-hardware",
+        action="store_true",
+        help="Explicitly allow the catalogued opt-in hardware/manual suite to execute",
+    )
     arguments = parser.parse_args()
-    return asyncio.run(_run(arguments.suite))
+    return asyncio.run(_run(arguments.suite, allow_hardware=arguments.allow_hardware))
 
 
 if __name__ == "__main__":

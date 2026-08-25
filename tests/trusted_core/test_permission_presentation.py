@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import uuid4
@@ -9,9 +10,12 @@ from uuid import uuid4
 import pytest
 from jarvis.permissions import (
     ActionDescriptor,
+    ApprovalChannelClass,
+    ApprovalChannelPolicy,
     ApprovalRequest,
     ApprovalStatus,
     DecisionReason,
+    DesktopApprovalHandoff,
     ExactOperationRenderer,
     Permission,
     PermissionRequest,
@@ -62,7 +66,14 @@ def test_spoken_approval_is_strict_and_non_authorizing(
 ) -> None:
     assert parse_spoken_approval(text) is result
     if result is SpokenApprovalResult.APPROVE_ONCE:
-        assert approval_choice_from_spoken(text) is not None
+        assert approval_choice_from_spoken(text) is None
+        assert (
+            approval_choice_from_spoken(
+                text,
+                channel_class=ApprovalChannelClass.NON_PRIVILEGED_CONFIRMATION,
+            )
+            is not None
+        )
     elif result is SpokenApprovalResult.DENY_ONCE:
         choice = approval_choice_from_spoken(text)
         assert choice is not None and choice.value == "deny_once"
@@ -112,7 +123,8 @@ def test_narrator_builds_one_typed_authority_object_for_all_surfaces(tmp_path: P
     assert "permission=filesystem.write" in presentation.exact_details
     assert renderer.render(presentation) == presentation.exact_details
     assert renderer.render_short(presentation) == presentation.short_explanation
-    assert renderer.render_voice(presentation).endswith("Choose YES / NO / DETAILS.")
+    assert "Say DETAILS or NO" in renderer.render_voice(presentation)
+    assert "trusted approval control" in renderer.render_voice(presentation)
     assert presentation.voice_choices == (
         VoiceApprovalChoice.YES,
         VoiceApprovalChoice.NO,
@@ -152,3 +164,29 @@ def test_malformed_permission_metadata_and_ambiguous_renderer_input_fail_closed(
         TrustedActionNarrator().narrate(mismatched, operation)
     with pytest.raises(TypeError, match="exact trusted permission presentation"):
         ExactOperationRenderer().render("JARVIS requests filesystem.write")
+
+
+def test_channel_policy_defaults_privileged_and_escalates_hard_safety() -> None:
+    assert (
+        ApprovalChannelPolicy.classify(Risk.LOW) is ApprovalChannelClass.NON_PRIVILEGED_CONFIRMATION
+    )
+    assert (
+        ApprovalChannelPolicy.classify(Risk.LOW, permission=Permission.FILESYSTEM_READ)
+        is ApprovalChannelClass.PRIVILEGED_APPROVAL
+    )
+    assert ApprovalChannelPolicy.classify(Risk.MEDIUM) is ApprovalChannelClass.PRIVILEGED_APPROVAL
+    assert ApprovalChannelPolicy.classify(Risk.HIGH) is ApprovalChannelClass.PRIVILEGED_APPROVAL
+    assert (
+        ApprovalChannelPolicy.classify(Risk.HIGH, SafetyClass.SELF_MODIFICATION)
+        is ApprovalChannelClass.HIGH_RISK_APPROVAL
+    )
+
+
+def test_desktop_handoff_is_exact_and_invalidates_changed_or_expired_requests() -> None:
+    request = _approval_request("C:/owned/settings.json")
+    handoff = DesktopApprovalHandoff.create(request)
+    assert handoff.matches(request, now=request.created_at) is True
+    changed = replace(request, action_fingerprint="c" * 64)
+    assert handoff.matches(changed, now=request.created_at) is False
+    expired = request.expires_at
+    assert handoff.matches(request, now=expired) is False

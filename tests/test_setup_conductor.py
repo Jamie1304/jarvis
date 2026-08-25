@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import uuid4
@@ -26,10 +27,13 @@ from jarvis.setup_conductor import (
     SetupRun,
     SetupRunState,
     SetupStep,
+    SetupStepResult,
     SetupStepState,
     SetupValidationError,
     SQLiteSetupStore,
 )
+
+from tests.adoption_fixtures import adoption_candidate
 
 
 class Handler:
@@ -103,9 +107,13 @@ def provisioning_plan() -> ProvisioningPlan:
     )
 
 
+async def provision_ok(_plan: ProvisioningPlan) -> ProvisioningResult:
+    return result()
+
+
 @pytest.mark.asyncio
 async def test_existing_local_runtime_is_adopted_without_provisioning() -> None:
-    candidate = AdoptionCandidate("local", "runtime", "C:/existing", "1.0", True, True, True)
+    candidate, adoption_policy = adoption_candidate("local", location="C:/existing")
     handler = Handler(candidate=candidate)
     handler.installed = True
     handler.configured = True
@@ -117,7 +125,13 @@ async def test_existing_local_runtime_is_adopted_without_provisioning() -> None:
     ) -> tuple[SetupDecision, ...]:
         decisions.append(requirements)
         assert candidates[0].has_user_data
-        return (SetupDecision("runtime-choice", AdoptionChoice.USE_IN_PLACE),)
+        return (
+            SetupDecision(
+                "runtime-choice",
+                AdoptionChoice.USE_IN_PLACE,
+                {"candidate_id": "local", "identity_digest": candidate.identity_digest},
+            ),
+        )
 
     provision_calls = 0
 
@@ -134,11 +148,158 @@ async def test_existing_local_runtime_is_adopted_without_provisioning() -> None:
         InMemorySetupStore(),
         provision,
         decision_collector=collect,
+        adoption_policy=adoption_policy,
     ).run("first_run", (step(requirements=(requirement,)),), SetupContext())
     assert run.state is SetupRunState.COMPLETED
     assert run.steps[0].state is SetupStepState.ADOPTED
+    assert run.steps[0].candidate_id == "local"
+    assert run.steps[0].identity_digest == candidate.identity_digest
+    assert run.steps[0].adoption_attestation is not None
     assert provision_calls == 0
     assert len(decisions) == 1
+
+
+@pytest.mark.asyncio
+async def test_adoption_rejects_unlisted_candidate_identity() -> None:
+    candidate = AdoptionCandidate(
+        "local", "runtime", "C:/existing", "1.0", identity_digest="a" * 64
+    )
+    handler = Handler(candidate=candidate)
+    handler.installed = True
+    handler.configured = True
+
+    async def collect(
+        requirements: tuple[SetupRequirement, ...],
+        candidates: tuple[AdoptionCandidate, ...],
+    ) -> tuple[SetupDecision, ...]:
+        del candidates
+        return (
+            SetupDecision(
+                requirements[0].requirement_id,
+                AdoptionChoice.USE_IN_PLACE,
+                {"candidate_id": "unlisted", "identity_digest": "b" * 64},
+            ),
+        )
+
+    requirement = SetupRequirement("runtime-choice", "Choose the existing runtime")
+
+    async def provision(_plan: ProvisioningPlan) -> ProvisioningResult:
+        return result()
+
+    with pytest.raises(SetupError, match="candidate"):
+        await SetupConductor(
+            {"runtime": handler},
+            InMemorySetupStore(),
+            provision,
+            decision_collector=collect,
+        ).run("adoption", (step(requirements=(requirement,)),), SetupContext())
+
+
+@pytest.mark.asyncio
+async def test_adoption_rejects_candidate_replacement_before_verification() -> None:
+    class ReplacingHandler(Handler):
+        inspections = 0
+
+        async def inspect(self, item: SetupStep, context: SetupContext) -> SetupInspection:
+            self.inspections += 1
+            if self.inspections == 2:
+                self.candidate = adoption_candidate(
+                    "local", location="C:/replacement", seed="replacement"
+                )[0]
+            return await super().inspect(item, context)
+
+    original, adoption_policy = adoption_candidate("local", location="C:/existing")
+    handler = ReplacingHandler(candidate=original)
+    handler.installed = True
+    handler.configured = True
+
+    async def collect(
+        requirements: tuple[SetupRequirement, ...],
+        candidates: tuple[AdoptionCandidate, ...],
+    ) -> tuple[SetupDecision, ...]:
+        del candidates
+        return (
+            SetupDecision(
+                requirements[0].requirement_id,
+                AdoptionChoice.USE_IN_PLACE,
+                {"candidate_id": "local", "identity_digest": original.identity_digest},
+            ),
+        )
+
+    requirement = SetupRequirement("runtime-choice", "Choose the existing runtime")
+
+    async def provision(_plan: ProvisioningPlan) -> ProvisioningResult:
+        return result()
+
+    with pytest.raises(SetupError, match="candidate|identity"):
+        await SetupConductor(
+            {"runtime": handler},
+            InMemorySetupStore(),
+            provision,
+            decision_collector=collect,
+            adoption_policy=adoption_policy,
+        ).run("adoption", (step(requirements=(requirement,)),), SetupContext())
+    assert handler.starts == 0
+
+
+@pytest.mark.asyncio
+async def test_adoption_attestation_survives_setup_store_restart(tmp_path: Path) -> None:
+    candidate, adoption_policy = adoption_candidate("restart", location="C:/restart.exe")
+    handler = Handler(candidate=candidate)
+    handler.installed = True
+    handler.configured = True
+    requirement = SetupRequirement("restart-choice", "Use the existing runtime")
+
+    async def collect(
+        requirements: tuple[SetupRequirement, ...],
+        candidates: tuple[AdoptionCandidate, ...],
+    ) -> tuple[SetupDecision, ...]:
+        assert candidates
+        return (
+            SetupDecision(
+                requirements[0].requirement_id,
+                AdoptionChoice.USE_IN_PLACE,
+                {
+                    "candidate_id": candidates[0].candidate_id,
+                    "identity_digest": candidates[0].identity_digest,
+                },
+            ),
+        )
+
+    database = tmp_path / "setup.sqlite3"
+    first_store = SQLiteSetupStore(database)
+    first = await SetupConductor(
+        {"runtime": handler},
+        first_store,
+        lambda plan: _async_provision(plan),
+        decision_collector=collect,
+        adoption_policy=adoption_policy,
+    ).run("restart-adoption", (step(requirements=(requirement,)),), SetupContext())
+    assert first.state is SetupRunState.COMPLETED
+    assert first.steps[0].adoption_attestation is not None
+    first_store.close()
+
+    second_store = SQLiteSetupStore(database)
+    second = await SetupConductor(
+        {"runtime": handler},
+        second_store,
+        lambda plan: _async_provision(plan),
+        decision_collector=collect,
+        adoption_policy=adoption_policy,
+    ).run(
+        "restart-adoption",
+        (step(requirements=(requirement,)),),
+        SetupContext(),
+        run_id=first.run_id,
+    )
+    assert second.state is SetupRunState.COMPLETED
+    assert second.steps[0].adoption_attestation is not None
+    second_store.close()
+
+
+async def _async_provision(plan: ProvisioningPlan) -> ProvisioningResult:
+    del plan
+    return result()
 
 
 @pytest.mark.asyncio
@@ -278,3 +439,118 @@ def test_setup_rejects_raw_secrets_and_invalid_steps() -> None:
         SetupConductor({}, InMemorySetupStore(), empty_provision)
     with pytest.raises(SetupValidationError):
         SetupStep("bad id!", "runtime")
+    with pytest.raises(SetupValidationError):
+        AdoptionCandidate("local", "runtime", "C:/existing", identity_digest="bad")
+    with pytest.raises(SetupValidationError):
+        SetupStepResult("bad id!", SetupStepState.VERIFIED)
+    with pytest.raises(SetupValidationError):
+        SetupStepResult("runtime", SetupStepState.VERIFIED, identity_digest="bad")
+
+
+@pytest.mark.asyncio
+async def test_setup_waits_for_decisions_and_honors_cancellation() -> None:
+    handler = Handler()
+    conductor = SetupConductor(
+        {"runtime": handler},
+        InMemorySetupStore(),
+        provision_ok,
+    )
+    waiting = await conductor.run(
+        "waiting",
+        (step(requirements=(SetupRequirement("choice", "Choose"),)),),
+        SetupContext(),
+    )
+    assert waiting.state is SetupRunState.WAITING_DECISIONS
+
+    cancelled = asyncio.Event()
+    cancelled.set()
+    recovered = await conductor.run("cancelled", (step(),), SetupContext(), cancellation=cancelled)
+    assert recovered.state is SetupRunState.RECOVERING
+    assert recovered.error == "cancelled"
+
+
+@pytest.mark.asyncio
+async def test_setup_rejects_context_change_dependency_and_unknown_decision() -> None:
+    store = InMemorySetupStore()
+    conductor = SetupConductor({"runtime": Handler()}, store, provision_ok)
+    run_id = uuid4()
+    first = await conductor.run("context", (step(),), SetupContext(), run_id=run_id)
+    assert first.state is SetupRunState.COMPLETED
+    with pytest.raises(SetupError, match="context changed"):
+        await conductor.run(
+            "context", (step(),), SetupContext(configuration={"changed": True}), run_id=run_id
+        )
+
+    async def collect_unknown(
+        requirements: tuple[SetupRequirement, ...], candidates: tuple[AdoptionCandidate, ...]
+    ) -> tuple[SetupDecision, ...]:
+        del requirements, candidates
+        return (SetupDecision("unknown", AdoptionChoice.IGNORE),)
+
+    with pytest.raises(SetupValidationError, match="unknown requirement"):
+        await SetupConductor(
+            {"runtime": Handler()},
+            InMemorySetupStore(),
+            provision_ok,
+            decision_collector=collect_unknown,
+        ).run(
+            "unknown", (step(requirements=(SetupRequirement("choice", "Choose"),)),), SetupContext()
+        )
+
+    dependent = (
+        SetupStep("first", "runtime"),
+        SetupStep("second", "runtime", depends_on=("first",)),
+    )
+    declined = await SetupConductor(
+        {"runtime": Handler()},
+        InMemorySetupStore(),
+        provision_ok,
+        decision_collector=lambda requirements, candidates: _ignore_decision(requirements),
+    ).run(
+        "dependency",
+        (SetupStep("first", "runtime", (SetupRequirement("choice", "Choose"),)), dependent[1]),
+        SetupContext(),
+    )
+    assert declined.state is SetupRunState.FAILED
+    assert declined.error == "dependency is not verified"
+
+
+async def _ignore_decision(requirements: tuple[SetupRequirement, ...]) -> tuple[SetupDecision, ...]:
+    return tuple(SetupDecision(item.requirement_id, AdoptionChoice.IGNORE) for item in requirements)
+
+
+@pytest.mark.asyncio
+async def test_setup_provision_verify_and_first_start_failures_are_recorded() -> None:
+    plan = provisioning_plan()
+
+    async def failed_provision(_plan: ProvisioningPlan) -> ProvisioningResult:
+        return ProvisioningResult(uuid4(), ProvisioningPlanState.FAILED, (), "failed")
+
+    failed = await SetupConductor(
+        {"runtime": Handler()}, InMemorySetupStore(), failed_provision
+    ).run("provision-fail", (step(),), SetupContext())
+    assert failed.state is SetupRunState.FAILED
+    assert failed.error == "provisioning failed"
+
+    class VerifyFailHandler(Handler):
+        async def verify(self, step: SetupStep, context: SetupContext) -> bool:
+            del step, context
+            return False
+
+    verified = await SetupConductor(
+        {"runtime": VerifyFailHandler()}, InMemorySetupStore(), provision_ok
+    ).run("verify-fail", (step(),), SetupContext())
+    assert verified.state is SetupRunState.FAILED
+    assert verified.error == "verification failed"
+
+    class StartFailHandler(Handler):
+        async def first_start(self, step: SetupStep, context: SetupContext) -> bool:
+            del step, context
+            return False
+
+    started = await SetupConductor(
+        {"runtime": StartFailHandler()}, InMemorySetupStore(), provision_ok
+    ).run("start-fail", (step(),), SetupContext())
+    assert started.state is SetupRunState.FAILED
+    assert started.error == "first-start test failed"
+    assert plan.actions

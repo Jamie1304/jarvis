@@ -1,5 +1,7 @@
 # Effect previews and safe compensation
 
+`PRODUCTION_COMPENSATION_VERIFICATION: RESOLVED`
+
 Execution, preview, compensation, and verification are separate boundaries.
 `EffectPreview` is trusted application metadata describing a proposed effect;
 it is not generated from model prose and it does not authorize execution.
@@ -24,9 +26,15 @@ secret-like fields are rejected.
 
 ## Compensation
 
-`CompensationExecutor` invokes the exact registered tool through:
+The runtime-owned `CompensationService` is the sole production orchestration
+path. It creates a one-step compensation proposal and submits it to the
+canonical `PlanningEngine`; execution then follows:
 
-`ToolRegistry -> Tool.invoke -> PermissionBroker -> Policy/approval`
+`PlanningEngine -> ToolRegistry -> Tool.invoke -> PermissionBroker -> Policy/approval`
+
+`CompensationExecutor` remains a lower-level compatibility contract for
+isolated callers and tests. It is not a second production task engine or
+authority.
 
 It never calls a provider or adapter directly. A permission denial, stale state,
 missing baseline, failed tool, unknown effect outcome, or failed verification is
@@ -47,3 +55,13 @@ fingerprints, compensation start/completion, request IDs, and statuses. Trace
 is observational and never becomes task, permission, artifact, or verification
 authority. A trace sink failure does not change the explicit compensation
 result.
+
+Before execution, `CompensationService.bind_original_effect()` derives an
+immutable `OriginalEffectReference` from a completed durable PlanningEngine
+task, exact plan revision, exact successful step, and its durable evidence.
+The compensation tool/capability must match that producing step. A caller
+boolean, callback, or model statement cannot create this binding. The service
+revalidates the current state fingerprint, persists bounded lifecycle metadata
+in `compensation.sqlite3`, and binds its compensation task into the original
+trace lineage. Independent VerificationEngine evidence is required for
+`VERIFIED`; `RECOVERING`/unknown outcomes are terminal and never replayed.

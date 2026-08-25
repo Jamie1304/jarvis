@@ -2,9 +2,16 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
+from datetime import UTC, datetime, timedelta
 from hashlib import sha256
+from uuid import uuid4
 
 import pytest
+from jarvis.effect_attestation import (
+    EffectAttestationStatus,
+    EffectAttestationStore,
+    TrustedEffectObserver,
+)
 from jarvis.integration_package import (
     IntegrationPackage,
     PackageBoundary,
@@ -36,6 +43,14 @@ from jarvis.package_certification import (
 from jarvis.package_reviewer import PackageSourceFile
 from jarvis.package_runtime import HotLoadManager, PackageRuntimeHealth, PreparedPackageRuntime
 from jarvis.tools.models import SemanticVersion
+from jarvis.verification import (
+    EvidenceRecord,
+    EvidenceType,
+    VerificationDisposition,
+    VerificationLevel,
+    VerificationResult,
+)
+from jarvis.windows_sandbox import SandboxSecurityStatus, WindowsContainmentMode
 
 PROVENANCE = PackageProvenance("generated", "revision-1", "MIT", "NOTICE", "trusted-reviewer")
 
@@ -149,30 +164,57 @@ def setup(
     rollback: list[tuple[str, ...]] | None = None,
     shadow_error: bool = False,
     canary_error: bool = False,
+    canary_unknown: bool = False,
+    verify: bool = True,
+    require_executable_isolation: bool = False,
+    sandbox_security_status: SandboxSecurityStatus | None = None,
 ) -> tuple[PackageActivationService, IntegrationPackage, PackageSourceFile]:
     item, source = package()
     record = certification(item, source)
     factory, surface = Factory(), Surface()
     manager = HotLoadManager(factory, surface)
+    effect_store = EffectAttestationStore()
     rollback = rollback if rollback is not None else []
 
     def rollback_effects(item: IntegrationPackage, effects: tuple[str, ...]) -> bool:
         rollback.append(effects)
         return True
 
-    def run_shadow(item: IntegrationPackage) -> ShadowExecution:
+    def run_shadow(item: IntegrationPackage, observer: TrustedEffectObserver) -> ShadowExecution:
         if shadow_error:
             raise RuntimeError("shadow failure")
-        return shadow or ShadowExecution(
-            predictions=("would call tool",),
-            broker_behavior=("read-only broker",),
-            verification=("zero effects",),
+        attempt = observer.begin(
+            action_id="probe",
+            request_id=uuid4(),
+            broker="fixture",
+            target="fixture",
+            scope="fixture.scope",
+            requested_effect="fixture effect",
+        )
+        observer.complete(attempt, status=EffectAttestationStatus.SUPPRESSED, dispatched=False)
+        attestation = effect_store.attest(
+            activation_id=observer.activation_id,
+            integration_id=item.package_id,
+            integration_version=str(item.version),
+            package_hash=item.package_hash,
+            activation_state="SHADOW",
+        )
+        return replace(
+            shadow
+            or ShadowExecution(
+                predictions=("would call tool",),
+                broker_behavior=("read-only broker",),
+                verification=("zero effects",),
+            ),
+            attestation=attestation,
         )
 
-    def run_canary(item: IntegrationPackage, limits: CanaryLimits) -> CanaryExecution:
+    def run_canary(
+        item: IntegrationPackage, limits: CanaryLimits, observer: TrustedEffectObserver
+    ) -> CanaryExecution:
         if canary_error:
             raise RuntimeError("canary failure")
-        return canary or CanaryExecution(
+        candidate = canary or CanaryExecution(
             limits.scope,
             predictions=("bounded call",),
             broker_behavior=("one approved effect",),
@@ -182,15 +224,75 @@ def setup(
             budget_used=1,
             wall_seconds=0.1,
         )
+        for effect in candidate.effects or (
+            ("fixture-effect",) if canary is not None else ("fixture-effect",)
+        ):
+            attempt = observer.begin(
+                action_id="effect",
+                request_id=uuid4(),
+                broker="fixture",
+                target="fixture",
+                scope=limits.scope,
+                requested_effect=effect,
+            )
+            observer.complete(
+                attempt,
+                status=(
+                    EffectAttestationStatus.UNKNOWN_OUTCOME
+                    if canary_unknown
+                    else EffectAttestationStatus.EFFECT_CONFIRMED
+                ),
+                dispatched=True,
+            )
+        attestation = effect_store.attest(
+            activation_id=observer.activation_id,
+            integration_id=item.package_id,
+            integration_version=str(item.version),
+            package_hash=item.package_hash,
+            activation_state="CANARY",
+        )
+        return replace(candidate, attestation=attestation)
+
+    def verify_canary(item: IntegrationPackage, attestation: object) -> VerificationResult:
+        return VerificationResult(
+            "bounded canary effect",
+            VerificationLevel.INTEGRATION_VERIFIED,
+            True,
+            VerificationDisposition.COMPLETE,
+            evidence=(
+                EvidenceRecord(
+                    EvidenceType.PROCESS,
+                    "fixture-verifier",
+                    datetime.now(UTC),
+                    timedelta(minutes=5),
+                    1.0,
+                    "effect",
+                    "effect",
+                    level=VerificationLevel.INTEGRATION_VERIFIED,
+                ),
+            ),
+        )
 
     hooks = ActivationHooks(
         shadow=run_shadow,
         canary=run_canary,
+        verify_canary=verify_canary if verify else None,
         rollback_effects=rollback_effects,
     )
-    service = PackageActivationService(manager, hooks)
+    service = PackageActivationService(
+        manager,
+        hooks,
+        attestation_store=effect_store,
+        require_executable_isolation=require_executable_isolation,
+    )
     service.register_certified(
-        ActivationRequest(item, record, (source,), CanaryLimits("fixture.scope"))
+        ActivationRequest(
+            item,
+            record,
+            (source,),
+            CanaryLimits("fixture.scope"),
+            sandbox_security_status=sandbox_security_status,
+        )
     )
     return service, item, source
 
@@ -198,6 +300,33 @@ def setup(
 def activate(service: PackageActivationService, item: IntegrationPackage) -> None:
     assert service.run_shadow(item.package_id, item.version).state is ActivationState.SHADOW
     assert service.run_canary(item.package_id, item.version).state is ActivationState.CANARY
+
+
+def test_production_activation_rejects_executable_without_os_isolation() -> None:
+    with pytest.raises(ActivationError, match="AppContainer isolation"):
+        setup(require_executable_isolation=True)
+
+
+def test_production_activation_records_selected_isolation_mode() -> None:
+    status = SandboxSecurityStatus(
+        WindowsContainmentMode.APPCONTAINER,
+        True,
+        True,
+        True,
+        3,
+        True,
+        True,
+        True,
+        "capability-free AppContainer",
+        appcontainer_profile="JARVIS-test-profile",
+        runtime_root="C:\\runtime",
+    )
+    service, item, _ = setup(
+        require_executable_isolation=True,
+        sandbox_security_status=status,
+    )
+    record = service.record_for(item.package_id, item.version)
+    assert record.sandbox_security_mode == WindowsContainmentMode.APPCONTAINER.value
 
 
 def test_shadow_canary_promotion_records_evidence_and_restart() -> None:
@@ -325,6 +454,37 @@ def test_broker_failures_fail_closed() -> None:
     service, item, _ = setup(canary_error=True)
     assert service.run_shadow(item.package_id, item.version).state is ActivationState.SHADOW
     assert service.run_canary(item.package_id, item.version).state is ActivationState.QUARANTINED
+
+
+def test_missing_or_unknown_trusted_attestation_blocks_staged_activation() -> None:
+    item, source = package()
+    record = certification(item, source)
+    manager = HotLoadManager(Factory(), Surface())
+    hooks = ActivationHooks(
+        shadow=lambda item, observer: ShadowExecution(verification=("claimed",)),
+        canary=lambda item, limits, observer: CanaryExecution(limits.scope),
+    )
+    with pytest.raises(TypeError):
+        PackageActivationService(manager, hooks)  # type: ignore[call-arg]
+    service = PackageActivationService(manager, hooks, attestation_store=EffectAttestationStore())
+    service.register_certified(
+        ActivationRequest(item, record, (source,), CanaryLimits("fixture.scope"))
+    )
+    assert service.run_shadow(item.package_id, item.version).state is ActivationState.QUARANTINED
+
+    service, item, _ = setup(canary_unknown=True)
+    assert service.run_shadow(item.package_id, item.version).state is ActivationState.SHADOW
+    result = service.run_canary(item.package_id, item.version)
+    assert result.state is ActivationState.QUARANTINED
+    assert "independently confirmed" in result.promotion_decision
+
+
+def test_independent_verification_is_required_even_with_trusted_canary_dispatch() -> None:
+    service, item, _ = setup(verify=False)
+    assert service.run_shadow(item.package_id, item.version).state is ActivationState.SHADOW
+    result = service.run_canary(item.package_id, item.version)
+    assert result.state is ActivationState.QUARANTINED
+    assert "VerificationEngine" in result.promotion_decision
 
 
 def test_scope_wall_time_and_missing_verification_are_canary_failures() -> None:

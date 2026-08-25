@@ -21,6 +21,7 @@ from jarvis.permissions import (
     AuthorizationReceipt,
     Decision,
     DecisionReason,
+    DesktopApprovalHandoff,
     InMemoryAuditSink,
     Permission,
     PermissionBroker,
@@ -34,6 +35,7 @@ from jarvis.permissions import (
     ScopeConstraint,
     TrustedApprovalAuthenticator,
     TrustedApprovalContext,
+    TrustedDesktopApprovalSurface,
 )
 from jarvis.tools.base import Tool
 from jarvis.tools.harness import ToolHarness
@@ -354,6 +356,55 @@ async def require_one_approval(broker: PermissionBroker) -> ApprovalRequest:
     pending = await broker.pending_approvals()
     assert len(pending) == 1
     return pending[0]
+
+
+@pytest.mark.asyncio
+async def test_desktop_handoff_approves_the_exact_pending_request_through_broker(
+    tmp_path: Path,
+) -> None:
+    tool, broker, harness = make_harness(tmp_path)
+    arguments = {"path": str(tmp_path / "file.txt"), "secret": "hidden"}
+    await harness.invoke(tool, arguments)
+    request = await require_one_approval(broker)
+    handoff = DesktopApprovalHandoff.create(request)
+
+    result = await TrustedDesktopApprovalSurface().decide(
+        handoff,
+        request,
+        choice=ApprovalChoice.APPROVE_ONCE,
+        authenticator=_APPROVAL_AUTHENTICATORS[id(broker)],
+        identity=trusted_user(),
+        broker=broker,
+    )
+
+    assert result.accepted is True
+    assert result.request is not None and result.request.request_id == request.request_id
+    assert (await harness.invoke(tool, arguments, task_id=request.task_id)).succeeded
+
+
+@pytest.mark.asyncio
+async def test_desktop_handoff_rejects_changed_request_and_leaves_original_pending(
+    tmp_path: Path,
+) -> None:
+    tool, broker, harness = make_harness(tmp_path)
+    arguments = {"path": str(tmp_path / "file.txt"), "secret": "hidden"}
+    await harness.invoke(tool, arguments)
+    request = await require_one_approval(broker)
+    handoff = DesktopApprovalHandoff.create(request)
+    changed = replace(request, argument_fingerprint="f" * 64)
+
+    result = await TrustedDesktopApprovalSurface().decide(
+        handoff,
+        changed,
+        choice=ApprovalChoice.APPROVE_ONCE,
+        authenticator=_APPROVAL_AUTHENTICATORS[id(broker)],
+        identity=trusted_user(),
+        broker=broker,
+    )
+
+    assert result.accepted is False
+    original = await broker.get_approval(request.request_id)
+    assert original is not None and original.status is ApprovalStatus.PENDING
 
 
 def test_tool_cannot_replace_brokered_entry_point_with_public_execute() -> None:

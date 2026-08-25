@@ -2,10 +2,12 @@
 
 The parent process exposes only bounded JSON messages over stdio.  It never
 passes a broker, policy, vault, audit writer, runtime container, or ambient
-environment into the child.  On Windows, a Job Object owns the process tree
-and applies active-process and memory limits.  Job Objects are not a complete
-filesystem, network, or identity sandbox; the limitations are intentional and
-documented in ``docs/sandbox-isolation.md``.
+environment into the child.  On Windows, the default executable launch uses
+a capability-free AppContainer, scoped ACLs, an explicit standard-handle list,
+and a Job Object for process-tree/resource ownership.  Restricted-token and
+Job-only modes remain explicit compatibility/diagnostic modes and do not meet
+the generated executable activation contract.  The actual guarantees and
+limitations are documented in ``docs/security/windows-integration-isolation.md``.
 """
 
 from __future__ import annotations
@@ -19,8 +21,10 @@ import os
 import shutil
 import signal
 import sys
+import time
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from hashlib import sha256
 from pathlib import Path
 from typing import Any
 from uuid import UUID, uuid4
@@ -31,6 +35,13 @@ from jarvis.resources import (
     ResourceBudget,
     ResourceGovernor,
     ResourcePriority,
+)
+from jarvis.windows_sandbox import (
+    SandboxSecurityStatus,
+    WindowsAppContainerLauncher,
+    WindowsContainmentMode,
+    WindowsNativeProcessError,
+    WindowsRestrictedLauncher,
 )
 
 SANDBOX_PROTOCOL_VERSION = 1
@@ -219,6 +230,9 @@ class SandboxLimits:
     max_processes: int = 1
     max_memory_bytes: int = 256 * 1024 * 1024
     max_restarts: int = 3
+    windows_containment: WindowsContainmentMode = WindowsContainmentMode.APPCONTAINER
+    appcontainer_runtime_root: Path | None = None
+    appcontainer_dependency_roots: tuple[Path, ...] = ()
 
     def __post_init__(self) -> None:
         if (
@@ -233,6 +247,19 @@ class SandboxLimits:
             or not 16 * 1024 * 1024 <= self.max_memory_bytes <= 4 * 1024 * 1024 * 1024
             or not isinstance(self.max_restarts, int)
             or not 0 <= self.max_restarts <= 8
+            or not isinstance(self.windows_containment, WindowsContainmentMode)
+            or (
+                self.appcontainer_runtime_root is not None
+                and (
+                    not isinstance(self.appcontainer_runtime_root, Path)
+                    or not self.appcontainer_runtime_root.is_absolute()
+                )
+            )
+            or type(self.appcontainer_dependency_roots) is not tuple
+            or any(
+                not isinstance(root, Path) or not root.is_absolute()
+                for root in self.appcontainer_dependency_roots
+            )
         ):
             raise SandboxConfigurationError("Sandbox resource bounds are invalid")
 
@@ -332,6 +359,7 @@ class _WindowsJob:  # pragma: no cover - opt-in native Windows integration
     def __init__(self, handle: int, library: Any) -> None:
         self._handle = handle
         self._library = library
+        self._root_process_id: int | None = None
 
     @classmethod
     def create(cls, limits: SandboxLimits) -> _WindowsJob:
@@ -354,6 +382,8 @@ class _WindowsJob:  # pragma: no cover - opt-in native Windows integration
             library.AssignProcessToJobObject.restype = wintypes.BOOL
             library.TerminateJobObject.argtypes = [ctypes.c_void_p, wintypes.UINT]
             library.TerminateJobObject.restype = wintypes.BOOL
+            library.WaitForSingleObject.argtypes = [ctypes.c_void_p, wintypes.DWORD]
+            library.WaitForSingleObject.restype = wintypes.DWORD
             library.CloseHandle.argtypes = [ctypes.c_void_p]
             library.CloseHandle.restype = wintypes.BOOL
             handle = library.CreateJobObjectW(None, None)
@@ -433,13 +463,117 @@ class _WindowsJob:  # pragma: no cover - opt-in native Windows integration
         if not handle:
             raise SandboxIsolationUnavailable("Sandbox process handle could not be opened")
         try:
-            if not self._library.AssignProcessToJobObject(self._handle, handle):
-                raise SandboxIsolationUnavailable("Sandbox process could not join its Job Object")
+            self.assign_handle(handle, process_id)
         finally:
             self._library.CloseHandle(handle)
 
+    def assign_handle(self, process_handle: int, process_id: int | None = None) -> None:
+        """Assign a suspended process before it is allowed to execute."""
+
+        if not self._library.AssignProcessToJobObject(self._handle, process_handle):
+            raise SandboxIsolationUnavailable("Sandbox process could not join its Job Object")
+        if process_id is not None:
+            self._root_process_id = process_id
+
     def terminate(self) -> None:
         self._library.TerminateJobObject(self._handle, 1)
+        self._terminate_unowned_descendants()
+
+    def _terminate_unowned_descendants(self) -> None:
+        """Best-effort cleanup for children that explicitly broke away.
+
+        A normal child is covered by the Job Object.  This narrow cleanup is
+        not an authority boundary: it exists only to avoid leaving a locally
+        owned process behind if a child used a supported Windows breakaway
+        path.  The descendant set is re-read a few times to bound PID-race
+        exposure and cleanup latency.
+        """
+
+        root = getattr(self, "_root_process_id", None)
+        if root is None:
+            return
+        # A child can be created just as the root is terminated.  Keep the
+        # cleanup bounded, but allow enough time for that local process-tree
+        # observation to become visible before removing the owned directory.
+        for _ in range(20):
+            descendants = self._descendant_processes(root)
+            if not descendants:
+                return
+            for process_id in descendants:
+                handle = self._library.OpenProcess(
+                    self._PROCESS_TERMINATE | self._PROCESS_QUERY_LIMITED_INFORMATION,
+                    False,
+                    process_id,
+                )
+                if handle:
+                    with contextlib.suppress(Exception):
+                        self._library.TerminateProcess(handle, 1)
+                    self._library.CloseHandle(handle)
+            time.sleep(0.05)
+
+    def _descendant_processes(self, root_process_id: int) -> set[int]:
+        class ProcessEntry(ctypes.Structure):
+            _fields_ = [
+                ("dwSize", wintypes.DWORD),
+                ("cntUsage", wintypes.DWORD),
+                ("th32ProcessID", wintypes.DWORD),
+                ("th32DefaultHeapID", ctypes.c_size_t),
+                ("th32ModuleID", wintypes.DWORD),
+                ("cntThreads", wintypes.DWORD),
+                ("th32ParentProcessID", wintypes.DWORD),
+                ("pcPriClassBase", wintypes.LONG),
+                ("dwFlags", wintypes.DWORD),
+                ("szExeFile", wintypes.WCHAR * 260),
+            ]
+
+        self._library.CreateToolhelp32Snapshot.argtypes = [wintypes.DWORD, wintypes.DWORD]
+        self._library.CreateToolhelp32Snapshot.restype = ctypes.c_void_p
+        self._library.Process32FirstW.argtypes = [
+            ctypes.c_void_p,
+            ctypes.POINTER(ProcessEntry),
+        ]
+        self._library.Process32FirstW.restype = wintypes.BOOL
+        self._library.Process32NextW.argtypes = [
+            ctypes.c_void_p,
+            ctypes.POINTER(ProcessEntry),
+        ]
+        self._library.Process32NextW.restype = wintypes.BOOL
+        snapshot = self._library.CreateToolhelp32Snapshot(0x00000002, 0)
+        if not snapshot or int(snapshot) == -1:
+            return set()
+        try:
+            entries: dict[int, int] = {}
+            entry = ProcessEntry()
+            entry.dwSize = ctypes.sizeof(ProcessEntry)
+            if self._library.Process32FirstW(snapshot, ctypes.byref(entry)):
+                while True:
+                    entries[int(entry.th32ProcessID)] = int(entry.th32ParentProcessID)
+                    if not self._library.Process32NextW(snapshot, ctypes.byref(entry)):
+                        break
+            result: set[int] = set()
+            frontier = {root_process_id}
+            while frontier:
+                children = {
+                    process_id
+                    for process_id, parent_id in entries.items()
+                    if parent_id in frontier and process_id not in result
+                }
+                result.update(children)
+                frontier = children
+            return result
+        finally:
+            self._library.CloseHandle(snapshot)
+
+    async def wait_for_empty(self, timeout_seconds: float) -> bool:
+        """Wait until all descendants have left the Job Object."""
+
+        milliseconds = max(1, min(30_000, int(timeout_seconds * 1_000)))
+        result = await asyncio.to_thread(
+            self._library.WaitForSingleObject,
+            self._handle,
+            milliseconds,
+        )
+        return bool(result == 0)
 
     def close(self) -> None:
         if self._handle:
@@ -486,8 +620,9 @@ class SandboxProcess:
         self._resource_governor = resource_governor
         self._resource_priority = resource_priority
         self._resource_reservation_id: UUID | None = None
-        self._process: asyncio.subprocess.Process | None = None
+        self._process: Any | None = None
         self._job: _WindowsJob | None = None
+        self._security_status: SandboxSecurityStatus | None = None
         self._paths: SandboxPaths | None = None
         self._lock = asyncio.Lock()
         self._closed = False
@@ -507,6 +642,12 @@ class SandboxProcess:
     def restart_count(self) -> int:
         return self._restart_count
 
+    @property
+    def security_status(self) -> SandboxSecurityStatus | None:
+        """Return the observable containment established by the active launch."""
+
+        return self._security_status
+
     async def start(self) -> None:
         async with self._lock:
             await self._start_locked()
@@ -521,6 +662,7 @@ class SandboxProcess:
             await self._stop_locked()
         if self._paths is not None:
             self._cleanup_paths_locked()
+        self._security_status = None
         if self._resource_governor is not None:
             decision = self._resource_governor.reserve(
                 f"sandbox.{self._integration_id}",
@@ -536,29 +678,120 @@ class SandboxProcess:
             self._resource_reservation_id = decision.reservation_id
         paths = SandboxPaths.create(self._parent_directory, self._integration_id)
         job: _WindowsJob | None = None
-        process: asyncio.subprocess.Process | None = None
+        process: Any | None = None
         try:
             if sys.platform == "win32":
                 job = _WindowsJob.create(self._limits)
-            flags = 0
-            if sys.platform == "win32":
-                flags = 0x00000200 | 0x08000000 | 0x00000400  # new group, no window, Unicode env
-            process = await asyncio.create_subprocess_exec(
-                os.fspath(self._executable),
-                *self._arguments,
-                stdin=asyncio.subprocess.PIPE,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.DEVNULL,
-                cwd=os.fspath(paths.work),
-                env=_sandbox_environment(),
-                creationflags=flags,
-                start_new_session=sys.platform != "win32",
-                limit=self._limits.max_message_bytes + 1,
-            )
+                if self._limits.windows_containment is WindowsContainmentMode.APPCONTAINER:
+                    if job is None:  # pragma: no cover - defensive invariant
+                        raise SandboxIsolationUnavailable("Sandbox Job Object was not created")
+                    runtime_root = self._limits.appcontainer_runtime_root
+                    if runtime_root is None:
+                        raise SandboxIsolationUnavailable(
+                            "AppContainer runtime root is required for executable isolation"
+                        )
+                    runtime_root = _owned_directory(runtime_root, create=False)
+                    dependency_roots = tuple(
+                        _owned_directory(root, create=False)
+                        for root in self._limits.appcontainer_dependency_roots
+                    )
+                    try:
+                        self._executable.relative_to(runtime_root)
+                    except ValueError as error:
+                        raise SandboxIsolationUnavailable(
+                            "Sandbox executable is outside the AppContainer runtime root"
+                        ) from error
+                    profile_name = (
+                        "JARVIS-"
+                        + sha256(f"{self._integration_id}:{uuid4().hex}".encode()).hexdigest()[:32]
+                    )
+                    process, self._security_status = await WindowsAppContainerLauncher.launch(
+                        os.fspath(self._executable),
+                        self._arguments,
+                        cwd=os.fspath(paths.work),
+                        environment=_sandbox_environment(),
+                        limit=self._limits.max_message_bytes + 1,
+                        job=job,
+                        profile_name=profile_name,
+                        runtime_root=os.fspath(runtime_root),
+                        allowed_roots=(*(os.fspath(root) for root in dependency_roots),),
+                        writable_roots=(os.fspath(paths.root),),
+                    )
+                elif self._limits.windows_containment is WindowsContainmentMode.RESTRICTED_TOKEN:
+                    if job is None:  # pragma: no cover - defensive invariant
+                        raise SandboxIsolationUnavailable("Sandbox Job Object was not created")
+                    process, self._security_status = await WindowsRestrictedLauncher.launch(
+                        os.fspath(self._executable),
+                        self._arguments,
+                        cwd=os.fspath(paths.work),
+                        environment=_sandbox_environment(),
+                        limit=self._limits.max_message_bytes + 1,
+                        job=job,
+                    )
+                else:
+                    flags = 0x00000200 | 0x08000000 | 0x00000400
+                    process = await asyncio.create_subprocess_exec(
+                        os.fspath(self._executable),
+                        *self._arguments,
+                        stdin=asyncio.subprocess.PIPE,
+                        stdout=asyncio.subprocess.PIPE,
+                        stderr=asyncio.subprocess.DEVNULL,
+                        cwd=os.fspath(paths.work),
+                        env=_sandbox_environment(),
+                        creationflags=flags,
+                        start_new_session=False,
+                        limit=self._limits.max_message_bytes + 1,
+                    )
+                    self._security_status = SandboxSecurityStatus(
+                        mode=WindowsContainmentMode.JOB_OBJECT_ONLY,
+                        token_restricted=False,
+                        disabled_privileges=False,
+                        explicit_handle_list=False,
+                        inherited_handle_count=0,
+                        job_object=True,
+                        filesystem_acl_restricted=False,
+                        network_restricted=False,
+                        detail="explicit degraded mode; lifecycle containment only",
+                    )
+            else:
+                process = await asyncio.create_subprocess_exec(
+                    os.fspath(self._executable),
+                    *self._arguments,
+                    stdin=asyncio.subprocess.PIPE,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.DEVNULL,
+                    cwd=os.fspath(paths.work),
+                    env=_sandbox_environment(),
+                    start_new_session=True,
+                    limit=self._limits.max_message_bytes + 1,
+                )
+                self._security_status = SandboxSecurityStatus(
+                    mode=WindowsContainmentMode.PROCESS_GROUP_ONLY,
+                    token_restricted=False,
+                    disabled_privileges=False,
+                    explicit_handle_list=False,
+                    inherited_handle_count=0,
+                    job_object=False,
+                    filesystem_acl_restricted=False,
+                    network_restricted=False,
+                    detail="POSIX process-group lifecycle containment only",
+                )
+            if self._security_status is not None:
+                self._security_status = replace(
+                    self._security_status,
+                    max_processes=self._limits.max_processes,
+                    max_memory_bytes=self._limits.max_memory_bytes,
+                )
             self._process = process
             self._paths = paths
-            if job is not None:
+            if job is not None and self._limits.windows_containment not in {
+                WindowsContainmentMode.RESTRICTED_TOKEN,
+                WindowsContainmentMode.APPCONTAINER,
+            }:
                 job.assign(process.pid)
+                self._job = job
+                job = None
+            elif job is not None:
                 self._job = job
                 job = None
         except Exception as error:
@@ -570,8 +803,14 @@ class SandboxProcess:
                 job.close()
             with contextlib.suppress(Exception):
                 paths.cleanup()
+            if self._paths is paths:
+                self._paths = None
             if isinstance(error, SandboxIsolationUnavailable):
                 raise
+            if isinstance(error, WindowsNativeProcessError):
+                raise SandboxIsolationUnavailable(
+                    "Mandatory Windows sandbox containment is unavailable"
+                ) from error
             raise SandboxProcessError("Sandbox process could not start") from error
 
     async def request(
@@ -665,8 +904,10 @@ class SandboxProcess:
             if self._restart_count >= self._limits.max_restarts:
                 raise SandboxProcessError("Sandbox restart limit was exhausted")
             self._release_resource(ReservationReleaseReason.CRASH)
-            await self._stop_locked()
-            self._cleanup_paths_locked()
+            try:
+                await self._stop_locked()
+            finally:
+                self._cleanup_paths_locked()
             self._restart_count += 1
             await self._start_locked()
 
@@ -681,16 +922,23 @@ class SandboxProcess:
                 return
             self._closed = True
             self._release_resource(ReservationReleaseReason.CANCEL)
-            await self._stop_locked()
-            self._cleanup_paths_locked()
+            try:
+                await self._stop_locked()
+            finally:
+                self._cleanup_paths_locked()
 
     async def _stop_locked(self) -> None:
         process, self._process = self._process, None
         job, self._job = self._job, None
         if process is not None:
-            with contextlib.suppress(Exception):
-                if process.stdin is not None:
-                    process.stdin.close()
+            close_streams = getattr(process, "close_streams", None)
+            if callable(close_streams):
+                with contextlib.suppress(Exception):
+                    close_streams()
+            else:
+                with contextlib.suppress(Exception):
+                    if process.stdin is not None:
+                        process.stdin.close()
             if process.returncode is None:
                 if job is not None:
                     job.terminate()
@@ -709,12 +957,24 @@ class SandboxProcess:
                     else:
                         with contextlib.suppress(ProcessLookupError):
                             os.killpg(process.pid, signal.SIGKILL)
-                    with contextlib.suppress(Exception):
-                        await process.wait()
+                with contextlib.suppress(Exception):
+                    await asyncio.wait_for(process.wait(), timeout=2)
+            if job is not None:
+                with contextlib.suppress(Exception):
+                    await job.wait_for_empty(2)
             for stream in (process.stdin, process.stdout):
                 transport = getattr(stream, "_transport", None)
                 if transport is not None:
                     transport.close()
+            close_native = getattr(process, "close", None)
+            if callable(close_native):
+                with contextlib.suppress(Exception):
+                    close_native()
+                cleanup_error = getattr(process, "cleanup_error", None)
+                if cleanup_error is not None:
+                    raise SandboxCleanupError(
+                        "Native sandbox security cleanup failed"
+                    ) from cleanup_error
         if job is not None:
             job.close()
 
@@ -746,5 +1006,7 @@ __all__ = [
     "SandboxProcess",
     "SandboxProcessError",
     "SandboxProtocolError",
+    "SandboxSecurityStatus",
     "SandboxTimeout",
+    "WindowsContainmentMode",
 ]

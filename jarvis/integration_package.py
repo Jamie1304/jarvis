@@ -268,6 +268,7 @@ class IntegrationPackage:
     dependency_lock: tuple[str, ...] = ()
     package_hash: str = ""
     operation_policy: PackageOperationPolicy = PackageOperationPolicy()
+    ui_manifest_hash: str = ""
 
     def __post_init__(self) -> None:
         _bounded(self.package_id, "Package ID", 128)
@@ -314,6 +315,8 @@ class IntegrationPackage:
                 raise PackageContractError("Package entry is outside its declared data boundary")
         if self.package_hash:
             _hash(self.package_hash, "Package hash")
+        if self.ui_manifest_hash:
+            _hash(self.ui_manifest_hash, "UI manifest hash")
         if self.provenance is None:
             raise PackageContractError("Package provenance is required")
         declared_permissions = set(self.permissions)
@@ -349,6 +352,22 @@ class IntegrationPackage:
                 raise PackageContractError(
                     "Package UI asset must be immutable package-owned content"
                 )
+
+    @property
+    def requires_executable_isolation(self) -> bool:
+        """Whether activation would execute package-owned code.
+
+        Declarative UI assets are not executable package code.  Unknown code
+        entry kinds are treated conservatively as executable so a new package
+        format cannot silently bypass the Windows isolation gate.
+        """
+
+        declarative_kinds = frozenset({"asset", "image", "theme", "stylesheet"})
+        return any(
+            entry.boundary is PackageBoundary.PACKAGE_CODE
+            and entry.kind.casefold() not in declarative_kinds
+            for entry in self.entries
+        )
 
 
 def validate_package_path(path: str) -> str:

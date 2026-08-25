@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import sqlite3
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import uuid4
@@ -102,6 +103,19 @@ def test_artifact_workspace_isolation_path_attacks_and_secret_rejection(tmp_path
     store.close()
 
 
+def test_artifact_root_rejects_reparse_ancestor_when_supported(tmp_path: Path) -> None:
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    link = tmp_path / "linked-root"
+    try:
+        link.symlink_to(outside, target_is_directory=True)
+    except OSError:
+        pytest.skip("Creating a symlink is not available to this test process")
+
+    with pytest.raises(OSError, match="reparse"):
+        ArtifactStore(link / "artifacts")
+
+
 def test_artifact_retention_and_restart(tmp_path: Path) -> None:
     path = tmp_path / "artifacts"
     store = ArtifactStore(path)
@@ -171,3 +185,25 @@ def test_artifact_retention_limits_versions(tmp_path: Path) -> None:
         store.get_version(first, workspace_id="workspace")
     assert store.read(third, workspace_id="workspace") == b"three"
     store.close()
+
+
+def test_artifact_store_migration_and_future_schema_refusal(tmp_path: Path) -> None:
+    future_root = tmp_path / "future-artifacts"
+    future_root.mkdir()
+    with sqlite3.connect(future_root / "artifacts.sqlite3") as connection:
+        connection.execute(
+            "CREATE TABLE artifact_schema_migrations "
+            "(version INTEGER PRIMARY KEY, name TEXT NOT NULL)"
+        )
+        connection.execute(
+            "INSERT INTO artifact_schema_migrations(version, name) VALUES (99, 'future')"
+        )
+    with pytest.raises(OSError, match="future schema"):
+        ArtifactStore(future_root)
+
+    migrated = ArtifactStore(tmp_path / "migrated-artifacts")
+    version = migrated._connection.execute(  # noqa: SLF001 - migration assertion
+        "SELECT version, name FROM artifact_schema_migrations"
+    ).fetchone()
+    assert version == (1, "create_artifacts")
+    migrated.close()

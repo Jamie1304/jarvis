@@ -10,14 +10,18 @@ from __future__ import annotations
 
 import ctypes
 import ctypes.wintypes as wintypes
+import hashlib
+import hmac
 import json
 import secrets
 import sqlite3
 import sys
 import threading
 from collections.abc import Callable, Iterable
+from contextlib import closing
 from dataclasses import dataclass, replace
-from datetime import UTC, datetime
+from dataclasses import field as dataclass_field
+from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from pathlib import Path
 from typing import Protocol
@@ -125,6 +129,35 @@ def _parse_timestamp(value: str | None) -> datetime | None:
     return parsed
 
 
+def _package_hash(value: object) -> str:
+    if (
+        type(value) is not str
+        or len(value) != 64
+        or any(character not in "0123456789abcdef" for character in value)
+    ):
+        raise CredentialVaultError("Package hash is invalid")
+    return value
+
+
+def _credential_ref_material(reference: CredentialRef) -> bytes:
+    return json.dumps(
+        (
+            str(reference.credential_id),
+            reference.integration_id,
+            reference.package_version,
+            reference.package_hash,
+            reference.association,
+            reference.operation,
+            reference.destination,
+            reference.workspace_id,
+            reference.scope,
+            reference.issued_at.astimezone(UTC).isoformat(),
+            reference.expires_at.astimezone(UTC).isoformat(),
+        ),
+        separators=(",", ":"),
+    ).encode("utf-8")
+
+
 @dataclass(frozen=True, slots=True)
 class CredentialMetadata:
     credential_id: UUID
@@ -155,6 +188,54 @@ class CredentialMetadata:
             raise CredentialVaultError("Credential expiry must be timezone-aware")
         if not isinstance(self.status, CredentialStatus):
             raise CredentialVaultError("Credential status is invalid")
+
+
+@dataclass(frozen=True, slots=True, repr=False)
+class CredentialRef:
+    """A bounded, non-secret capability reference for one trusted operation.
+
+    The reference contains metadata only.  It is issued by the Vault and is
+    useful to a trusted host adapter, while the raw secret remains behind the
+    Vault boundary.  Every field that can change the authorization meaning is
+    part of the reference so a broker can reject substitution or widening.
+    """
+
+    credential_id: UUID
+    integration_id: str
+    package_version: str
+    package_hash: str
+    association: str
+    operation: str
+    destination: str
+    workspace_id: str
+    scope: tuple[str, ...]
+    issued_at: datetime
+    expires_at: datetime
+    _proof: bytes = dataclass_field(repr=False)
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.credential_id, UUID):
+            raise CredentialVaultError("Credential reference identity is invalid")
+        for value, field, limit in (
+            (self.integration_id, "Credential integration", 256),
+            (self.package_version, "Credential package version", 128),
+            (self.association, "Credential association", 256),
+            (self.operation, "Credential operation", 256),
+            (self.destination, "Credential destination", 2_048),
+            (self.workspace_id, "Credential workspace", 256),
+        ):
+            _text(value, field, limit)
+        _package_hash(self.package_hash)
+        _scope(self.scope)
+        if self.issued_at.tzinfo is None or self.expires_at.tzinfo is None:
+            raise CredentialVaultError("Credential reference timestamps must be timezone-aware")
+        if self.expires_at <= self.issued_at:
+            raise CredentialVaultError("Credential reference expiry is invalid")
+        if type(self._proof) is not bytes or len(self._proof) != hashlib.sha256().digest_size:
+            raise CredentialVaultError("Credential reference proof is invalid")
+
+    def __repr__(self) -> str:
+        return f"CredentialRef({self.credential_id}, <metadata-only>)"
 
 
 class SecretBackend(Protocol):
@@ -325,6 +406,7 @@ class CredentialVault:
         self._backend = backend or _default_backend()
         self._event_bus = event_bus
         self._clock = clock or (lambda: datetime.now(UTC))
+        self._ref_signing_key = secrets.token_bytes(32)
         self._lock = threading.RLock()
         self._initialize()
 
@@ -337,7 +419,7 @@ class CredentialVault:
         return connection
 
     def _initialize(self) -> None:
-        with self._lock, self._connect() as connection:
+        with self._lock, closing(self._connect()) as connection, connection:
             connection.execute(
                 "CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL)"
             )
@@ -402,7 +484,7 @@ class CredentialVault:
         target = self._target(credential_id)
         try:
             self._backend.put(target, secret_bytes)
-            with self._lock, self._connect() as connection:
+            with self._lock, closing(self._connect()) as connection, connection:
                 connection.execute(
                     "INSERT INTO credentials VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     self._row_values(metadata),
@@ -507,7 +589,7 @@ class CredentialVault:
     def metadata(self, credential_id: UUID) -> CredentialMetadata:
         if not isinstance(credential_id, UUID):
             raise CredentialNotFound("Credential metadata was not found")
-        with self._lock, self._connect() as connection:
+        with self._lock, closing(self._connect()) as connection, connection:
             row = connection.execute(
                 "SELECT * FROM credentials WHERE credential_id = ?", (str(credential_id),)
             ).fetchone()
@@ -525,7 +607,7 @@ class CredentialVault:
         return metadata
 
     def list(self, *, association: str | None = None) -> tuple[CredentialMetadata, ...]:
-        with self._lock, self._connect() as connection:
+        with self._lock, closing(self._connect()) as connection, connection:
             rows = tuple(
                 connection.execute("SELECT * FROM credentials ORDER BY created_at, credential_id")
             )
@@ -558,6 +640,96 @@ class CredentialVault:
         except Exception as error:
             raise CredentialVaultError("Secure credential read failed") from error
 
+    def issue_ref(
+        self,
+        credential_id: UUID,
+        *,
+        integration_id: str,
+        package_version: str,
+        package_hash: str,
+        operation: str,
+        destination: str,
+        workspace_id: str,
+        scope: Iterable[str],
+        ttl_seconds: float = 300.0,
+    ) -> CredentialRef:
+        """Issue a short-lived operation-bound reference without exposing bytes."""
+
+        metadata = self.metadata(credential_id)
+        integration_id = _text(integration_id, "Credential integration", 256)
+        package_version = _text(package_version, "Credential package version", 128)
+        package_hash = _package_hash(package_hash)
+        operation = _text(operation, "Credential operation", 256)
+        destination = _text(destination, "Credential destination", 2_048)
+        workspace_id = _text(workspace_id, "Credential workspace", 256)
+        requested_scope = _scope(scope)
+        if not set(requested_scope).issubset(metadata.scope):
+            raise CredentialUseDenied("Credential use is outside its trusted scope")
+        if not isinstance(ttl_seconds, int | float) or isinstance(ttl_seconds, bool):
+            raise CredentialVaultError("Credential reference lifetime is invalid")
+        if not 0 < float(ttl_seconds) <= 3_600:
+            raise CredentialVaultError("Credential reference lifetime is invalid")
+        now = self._now()
+        expiry = now + timedelta(seconds=float(ttl_seconds))
+        if metadata.expires_at is not None:
+            expiry = min(expiry, metadata.expires_at)
+        if expiry <= now:
+            raise CredentialUseDenied("Credential is expired")
+        unsigned = CredentialRef(
+            credential_id,
+            integration_id,
+            package_version,
+            package_hash,
+            metadata.association,
+            operation,
+            destination,
+            workspace_id,
+            requested_scope,
+            now,
+            expiry,
+            b"\0" * hashlib.sha256().digest_size,
+        )
+        return replace(unsigned, _proof=self._reference_proof(unsigned))
+
+    def resolve_ref(
+        self,
+        reference: CredentialRef,
+        *,
+        integration_id: str,
+        package_version: str,
+        package_hash: str,
+        operation: str,
+        destination: str,
+        workspace_id: str,
+        scope: Iterable[str],
+    ) -> bytes:
+        """Resolve an exact trusted reference for use by a host-side adapter."""
+
+        if type(reference) is not CredentialRef:
+            raise CredentialUseDenied("Credential reference is not trusted")
+        if not hmac.compare_digest(reference._proof, self._reference_proof(reference)):
+            raise CredentialUseDenied("Credential reference proof is invalid")
+        now = self._now()
+        if reference.expires_at <= now:
+            raise CredentialUseDenied("Credential reference has expired")
+        expected_scope = _scope(scope)
+        if (
+            reference.integration_id != _text(integration_id, "Credential integration", 256)
+            or reference.package_version
+            != _text(package_version, "Credential package version", 128)
+            or reference.package_hash != _package_hash(package_hash)
+            or reference.operation != _text(operation, "Credential operation", 256)
+            or reference.destination != _text(destination, "Credential destination", 2_048)
+            or reference.workspace_id != _text(workspace_id, "Credential workspace", 256)
+            or reference.scope != expected_scope
+        ):
+            raise CredentialUseDenied("Credential reference binding does not match")
+        return self.scoped_use(
+            reference.credential_id,
+            association=reference.association,
+            scope=expected_scope,
+        )
+
     def status(self, credential_id: UUID) -> CredentialStatus:
         return self.metadata(credential_id).status
 
@@ -573,7 +745,7 @@ class CredentialVault:
             raise CredentialVaultError("Secure credential write failed") from error
 
     def _write_metadata(self, metadata: CredentialMetadata) -> None:
-        with self._lock, self._connect() as connection:
+        with self._lock, closing(self._connect()) as connection, connection:
             connection.execute(
                 """UPDATE credentials SET label=?, association=?, scope_json=?, auth_method=?,
                    created_at=?, updated_at=?, expires_at=?, status=? WHERE credential_id=?""",
@@ -628,6 +800,13 @@ class CredentialVault:
             raise CredentialVaultError("Credential clock is invalid")
         return value.astimezone(UTC)
 
+    def _reference_proof(self, reference: CredentialRef) -> bytes:
+        return hmac.new(
+            self._ref_signing_key,
+            _credential_ref_material(reference),
+            hashlib.sha256,
+        ).digest()
+
     def _emit(self, metadata: CredentialMetadata, operation: str) -> None:
         if self._event_bus is None:
             return
@@ -638,6 +817,68 @@ class CredentialVault:
                 source="credentials.vault",
                 correlation_id=uuid4(),
             )
+        )
+
+
+class CredentialBroker:
+    """Trusted application adapter for scoped Vault use.
+
+    Integrations receive :class:`CredentialRef` metadata, not this object and
+    never the Vault backend.  The return value is intended only for a trusted
+    adapter callback that immediately constructs an authenticated operation.
+    """
+
+    def __init__(self, vault: CredentialVault) -> None:
+        if type(vault) is not CredentialVault:
+            raise CredentialVaultError("Credential broker requires the authoritative Vault")
+        self._vault = vault
+
+    def issue_ref(
+        self,
+        credential_id: UUID,
+        *,
+        integration_id: str,
+        package_version: str,
+        package_hash: str,
+        operation: str,
+        destination: str,
+        workspace_id: str,
+        scope: Iterable[str],
+        ttl_seconds: float = 300.0,
+    ) -> CredentialRef:
+        return self._vault.issue_ref(
+            credential_id,
+            integration_id=integration_id,
+            package_version=package_version,
+            package_hash=package_hash,
+            operation=operation,
+            destination=destination,
+            workspace_id=workspace_id,
+            scope=scope,
+            ttl_seconds=ttl_seconds,
+        )
+
+    def resolve(
+        self,
+        reference: CredentialRef,
+        *,
+        integration_id: str,
+        package_version: str,
+        package_hash: str,
+        operation: str,
+        destination: str,
+        workspace_id: str,
+        scope: Iterable[str],
+    ) -> bytes:
+        return self._vault.resolve_ref(
+            reference,
+            integration_id=integration_id,
+            package_version=package_version,
+            package_hash=package_hash,
+            operation=operation,
+            destination=destination,
+            workspace_id=workspace_id,
+            scope=scope,
         )
 
 
@@ -951,8 +1192,10 @@ __all__ = [
     "AuthenticationResult",
     "AuthorizationRequest",
     "AuthTokenSet",
+    "CredentialBroker",
     "CredentialMetadata",
     "CredentialNotFound",
+    "CredentialRef",
     "CredentialStatus",
     "CredentialUseDenied",
     "CredentialVault",

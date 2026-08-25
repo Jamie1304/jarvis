@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 from hashlib import sha256
+from typing import cast
 
 import pytest
 from jarvis.integration_package import (
@@ -27,6 +28,15 @@ from jarvis.package_reviewer import PackageSourceFile
 from jarvis.package_runtime import PackageCertification
 from jarvis.permissions.models import Permission
 from jarvis.tools.models import SemanticVersion
+from jarvis.ui_simulation import (
+    UISimulationAction,
+    UISimulationAttestation,
+    UISimulationComponent,
+    UISimulationComponentKind,
+    UISimulationHarness,
+    UISimulationManifest,
+)
+from jarvis.windows_sandbox import SandboxSecurityStatus, WindowsContainmentMode
 
 PROVENANCE = PackageProvenance("generated", "revision-1", "MIT", "NOTICE", "trusted-reviewer")
 
@@ -59,6 +69,22 @@ def request(item: IntegrationPackage) -> CertificationRequest:
         "restore-point:previous",
         ("windows", "python-3.12"),
         ("returns deterministic bounded result",),
+    )
+
+
+def executable_isolation_status() -> SandboxSecurityStatus:
+    return SandboxSecurityStatus(
+        WindowsContainmentMode.APPCONTAINER,
+        True,
+        True,
+        True,
+        3,
+        True,
+        True,
+        True,
+        "trusted synthetic AppContainer",
+        appcontainer_profile="synthetic",
+        runtime_root="C:\\runtime",
     )
 
 
@@ -95,6 +121,23 @@ def hooks(
         healthcheck=lambda item: stage(CertificationStage.HEALTHCHECK),
         verification=lambda item: stage(CertificationStage.VERIFICATION),
     )
+
+
+def test_production_certifier_requires_trusted_executable_isolation() -> None:
+    item, source = package()
+    certified_hooks = replace(hooks([]), build=lambda built: BuiltPackage(built, (source,)))
+    with pytest.raises(CertificationFailure, match="SANDBOX_INTEGRATION_TEST"):
+        PackageCertifier(require_executable_isolation=True).certify(request(item), certified_hooks)
+    secured = CertificationRequest(
+        item,
+        "restore-point:previous",
+        ("windows", "python-3.12"),
+        ("returns deterministic bounded result",),
+        sandbox_security_status=executable_isolation_status(),
+    )
+    record = PackageCertifier(require_executable_isolation=True).certify(secured, certified_hooks)
+    assert record.stages[-1].stage is CertificationStage.CERTIFIED
+    assert record.stages[-1].passed
 
 
 def test_certification_runs_in_order_and_is_not_activation() -> None:
@@ -177,7 +220,14 @@ def test_privileged_package_requires_trusted_authority_reference() -> None:
 
 def test_ui_harness_requirement_is_mandatory_and_fail_closed() -> None:
     item, source = package()
-    ui_item = replace(item, profiles=("desktop",))
+    manifest = UISimulationManifest(
+        item.package_id,
+        str(item.version),
+        "root",
+        (UISimulationComponent("root", UISimulationComponentKind.CONTAINER),),
+        actions=(UISimulationAction("inspect", "capability.inspect"),),
+    )
+    ui_item = replace(item, profiles=("desktop",), ui_manifest_hash=manifest.manifest_hash)
     cert_hooks = replace(hooks([]), build=lambda built: BuiltPackage(built, (source,)))
     with pytest.raises(CertificationFailure) as unavailable:
         PackageCertifier().certify(request(ui_item), cert_hooks)
@@ -188,15 +238,86 @@ def test_ui_harness_requirement_is_mandatory_and_fail_closed() -> None:
             cert_hooks,
         )
     assert failure.value.stage is CertificationStage.VERIFICATION
+    harness = UISimulationHarness(ui_item)
+    harness.load_manifest(manifest)
+    attestations = []
+
+    def simulate(_item: IntegrationPackage, digest: str) -> UISimulationAttestation:
+        attestation = harness.attest(digest)
+        attestations.append(attestation)
+        return attestation
+
     record = PackageCertifier().certify(
         replace(
             request(ui_item),
             ui_simulation_harness_available=True,
             ui_simulation_evidence=("ui harness passed",),
         ),
-        cert_hooks,
+        replace(cert_hooks, ui_simulation=simulate),
     )
-    assert record.verification[-1] == "ui harness passed"
+    assert "ui-simulation-attestation:digest=" in " ".join(record.verification)
+    assert record.ui_simulation_attestation_ref is not None
+    assert (
+        attestations
+        and record.ui_simulation_attestation_digest == attestations[-1].attestation_digest
+    )
+
+
+def test_ui_attestation_failure_or_mismatch_blocks_certification() -> None:
+    item, source = package()
+    manifest = UISimulationManifest(
+        item.package_id,
+        str(item.version),
+        "root",
+        (
+            UISimulationComponent("root", UISimulationComponentKind.CONTAINER),
+            UISimulationComponent(
+                "approve",
+                UISimulationComponentKind.CONTROL,
+                "Approve",
+                action_id="approve",
+            ),
+        ),
+        actions=(UISimulationAction("approve", "permission.approve"),),
+    )
+    ui_item = replace(item, profiles=("desktop",), ui_manifest_hash=manifest.manifest_hash)
+    harness = UISimulationHarness(ui_item)
+    harness.load_manifest(manifest)
+    cert_hooks = replace(
+        hooks([]),
+        build=lambda built: BuiltPackage(built, (source,)),
+        ui_simulation=lambda _item, digest: harness.attest(digest),
+    )
+    with pytest.raises(CertificationFailure, match="VERIFICATION"):
+        PackageCertifier().certify(request(ui_item), cert_hooks)
+
+
+def test_ui_certifier_rejects_malformed_and_stale_attestation() -> None:
+    item, source = package()
+    manifest = UISimulationManifest(
+        item.package_id,
+        str(item.version),
+        "root",
+        (UISimulationComponent("root", UISimulationComponentKind.CONTAINER),),
+    )
+    ui_item = replace(item, profiles=("desktop",), ui_manifest_hash=manifest.manifest_hash)
+    harness = UISimulationHarness(ui_item)
+    harness.load_manifest(manifest)
+    stale = harness.attest("a" * 64)
+    base_hooks = replace(hooks([]), build=lambda built: BuiltPackage(built, (source,)))
+    with pytest.raises(CertificationFailure, match="VERIFICATION"):
+        PackageCertifier().certify(
+            request(ui_item),
+            replace(
+                base_hooks,
+                ui_simulation=lambda _item, _digest: cast(UISimulationAttestation, object()),
+            ),
+        )
+    with pytest.raises(CertificationFailure, match="VERIFICATION"):
+        PackageCertifier().certify(
+            request(ui_item),
+            replace(base_hooks, ui_simulation=lambda _item, _digest: stale),
+        )
 
 
 def test_fingerprints_invalidate_code_dependency_manifest_and_permission_changes() -> None:

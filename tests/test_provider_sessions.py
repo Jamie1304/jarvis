@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sqlite3
 from pathlib import Path
 from typing import Any, cast
 from uuid import uuid4
@@ -11,7 +12,7 @@ from jarvis.ai.providers.registry import (
     ProviderMetadata,
     ProviderRegistry,
 )
-from jarvis.ai.sessions import AgentSessionStore, AgentSessionType
+from jarvis.ai.sessions import AgentSessionStore, AgentSessionStoreError, AgentSessionType
 from jarvis.conversation.service import ConversationService
 from jarvis.core.errors import ConversationCancelledError
 from jarvis.planning.models import PlanningTaskStatus
@@ -181,3 +182,21 @@ def test_session_store_rejects_invalid_usage_and_missing_relationships(tmp_path:
     with pytest.raises(KeyError):
         store.child(uuid4(), AgentSessionType.SUBAGENT)
     store.close()
+
+
+def test_session_store_migration_and_future_schema_refusal(tmp_path: Path) -> None:
+    path = tmp_path / "future-sessions.sqlite3"
+    with sqlite3.connect(path) as connection:
+        connection.execute(
+            "CREATE TABLE agent_session_schema (version INTEGER PRIMARY KEY, name TEXT NOT NULL)"
+        )
+        connection.execute("INSERT INTO agent_session_schema(version, name) VALUES (99, 'future')")
+    with pytest.raises(AgentSessionStoreError, match="future schema"):
+        AgentSessionStore(path)
+
+    migrated = AgentSessionStore(tmp_path / "migrated.sqlite3")
+    version = migrated._connection.execute(  # noqa: SLF001 - migration assertion
+        "SELECT version, name FROM agent_session_schema"
+    ).fetchone()
+    assert version == (1, "create_agent_sessions")
+    migrated.close()

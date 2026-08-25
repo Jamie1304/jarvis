@@ -11,6 +11,10 @@ from pathlib import Path
 from uuid import UUID, uuid4
 
 
+class AgentSessionStoreError(RuntimeError):
+    """The durable session store is malformed or uses an unsupported schema."""
+
+
 class AgentSessionType(StrEnum):
     INTERACTIVE = "interactive"
     VOICE = "voice"
@@ -41,29 +45,64 @@ class AgentSession:
 class AgentSessionStore:
     """Own the durable session registry; no task or user-memory truth lives here."""
 
+    _SCHEMA_VERSION = 1
+    _MIGRATION_NAME = "create_agent_sessions"
+
     def __init__(self, path: Path) -> None:
+        if not isinstance(path, Path):
+            raise AgentSessionStoreError("Session database path is invalid")
+        path.parent.mkdir(parents=True, exist_ok=True)
         self._connection = sqlite3.connect(path, timeout=5.0)
         self._connection.execute("PRAGMA busy_timeout=5000")
         self._connection.execute("PRAGMA foreign_keys=ON")
-        self._connection.execute(
-            """
-            CREATE TABLE IF NOT EXISTS agent_sessions (
-                session_id TEXT PRIMARY KEY,
-                session_type TEXT NOT NULL,
-                provider_id TEXT NOT NULL,
-                model_id TEXT NOT NULL,
-                created_at TEXT NOT NULL,
-                last_used_at TEXT NOT NULL,
-                context_metadata TEXT NOT NULL,
-                usage_tokens INTEGER NOT NULL DEFAULT 0,
-                usage_cost REAL NOT NULL DEFAULT 0,
-                parent_session_id TEXT REFERENCES agent_sessions(session_id),
-                archived INTEGER NOT NULL DEFAULT 0,
-                synchronized INTEGER NOT NULL DEFAULT 1
+        self._connection.execute("PRAGMA journal_mode=WAL")
+        try:
+            self._migrate()
+        except (sqlite3.DatabaseError, AgentSessionStoreError) as error:
+            self._connection.close()
+            if isinstance(error, AgentSessionStoreError):
+                raise
+            raise AgentSessionStoreError("Session database is unavailable") from error
+
+    def _migrate(self) -> None:
+        with self._connection:
+            self._connection.execute(
+                "CREATE TABLE IF NOT EXISTS agent_session_schema "
+                "(version INTEGER PRIMARY KEY, name TEXT NOT NULL)"
             )
-            """
-        )
-        self._connection.commit()
+            rows = self._connection.execute(
+                "SELECT version, name FROM agent_session_schema"
+            ).fetchall()
+            versions = {int(row[0]): str(row[1]) for row in rows}
+            if any(version > self._SCHEMA_VERSION for version in versions):
+                raise AgentSessionStoreError("Session database uses a future schema")
+            if versions and versions.get(1) != self._MIGRATION_NAME:
+                raise AgentSessionStoreError("Session migration identity mismatch")
+            if not versions:
+                # This also upgrades databases created before the schema table
+                # existed; CREATE TABLE IF NOT EXISTS preserves their records.
+                self._connection.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS agent_sessions (
+                        session_id TEXT PRIMARY KEY,
+                        session_type TEXT NOT NULL,
+                        provider_id TEXT NOT NULL,
+                        model_id TEXT NOT NULL,
+                        created_at TEXT NOT NULL,
+                        last_used_at TEXT NOT NULL,
+                        context_metadata TEXT NOT NULL,
+                        usage_tokens INTEGER NOT NULL DEFAULT 0,
+                        usage_cost REAL NOT NULL DEFAULT 0,
+                        parent_session_id TEXT REFERENCES agent_sessions(session_id),
+                        archived INTEGER NOT NULL DEFAULT 0,
+                        synchronized INTEGER NOT NULL DEFAULT 1
+                    )
+                    """
+                )
+                self._connection.execute(
+                    "INSERT INTO agent_session_schema(version, name) VALUES (?, ?)",
+                    (self._SCHEMA_VERSION, self._MIGRATION_NAME),
+                )
 
     def create(
         self,

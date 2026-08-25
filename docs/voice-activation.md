@@ -43,9 +43,13 @@ Cooldown/debounce prevents overlapping wake sessions. Wake confidence, wake word
 and timing limits are configuration values, with `Jarvis` as the default word.
 Voice activation remains separate from camera, terminal, and other privileged tools;
 a spoken request still follows the normal planner, Permission Broker, approval, and
-verification boundaries. Trusted spoken approval parsing accepts only exact configured
-phrases and maps ambiguous or timed-out input to no approval; the trusted permission
-presentation remains the only source of operation details.
+verification boundaries. The trusted permission presentation remains the only
+source of operation details. Voice may say `DETAILS` or `NO`, but privileged and
+high-risk spoken approval is disabled by design for v1: STT is not owner
+authentication, and an affirmative transcript cannot authorize a real-world
+effect. Approval must use the authenticated trusted desktop surface through the
+same immutable request and exact fingerprints; if that surface is unavailable,
+the request remains waiting or is denied.
 
 ## Privacy and manual testing
 

@@ -40,6 +40,18 @@ from jarvis.sandbox_proxies import (
 HASH = "a" * 64
 
 
+class _CountingSecretBackend(TestOnlyInMemorySecretBackend):
+    __test__ = False
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.get_calls = 0
+
+    def get(self, target: str) -> bytes:
+        self.get_calls += 1
+        return super().get(target)
+
+
 def request(manifest: HostProxyManifest, *, capability: str, action: str) -> HostProxyRequest:
     return HostProxyRequest(
         uuid4(), manifest.integration_id, manifest.package_hash, capability, action, uuid4()
@@ -299,9 +311,8 @@ async def test_credentials_are_opaque_and_resolved_only_on_trusted_side(tmp_path
             CredentialBinding("api", "demo-api", CredentialLocation.BEARER, ("read",)),
         )
     )
-    vault = CredentialVault(
-        tmp_path / "credentials.sqlite", backend=TestOnlyInMemorySecretBackend()
-    )
+    backend = _CountingSecretBackend()
+    vault = CredentialVault(tmp_path / "credentials.sqlite", backend=backend)
     credential = vault.create(
         label="test",
         association="demo-api",
@@ -315,6 +326,26 @@ async def test_credentials_are_opaque_and_resolved_only_on_trusted_side(tmp_path
         scope=("read",),
         auth_method=AuthenticationMethod.API_TOKEN,
         secret="wrong-secret",
+    )
+    credential_ref = vault.issue_ref(
+        credential.credential_id,
+        integration_id=manifest.integration_id,
+        package_version=manifest.package_version,
+        package_hash=manifest.package_hash,
+        operation="network.request",
+        destination="https://api.example.test:443",
+        workspace_id="default",
+        scope=("read",),
+    )
+    wrong_ref = vault.issue_ref(
+        wrong_credential.credential_id,
+        integration_id=manifest.integration_id,
+        package_version=manifest.package_version,
+        package_hash=manifest.package_hash,
+        operation="network.request",
+        destination="https://api.example.test:443",
+        workspace_id="default",
+        scope=("read",),
     )
     seen: list[str] = []
 
@@ -337,20 +368,21 @@ async def test_credentials_are_opaque_and_resolved_only_on_trusted_side(tmp_path
                 request(manifest, capability="net", action="request"),
                 "GET",
                 "https://api.example.test/",
-                credential_ref=credential.credential_id,
+                credential_ref=credential_ref,
                 credential_binding_id="api",
                 credential_scope=("read",),
             )
         )
         assert response.body == b"opaque"
         assert seen == ["Bearer secret-token"]
+        assert backend.get_calls == 1
         with pytest.raises(HostProxyDenied):
             await proxy.network(
                 NetworkRequest(
                     request(manifest, capability="net", action="request"),
                     "GET",
                     "https://api.example.test/",
-                    credential_ref=credential.credential_id,
+                    credential_ref=credential_ref,
                     credential_binding_id="api",
                     credential_scope=("write",),
                 )
@@ -361,11 +393,40 @@ async def test_credentials_are_opaque_and_resolved_only_on_trusted_side(tmp_path
                     request(manifest, capability="net", action="request"),
                     "GET",
                     "https://api.example.test/",
-                    credential_ref=wrong_credential.credential_id,
+                    credential_ref=wrong_ref,
                     credential_binding_id="api",
                     credential_scope=("read",),
                 )
             )
+        approval_proxy = HostProxy(
+            manifest,
+            broker_for(
+                PolicyRule(
+                    "approval.network",
+                    Permission.NETWORK_REQUEST,
+                    Decision.REQUIRE_APPROVAL,
+                    ScopeConstraint(hosts=("api.example.test",)),
+                    frozenset({"sandbox.network.request"}),
+                )
+            ),
+            vault=vault,
+            resolver=lambda _: ("93.184.216.34",),
+        )
+        try:
+            with pytest.raises(HostProxyApprovalRequired):
+                await approval_proxy.network(
+                    NetworkRequest(
+                        request(manifest, capability="net", action="request"),
+                        "GET",
+                        "https://api.example.test/",
+                        credential_ref=credential_ref,
+                        credential_binding_id="api",
+                        credential_scope=("read",),
+                    )
+                )
+            assert backend.get_calls == 1
+        finally:
+            await approval_proxy.close()
     finally:
         await proxy.close()
         vault.close()
@@ -539,7 +600,7 @@ def test_proxy_contract_rejects_malformed_metadata_and_payloads(tmp_path: Path) 
             request(network_manifest(), capability="net", action="request"),
             "GET",
             "https://api.example.test/",
-            credential_ref=uuid4(),
+            credential_ref=uuid4(),  # type: ignore[arg-type]
             credential_scope=("",),
         )
     capability = ProxyCapability("one", ProxyKind.NETWORK, ("read",), Permission.NETWORK_REQUEST)

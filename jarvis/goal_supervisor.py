@@ -38,6 +38,7 @@ from jarvis.planning.models import (
     PlanningTaskStatus,
 )
 from jarvis.task_controller import TaskController
+from jarvis.trace import TraceEventType, TraceService
 
 
 class GoalSupervisorError(RuntimeError):
@@ -294,6 +295,7 @@ class CapabilityAcquisitionRequest:
     workspace: WorkspaceContext
     environment: EnvironmentGraph
     preferences: Mapping[str, object]
+    goal_id: UUID | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.gap, CapabilityGap) or not isinstance(self.solution, SolutionReport):
@@ -307,6 +309,8 @@ class CapabilityAcquisitionRequest:
         ):
             raise GoalSupervisorValidationError("Capability acquisition scope is malformed")
         _json_safe(self.preferences)
+        if self.goal_id is not None and not isinstance(self.goal_id, UUID):
+            raise GoalSupervisorValidationError("Capability acquisition goal ID is malformed")
 
 
 @dataclass(frozen=True, slots=True)
@@ -691,6 +695,7 @@ class GoalSupervisor:
         runner: GoalTaskRunner,
         alternatives: AlternativeExaminer | None = None,
         clock: Callable[[], datetime] | None = None,
+        trace: TraceService | None = None,
     ) -> None:
         if not isinstance(registry, CapabilityRegistry):
             raise GoalSupervisorValidationError("Capability registry is malformed")
@@ -702,6 +707,9 @@ class GoalSupervisor:
         self._runner = runner
         self._alternatives = alternatives or DefaultAlternativeExaminer()
         self._clock = clock or (lambda: datetime.now(UTC))
+        if trace is not None and type(trace) is not TraceService:
+            raise GoalSupervisorValidationError("Trace service is malformed")
+        self._trace = trace
 
     async def start(self, intent: GoalIntent, budget: GoalBudget) -> GoalSupervisorState:
         current = self._store.load(intent.goal_id)
@@ -716,6 +724,14 @@ class GoalSupervisor:
             )
         if current.terminal:
             return current
+        if self._trace is not None:
+            self._trace.record(
+                TraceEventType.GOAL,
+                "Goal supervisor state loaded",
+                goal_id=intent.goal_id,
+                correlation_id=intent.goal_id,
+                result={"status": current.status.value},
+            )
         if current.status in {GoalStatus.RECOVERING, GoalStatus.WAITING_FOR_PERMISSION}:
             return current
         current = self._save(replace(current, active_run=True))
@@ -784,6 +800,8 @@ class GoalSupervisor:
                 current = self._add_evidence(current, report.evidence)
                 current = self._check_budget(current)
                 if report.task_id is not None:
+                    if self._trace is not None:
+                        self._trace.bind_goal_task(intent.goal_id, report.task_id)
                     current = self._save(replace(current, task_id=report.task_id))
                 current = self._transition(current, GoalStatus.VERIFYING)
                 if report.status is GoalExecutionStatus.COMPLETED:

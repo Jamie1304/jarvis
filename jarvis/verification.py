@@ -413,6 +413,11 @@ class VerificationEngine:
         """Use the actual queried surface as SCREEN evidence, never the request echo."""
 
         actual = await surface.query_state()
+        actual_fingerprint = (
+            actual.state_fingerprint
+            if actual.observed
+            else f"unobserved:{actual.state_fingerprint}"
+        )
         record = EvidenceRecord(
             EvidenceType.SCREEN,
             f"surface:{actual.surface_id}",
@@ -420,8 +425,8 @@ class VerificationEngine:
             plan.max_evidence_age,
             1.0,
             expected.state_fingerprint,
-            actual.state_fingerprint,
-            actual.state_fingerprint != expected.state_fingerprint,
+            actual_fingerprint,
+            (not actual.observed) or actual_fingerprint != expected.state_fingerprint,
             VerificationLevel.INTEGRATION_VERIFIED,
         )
         return self.evaluate(plan, (record,), now=now or datetime.now(UTC))

@@ -9,15 +9,23 @@ from pathlib import Path
 
 import pytest
 from jarvis import application
+from jarvis.browser_broker import BrowserCapabilityStatus
+from jarvis.capability_acquisition import CapabilityAcquisitionCoordinator, SolutionDiscovery
 from jarvis.capability_health import HealthProbeMode, HealthProbeResult, HealthStatus
 from jarvis.control_center import ControlCenterSection
 from jarvis.core.config import Settings
+from jarvis.credentials import CredentialVault
+from jarvis.effects import CompensationService
+from jarvis.environment_discovery import EnvironmentDiscoveryService
 from jarvis.memory.control import MemoryControlService
 from jarvis.memory.services import MemoryConsistencyService
 from jarvis.planning.models import PlanningTaskStatus
+from jarvis.presence import PresenceProjection
+from jarvis.presentation import PresentationSurface
 from jarvis.recovery import RecoveryEvidence, RecoveryPhase, RecoveryStore
 from jarvis.runtime import ApplicationRuntime, RuntimePaths, RuntimeStatus
 from jarvis.task_controller import PlanningTaskController
+from jarvis.update_preview import ControlledSelfUpdate
 
 
 @pytest.mark.asyncio
@@ -28,6 +36,56 @@ async def test_canonical_runtime_calculates_and_recovers_persisted_task(tmp_path
     assert initial_status is RuntimeStatus.READY
     assert runtime.container is not None
     assert isinstance(runtime.container.task_controller, PlanningTaskController)
+    assert isinstance(runtime.container.capability_acquisition, CapabilityAcquisitionCoordinator)
+    assert isinstance(runtime.container.solution_discovery, SolutionDiscovery)
+    assert runtime.container.opportunity_engine
+    assert runtime.container.opportunity_store
+    assert runtime.container.paths.opportunity_database.is_file()
+    assert runtime.container.attention_policy
+    assert runtime.container.attention_store
+    assert runtime.container.paths.attention_database.is_file()
+    assert runtime.container.goal_supervisor_store
+    assert isinstance(runtime.container.controlled_self_update, ControlledSelfUpdate)
+    assert isinstance(runtime.container.credential_vault, CredentialVault)
+    assert runtime.container.paths.credential_database.is_file()
+    assert id(runtime.container.environment_discovery) != id(runtime.container.discovery)
+    assert isinstance(runtime.container.environment_discovery, EnvironmentDiscoveryService)
+    assert isinstance(runtime.container.presence_projection, PresenceProjection)
+    assert isinstance(runtime.container.presentation_surface, PresentationSurface)
+    assert isinstance(runtime.container.compensation_service, CompensationService)
+    assert runtime.container.paths.compensation_database.is_file()
+    assert runtime.container.tool_registry.permission_broker is runtime.container.permission_broker
+    assert runtime.container.voice is None
+    assert runtime.container.camera is None
+    assert runtime.container.browser_status.value == "unavailable"
+    assert runtime.container.service_status("voice").availability.value == "unavailable"
+    assert runtime.container.service_status("browser").availability.value == "unavailable"
+    assert (
+        runtime.container.service_status("environment_discovery").availability.value == "degraded"
+    )
+    assert {item.service_id for item in runtime.container.service_statuses()} == {
+        "voice",
+        "camera",
+        "browser",
+        "environment_discovery",
+        "presentation",
+        "ui_simulation",
+    }
+    with pytest.raises(ValueError):
+        runtime.container.service_status("")
+    with pytest.raises(KeyError):
+        runtime.container.service_status("unknown")
+    object.__setattr__(runtime.container, "voice", object())
+    object.__setattr__(runtime.container, "camera", object())
+    object.__setattr__(runtime.container, "browser", object())
+    object.__setattr__(runtime.container, "browser_status", BrowserCapabilityStatus.DEGRADED)
+    assert runtime.container.service_status("voice").availability.value == "available"
+    assert runtime.container.service_status("camera").availability.value == "available"
+    assert runtime.container.service_status("browser").availability.value == "degraded"
+    assert id(runtime.container.permission_broker) != id(
+        runtime.container.capability_lifecycle_store
+    )
+    assert id(runtime.container.planning_engine) != id(runtime.container.goal_supervisor)
     assert isinstance(runtime.container.memory_consistency, MemoryConsistencyService)
     assert isinstance(runtime.container.memory_control, MemoryControlService)
     assert runtime.container.backup.installation_id
@@ -67,6 +125,15 @@ async def test_canonical_runtime_calculates_and_recovers_persisted_task(tmp_path
         (HealthProbeResult(HealthProbeMode.PASSIVE, True, "observed", datetime.now(UTC)),),
     )
     assert capability_health.status is HealthStatus.HEALTHY
+    degraded = runtime.container.capability_health.evaluate_health(
+        "runtime-attention",
+        (HealthProbeResult(HealthProbeMode.READ_ONLY, False, "synthetic degradation"),),
+    )
+    assert degraded.status is HealthStatus.DEGRADED
+    assert any(
+        attention.item_type == "capability.health"
+        for attention in runtime.container.attention_policy.pending()
+    )
     health_center = await runtime.container.control_center.refresh(ControlCenterSection.HEALTH)
     assert any(
         item.item_id == "runtime-fixture"
@@ -100,7 +167,26 @@ async def test_canonical_runtime_calculates_and_recovers_persisted_task(tmp_path
     assert restarted.container.task_controller.get_result(task.task_id) is not None
     assert restarted.container.state_machine.task(task.task_id) is not None
     assert restarted.container.task_controller.inspect_plan(task.task_id) is not None
+    assert any(
+        attention.item_type == "capability.health"
+        for attention in restarted.container.attention_policy.pending()
+    )
     await restarted.aclose()
+
+
+@pytest.mark.asyncio
+async def test_runtime_optional_surfaces_are_application_owned_and_degraded(tmp_path: Path) -> None:
+    runtime = ApplicationRuntime.create(
+        Settings(app_data_dir=tmp_path / "jarvis-data", ai_provider="ollama")
+    )
+    assert runtime.status is RuntimeStatus.READY
+    assert runtime.container is not None
+    assert runtime.container.voice is None
+    assert runtime.container.browser_status.value == "unavailable"
+    assert runtime.container.presence_projection.snapshot().state.value == "idle"
+    requested = await runtime.container.presentation_surface.query_state()
+    assert requested.observed is False
+    await runtime.aclose()
 
 
 @pytest.mark.asyncio

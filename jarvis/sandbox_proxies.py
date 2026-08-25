@@ -22,7 +22,18 @@ from uuid import UUID
 
 import httpx
 
-from jarvis.credentials import CredentialVault, CredentialVaultError
+from jarvis.credentials import (
+    CredentialBroker,
+    CredentialRef,
+    CredentialVault,
+    CredentialVaultError,
+)
+from jarvis.effect_attestation import (
+    BrokerEffectObservation,
+    EffectAttemptRecord,
+    EffectAttestationStatus,
+    TrustedEffectObserver,
+)
 from jarvis.permissions.broker import PermissionBroker
 from jarvis.permissions.models import (
     ActionDescriptor,
@@ -319,6 +330,7 @@ class HostProxyRequest:
     action: str
     task_id: UUID
     user_id: str | None = None
+    workspace_id: str = "default"
 
     def __post_init__(self) -> None:
         if not isinstance(self.request_id, UUID) or not isinstance(self.task_id, UUID):
@@ -329,6 +341,7 @@ class HostProxyRequest:
         _identifier(self.action, "Request action")
         if self.user_id is not None:
             _text(self.user_id, "Request user identity", 256)
+        _text(self.workspace_id, "Request workspace", 256)
 
 
 @dataclass(frozen=True, slots=True)
@@ -338,7 +351,7 @@ class NetworkRequest:
     url: str
     headers: Mapping[str, str] = field(default_factory=dict)
     body: bytes = b""
-    credential_ref: UUID | None = None
+    credential_ref: CredentialRef | None = None
     credential_binding_id: str | None = None
     credential_scope: tuple[str, ...] = ()
 
@@ -362,7 +375,7 @@ class NetworkRequest:
                 raise HostProxyDenied("Caller cannot supply protected network headers")
         if not isinstance(self.body, bytes) or len(self.body) > _MAX_BODY_BYTES:
             raise HostProxyBoundExceeded("Network request body is too large")
-        if self.credential_ref is not None and not isinstance(self.credential_ref, UUID):
+        if self.credential_ref is not None and type(self.credential_ref) is not CredentialRef:
             raise HostProxyDenied("Credential reference is malformed")
         if self.credential_ref is None and (
             self.credential_binding_id is not None or self.credential_scope
@@ -432,6 +445,7 @@ class HostProxyAuditEvent:
     task_id: UUID
     outcome: str
     scope: str
+    effect_observation_id: UUID | None = None
 
 
 class HostProxyAudit(Protocol):
@@ -456,43 +470,67 @@ class HostProxy:
         manifest: HostProxyManifest,
         broker: PermissionBroker,
         *,
+        credential_broker: CredentialBroker | None = None,
         vault: CredentialVault | None = None,
         audit: HostProxyAudit | None = None,
         http_client: httpx.AsyncClient | None = None,
         resolver: Callable[[str], Sequence[str]] | None = None,
         forbidden_roots: Sequence[Path] = (),
+        effect_observer: TrustedEffectObserver | None = None,
+        tool_bindings: Mapping[str, tuple[str, object]] | None = None,
     ) -> None:
         if type(manifest) is not HostProxyManifest or not isinstance(broker, PermissionBroker):
             raise HostProxyError("Host proxy composition is malformed")
         self.manifest = manifest
         self._broker = broker
-        self._vault = vault
+        if credential_broker is not None and type(credential_broker) is not CredentialBroker:
+            raise HostProxyError("Credential broker is malformed")
+        if credential_broker is not None and vault is not None:
+            raise HostProxyError("Host proxy cannot receive two credential authorities")
+        self._credential_broker = credential_broker or (
+            CredentialBroker(vault) if vault is not None else None
+        )
         self._audit = audit
         self._http = http_client
         self._owns_http = http_client is None
         self._resolver = resolver or _resolve_addresses
         self._forbidden_roots = tuple(_regular_root(item) for item in forbidden_roots)
+        if effect_observer is not None and not isinstance(effect_observer, TrustedEffectObserver):
+            raise HostProxyError("Effect observer is malformed")
+        self._effect_observer = effect_observer
+        self._owns_tool_bindings = tool_bindings is None
         self._tools: dict[str, tuple[str, object]] = {}
         for capability in manifest.capabilities:
-            tool_id = f"sandbox.{manifest.integration_id}.{capability.capability_id}"
-            identity = object()
-            self._broker.register_tool(tool_id, identity, frozenset({capability.permission}))
+            binding_key = f"{capability.kind.value}.{capability.actions[0]}"
+            if tool_bindings is not None:
+                try:
+                    tool_id, identity = tool_bindings[binding_key]
+                except KeyError as error:
+                    raise HostProxyError(
+                        "Trusted runtime has no registered sandbox tool binding"
+                    ) from error
+                if type(tool_id) is not str or identity is None:
+                    raise HostProxyError("Sandbox tool binding is malformed")
+            else:
+                tool_id = f"sandbox.{manifest.integration_id}.{capability.capability_id}"
+                identity = object()
+                self._broker.register_tool(tool_id, identity, frozenset({capability.permission}))
             self._tools[capability.capability_id] = (tool_id, identity)
 
     async def close(self) -> None:
         if self._owns_http and self._http is not None:
             await self._http.aclose()
             self._http = None
-        with contextlib.suppress(RuntimeError):
-            for tool_id, identity in self._tools.values():
-                self._broker.unregister_tool(tool_id, identity)
+        if self._owns_tool_bindings:
+            with contextlib.suppress(RuntimeError):
+                for tool_id, identity in self._tools.values():
+                    self._broker.unregister_tool(tool_id, identity)
 
     async def network(self, request: NetworkRequest) -> NetworkResponse:
         capability = self._validate_context(request.context, ProxyKind.NETWORK)
         normalized, parsed = self.manifest.origin_allowed(request.url)
         await self._validate_network_address(request.url)
         headers = dict(request.headers)
-        await self._attach_credential(request, capability, headers)
         descriptor = self._descriptor(
             request.context,
             capability,
@@ -501,15 +539,38 @@ class HostProxy:
         )
         _, receipt = await self._authorize(request.context, descriptor, {"origin": normalized})
         try:
-            response = await self._network_request(request, headers)
-        except httpx.HTTPError as error:
-            await self._finish(receipt, "unknown_outcome")
-            raise HostProxyEffectUnknown("Network outcome is unknown") from error
+            await self._attach_credential(request, capability, headers)
         except Exception:
             await self._finish(receipt, "pre_effect_failure")
             raise
+        attempt = await self._begin_effect(
+            request.context,
+            capability,
+            normalized,
+            normalized,
+            "network request",
+            receipt,
+        )
+        try:
+            response = await self._network_request(request, headers)
+        except httpx.HTTPError as error:
+            await self._finish(receipt, "unknown_outcome")
+            await self._complete_effect(attempt, EffectAttestationStatus.UNKNOWN_OUTCOME, True)
+            raise HostProxyEffectUnknown("Network outcome is unknown") from error
+        except Exception:
+            await self._finish(receipt, "pre_effect_failure")
+            await self._complete_effect(attempt, EffectAttestationStatus.PRE_EFFECT_FAILURE, False)
+            raise
         await self._finish(receipt, "effect_confirmed")
-        await self._record(request.context, "effect_confirmed", normalized)
+        observation = await self._complete_effect(
+            attempt, EffectAttestationStatus.EFFECT_CONFIRMED, True
+        )
+        await self._record(
+            request.context,
+            "effect_confirmed",
+            normalized,
+            observation_id=observation.observation_id if observation else None,
+        )
         return response
 
     async def read_file(self, request: FileReadRequest) -> bytes:
@@ -522,6 +583,9 @@ class HostProxy:
             (SafeArgument("root", request.root_id), SafeArgument("path", request.relative_path)),
         )
         _, receipt = await self._authorize(request.context, descriptor, {"path": scope})
+        attempt = await self._begin_effect(
+            request.context, capability, scope, scope, "filesystem read", receipt
+        )
         try:
             size = path.stat().st_size
             if size > self.manifest.max_response_bytes:
@@ -532,12 +596,22 @@ class HostProxy:
                 raise HostProxyBoundExceeded("Filesystem response is too large")
         except HostProxyBoundExceeded:
             await self._finish(receipt, "pre_effect_failure")
+            await self._complete_effect(attempt, EffectAttestationStatus.PRE_EFFECT_FAILURE, False)
             raise
         except OSError as error:
             await self._finish(receipt, "pre_effect_failure")
+            await self._complete_effect(attempt, EffectAttestationStatus.UNKNOWN_OUTCOME, True)
             raise HostProxyError("Filesystem read failed") from error
         await self._finish(receipt, "effect_confirmed")
-        await self._record(request.context, "effect_confirmed", scope)
+        observation = await self._complete_effect(
+            attempt, EffectAttestationStatus.EFFECT_CONFIRMED, True
+        )
+        await self._record(
+            request.context,
+            "effect_confirmed",
+            scope,
+            observation_id=observation.observation_id if observation else None,
+        )
         return content
 
     async def write_file(self, request: FileWriteRequest) -> None:
@@ -552,18 +626,31 @@ class HostProxy:
             (SafeArgument("root", request.root_id), SafeArgument("path", request.relative_path)),
         )
         _, receipt = await self._authorize(request.context, descriptor, {"path": scope})
+        attempt = await self._begin_effect(
+            request.context, capability, scope, scope, "filesystem write", receipt
+        )
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
             with path.open("xb") as stream:
                 stream.write(request.content)
         except FileExistsError as error:
             await self._finish(receipt, "pre_effect_failure")
+            await self._complete_effect(attempt, EffectAttestationStatus.PRE_EFFECT_FAILURE, False)
             raise HostProxyDenied("Trusted host proxy will not overwrite a file") from error
         except OSError as error:
             await self._finish(receipt, "pre_effect_failure")
+            await self._complete_effect(attempt, EffectAttestationStatus.UNKNOWN_OUTCOME, True)
             raise HostProxyError("Filesystem write failed") from error
         await self._finish(receipt, "effect_confirmed")
-        await self._record(request.context, "effect_confirmed", scope)
+        observation = await self._complete_effect(
+            attempt, EffectAttestationStatus.EFFECT_CONFIRMED, True
+        )
+        await self._record(
+            request.context,
+            "effect_confirmed",
+            scope,
+            observation_id=observation.observation_id if observation else None,
+        )
 
     async def list_files(self, request: FileListRequest) -> tuple[FileEntry, ...]:
         capability = self._validate_context(request.context, ProxyKind.FILESYSTEM)
@@ -580,6 +667,9 @@ class HostProxy:
             ),
         )
         _, receipt = await self._authorize(request.context, descriptor, {"path": scope})
+        attempt = await self._begin_effect(
+            request.context, capability, scope, scope, "filesystem list", receipt
+        )
         try:
             entries = []
             for child in path.iterdir():
@@ -590,11 +680,14 @@ class HostProxy:
                 raise HostProxyBoundExceeded("Filesystem listing is too large")
         except HostProxyBoundExceeded:
             await self._finish(receipt, "pre_effect_failure")
+            await self._complete_effect(attempt, EffectAttestationStatus.PRE_EFFECT_FAILURE, False)
             raise
         except OSError as error:
             await self._finish(receipt, "pre_effect_failure")
+            await self._complete_effect(attempt, EffectAttestationStatus.UNKNOWN_OUTCOME, True)
             raise HostProxyError("Filesystem listing failed") from error
         await self._finish(receipt, "effect_confirmed")
+        await self._complete_effect(attempt, EffectAttestationStatus.EFFECT_CONFIRMED, True)
         await self._record(request.context, "effect_confirmed", scope)
         return tuple(sorted(entries, key=lambda item: item.name.casefold()))
 
@@ -626,6 +719,14 @@ class HostProxy:
             descriptor,
             {"capability": capability.capability_id, "payload_keys": sorted(payload)},
         )
+        attempt = await self._begin_effect(
+            request.context,
+            capability,
+            capability.capability_id,
+            capability.capability_id,
+            f"typed {kind.value} action",
+            receipt,
+        )
         try:
             result = await executor(request.context.action, payload)
             bounded = _json_value(result)
@@ -633,12 +734,22 @@ class HostProxy:
                 raise HostProxyError("Typed action result must be an object")
         except HostProxyError:
             await self._finish(receipt, "pre_effect_failure")
+            await self._complete_effect(attempt, EffectAttestationStatus.PRE_EFFECT_FAILURE, False)
             raise
         except Exception as error:
             await self._finish(receipt, "unknown_outcome")
+            await self._complete_effect(attempt, EffectAttestationStatus.UNKNOWN_OUTCOME, True)
             raise HostProxyEffectUnknown("Typed action outcome is unknown") from error
         await self._finish(receipt, "effect_confirmed")
-        await self._record(request.context, "effect_confirmed", capability.capability_id)
+        observation = await self._complete_effect(
+            attempt, EffectAttestationStatus.EFFECT_CONFIRMED, True
+        )
+        await self._record(
+            request.context,
+            "effect_confirmed",
+            capability.capability_id,
+            observation_id=observation.observation_id if observation else None,
+        )
         return bounded
 
     def _validate_context(self, request: HostProxyRequest, kind: ProxyKind) -> ProxyCapability:
@@ -703,7 +814,50 @@ class HostProxy:
     async def _finish(self, receipt: AuthorizationReceipt, outcome: str) -> None:
         await self._broker.record_execution_outcome(receipt, outcome)
 
-    async def _record(self, request: HostProxyRequest, outcome: str, scope: str) -> None:
+    async def _begin_effect(
+        self,
+        request: HostProxyRequest,
+        capability: ProxyCapability,
+        target: str,
+        scope: str,
+        requested_effect: str,
+        receipt: AuthorizationReceipt,
+    ) -> EffectAttemptRecord | None:
+        if self._effect_observer is None:
+            return None
+        attempt = self._effect_observer.begin(
+            action_id=request.action,
+            request_id=request.request_id,
+            broker=f"host_proxy.{capability.kind.value}",
+            target=target,
+            scope=scope,
+            requested_effect=requested_effect,
+            task_id=request.task_id,
+        )
+        if self._effect_observer.activation_state == "SHADOW":
+            await self._finish(receipt, "pre_effect_failure")
+            await self._complete_effect(attempt, EffectAttestationStatus.SUPPRESSED, False)
+            raise HostProxyDenied("Shadow activation suppresses effect dispatch")
+        return attempt
+
+    async def _complete_effect(
+        self,
+        attempt: EffectAttemptRecord | None,
+        status: EffectAttestationStatus,
+        dispatched: bool,
+    ) -> BrokerEffectObservation | None:
+        if attempt is not None and self._effect_observer is not None:
+            return self._effect_observer.complete(attempt, status=status, dispatched=dispatched)
+        return None
+
+    async def _record(
+        self,
+        request: HostProxyRequest,
+        outcome: str,
+        scope: str,
+        *,
+        observation_id: UUID | None = None,
+    ) -> None:
         if self._audit is not None:
             await self._audit.record(
                 HostProxyAuditEvent(
@@ -714,6 +868,7 @@ class HostProxy:
                     request.task_id,
                     outcome,
                     scope,
+                    observation_id,
                 )
             )
 
@@ -798,7 +953,7 @@ class HostProxy:
     ) -> None:
         if request.credential_ref is None:
             return
-        if self._vault is None or request.credential_binding_id is None:
+        if self._credential_broker is None or request.credential_binding_id is None:
             raise HostProxyDenied("Credential use requires a trusted vault binding")
         binding = next(
             (
@@ -814,10 +969,28 @@ class HostProxy:
             binding.allowed_scope
         ):
             raise HostProxyDenied("Credential scope exceeds its manifest binding")
+        reference = request.credential_ref
+        assert reference is not None
+        if (
+            reference.integration_id != self.manifest.integration_id
+            or reference.package_version != self.manifest.package_version
+            or reference.package_hash != self.manifest.package_hash
+            or reference.association != binding.association
+            or reference.operation != "network.request"
+            or reference.scope != request.credential_scope
+            or reference.destination != _origin(request.url)[0]
+            or reference.workspace_id != request.context.workspace_id
+        ):
+            raise HostProxyDenied("Credential reference binding does not match this request")
         try:
-            secret = self._vault.scoped_use(
-                request.credential_ref,
-                association=binding.association,
+            secret = self._credential_broker.resolve(
+                reference,
+                integration_id=self.manifest.integration_id,
+                package_version=self.manifest.package_version,
+                package_hash=self.manifest.package_hash,
+                operation="network.request",
+                destination=_origin(request.url)[0],
+                workspace_id=request.context.workspace_id,
                 scope=request.credential_scope,
             )
         except CredentialVaultError as error:

@@ -20,10 +20,38 @@ from enum import StrEnum
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any, cast
-from uuid import UUID, uuid4
+from uuid import UUID, uuid4, uuid5
 
 from jarvis.artifacts import ArtifactClassification, ArtifactReference
 from jarvis.effects import EffectTraceRecord
+from jarvis.events import EventBus
+from jarvis.events.models import (
+    ArtifactCreated,
+    AutomationStateChanged,
+    CapabilityChanged,
+    CredentialChanged,
+    EffectAttestationRecorded,
+    EventEnvelope,
+    EventPayload,
+    EventType,
+    GoalCreated,
+    HealthChanged,
+    IntegrationChanged,
+    PermissionDenied,
+    PermissionGranted,
+    PermissionRequested,
+    PlanCreated,
+    PlanUpdated,
+    StepCompleted,
+    StepFailed,
+    StepStarted,
+    SystemError,
+    TaskCreated,
+    TaskStateChanged,
+    ToolCompleted,
+    ToolFailed,
+    ToolStarted,
+)
 from jarvis.planning.models import EffectOutcome
 
 
@@ -43,6 +71,10 @@ class TraceEventType(StrEnum):
     AGENT_EXECUTION = "agent_execution"
     PROVIDER = "provider"
     CAPABILITY_TOOL = "capability_tool"
+    CAPABILITY_ACQUISITION = "capability_acquisition"
+    CREDENTIAL = "credential"
+    PROVISIONING = "provisioning"
+    EFFECT_ATTESTATION = "effect_attestation"
     PERMISSION = "permission"
     RESULT = "result"
     ARTIFACT = "artifact"
@@ -213,6 +245,13 @@ class TraceEvent:
     request_id: UUID | None = None
     effect_id: UUID | None = None
     correlation_id: UUID | None = None
+    causation_id: UUID | None = None
+    goal_id: UUID | None = None
+    session_id: UUID | None = None
+    integration_id: str | None = None
+    package_version: str | None = None
+    package_hash: str | None = None
+    credential_reference_ids: tuple[UUID, ...] = ()
     model: str | None = None
     usage: TraceUsage | None = None
     arguments: Mapping[str, object] = field(default_factory=dict)
@@ -225,6 +264,7 @@ class TraceEvent:
     external_effect: bool = False
     replay_safe: bool = False
     approval_ids: tuple[UUID, ...] = ()
+    effect_attestation_ids: tuple[UUID, ...] = ()
     classification: ArtifactClassification = ArtifactClassification.INTERNAL
     redaction_applied: bool = field(init=False, default=False)
 
@@ -237,6 +277,25 @@ class TraceEvent:
         _text(self.source, "Trace source", 256)
         if self.source.casefold() in _UNTRUSTED_SOURCES:
             raise TraceError("Model output cannot create trusted trace facts")
+        for value, name in (
+            (self.correlation_id, "Correlation ID"),
+            (self.causation_id, "Causation ID"),
+            (self.goal_id, "Goal ID"),
+            (self.session_id, "Session ID"),
+        ):
+            if value is not None and not isinstance(value, UUID):
+                raise TraceError(f"{name} is malformed")
+        if self.integration_id is not None:
+            _text(self.integration_id, "Trace integration", 256)
+        if self.package_version is not None:
+            _text(self.package_version, "Trace package version", 128)
+        if self.package_hash is not None:
+            if (
+                type(self.package_hash) is not str
+                or len(self.package_hash) != 64
+                or any(character not in "0123456789abcdef" for character in self.package_hash)
+            ):
+                raise TraceError("Trace package hash is malformed")
         object.__setattr__(self, "occurred_at", _utc(self.occurred_at))
         if self.duration_seconds is not None and (
             self.duration_seconds < 0 or not math.isfinite(self.duration_seconds)
@@ -279,6 +338,14 @@ class TraceEvent:
             not isinstance(item, UUID) for item in self.approval_ids
         ):
             raise TraceError("Trace approval IDs are malformed")
+        if not isinstance(self.effect_attestation_ids, tuple) or any(
+            not isinstance(item, UUID) for item in self.effect_attestation_ids
+        ):
+            raise TraceError("Trace effect attestation IDs are malformed")
+        if not isinstance(self.credential_reference_ids, tuple) or any(
+            not isinstance(item, UUID) for item in self.credential_reference_ids
+        ):
+            raise TraceError("Trace credential references are malformed")
         if any(not isinstance(item, ArtifactReference) for item in self.artifacts):
             raise TraceError("Trace artifact links are malformed")
         arguments, arguments_redacted = _safe_value(
@@ -313,6 +380,13 @@ class TraceEvent:
             "request_id": str(self.request_id) if self.request_id else None,
             "effect_id": str(self.effect_id) if self.effect_id else None,
             "correlation_id": str(self.correlation_id) if self.correlation_id else None,
+            "causation_id": str(self.causation_id) if self.causation_id else None,
+            "goal_id": str(self.goal_id) if self.goal_id else None,
+            "session_id": str(self.session_id) if self.session_id else None,
+            "integration_id": self.integration_id,
+            "package_version": self.package_version,
+            "package_hash": self.package_hash,
+            "credential_reference_ids": [str(item) for item in self.credential_reference_ids],
             "model": self.model,
             "usage": (
                 {
@@ -341,6 +415,7 @@ class TraceEvent:
             "external_effect": self.external_effect,
             "replay_safe": self.replay_safe,
             "approval_ids": [str(item) for item in self.approval_ids],
+            "effect_attestation_ids": [str(item) for item in self.effect_attestation_ids],
             "classification": self.classification.value,
             "redaction_applied": self.redaction_applied,
         }
@@ -383,9 +458,17 @@ class TraceEvent:
         permissions = data.get("permissions", ())
         evidence = data.get("evidence", ())
         approval_ids = data.get("approval_ids", ())
+        effect_attestation_ids = data.get("effect_attestation_ids", ())
+        credential_reference_ids = data.get("credential_reference_ids", ())
         if any(
             not isinstance(value, Sequence) or isinstance(value, str)
-            for value in (permissions, evidence, approval_ids)
+            for value in (
+                permissions,
+                evidence,
+                approval_ids,
+                effect_attestation_ids,
+                credential_reference_ids,
+            )
         ):
             raise TraceError("Trace list data is malformed")
         external_effect = data.get("external_effect", False)
@@ -411,6 +494,21 @@ class TraceEvent:
             request_id=optional_uuid("request_id"),
             effect_id=optional_uuid("effect_id"),
             correlation_id=optional_uuid("correlation_id"),
+            causation_id=optional_uuid("causation_id"),
+            goal_id=optional_uuid("goal_id"),
+            session_id=optional_uuid("session_id"),
+            integration_id=(
+                str(data["integration_id"]) if data.get("integration_id") is not None else None
+            ),
+            package_version=(
+                str(data["package_version"]) if data.get("package_version") is not None else None
+            ),
+            package_hash=(
+                str(data["package_hash"]) if data.get("package_hash") is not None else None
+            ),
+            credential_reference_ids=tuple(
+                UUID(str(item)) for item in cast(Sequence[object], credential_reference_ids)
+            ),
             model=str(data["model"]) if data.get("model") is not None else None,
             usage=usage,
             arguments=cast(Mapping[str, object], arguments),
@@ -425,6 +523,9 @@ class TraceEvent:
             external_effect=external_effect,
             replay_safe=replay_safe,
             approval_ids=tuple(UUID(str(item)) for item in cast(Sequence[object], approval_ids)),
+            effect_attestation_ids=tuple(
+                UUID(str(item)) for item in cast(Sequence[object], effect_attestation_ids)
+            ),
             classification=ArtifactClassification(str(data["classification"])),
         )
 
@@ -455,16 +556,22 @@ class ExecutionTrace:
         for event in self._events:
             line = f"{event.occurred_at.isoformat()} {event.event_type.value}: {event.summary}"
             identifiers = [
+                ("goal", event.goal_id),
                 ("task", event.task_id),
                 ("plan", event.plan_id),
                 ("step", event.step_id),
                 ("request", event.request_id),
+                ("session", event.session_id),
             ]
             present = ", ".join(f"{name}={value}" for name, value in identifiers if value)
             if present:
                 line += f" [{present}]"
             if event.effect_id:
                 line += f" [effect={event.effect_id}]"
+            if event.integration_id:
+                line += f" integration={event.integration_id}"
+            if event.package_version:
+                line += f" package={event.package_version}"
             if event.model:
                 line += f" model={event.model}"
             if event.usage:
@@ -475,6 +582,10 @@ class ExecutionTrace:
                 line += f" permissions={','.join(event.permissions)}"
             if event.approval_ids:
                 line += " approvals=" + ",".join(str(item) for item in event.approval_ids)
+            if event.effect_attestation_ids:
+                line += " attestations=" + ",".join(
+                    str(item) for item in event.effect_attestation_ids
+                )
             if event.result is not None:
                 line += f" result={json.dumps(_json_value(event.result), sort_keys=True)}"
             if event.artifacts:
@@ -519,6 +630,8 @@ class EffectTraceSinkAdapter:
 class TraceStore:
     """Small durable projection store; task and audit stores remain authoritative."""
 
+    _SCHEMA_VERSION = 2
+
     def __init__(self, path: Path) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         self._connection = sqlite3.connect(path, timeout=5.0)
@@ -533,7 +646,7 @@ class TraceStore:
                 "SELECT version FROM trace_schema_migrations"
             ).fetchall()
         }
-        if any(version > 1 for version in versions):
+        if any(version > self._SCHEMA_VERSION for version in versions):
             self.close()
             raise TraceError("Trace database uses a future schema")
         self._connection.execute(
@@ -541,8 +654,20 @@ class TraceStore:
             "(sequence INTEGER PRIMARY KEY AUTOINCREMENT, event_id TEXT NOT NULL UNIQUE, "
             "trace_id TEXT NOT NULL, event_json TEXT NOT NULL)"
         )
+        self._connection.execute(
+            "CREATE TABLE IF NOT EXISTS trace_lineage "
+            "(alias_id TEXT PRIMARY KEY, root_id TEXT NOT NULL)"
+        )
         if not versions:
-            self._connection.execute("INSERT INTO trace_schema_migrations(version) VALUES (1)")
+            self._connection.execute(
+                "INSERT INTO trace_schema_migrations(version) VALUES (?)",
+                (self._SCHEMA_VERSION,),
+            )
+        elif max(versions) < self._SCHEMA_VERSION:
+            self._connection.execute(
+                "INSERT INTO trace_schema_migrations(version) VALUES (?)",
+                (self._SCHEMA_VERSION,),
+            )
         self._connection.commit()
 
     def append(self, event: TraceEvent) -> None:
@@ -560,17 +685,371 @@ class TraceStore:
             raise TraceError("Duplicate trace event") from error
 
     def load(self, trace_id: UUID) -> ExecutionTrace:
-        trace = ExecutionTrace(trace_id)
+        trace = ExecutionTrace(trace_id, store=self)
         rows = self._connection.execute(
             "SELECT event_json FROM execution_trace_events WHERE trace_id=? ORDER BY sequence",
             (str(trace_id),),
         ).fetchall()
         for (payload,) in rows:
-            trace.append(TraceEvent.from_dict(json.loads(str(payload))))
+            # Loading existing rows must not write them back as duplicates.
+            trace._events.append(TraceEvent.from_dict(json.loads(str(payload))))
         return trace
+
+    def contains_event_ids(self, event_ids: Sequence[str]) -> bool:
+        """Return whether every supplied ID is an existing durable trace fact."""
+
+        if (
+            not event_ids
+            or len(event_ids) > 32
+            or any(
+                type(item) is not str or not item.strip() or len(item) > 128 for item in event_ids
+            )
+        ):
+            return False
+        placeholders = ",".join("?" for _ in event_ids)
+        row = self._connection.execute(
+            f"SELECT COUNT(*) FROM execution_trace_events WHERE event_id IN ({placeholders})",
+            tuple(event_ids),
+        ).fetchone()
+        return row is not None and int(row[0]) == len(set(event_ids))
+
+    def bind_lineage(self, alias_id: UUID, root_id: UUID) -> None:
+        if not isinstance(alias_id, UUID) or not isinstance(root_id, UUID):
+            raise TraceError("Trace lineage identity is malformed")
+        existing = self._connection.execute(
+            "SELECT root_id FROM trace_lineage WHERE alias_id=?", (str(alias_id),)
+        ).fetchone()
+        if existing is not None and str(existing[0]) != str(root_id):
+            raise TraceError("Trace lineage cannot be rebound to another root")
+        self._connection.execute(
+            "INSERT OR IGNORE INTO trace_lineage(alias_id, root_id) VALUES (?, ?)",
+            (str(alias_id), str(root_id)),
+        )
+        self._connection.commit()
+
+    def lineage_root(self, alias_id: UUID) -> UUID | None:
+        if not isinstance(alias_id, UUID):
+            raise TraceError("Trace lineage identity is malformed")
+        row = self._connection.execute(
+            "SELECT root_id FROM trace_lineage WHERE alias_id=?", (str(alias_id),)
+        ).fetchone()
+        if row is None:
+            return None
+        try:
+            return UUID(str(row[0]))
+        except ValueError as error:
+            raise TraceError("Trace lineage metadata is malformed") from error
 
     def close(self) -> None:
         self._connection.close()
+
+
+_TRACE_NAMESPACE = UUID("6c5e3f3f-4a58-4d46-9d4a-7f43ec1a9316")
+
+
+class TraceService:
+    """Runtime-owned factual trace projection fed by canonical events.
+
+    This service is intentionally a projection: durable task, permission,
+    capability, artifact, and verification owners remain authoritative.  The
+    service only records bounded IDs/statuses from trusted application events,
+    and stores a small durable goal/task lineage map so a restart continues the
+    same human-readable trace.
+    """
+
+    def __init__(self, store: TraceStore, event_bus: EventBus) -> None:
+        if type(store) is not TraceStore:
+            raise TraceError("Trace service requires the runtime TraceStore")
+        self._store = store
+        self._event_bus = event_bus
+        self._subscription_id: str | None = None
+        self._traces: dict[UUID, ExecutionTrace] = {}
+
+    async def start(self) -> None:
+        if self._subscription_id is None:
+            self._subscription_id = await self._event_bus.subscribe(self._on_event)
+
+    async def close(self) -> None:
+        if self._subscription_id is not None:
+            await self._event_bus.unsubscribe(self._subscription_id)
+            self._subscription_id = None
+        self._traces.clear()
+
+    def bind_goal_task(self, goal_id: UUID, task_id: UUID) -> None:
+        if not isinstance(goal_id, UUID) or not isinstance(task_id, UUID):
+            raise TraceError("Goal/task trace binding is malformed")
+        self._store.bind_lineage(goal_id, goal_id)
+        self._store.bind_lineage(task_id, goal_id)
+
+    def trace_id_for(
+        self,
+        *,
+        goal_id: UUID | None = None,
+        task_id: UUID | None = None,
+        correlation_id: UUID | None = None,
+    ) -> UUID:
+        lineage = goal_id or task_id or correlation_id
+        if not isinstance(lineage, UUID):
+            raise TraceError("A trace lineage identity is required")
+        root = self._store.lineage_root(lineage) or lineage
+        return uuid5(_TRACE_NAMESPACE, str(root))
+
+    def get(
+        self,
+        *,
+        goal_id: UUID | None = None,
+        task_id: UUID | None = None,
+        correlation_id: UUID | None = None,
+    ) -> ExecutionTrace:
+        trace_id = self.trace_id_for(
+            goal_id=goal_id, task_id=task_id, correlation_id=correlation_id
+        )
+        trace = self._traces.get(trace_id)
+        if trace is None:
+            trace = self._store.load(trace_id)
+            self._traces[trace_id] = trace
+        return trace
+
+    def record(
+        self,
+        event_type: TraceEventType,
+        summary: str,
+        *,
+        goal_id: UUID | None = None,
+        task_id: UUID | None = None,
+        correlation_id: UUID | None = None,
+        **fields: Any,
+    ) -> TraceEvent:
+        trace = self.get(goal_id=goal_id, task_id=task_id, correlation_id=correlation_id)
+        event = TraceEvent(
+            trace_id=trace.trace_id,
+            event_type=event_type,
+            summary=summary,
+            source="runtime.trace",
+            task_id=task_id,
+            correlation_id=correlation_id or task_id or goal_id,
+            goal_id=goal_id,
+            **fields,
+        )
+        trace.append(event)
+        return event
+
+    async def _on_event(self, event: EventEnvelope[EventPayload]) -> None:
+        trace_event = self._translate(event)
+        if trace_event is None:
+            return
+        trace_id = self.trace_id_for(task_id=event.task_id, correlation_id=event.correlation_id)
+        trace = self._traces.get(trace_id)
+        if trace is None:
+            trace = self._store.load(trace_id)
+            self._traces[trace_id] = trace
+        trace.append(trace_event)
+
+    def _translate(self, event: EventEnvelope[EventPayload]) -> TraceEvent | None:
+        payload = event.payload
+        event_type = event.event_type
+        common: dict[str, Any] = {
+            "trace_id": self.trace_id_for(
+                task_id=event.task_id, correlation_id=event.correlation_id
+            ),
+            "source": "runtime.event_projection",
+            "occurred_at": event.timestamp,
+            "task_id": event.task_id,
+            "correlation_id": event.correlation_id,
+            "causation_id": event.causation_id,
+        }
+        if event_type is EventType.TASK_CREATED and isinstance(payload, TaskCreated):
+            return TraceEvent(event_type=TraceEventType.GOAL, summary="Goal accepted", **common)
+        if event_type is EventType.GOAL_CREATED and isinstance(payload, GoalCreated):
+            return TraceEvent(event_type=TraceEventType.GOAL, summary="Goal persisted", **common)
+        if event_type is EventType.TASK_STATE_CHANGED and isinstance(payload, TaskStateChanged):
+            terminal = payload.to_state.casefold() in {
+                "completed",
+                "failed",
+                "cancelled",
+                "budget_exhausted",
+            }
+            return TraceEvent(
+                event_type=TraceEventType.COMPLETION if terminal else TraceEventType.RESULT,
+                summary="Task state changed",
+                result={"from": payload.from_state, "to": payload.to_state},
+                **common,
+            )
+        if event_type is EventType.PLAN_CREATED and isinstance(payload, PlanCreated):
+            return TraceEvent(
+                event_type=TraceEventType.PLAN_REVISION,
+                summary="Plan created",
+                plan_id=payload.plan_id,
+                result={"steps": payload.step_count},
+                **common,
+            )
+        if event_type is EventType.PLAN_UPDATED and isinstance(payload, PlanUpdated):
+            return TraceEvent(
+                event_type=TraceEventType.PLAN_REVISION,
+                summary="Plan revision persisted",
+                plan_id=payload.plan_id,
+                result={"revision": payload.revision},
+                **common,
+            )
+        if event_type is EventType.STEP_STARTED and isinstance(payload, StepStarted):
+            return TraceEvent(
+                event_type=TraceEventType.STEP,
+                summary="Step started",
+                step_id=payload.step_id,
+                arguments={"tool_id": payload.tool_id},
+                **common,
+            )
+        if event_type is EventType.STEP_COMPLETED and isinstance(payload, StepCompleted):
+            return TraceEvent(
+                event_type=TraceEventType.RESULT,
+                summary="Step completed",
+                step_id=payload.step_id,
+                result={"outcome": payload.outcome},
+                **common,
+            )
+        if event_type is EventType.STEP_FAILED and isinstance(payload, StepFailed):
+            return TraceEvent(
+                event_type=TraceEventType.ERROR,
+                summary="Step failed",
+                step_id=payload.step_id,
+                error=payload.error_code,
+                **common,
+            )
+        if event_type is EventType.PERMISSION_REQUESTED and isinstance(
+            payload, PermissionRequested
+        ):
+            return TraceEvent(
+                event_type=TraceEventType.PERMISSION,
+                summary="Permission requested",
+                request_id=payload.request_id,
+                permissions=(payload.permission,),
+                result={"risk": payload.risk},
+                **common,
+            )
+        if event_type is EventType.PERMISSION_GRANTED and isinstance(payload, PermissionGranted):
+            return TraceEvent(
+                event_type=TraceEventType.PERMISSION,
+                summary="Permission granted",
+                request_id=payload.request_id,
+                approval_ids=(payload.request_id,),
+                permissions=(payload.permission,),
+                **common,
+            )
+        if event_type is EventType.PERMISSION_DENIED and isinstance(payload, PermissionDenied):
+            return TraceEvent(
+                event_type=TraceEventType.PERMISSION,
+                summary="Permission denied",
+                request_id=payload.request_id,
+                error=payload.reason_code,
+                **common,
+            )
+        if event_type is EventType.TOOL_STARTED and isinstance(payload, ToolStarted):
+            return TraceEvent(
+                event_type=TraceEventType.CAPABILITY_TOOL,
+                summary="Tool started",
+                arguments={"tool_id": payload.tool_id},
+                **common,
+            )
+        if event_type is EventType.TOOL_COMPLETED and isinstance(payload, ToolCompleted):
+            return TraceEvent(
+                event_type=TraceEventType.RESULT,
+                summary="Tool completed",
+                result={"tool_id": payload.tool_id, "status": payload.status},
+                **common,
+            )
+        if event_type is EventType.TOOL_FAILED and isinstance(payload, ToolFailed):
+            return TraceEvent(
+                event_type=TraceEventType.ERROR,
+                summary="Tool failed",
+                error=payload.error_code,
+                arguments={"tool_id": payload.tool_id},
+                **common,
+            )
+        if event_type is EventType.ARTIFACT_CREATED and isinstance(payload, ArtifactCreated):
+            return TraceEvent(
+                event_type=TraceEventType.ARTIFACT,
+                summary="Artifact created",
+                artifacts=(
+                    ArtifactReference(
+                        payload.artifact_id,
+                        payload.version,
+                        payload.workspace_id,
+                        f"trace://artifact/{payload.artifact_id}",
+                    ),
+                ),
+                result={"size": payload.size},
+                **common,
+            )
+        if event_type is EventType.CREDENTIAL_CHANGED and isinstance(payload, CredentialChanged):
+            return TraceEvent(
+                event_type=TraceEventType.CREDENTIAL,
+                summary="Credential metadata changed",
+                credential_reference_ids=(payload.credential_id,),
+                result={"status": payload.status, "operation": payload.operation},
+                classification=ArtifactClassification.INTERNAL,
+                **common,
+            )
+        if event_type is EventType.EFFECT_ATTESTATION_RECORDED and isinstance(
+            payload, EffectAttestationRecorded
+        ):
+            return TraceEvent(
+                event_type=TraceEventType.EFFECT_ATTESTATION,
+                summary="Trusted effect observation recorded",
+                effect_id=payload.observation_id or payload.attestation_id,
+                effect_attestation_ids=(
+                    (payload.attestation_id,) if payload.attestation_id is not None else ()
+                ),
+                integration_id=payload.integration_id,
+                package_version=payload.integration_version,
+                result={
+                    "status": payload.status,
+                    "allowed": payload.allowed,
+                    "dispatched": payload.dispatched,
+                },
+                external_effect=bool(payload.dispatched),
+                **common,
+            )
+        if event_type is EventType.HEALTH_CHANGED and isinstance(payload, HealthChanged):
+            return TraceEvent(
+                event_type=TraceEventType.HEALTH,
+                summary="Capability health changed",
+                result={"component": payload.component, "status": payload.status},
+                **common,
+            )
+        if event_type is EventType.AUTOMATION_STATE_CHANGED and isinstance(
+            payload, AutomationStateChanged
+        ):
+            return TraceEvent(
+                event_type=TraceEventType.AUTOMATION,
+                summary="Automation state changed",
+                result={"automation_id": str(payload.automation_id), "state": payload.state},
+                **common,
+            )
+        if event_type is EventType.CAPABILITY_CHANGED and isinstance(payload, CapabilityChanged):
+            return TraceEvent(
+                event_type=TraceEventType.CAPABILITY_TOOL,
+                summary="Capability state changed",
+                integration_id=payload.capability,
+                result={"available": payload.available},
+                **common,
+            )
+        if event_type is EventType.INTEGRATION_CHANGED and isinstance(payload, IntegrationChanged):
+            return TraceEvent(
+                event_type=TraceEventType.CAPABILITY_ACQUISITION,
+                summary="Integration lifecycle changed",
+                integration_id=payload.integration,
+                result={"state": payload.state},
+                **common,
+            )
+        if event_type is EventType.SYSTEM_ERROR and isinstance(payload, SystemError):
+            return TraceEvent(
+                event_type=TraceEventType.ERROR,
+                summary="Runtime error",
+                error=payload.code,
+                result={"summary": payload.summary},
+                **common,
+            )
+        return None
 
 
 @dataclass(frozen=True, slots=True)

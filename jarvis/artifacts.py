@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import sqlite3
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from pathlib import Path
+from typing import BinaryIO, cast
 from uuid import UUID, uuid4
 
 from jarvis.events import EventBus, EventEnvelope, EventType
@@ -92,6 +94,9 @@ class ArtifactRecord:
 class ArtifactStore:
     """Single owner for durable artifact metadata and bytes."""
 
+    _SCHEMA_VERSION = 1
+    _MIGRATION_NAME = "create_artifacts"
+
     def __init__(self, root: Path, *, event_bus: EventBus | None = None) -> None:
         self._root = _safe_root(root)
         self._content_root = self._root / "content"
@@ -101,6 +106,11 @@ class ArtifactStore:
         self._connection.execute("PRAGMA journal_mode=WAL")
         self._connection.execute("PRAGMA busy_timeout=5000")
         self._connection.execute("PRAGMA foreign_keys=ON")
+        try:
+            self._migrate()
+        except Exception:
+            self._connection.close()
+            raise
         self._connection.execute(
             """
             CREATE TABLE IF NOT EXISTS artifacts (
@@ -137,6 +147,30 @@ class ArtifactStore:
         )
         self._connection.commit()
         self._event_bus = event_bus
+
+    def _migrate(self) -> None:
+        """Version the metadata schema and refuse unknown future layouts."""
+
+        self._connection.execute(
+            "CREATE TABLE IF NOT EXISTS artifact_schema_migrations "
+            "(version INTEGER PRIMARY KEY, name TEXT NOT NULL)"
+        )
+        rows = self._connection.execute(
+            "SELECT version, name FROM artifact_schema_migrations"
+        ).fetchall()
+        versions = {int(row[0]): str(row[1]) for row in rows}
+        if any(version > self._SCHEMA_VERSION for version in versions):
+            raise OSError("Artifact database uses a future schema")
+        if versions and versions.get(1) != self._MIGRATION_NAME:
+            raise OSError("Artifact migration identity mismatch")
+        if not versions:
+            # Existing pre-versioned tables are preserved by IF NOT EXISTS;
+            # the marker records their compatible baseline as version 1.
+            self._connection.execute(
+                "INSERT INTO artifact_schema_migrations(version, name) VALUES (?, ?)",
+                (self._SCHEMA_VERSION, self._MIGRATION_NAME),
+            )
+        self._connection.commit()
 
     def put(
         self,
@@ -232,7 +266,7 @@ class ArtifactStore:
             raise KeyError("Unknown artifact version")
         path = self._content_root / str(row[0])
         _assert_safe_path(self._content_root, path)
-        content = path.read_bytes()
+        content = _read_owned_bytes(self._content_root, path)
         if hashlib.sha256(content).hexdigest() != str(row[1]):
             raise OSError("Artifact content integrity check failed")
         return content
@@ -288,8 +322,7 @@ class ArtifactStore:
                 continue
             path = self._content_root / str(storage_reference)
             _assert_safe_path(self._content_root, path)
-            if path.exists():
-                path.unlink()
+            _unlink_owned(self._content_root, path, missing_ok=True)
             self._connection.execute(
                 "DELETE FROM artifact_versions WHERE artifact_id=? AND version=?",
                 (str(artifact_id), int(version)),
@@ -321,8 +354,9 @@ class ArtifactStore:
         storage_reference = f"{artifact_id.hex}-{version}-{uuid4().hex}.bin"
         path = self._content_root / storage_reference
         _assert_safe_path(self._content_root, path)
-        with path.open("xb") as handle:
+        with _open_exclusive(path) as handle:
             handle.write(content)
+        _assert_safe_path(self._content_root, path)
         reference = ArtifactReference(artifact_id, version, workspace_id, storage_reference)
         try:
             if version == 1:
@@ -364,7 +398,7 @@ class ArtifactStore:
             self._connection.commit()
         except Exception:
             self._connection.rollback()
-            path.unlink(missing_ok=True)
+            _unlink_owned(self._content_root, path, missing_ok=True)
             raise
         if retention.max_versions is not None:
             self._trim_versions(artifact_id, retention.max_versions)
@@ -391,7 +425,7 @@ class ArtifactStore:
         for version, storage_reference in rows[max_versions:]:
             path = self._content_root / str(storage_reference)
             _assert_safe_path(self._content_root, path)
-            path.unlink(missing_ok=True)
+            _unlink_owned(self._content_root, path, missing_ok=True)
             self._connection.execute(
                 "DELETE FROM artifact_versions WHERE artifact_id=? AND version=?",
                 (str(artifact_id), int(str(version))),
@@ -501,20 +535,66 @@ _STORAGE_REFERENCE = re.compile(r"^[0-9a-f]{32}-[0-9]+-[0-9a-f]{32}\.bin$")
 
 
 def _safe_root(root: Path) -> Path:
-    resolved = root.expanduser().resolve(strict=False)
-    if root.is_symlink() or root.is_junction():
-        raise OSError("Artifact root cannot be a reparse point")
+    candidate = root.expanduser().absolute()
+    if _has_reparse_ancestor(candidate):
+        raise OSError("Artifact root cannot contain a reparse point")
+    resolved = candidate.resolve(strict=False)
+    if _has_reparse_ancestor(resolved):
+        raise OSError("Artifact root cannot contain a reparse point")
     resolved.mkdir(parents=True, exist_ok=True)
     return resolved
 
 
 def _assert_safe_path(root: Path, path: Path) -> None:
-    if (
-        path.is_symlink()
-        or path.is_junction()
-        or not path.resolve(strict=False).is_relative_to(root)
-    ):
+    if _has_reparse_ancestor(root) or _has_reparse_ancestor(path):
+        raise OSError("Artifact path contains a reparse point")
+    resolved = path.resolve(strict=False)
+    if _has_reparse_ancestor(resolved) or not resolved.is_relative_to(root):
         raise OSError("Artifact path escapes its owned root")
+
+
+def _has_reparse_ancestor(path: Path) -> bool:
+    current = path.expanduser().absolute()
+    while True:
+        junction = getattr(current, "is_junction", None)
+        if current.is_symlink() or (callable(junction) and bool(junction())):
+            return True
+        if current == current.parent:
+            return False
+        current = current.parent
+
+
+def _open_exclusive(path: Path) -> BinaryIO:
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    flags |= getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(path, flags, 0o600)
+    return os.fdopen(descriptor, "wb")
+
+
+def _read_owned_bytes(root: Path, path: Path) -> bytes:
+    _assert_safe_path(root, path)
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(path, flags)
+    try:
+        handle = cast(BinaryIO, os.fdopen(descriptor, "rb"))
+        descriptor = -1
+        try:
+            return handle.read()
+        finally:
+            handle.close()
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+
+
+def _unlink_owned(root: Path, path: Path, *, missing_ok: bool = False) -> None:
+    _assert_safe_path(root, path)
+    if not path.exists():
+        if missing_ok:
+            return
+        raise FileNotFoundError(path)
+    _assert_safe_path(root, path)
+    path.unlink()
 
 
 def _utc(value: datetime) -> datetime:

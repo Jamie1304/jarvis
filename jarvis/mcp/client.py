@@ -7,9 +7,15 @@ import json
 import os
 import sys
 from collections.abc import Mapping
+from pathlib import Path
 
 import httpx
 
+from jarvis.computer.process import (
+    ProcessIdentityError,
+    resolve_trusted_executable,
+    trusted_process_environment,
+)
 from jarvis.mcp.models import MCPExtensionConfig, MCPServerTransport
 
 
@@ -29,25 +35,37 @@ class MCPClient:
 
     async def start(self) -> None:
         if self.config.transport is MCPServerTransport.STDIO:
-            safe_env = {
-                key: value
-                for key, value in os.environ.items()
-                if key in {"PATH", "SystemRoot", "WINDIR", "TEMP", "TMP"}
-            }
-            self._process = await asyncio.create_subprocess_exec(
-                *self.config.command,
-                stdin=asyncio.subprocess.PIPE,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.DEVNULL,
-                cwd=self.config.working_directory,
-                env=safe_env,
-                creationflags=0 if not sys.platform.startswith("win") else 0x08000000,
-            )
+            try:
+                executable = resolve_trusted_executable(self.config.command[0])
+                working_directory = _resolve_working_directory(self.config.working_directory)
+            except (OSError, RuntimeError, ProcessIdentityError) as error:
+                raise MCPProtocolError(
+                    "MCP stdio process identity or working directory is unsafe"
+                ) from error
+            try:
+                self._process = await asyncio.create_subprocess_exec(
+                    os.fspath(executable),
+                    *self.config.command[1:],
+                    stdin=asyncio.subprocess.PIPE,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.DEVNULL,
+                    cwd=os.fspath(working_directory),
+                    env=trusted_process_environment(),
+                    creationflags=0 if not sys.platform.startswith("win") else 0x08000000,
+                )
+            except OSError as error:
+                raise MCPProtocolError("MCP stdio server could not be started") from error
         else:
             self._http = httpx.AsyncClient(
-                timeout=httpx.Timeout(self.config.timeout_seconds), trust_env=False
+                timeout=httpx.Timeout(self.config.timeout_seconds),
+                trust_env=False,
+                follow_redirects=False,
             )
-        await self.request("initialize", {"protocolVersion": "2025-03-26", "capabilities": {}})
+        try:
+            await self.request("initialize", {"protocolVersion": "2025-03-26", "capabilities": {}})
+        except BaseException:
+            await self.close()
+            raise
 
     async def request(self, method: str, params: Mapping[str, object]) -> dict[str, object]:
         if not method or len(method) > 128 or any(ord(char) < 32 for char in method):
@@ -147,3 +165,20 @@ class MCPClient:
                 except TimeoutError:
                     process.kill()
                     await process.wait()
+
+
+def _resolve_working_directory(value: Path | None) -> Path:
+    if value is None or not value.is_absolute():
+        raise MCPProtocolError("MCP stdio requires an absolute working directory")
+    current = value
+    while True:
+        if current.is_symlink() or current.is_junction():
+            raise MCPProtocolError("MCP working directory contains a reparse point")
+        parent = current.parent
+        if parent == current:
+            break
+        current = parent
+    resolved = value.resolve(strict=True)
+    if resolved != value or not resolved.is_dir():
+        raise MCPProtocolError("MCP working directory is not a private regular directory")
+    return resolved
