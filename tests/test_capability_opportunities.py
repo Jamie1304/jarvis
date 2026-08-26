@@ -70,6 +70,16 @@ class _FailingPreparation:
         raise RuntimeError("synthetic preparation failure")
 
 
+class _FailedResultPreparation:
+    async def prepare(self, opportunity: object) -> OpportunityPreparationResult:
+        del opportunity
+        return OpportunityPreparationResult(
+            OpportunityPreparationState.FAILED,
+            "synthetic review failure with retained evidence",
+            evidence_references=("preparation:failed",),
+        )
+
+
 class _FailingAcquisition(_Acquisition):
     async def acquire(self, request: CapabilityAcquisitionRequest) -> CapabilityAcquisitionReport:
         del request
@@ -297,6 +307,24 @@ async def test_failed_preparation_and_acquisition_are_recorded() -> None:
         engine.get(opportunity.opportunity_id).preparation_state
         is OpportunityPreparationState.FAILED
     )
+
+
+@pytest.mark.asyncio
+async def test_failed_preparation_with_evidence_is_not_proposal_ready() -> None:
+    engine = CapabilityOpportunityEngine(
+        InMemoryOpportunityStore(),
+        _Acquisition(),
+        preparation=_FailedResultPreparation(),
+        clock=lambda: NOW,
+    )
+    opportunity = _observe(engine, _evidence("workflow:failed-one", "workflow:failed-two"))
+    assert opportunity is not None
+    prepared = await engine.prepare(opportunity.opportunity_id)
+    assert prepared.status is OpportunityStatus.FAILED
+    assert prepared.preparation_state is OpportunityPreparationState.FAILED
+    assert "preparation:failed" in prepared.evidence_references
+    with pytest.raises(CapabilityOpportunityError):
+        engine.proposal(opportunity.opportunity_id)
 
 
 def test_opportunity_validation_and_retention_bounds_fail_closed() -> None:

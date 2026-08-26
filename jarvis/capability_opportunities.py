@@ -50,6 +50,7 @@ class OpportunityStatus(StrEnum):
     EXPIRED = "expired"
     ACTIVATING = "activating"
     ACTIVE = "active"
+    FAILED = "failed"
     ARCHIVED = "archived"
 
 
@@ -64,6 +65,8 @@ class OpportunityPreparationState(StrEnum):
     READY = "ready"
     WAITING_FOR_AUTHORITY = "waiting_for_authority"
     FAILED = "failed"
+    SECURITY_BLOCKED = "security_blocked"
+    UNKNOWN_OUTCOME = "unknown_outcome"
 
 
 class OpportunityDecision(StrEnum):
@@ -594,11 +597,29 @@ class CapabilityOpportunityEngine:
             for reference in result_references
             if reference not in existing_references
         )
+        if result.state is OpportunityPreparationState.READY:
+            status = OpportunityStatus.READY_TO_PROPOSE
+            decision = OpportunityDecision.PROPOSE
+        elif result.state is OpportunityPreparationState.WAITING_FOR_AUTHORITY:
+            status = OpportunityStatus.PROPOSED
+            decision = OpportunityDecision.PREPARE
+        elif result.state is OpportunityPreparationState.SECURITY_BLOCKED:
+            status = OpportunityStatus.ARCHIVED
+            decision = OpportunityDecision.NONE
+        elif result.state is OpportunityPreparationState.UNKNOWN_OUTCOME:
+            status = OpportunityStatus.ASSESSING
+            decision = OpportunityDecision.PREPARE
+        elif result.state is OpportunityPreparationState.FAILED:
+            status = OpportunityStatus.FAILED
+            decision = OpportunityDecision.PREPARE
+        else:
+            status = OpportunityStatus.PREPARING
+            decision = OpportunityDecision.PREPARE
         prepared = replace(
             assessing,
-            status=OpportunityStatus.READY_TO_PROPOSE,
+            status=status,
             preparation_state=result.state,
-            decision=OpportunityDecision.PROPOSE,
+            decision=decision,
             prepared_summary=result.prepared_summary,
             remaining_authority=tuple(sorted(set(result.remaining_authority))),
             evidence_references=tuple(

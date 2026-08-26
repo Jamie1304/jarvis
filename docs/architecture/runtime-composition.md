@@ -57,8 +57,10 @@ The composition root follows this dependency order:
    metadata store. Construct the single `CredentialBroker` wrapper; a secure
    credential backend is never replaced by plaintext.
 3. Construct the single `PolicyEngine` and `PermissionBroker`, then construct
-   the `ToolRegistry` with that broker. Tool registration is sealed before
-   planning or external package lifecycle services run.
+   the `ToolRegistry` with that broker. Ordinary registration is sealed before
+   planning or external package lifecycle services run; only the private
+   activation port held by `PackageActivationService` can add exact,
+   certified generated adapters after that point.
 4. Open the authoritative planning, memory, User Model, knowledge, session,
    artifact, trace, automation, goal, setup, effect-attestation, compensation, lifecycle,
    opportunity, attention, and golden-workflow stores.
@@ -75,7 +77,10 @@ The composition root follows this dependency order:
    verification, the sealed compensation observation registry (including the
    bounded application-data filesystem observer), compensation, health/doctor,
    opportunity, and attention
-   services using those already-owned dependencies.
+   services using those already-owned dependencies. In production,
+   `GeneratedCapabilityToolRegistrar` binds the activation port to the
+   lifecycle store and package runtime before the goal runner can select a
+   generated action.
 7. Construct derived PresenceProjection and PresentationSurface. Presence
    subscribes to canonical events only; the subscription is cancelled by the
    same container that owns it.
@@ -140,6 +145,13 @@ voice, camera, and browser states are safe unavailable states, that optional
 health is exposed, that the presence/presentation services are application
 owned, and that shutdown remains idempotent.
 
+The production capability-growth acceptance additionally proves that the
+generated action registration port is not the ordinary public registry API:
+the exact package hash/certification and durable ACTIVE row are required, the
+generated adapter is selected by the planner, and its invocation enters the
+same brokered tool path as every other tool. A package process has no reference
+to the port or to any trusted application service.
+
 The runtime tests also cover crash-loop Safe Mode. No hardware or real browser
 acceptance is implied by these composition tests.
 
@@ -151,9 +163,9 @@ acceptance is implied by these composition tests.
 - `.venv\\Scripts\\python.exe scripts/run_system_tests.py --suite deterministic-permissions`:
   **72 passed, 1 skipped**
 - `.venv\\Scripts\\python.exe scripts/run_system_tests.py --suite v1-acceptance`:
-  **22 passed**
+  **23 passed**
 - `$env:JARVIS_ENVIRONMENT=test; .venv\\Scripts\\python.exe scripts/quality.py`:
-  Ruff format/check, strict mypy, and the full suite **passed**; **1,390
+  Ruff format/check, strict mypy, and the full suite **passed**; **1,441
   passed, 7 skipped**, with 90% combined statement/branch coverage. No
   coverage exclusion or security-test weakening was added in this composition
   change.

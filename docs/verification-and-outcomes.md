@@ -50,6 +50,14 @@ authority. Durable task outcome remains owned by `PlanningEngine`; any future
 durable evidence store must be added to `docs/authoritative-state-map.md`
 before implementation.
 
+Production generated actions are verified against the original goal only after
+their exact declared action has run. The trusted package certification plan
+binds the package/version/hash, action, input digest, actual output digest,
+schema result, and application-owned expected result. Registry membership,
+process readiness, package callbacks, model claims, and package-supplied
+`verified` fields are not semantic proof. If no trusted oracle exists for a
+result-producing action, certification and subsequent verification fail closed.
+
 ## Installation-specific regressions
 
 `GoldenWorkflowStore` owns versioned privacy-safe regression definitions and run

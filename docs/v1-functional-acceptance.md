@@ -36,12 +36,15 @@ The production-composition evidence is intentionally narrower and explicit:
   `RuntimeTestFixture`, and the concrete generator, package store/runtime, sandbox,
   reviewer/certifier, setup/provisioning, staged activation, hot-load, registry, verifier,
   lifecycle-restorer, trace, and ComponentDoctor services created by `ApplicationRuntime`.
-  It proves the generic BUILD path and exact restart restoration; it does not claim that an
+  It proves the generic BUILD path, typed semantic action selection/execution through
+  `PlanningEngine -> ToolRegistry -> PermissionBroker`, schema-valid package output,
+  VerificationEngine completion, and exact restart restoration; it does not claim that an
   arbitrary external package or an adopted machine binary is universally safe.
 - The same test exercises `CapabilityOpportunityEngine.prepare()` through the production
-  coordinator. It reaches `READY_TO_PROPOSE`/`CERTIFYING`, records remaining authority,
-  leaves the capability registry inactive, and records decline cooldown. Preparation does not
-  grant authority or activate a package.
+  coordinator. Its intentionally oracle-less generated action fails certification closed and
+  remains `FAILED`, proving evidence alone cannot produce `READY_TO_PROPOSE`; successful
+  certified preparation remains proposal-ready in the dedicated opportunity tests. Preparation
+  does not grant authority or activate a package.
 - `test_v1_acceptance_production_composed_compensation_uses_trusted_observer` is the
   production-composed compensation/verification proof. It uses the sealed application-owned
   observer registry after restart; the fixture callback path is compatibility-only.
@@ -58,7 +61,7 @@ server, physical voice/camera/audio path, desktop renderer, or adopted external 
 | 2 | Unknown capability through CapabilityAcquisitionCoordinator | PASS | `test_v1_acceptance_unknown_capability_certifies_activates_verifies_and_restarts` |
 | 3 | Existing capability reuse | PASS | `test_v1_acceptance_existing_reuse_and_adoption_before_install` |
 | 4 | Adopt before install | PASS | Same test; compatible synthetic installation is adopted through trusted identity/provenance evidence and the generator remains unused |
-| 5 | Static review and certification | PASS | Unknown-capability coordinator path invokes package review and all certification stages |
+| 5 | Static review and certification | PASS | Package-specific `PackageCertificationPlan` runs declared actions in the native sandbox, validates output schemas, and requires trusted semantic evidence; wrong-output and missing-oracle regressions fail closed |
 | 6 | Shadow trusted no-effect attestation | PASS | Activation fixture records `SUPPRESSED`, `dispatched=False` through runtime-owned store |
 | 7 | Canary trusted effect attestation | PASS | Canary records one bounded trusted dispatch and independent verification |
 | 8 | ACTIVE persistence/restart | PASS | The composed runtime restores the exact package/version/hash, safely reattaches the active runtime, and reuses the capability after a fresh `ApplicationRuntime.create` |
@@ -83,7 +86,7 @@ server, physical voice/camera/audio path, desktop renderer, or adopted external 
 | 27 | Safe Mode composition | PASS | Three synthetic failed starts cause the composed runtime to enter Safe Mode without creating the normal container |
 | 28 | Graceful shutdown/restart | PASS | Container shutdown is idempotent and the application can be restarted from the same data root |
 | 29 | Adoption identity/provenance | PASS | Synthetic tests bind stable file identity, content hash, signer status, independent dependency provenance, exact scope/expiry, and reject reparse, stale, changed, forged, or unavailable evidence |
-| 30 | Complete production capability growth | PASS | `test_v1_production_composition_acquires_randomized_capability_and_restores_it` uses no fixture, reaches generated package ACTIVE through the real AppContainer/certification/attestation path, invokes only the safe local worker contract, and restores the exact package/version/hash after restart |
+| 30 | Complete production capability growth | PASS | `test_v1_production_composition_acquires_randomized_capability_and_restores_it` uses no fixture, reaches generated package ACTIVE through the real AppContainer/certification/attestation path, selects the randomized typed action through PlanningEngine/ToolRegistry/PermissionBroker, validates output with VerificationEngine, and restores/reuses the exact package/version/hash after restart |
 
 ## Current run
 
@@ -98,13 +101,13 @@ The registered system-test command is:
   python scripts/run_system_tests.py --suite v1-acceptance
 ```
 
-Recorded checks (current mutable tree):
+Recorded checks (current mutable tree, 2026-08-26):
 
-- `v1-acceptance`: PASS, 23 passed; run `43956212-db86-4d12-a5eb-562262524984`;
-- `deterministic-workflows`: PASS, 26 passed; run `d828ec43-0620-48d3-9045-a38da95af545`;
+- `v1-acceptance`: PASS, 23 passed; run `bb5e1a37-cd96-4354-93a8-8e26f62aba5e`;
+- `deterministic-workflows`: PASS, 26 passed; run `fdb95a5b-e2f0-4488-8aaa-fb2abdabf5fe`;
 - `deterministic-permissions`: PASS, 72 passed, 1 skipped; run
-  `e120061d-1a3f-4775-b125-8fff9fb4ca71`;
-- `quality.py` with explicit `JARVIS_ENVIRONMENT=test`: PASS, 1,394 passed and
+  `d59ed34e-36be-41d2-b306-89116ab82c5a`;
+- `quality.py` with explicit `JARVIS_ENVIRONMENT=test`: PASS, 1,446 passed and
   7 skipped; Ruff format/check, mypy, and 90% combined statement/branch
   coverage passed. The default local run is blocked on this host by Windows
   Credential Manager Win32 error 8 during secure recovery-key creation; no

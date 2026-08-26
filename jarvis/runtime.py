@@ -51,6 +51,7 @@ from jarvis.capability_acquisition import (
     CapabilityAcquisitionServices,
     CapabilityManifestProvider,
     CertificationHookProvider,
+    EnvironmentAdoptionCandidateProvider,
     PackageSourceProvider,
     SolutionDiscovery,
     VerificationEvidenceProvider,
@@ -65,6 +66,7 @@ from jarvis.capability_factory import (
 )
 from jarvis.capability_health import AttentionNotice, CapabilityHealthService, HealthStatus
 from jarvis.capability_lifecycle import (
+    CapabilityLifecycleError,
     SQLiteCapabilityLifecycleStore,
     StoredLifecycleRecord,
 )
@@ -128,6 +130,10 @@ from jarvis.environment_discovery import (
     EnvironmentDiscoveryService,
 )
 from jarvis.events import EventBus, InMemoryEventBus
+from jarvis.generated_capability import (
+    GeneratedActionPlanPlanner,
+    GeneratedCapabilityToolRegistrar,
+)
 from jarvis.goal_supervisor import (
     GoalAnalysis,
     GoalIntent,
@@ -187,6 +193,7 @@ from jarvis.presentation import PresentationSurface
 from jarvis.production_capability import (
     AgentRuntimeCapabilityGenerator,
     CapabilityLifecycleRestorer,
+    CertificationOracle,
     ProductionActivationBoundary,
     ProductionCertificationProvider,
     ProductionLocalCandidateProvider,
@@ -654,6 +661,7 @@ class RuntimeContainer:
     effect_attestation_store: EffectAttestationStore
     capability_lifecycle_store: SQLiteCapabilityLifecycleStore
     capability_lifecycle_restorer: CapabilityLifecycleRestorer | None
+    generated_action_registrar: GeneratedCapabilityToolRegistrar | None
     package_store: ProductionPackageStore
     production_sandbox: ProductionSandboxRunner
     opportunity_store: SQLiteOpportunityStore
@@ -993,6 +1001,7 @@ class ApplicationRuntime:
         permission_policy: PolicyEngine | None = None,
         trusted_application_tools: tuple[Tool[Any, Any], ...] = (),
         trusted_compensation_observers: Mapping[str, EffectStateObserverProvider] | None = None,
+        certification_oracle: CertificationOracle | None = None,
     ) -> ApplicationRuntime:
         if test_fixture is not None and settings.environment != "test":
             return cls(
@@ -1074,6 +1083,7 @@ class ApplicationRuntime:
         browser_service: BrowserSemanticBridge | None = None
         capability_lifecycle_store: SQLiteCapabilityLifecycleStore | None = None
         capability_lifecycle_restorer: CapabilityLifecycleRestorer | None = None
+        generated_action_registrar: GeneratedCapabilityToolRegistrar | None = None
         provisioning_store: SQLiteProvisioningStore | None = None
         opportunity_store: SQLiteOpportunityStore | None = None
         attention_store: SQLiteAttentionStore | None = None
@@ -1296,6 +1306,7 @@ class ApplicationRuntime:
                 else ()
             )
             environment_discovery = EnvironmentDiscoveryService(discovery_providers)
+            environment_adoption = EnvironmentAdoptionCandidateProvider(environment_discovery)
             discovery_sources: tuple[DiscoveryProvider, ...] = (
                 InternalToolCatalogProvider(registry),
             )
@@ -1313,6 +1324,11 @@ class ApplicationRuntime:
             )
             solution_discovery = SolutionDiscovery(
                 CapabilityDiscoveryService(discovery_sources, CandidateEvaluator()),
+                adoption_provider=(
+                    environment_adoption.for_gap
+                    if production_mode and test_fixture is None
+                    else None
+                ),
                 build_setup_step=build_setup_step,
             )
             setup_store = SQLiteSetupStore(paths.setup_database)
@@ -1338,7 +1354,13 @@ class ApplicationRuntime:
             setup_conductor = SetupConductor(
                 test_fixture.setup_handlers
                 if test_fixture is not None and test_fixture.setup_handlers is not None
-                else {"generic": ProductionSetupHandler()},
+                else {
+                    "generic": ProductionSetupHandler(
+                        environment_adoption.for_setup
+                        if production_mode and test_fixture is None
+                        else None
+                    )
+                },
                 setup_store,
                 provisioning_engine.run,
                 decision_collector=(
@@ -1397,12 +1419,42 @@ class ApplicationRuntime:
                     verification_engine,
                 ).hooks(effect_attestation_store)
 
+            if production_mode:
+
+                def invoke_generated(
+                    package_id: str,
+                    action_id: str,
+                    payload: Mapping[str, object],
+                ) -> Mapping[str, object]:
+                    def invoke(runtime: object) -> Mapping[str, object]:
+                        operation = getattr(runtime, "invoke", None)
+                        if not callable(operation):
+                            raise CapabilityAcquisitionError(
+                                "Active generated package has no invocation boundary"
+                            )
+                        result = operation(action_id, payload)
+                        if not isinstance(result, Mapping):
+                            raise CapabilityAcquisitionError(
+                                "Generated package returned a malformed result"
+                            )
+                        return result
+
+                    return hot_load.invoke(package_id, invoke)
+
+                generated_action_registrar = GeneratedCapabilityToolRegistrar(
+                    registry._trusted_application_registration_port(),  # noqa: SLF001
+                    capability_lifecycle_store,
+                    invoke_generated,
+                    trace=trace_service,
+                )
+
             package_activation = PackageActivationService(
                 hot_load,
                 activation_hooks,
                 attestation_store=effect_attestation_store,
                 lifecycle_store=capability_lifecycle_store,
                 require_executable_isolation=True,
+                generated_action_registrar=generated_action_registrar,
             )
 
             if test_fixture is not None and test_fixture.lifecycle_restore is not None:
@@ -1478,7 +1530,10 @@ class ApplicationRuntime:
             )
             production_certification = (
                 ProductionCertificationProvider(
-                    package_store, production_sandbox, verification_engine
+                    package_store,
+                    production_sandbox,
+                    verification_engine,
+                    semantic_oracle=certification_oracle,
                 )
                 if production_mode
                 else None
@@ -1539,7 +1594,11 @@ class ApplicationRuntime:
                     if test_fixture is not None
                     else (
                         ProductionVerificationEvidence(
-                            capability_registry, capability_lifecycle_store, package_store
+                            capability_registry,
+                            capability_lifecycle_store,
+                            package_store,
+                            sandbox=production_sandbox,
+                            semantic_oracle=certification_oracle,
                         )
                         if production_mode
                         else _NoVerificationEvidence()
@@ -1569,7 +1628,14 @@ class ApplicationRuntime:
                 analyzer=RegistryGoalAnalyzer(),
                 researcher=capability_acquisition,
                 acquirer=capability_acquisition,
-                runner=PlanningGoalTaskRunner(task_controller),
+                runner=PlanningGoalTaskRunner(
+                    task_controller,
+                    generated_planner=(
+                        GeneratedActionPlanPlanner(registry) if production_mode else None
+                    ),
+                    verification_engine=verification_engine if production_mode else None,
+                    trace=trace_service,
+                ),
                 trace=trace_service,
             )
             workflow_procedure_store = SQLiteWorkflowProcedureStore(
@@ -1618,10 +1684,45 @@ class ApplicationRuntime:
                     )
                 )
 
+            def canonical_lifecycle_state(capability_id: str) -> ActivationState:
+                records = tuple(
+                    record
+                    for record in package_activation.records()
+                    if record.package_id == capability_id
+                )
+                if not records:
+                    return ActivationState.CERTIFIED
+                return max(records, key=lambda record: record.updated_at).state
+
+            def canonical_lifecycle_transition(
+                capability_id: str, state: ActivationState, detail: str
+            ) -> ActivationState:
+                records = tuple(
+                    record
+                    for record in package_activation.records()
+                    if record.package_id == capability_id
+                )
+                if not records:
+                    raise CapabilityLifecycleError("No durable lifecycle record for drift")
+                record = max(records, key=lambda item: item.updated_at)
+                if state is ActivationState.DEGRADED:
+                    return package_activation.mark_degraded(
+                        record.package_id, record.version, detail
+                    ).state
+                if state is ActivationState.QUARANTINED:
+                    return package_activation.quarantine(
+                        record.package_id, record.version, detail
+                    ).state
+                return record.state
+
             capability_health = CapabilityHealthService(
                 event_bus=events,
                 trace=trace_service.get(correlation_id=UUID(int=0)),
                 attention_sink=health_attention_sink,
+            )
+            capability_health.bind_lifecycle(
+                canonical_lifecycle_state,
+                canonical_lifecycle_transition,
             )
             if capability_lifecycle_restorer is not None:
                 capability_lifecycle_restorer.bind_health(capability_health)
@@ -2115,6 +2216,7 @@ class ApplicationRuntime:
                 effect_attestation_store=effect_attestation_store,
                 capability_lifecycle_store=capability_lifecycle_store,
                 capability_lifecycle_restorer=capability_lifecycle_restorer,
+                generated_action_registrar=generated_action_registrar,
                 package_store=package_store,
                 production_sandbox=production_sandbox,
                 opportunity_store=opportunity_store,

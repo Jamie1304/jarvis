@@ -61,6 +61,7 @@ def observation(**changes: object) -> BehaviorObservation:
         "capability_id": "fixture.integration",
         "source": "broker",
         "trusted": True,
+        "package_version": "1.0.0",
         "network_hosts": frozenset({"api.example.test"}),
         "filesystem_roots": frozenset({"workspace-root"}),
         "broker_calls": frozenset({"read_file"}),
@@ -336,6 +337,32 @@ def test_expected_and_low_risk_drift_are_traced_and_notify_attention() -> None:
         TraceEventType.DRIFT,
         TraceEventType.DRIFT,
     ]
+
+
+def test_bound_lifecycle_is_the_only_activation_writer() -> None:
+    monitor = service()
+    monitor.register_baseline(baseline())
+    state = {"value": ActivationState.ACTIVE}
+    transitions: list[tuple[ActivationState, str]] = []
+
+    def state_provider(capability_id: str) -> ActivationState:
+        assert capability_id == "fixture.integration"
+        return state["value"]
+
+    def transition(capability_id: str, value: ActivationState, detail: str) -> ActivationState:
+        assert capability_id == "fixture.integration"
+        transitions.append((value, detail))
+        state["value"] = value
+        return state["value"]
+
+    monitor.bind_lifecycle(state_provider, transition)
+    report = monitor.record_trusted_broker_observation(
+        observation(credential_scopes=frozenset({"fixture.read", "fixture.write"}))
+    )
+
+    assert report.resulting_activation_state is ActivationState.QUARANTINED
+    assert monitor.activation_state("fixture.integration") is ActivationState.QUARANTINED
+    assert transitions == [(ActivationState.QUARANTINED, "behavior drift: security_drift")]
 
 
 def test_material_and_security_drift_escalate_without_auto_recovery() -> None:

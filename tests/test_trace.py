@@ -125,6 +125,31 @@ async def test_runtime_trace_service_projects_and_reloads_one_goal_task_lineage(
     restarted_store.close()
 
 
+def test_trace_service_rehomes_events_emitted_before_goal_task_binding(tmp_path: Path) -> None:
+    store = TraceStore(tmp_path / "trace.sqlite3")
+    service = TraceService(store, InMemoryEventBus())
+    goal_id = uuid4()
+    task_id = uuid4()
+
+    service.record(
+        TraceEventType.CAPABILITY_TOOL,
+        "Generated action output validated",
+        task_id=task_id,
+        correlation_id=task_id,
+        integration_id="generated.synthetic",
+        package_version="1.0.0",
+        package_hash="a" * 64,
+    )
+    service.bind_goal_task(goal_id, task_id)
+
+    trace = service.get(task_id=task_id)
+    assert trace.trace_id == service.get(goal_id=goal_id).trace_id
+    assert len(trace.events) == 1
+    assert trace.events[0].integration_id == "generated.synthetic"
+
+    store.close()
+
+
 @pytest.mark.asyncio
 async def test_runtime_trace_service_projects_all_canonical_event_families(tmp_path: Path) -> None:
     bus = InMemoryEventBus()

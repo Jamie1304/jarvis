@@ -727,6 +727,54 @@ class TraceStore:
         )
         self._connection.commit()
 
+    def rebind_trace(self, old_trace_id: UUID, new_trace_id: UUID) -> None:
+        """Move pre-binding events into the canonical lineage trace.
+
+        A task runner may finish before the supervisor learns the task ID and
+        binds it to its goal.  Events emitted during that interval are still
+        trusted facts; re-homing them prevents an orphan trace projection.
+        The event IDs and sequence ordering remain unchanged.
+        """
+
+        if not isinstance(old_trace_id, UUID) or not isinstance(new_trace_id, UUID):
+            raise TraceError("Trace rebind identities are malformed")
+        if old_trace_id == new_trace_id:
+            return
+        rows = self._connection.execute(
+            "SELECT sequence, event_json FROM execution_trace_events WHERE trace_id=? "
+            "ORDER BY sequence",
+            (str(old_trace_id),),
+        ).fetchall()
+        if not rows:
+            return
+        try:
+            self._connection.execute("BEGIN")
+            for sequence, payload in rows:
+                data = json.loads(str(payload))
+                if not isinstance(data, dict):
+                    raise TraceError("Stored trace event is malformed")
+                data["trace_id"] = str(new_trace_id)
+                rewritten = json.dumps(data, sort_keys=True, separators=(",", ":"))
+                if len(rewritten.encode()) > _MAX_VALUE_BYTES:
+                    raise TraceError("Serialized trace event is too large")
+                self._connection.execute(
+                    "UPDATE execution_trace_events SET trace_id=?, event_json=? "
+                    "WHERE sequence=? AND trace_id=?",
+                    (str(new_trace_id), rewritten, int(sequence), str(old_trace_id)),
+                )
+            self._connection.commit()
+        except (
+            TraceError,
+            ValueError,
+            TypeError,
+            json.JSONDecodeError,
+            sqlite3.DatabaseError,
+        ) as error:
+            self._connection.rollback()
+            if isinstance(error, TraceError):
+                raise
+            raise TraceError("Trace lineage rebind failed") from error
+
     def lineage_root(self, alias_id: UUID) -> UUID | None:
         if not isinstance(alias_id, UUID):
             raise TraceError("Trace lineage identity is malformed")
@@ -778,8 +826,16 @@ class TraceService:
     def bind_goal_task(self, goal_id: UUID, task_id: UUID) -> None:
         if not isinstance(goal_id, UUID) or not isinstance(task_id, UUID):
             raise TraceError("Goal/task trace binding is malformed")
+        goal_root = self._store.lineage_root(goal_id) or goal_id
+        task_root = self._store.lineage_root(task_id) or task_id
+        old_trace_id = uuid5(_TRACE_NAMESPACE, str(task_root))
+        new_trace_id = uuid5(_TRACE_NAMESPACE, str(goal_root))
         self._store.bind_lineage(goal_id, goal_id)
         self._store.bind_lineage(task_id, goal_id)
+        if old_trace_id != new_trace_id:
+            self._store.rebind_trace(old_trace_id, new_trace_id)
+            self._traces.pop(old_trace_id, None)
+            self._traces.pop(new_trace_id, None)
 
     def trace_id_for(
         self,

@@ -81,6 +81,10 @@ class PermissionBroker:
         self._active_receipts: dict[UUID, AuthorizationReceipt] = {}
         self._cancelled_tasks: set[UUID] = set()
         self._registration_sealed = False
+        # Kept private so only the application-owned ToolRegistry can receive
+        # the narrow post-seal registration capability used by certified
+        # generated adapters.
+        self._trusted_registration_authority = object()
         self._lock = asyncio.Lock()
 
     @property
@@ -97,6 +101,14 @@ class PermissionBroker:
 
         if self._registration_sealed:
             raise RuntimeError("Permission broker registration is sealed")
+        self._register_tool_unchecked(tool_id, tool_identity, declared_permissions)
+
+    def _register_tool_unchecked(
+        self,
+        tool_id: str,
+        tool_identity: object,
+        declared_permissions: frozenset[Permission],
+    ) -> None:
         existing = self._registered_tools.get(tool_id)
         registration = (id(tool_identity), declared_permissions)
         if existing == registration:
@@ -109,14 +121,37 @@ class PermissionBroker:
             raise ValueError("Tool registration must be unique and use known permissions")
         self._registered_tools[tool_id] = registration
 
+    def _register_tool_for_trusted_application(
+        self,
+        authority: object,
+        tool_id: str,
+        tool_identity: object,
+        declared_permissions: frozenset[Permission],
+    ) -> None:
+        """Register a tool through the private certified-activation capability."""
+
+        if authority is not self._trusted_registration_authority:
+            raise RuntimeError("Untrusted tool registration authority")
+        self._register_tool_unchecked(tool_id, tool_identity, declared_permissions)
+
     def unregister_tool(self, tool_id: str, tool_identity: object) -> bool:
         if self._registration_sealed:
             raise RuntimeError("Permission broker registration is sealed")
+        return self._unregister_tool_unchecked(tool_id, tool_identity)
+
+    def _unregister_tool_unchecked(self, tool_id: str, tool_identity: object) -> bool:
         registration = self._registered_tools.get(tool_id)
         if registration is None or registration[0] != id(tool_identity):
             return False
         del self._registered_tools[tool_id]
         return True
+
+    def _unregister_tool_for_trusted_application(
+        self, authority: object, tool_id: str, tool_identity: object
+    ) -> bool:
+        if authority is not self._trusted_registration_authority:
+            raise RuntimeError("Untrusted tool registration authority")
+        return self._unregister_tool_unchecked(tool_id, tool_identity)
 
     def seal_registration(self) -> None:
         """Permanently close normal runtime tool-registration mutation."""

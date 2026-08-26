@@ -295,6 +295,7 @@ class CapabilityFactory:
                     resource_decision=resource_decision,
                 )
             reservation_id = resource_decision.reservation_id
+        release_reason = ReservationReleaseReason.COMPLETE
         try:
             result = await self._acquire(
                 gap,
@@ -309,12 +310,11 @@ class CapabilityFactory:
                 result = replace(result, resource_decision=resource_decision)
             return result
         except BaseException:
-            if reservation_id is not None and governor is not None:
-                governor.release(reservation_id, ReservationReleaseReason.CRASH)
+            release_reason = ReservationReleaseReason.CRASH
             raise
-        else:
+        finally:
             if reservation_id is not None and governor is not None:
-                governor.release(reservation_id, ReservationReleaseReason.COMPLETE)
+                governor.release(reservation_id, release_reason)
 
     async def _acquire(
         self,

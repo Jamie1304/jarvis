@@ -13,10 +13,14 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from enum import StrEnum
+from hashlib import sha256
 from typing import Protocol
 from uuid import UUID
 
 from jarvis.capabilities import CapabilityManifest, CapabilityRegistry, EnvironmentGraph
+from jarvis.capability_factory import (
+    AdoptionCandidate as FactoryAdoptionCandidate,
+)
 from jarvis.capability_factory import (
     AdoptionCandidates,
     CapabilityFactory,
@@ -68,8 +72,13 @@ from jarvis.package_reviewer import (
 from jarvis.package_runtime import HotLoadManager
 from jarvis.provisioning import ProvisioningEngine
 from jarvis.setup_conductor import (
+    AdoptionCandidate as SetupAdoptionCandidate,
+)
+from jarvis.setup_conductor import (
+    AdoptionChoice,
     SetupConductor,
     SetupContext,
+    SetupRequirement,
     SetupRun,
     SetupRunState,
     SetupStep,
@@ -135,6 +144,94 @@ class SolutionDiscoveryProvider(Protocol):
     async def discover(
         self, gap: CapabilityGap, environment: EnvironmentGraph
     ) -> SolutionDiscoveryResult: ...  # pragma: no cover
+
+
+class EnvironmentAdoptionCandidateProvider:
+    """Build advisory adoption candidates from generic local observations.
+
+    Discovery supplies evidence only.  ``SetupConductor`` re-inspects each
+    candidate through ``AdoptionPolicy`` immediately before adoption and is the
+    only place that can issue an adoption attestation.
+    """
+
+    def __init__(self, discovery: EnvironmentDiscoveryService) -> None:
+        self._discovery = discovery
+        self._last_candidates: tuple[SetupAdoptionCandidate, ...] = ()
+
+    def _candidates(self, gap: CapabilityGap) -> tuple[SetupAdoptionCandidate, ...]:
+        candidates: list[SetupAdoptionCandidate] = []
+        for environment in self._discovery.discover(DiscoveryMode.READ_ONLY_LOCAL_DISCOVERY):
+            identifiers = dict(environment.identity.identifiers)
+            properties = dict(environment.observations[-1].properties)
+            if (
+                properties.get("kind") == "python-runtime"
+                and "runtime" not in gap.desired_capability.casefold()
+            ):
+                continue
+            location = next(
+                (
+                    identifiers.get(key)
+                    for key in ("executable", "path", "location", "endpoint")
+                    if identifiers.get(key)
+                ),
+                None,
+            )
+            if location is None:
+                continue
+            candidate_id = (
+                "environment-"
+                + sha256(environment.identity.stable_key.encode("utf-8")).hexdigest()[:24]
+            )
+            candidates.append(
+                SetupAdoptionCandidate(
+                    candidate_id,
+                    gap.desired_capability.replace(" ", "-")[:128],
+                    location,
+                    identifiers.get("version"),
+                    compatible=True,
+                    evidence="generic environment discovery observation",
+                )
+            )
+        return tuple(candidates)
+
+    def for_gap(self, gap: CapabilityGap, _environment: EnvironmentGraph) -> AdoptionCandidates:
+        step_candidates = self._candidates(gap)
+        self._last_candidates = step_candidates
+        return AdoptionCandidates(
+            tuple(
+                FactoryAdoptionCandidate(
+                    candidate,
+                    SetupStep(
+                        "adopt-" + candidate.candidate_id,
+                        "generic",
+                        (
+                            SetupRequirement(
+                                "adoption-" + candidate.candidate_id,
+                                "Choose whether to use the discovered capability in place",
+                                (AdoptionChoice.USE_IN_PLACE, AdoptionChoice.IGNORE),
+                            ),
+                        ),
+                    ),
+                )
+                for candidate in step_candidates
+            )
+        )
+
+    def for_setup(
+        self, step: SetupStep, _context: SetupContext
+    ) -> tuple[SetupAdoptionCandidate, ...]:
+        del step
+        return tuple(
+            SetupAdoptionCandidate(
+                candidate.candidate_id,
+                "generic",
+                candidate.location,
+                candidate.version,
+                compatible=candidate.compatible,
+                evidence=candidate.evidence,
+            )
+            for candidate in self._last_candidates
+        )
 
 
 class ScopeProvider(Protocol):
@@ -444,6 +541,7 @@ class CapabilityAcquisitionCoordinator:
                 result.capability_id,
                 evidence=(result.reason or "no candidate was generated",),
                 detail=result.reason or "No inactive capability candidate is available",
+                stage=self._last_run.stage.value,
             )
         if self._sources is None or self._certification_hooks is None:
             return CapabilityAcquisitionReport(
@@ -454,6 +552,7 @@ class CapabilityAcquisitionCoordinator:
                     "Capability preparation remains inactive because trusted package "
                     "boundaries are unavailable"
                 ),
+                stage=self._last_run.stage.value,
             )
         package = result.package.package
         source_files = self._sources.sources(package)
@@ -469,6 +568,7 @@ class CapabilityAcquisitionCoordinator:
                 result.capability_id,
                 evidence=("package preparation review failed",),
                 detail="Capability preparation was rejected by the trusted package reviewer",
+                stage=AcquisitionStage.FAILED.value,
             )
         try:
             certification = self._services.package_certifier.certify(
@@ -491,6 +591,7 @@ class CapabilityAcquisitionCoordinator:
                 detail=(
                     f"Capability preparation failed closed at certification: {type(error).__name__}"
                 ),
+                stage=AcquisitionStage.FAILED.value,
             )
         self._update(
             stage=AcquisitionStage.CERTIFYING,
@@ -507,6 +608,7 @@ class CapabilityAcquisitionCoordinator:
                 "activation intentionally not attempted",
             ),
             detail="Capability candidate was prepared and certified without activation",
+            stage=AcquisitionStage.CERTIFYING.value,
         )
 
     async def _verify_reused(
@@ -526,6 +628,7 @@ class CapabilityAcquisitionCoordinator:
                 result.capability_id,
                 evidence=("existing capability reused", "verification complete"),
                 detail="existing safe capability reused and independently verified",
+                stage=AcquisitionStage.ACTIVE.value,
             )
         self._update(
             stage=AcquisitionStage.FAILED,
@@ -676,6 +779,7 @@ class CapabilityAcquisitionCoordinator:
                 "verified",
             ),
             detail="capability reached ACTIVE and passed trusted verification",
+            stage=AcquisitionStage.ACTIVE.value,
         )
 
     async def _run_setup(
@@ -713,19 +817,28 @@ class CapabilityAcquisitionCoordinator:
         self, result: CapabilityFactoryResult, reason: str
     ) -> CapabilityAcquisitionReport:
         self._update(stage=AcquisitionStage.FAILED, reason=reason)
-        return CapabilityAcquisitionReport(False, evidence=(reason,), detail=reason)
+        return CapabilityAcquisitionReport(
+            False, evidence=(reason,), detail=reason, stage=AcquisitionStage.FAILED.value
+        )
 
     def _waiting_report(
         self, result: CapabilityFactoryResult, reason: str
     ) -> CapabilityAcquisitionReport:
         self._update(stage=AcquisitionStage.WAITING_FOR_APPROVAL, reason=reason)
-        return CapabilityAcquisitionReport(False, evidence=(reason,), detail=reason)
+        return CapabilityAcquisitionReport(
+            False,
+            evidence=(reason,),
+            detail=reason,
+            stage=AcquisitionStage.WAITING_FOR_APPROVAL.value,
+        )
 
     def _failed_report(
         self, result: CapabilityFactoryResult, reason: str
     ) -> CapabilityAcquisitionReport:
         self._update(stage=AcquisitionStage.FAILED, reason=reason)
-        return CapabilityAcquisitionReport(False, evidence=(reason,), detail=reason)
+        return CapabilityAcquisitionReport(
+            False, evidence=(reason,), detail=reason, stage=AcquisitionStage.FAILED.value
+        )
 
     def _update(
         self,

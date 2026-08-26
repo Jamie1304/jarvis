@@ -267,11 +267,17 @@ class BehaviorBaseline:
     persistence_operations: frozenset[str] = frozenset()
     activation_state: ActivationState = ActivationState.ACTIVE
     baseline_hash: str = ""
+    package_hash: str = ""
 
     def __post_init__(self) -> None:
         _text(self.capability_id, "Baseline capability ID", 256)
         _text(self.package_version, "Baseline package version", 256)
         _text(self.certification_ref, "Baseline certification reference", 512)
+        if self.package_hash and (
+            len(self.package_hash) != 64
+            or any(character not in "0123456789abcdef" for character in self.package_hash)
+        ):
+            raise CapabilityHealthError("Baseline package hash is malformed")
         for values, name in (
             (self.network_hosts, "Baseline network hosts"),
             (self.filesystem_roots, "Baseline filesystem roots"),
@@ -301,6 +307,7 @@ class BehaviorBaseline:
             {
                 "capability_id": self.capability_id,
                 "package_version": self.package_version,
+                "package_hash": self.package_hash,
                 "certification_ref": self.certification_ref,
                 "network_hosts": sorted(self.network_hosts),
                 "filesystem_roots": sorted(self.filesystem_roots),
@@ -341,6 +348,8 @@ class BehaviorObservation:
     event_emissions: frozenset[str] = frozenset()
     persistence_operations: frozenset[str] = frozenset()
     evidence: tuple[str, ...] = ()
+    package_version: str | None = None
+    package_hash: str | None = None
 
     def __post_init__(self) -> None:
         _text(self.capability_id, "Observation capability ID", 256)
@@ -368,6 +377,13 @@ class BehaviorObservation:
         if type(self.request_volume) is not int or not 0 <= self.request_volume <= 1_000_000:
             raise CapabilityHealthError("Observed request volume is malformed")
         _labels(self.evidence, "Observation evidence", 64)
+        if self.package_version is not None:
+            _text(self.package_version, "Observation package version", 256)
+        if self.package_hash is not None and (
+            len(self.package_hash) != 64
+            or any(character not in "0123456789abcdef" for character in self.package_hash)
+        ):
+            raise CapabilityHealthError("Observation package hash is malformed")
 
 
 @dataclass(frozen=True, slots=True)
@@ -549,6 +565,10 @@ class CapabilityHealthService:
         self._health: dict[str, CapabilityHealthReport] = {}
         self._drift: dict[str, DriftReport] = {}
         self._activation: dict[str, ActivationState] = {}
+        self._activation_state_provider: Callable[[str], ActivationState] | None = None
+        self._activation_transition: (
+            Callable[[str, ActivationState, str], ActivationState] | None
+        ) = None
         self._history: dict[str, list[DriftFinding]] = {}
         self._attention: list[AttentionNotice] = []
 
@@ -578,7 +598,20 @@ class CapabilityHealthService:
         if existing is not None and baseline.package_version == existing.package_version:
             raise CapabilityHealthError("A certified baseline version cannot be rewritten")
         self._baselines[baseline.capability_id] = baseline
-        self._activation[baseline.capability_id] = baseline.activation_state
+        if self._activation_state_provider is None:
+            self._activation[baseline.capability_id] = baseline.activation_state
+
+    def bind_lifecycle(
+        self,
+        state_provider: Callable[[str], ActivationState],
+        transition: Callable[[str, ActivationState, str], ActivationState],
+    ) -> None:
+        """Bind health/drift to the canonical application lifecycle owner."""
+
+        if not callable(state_provider) or not callable(transition):
+            raise CapabilityHealthError("Lifecycle binding is malformed")
+        self._activation_state_provider = state_provider
+        self._activation_transition = transition
 
     def baseline(self, capability_id: str) -> BehaviorBaseline:
         capability_id = _text(capability_id, "Capability ID", 256)
@@ -600,7 +633,11 @@ class CapabilityHealthService:
                 "No health observation has been recorded",
             ),
         )
-        activation = self._activation.get(capability_id)
+        activation = (
+            self._activation_state_provider(capability_id)
+            if self._activation_state_provider is not None
+            else self._activation.get(capability_id)
+        )
         if activation is ActivationState.QUARANTINED:
             return replace(
                 report,
@@ -717,14 +754,28 @@ class CapabilityHealthService:
         if not isinstance(observation, BehaviorObservation) or not observation.trusted:
             raise CapabilityHealthError("Untrusted observations cannot declare behavior drift")
         baseline = self.baseline(observation.capability_id)
+        if baseline.package_hash and observation.package_hash != baseline.package_hash:
+            raise CapabilityHealthError("Observation package hash does not match baseline")
+        if baseline.package_version and observation.package_version != baseline.package_version:
+            raise CapabilityHealthError("Observation package version does not match baseline")
         findings = self._findings_for(baseline, observation)
         classification = max(
             (finding.classification for finding in findings),
             default=DriftClass.EXPECTED,
             key=self._drift_rank,
         )
-        previous = self._activation.get(observation.capability_id, baseline.activation_state)
+        previous = (
+            self._activation_state_provider(observation.capability_id)
+            if self._activation_state_provider is not None
+            else self._activation.get(observation.capability_id, baseline.activation_state)
+        )
         resulting = self._next_activation(previous, classification)
+        if resulting is not previous and self._activation_transition is not None:
+            resulting = self._activation_transition(
+                observation.capability_id,
+                resulting,
+                f"behavior drift: {classification.value}",
+            )
         report = DriftReport(
             observation.capability_id,
             baseline.baseline_hash,
@@ -735,7 +786,8 @@ class CapabilityHealthService:
             resulting,
         )
         self._drift[observation.capability_id] = report
-        self._activation[observation.capability_id] = resulting
+        if self._activation_state_provider is None:
+            self._activation[observation.capability_id] = resulting
         history = self._history.setdefault(observation.capability_id, [])
         history.extend(findings)
         del history[: -self._max_findings]
@@ -752,6 +804,8 @@ class CapabilityHealthService:
 
     def activation_state(self, capability_id: str) -> ActivationState:
         capability_id = _text(capability_id, "Capability ID", 256)
+        if self._activation_state_provider is not None:
+            return self._activation_state_provider(capability_id)
         return self._activation.get(capability_id, ActivationState.CERTIFIED)
 
     def repair(

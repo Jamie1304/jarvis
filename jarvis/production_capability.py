@@ -19,7 +19,7 @@ import re
 import sys
 import threading
 from collections.abc import Callable, Coroutine, Mapping, Sequence
-from dataclasses import asdict, dataclass, replace
+from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from hashlib import sha256
 from pathlib import Path
@@ -29,6 +29,8 @@ from uuid import UUID, uuid4
 from jarvis.agent_runtime import AgentContext, AgentLoop, AgentLoopBudget, AgentTerminationReason
 from jarvis.ai.routing import ProviderRouter, RouteRequest, RouteStatus, RoutingPolicy
 from jarvis.capabilities import (
+    CapabilityActionSpec,
+    CapabilityError,
     CapabilityHealth,
     CapabilityLifecycle,
     CapabilityManifest,
@@ -37,6 +39,8 @@ from jarvis.capabilities import (
     EffectMetadata,
     EnvironmentGraph,
     Reversibility,
+    action_schema_dict,
+    validate_action_schema,
 )
 from jarvis.capability_acquisition import AcquisitionStage, CapabilityAcquisitionCoordinator
 from jarvis.capability_factory import (
@@ -129,7 +133,15 @@ from jarvis.provisioning import (
 )
 from jarvis.resources import ResourceGovernor, ResourcePriority
 from jarvis.sandbox import SandboxLimits, SandboxProcess
-from jarvis.setup_conductor import SetupContext, SetupDecision, SetupInspection, SetupStep
+from jarvis.setup_conductor import (
+    AdoptionCandidate as SetupAdoptionCandidate,
+)
+from jarvis.setup_conductor import (
+    SetupContext,
+    SetupDecision,
+    SetupInspection,
+    SetupStep,
+)
 from jarvis.tools.models import SemanticVersion, ToolHealthStatus, ToolPlatform
 from jarvis.verification import (
     EvidenceRecord,
@@ -319,6 +331,23 @@ class _GenerationSpec:
     name: str
     description: str
     source: str | None
+    actions: tuple[_GeneratedActionDraft, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class _GeneratedActionDraft:
+    action_id: str
+    semantic_name: str
+    description: str
+    input_schema: Mapping[str, object]
+    output_schema: Mapping[str, object]
+    effect: EffectMetadata
+    permissions: tuple[Permission, ...] = ()
+    target_scope: tuple[str, ...] = ()
+    idempotent: bool = True
+    retryable: bool = False
+    verification: tuple[str, ...] = ("adapter_output_schema",)
+    compensation: str | None = None
 
 
 def _parse_generation_spec(raw: str) -> _GenerationSpec:
@@ -346,7 +375,124 @@ def _parse_generation_spec(raw: str) -> _GenerationSpec:
         type(source) is not str or not source.strip() or len(source.encode("utf-8")) > 512 * 1024
     ):
         raise ProductionCapabilityError("Capability design source is malformed")
-    return _GenerationSpec(name.strip(), description.strip(), source)
+    raw_actions = value.get("actions", [])
+    if not isinstance(raw_actions, list) or len(raw_actions) > 64:
+        raise ProductionCapabilityError("Capability action declarations are malformed")
+    actions = tuple(_parse_action_draft(item, index) for index, item in enumerate(raw_actions))
+    if len({item.action_id for item in actions}) != len(actions):
+        raise ProductionCapabilityError("Capability action IDs must be unique")
+    return _GenerationSpec(name.strip(), description.strip(), source, actions)
+
+
+def _parse_action_draft(value: object, index: int) -> _GeneratedActionDraft:
+    if not isinstance(value, dict):
+        raise ProductionCapabilityError(f"Capability action {index} is malformed")
+    action_id = value.get("action_id")
+    semantic_name = value.get("semantic_name")
+    description = value.get("description")
+    input_schema = value.get("input_schema")
+    output_schema = value.get("output_schema")
+    if (
+        type(action_id) is not str
+        or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", action_id)
+        or action_id in {"health", "inspect"}
+        or type(semantic_name) is not str
+        or not semantic_name.strip()
+        or len(semantic_name) > 256
+        or type(description) is not str
+        or not description.strip()
+        or len(description) > 2_000
+        or not isinstance(input_schema, Mapping)
+        or not isinstance(output_schema, Mapping)
+    ):
+        raise ProductionCapabilityError(
+            f"Capability action {index} identity or schema is malformed"
+        )
+    try:
+        normalized_input = validate_action_schema(input_schema, "Generated input schema")
+        normalized_output = validate_action_schema(output_schema, "Generated output schema")
+    except (CapabilityError, ValueError) as error:
+        raise ProductionCapabilityError(f"Capability action {index} schema is malformed") from error
+    if normalized_input.get("type") != "object" or normalized_output.get("type") != "object":
+        raise ProductionCapabilityError(
+            f"Capability action {index} input and output schemas must be objects"
+        )
+    raw_effect = value.get("effect", {})
+    if not isinstance(raw_effect, Mapping):
+        raise ProductionCapabilityError(f"Capability action {index} effect is malformed")
+    raw_artifacts = raw_effect.get("produced_artifacts", ())
+    raw_events = raw_effect.get("emitted_events", ())
+    preview_supported = raw_effect.get("preview_supported", False)
+    if (
+        type(preview_supported) is not bool
+        or not isinstance(raw_artifacts, list | tuple)
+        or not isinstance(raw_events, list | tuple)
+        or any(type(item) is not str for item in (*raw_artifacts, *raw_events))
+    ):
+        raise ProductionCapabilityError(f"Capability action {index} effect metadata is malformed")
+    try:
+        effect = EffectMetadata(
+            EffectClassification(str(raw_effect.get("classification", "unknown"))),
+            Reversibility(str(raw_effect.get("reversibility", "unknown"))),
+            preview_supported,
+            raw_effect.get("compensation"),
+            tuple(raw_artifacts),
+            tuple(raw_events),
+        )
+    except (TypeError, ValueError) as error:
+        raise ProductionCapabilityError(f"Capability action {index} effect is malformed") from error
+    raw_permissions = value.get("permissions", [])
+    if not isinstance(raw_permissions, list):
+        raise ProductionCapabilityError(f"Capability action {index} permissions are malformed")
+    try:
+        permissions = tuple(
+            sorted({Permission(str(item)) for item in raw_permissions}, key=lambda item: item.value)
+        )
+    except ValueError as error:
+        raise ProductionCapabilityError(
+            f"Capability action {index} permissions are malformed"
+        ) from error
+    raw_scope = value.get("target_scope", [])
+    raw_verification = value.get("verification", ["adapter_output_schema"])
+    if (
+        not isinstance(raw_scope, list)
+        or any(type(item) is not str for item in raw_scope)
+        or len(raw_scope) > 32
+        or any(not item.strip() or len(item) > 512 or "\x00" in item for item in raw_scope)
+        or not isinstance(raw_verification, list)
+        or any(type(item) is not str for item in raw_verification)
+        or len(raw_verification) > 32
+        or any(not item.strip() or len(item) > 512 or "\x00" in item for item in raw_verification)
+    ):
+        raise ProductionCapabilityError(f"Capability action {index} metadata is malformed")
+    idempotent = value.get("idempotent", True)
+    retryable = value.get("retryable", False)
+    compensation = value.get("compensation")
+    if (
+        type(idempotent) is not bool
+        or type(retryable) is not bool
+        or (retryable and not idempotent)
+        or compensation is not None
+        and (type(compensation) is not str or not compensation.strip())
+    ):
+        raise ProductionCapabilityError(f"Capability action {index} retry metadata is malformed")
+    try:
+        return _GeneratedActionDraft(
+            action_id,
+            semantic_name.strip(),
+            description.strip(),
+            normalized_input,
+            normalized_output,
+            effect,
+            permissions,
+            tuple(raw_scope),
+            idempotent,
+            retryable,
+            tuple(raw_verification),
+            compensation,
+        )
+    except (CapabilityError, ValueError) as error:
+        raise ProductionCapabilityError(f"Capability action {index} is invalid") from error
 
 
 def _safe_identifier(value: str, *, limit: int = 48) -> str:
@@ -363,11 +509,34 @@ def _build_generic_package(gap: CapabilityGap, spec: _GenerationSpec) -> Integra
         "JARVIS-internal",
         verified_by="jarvis.trusted.capability-generator",
     )
-    source = spec.source or _generic_worker_source(package_id, "Generated capability")
+    version = SemanticVersion(1, 0, 0)
+    drafts = spec.actions or (_default_action_draft(spec.name),)
+    action_specs = tuple(
+        CapabilityActionSpec(
+            gap.desired_capability,
+            package_id,
+            version,
+            "",
+            draft.action_id,
+            draft.semantic_name,
+            draft.description,
+            draft.input_schema,
+            draft.output_schema,
+            draft.effect,
+            draft.permissions,
+            draft.target_scope,
+            draft.idempotent,
+            draft.retryable,
+            draft.verification,
+            draft.compensation,
+        )
+        for draft in drafts
+    )
+    source = spec.source or _generic_worker_source(package_id, spec.name, action_specs)
     source_hash = sha256(source.encode("utf-8")).hexdigest()
     package = IntegrationPackage(
         package_id,
-        SemanticVersion(1, 0, 0),
+        version,
         PackageLayout(),
         (
             PackageEntry(
@@ -378,7 +547,7 @@ def _build_generic_package(gap: CapabilityGap, spec: _GenerationSpec) -> Integra
                 provenance,
             ),
         ),
-        tools=("inspect",),
+        tools=("inspect", *(item.action_id for item in action_specs)),
         health_contract=("bounded IPC response",),
         lifecycle=PackageLifecycle.DISCOVERED,
         diagnostics=DiagnosticsContract(
@@ -388,31 +557,102 @@ def _build_generic_package(gap: CapabilityGap, spec: _GenerationSpec) -> Integra
         provenance=provenance,
         package_hash="",
         operation_policy=PackageOperationPolicy(),
+        action_specs=action_specs,
     )
-    return replace(package, package_hash=_package_digest(package))
+    package_hash = _package_digest(package)
+    return replace(
+        package,
+        package_hash=package_hash,
+        action_specs=tuple(replace(item, package_hash=package_hash) for item in action_specs),
+    )
+
+
+def _default_action_draft(name: str) -> _GeneratedActionDraft:
+    return _GeneratedActionDraft(
+        "observe",
+        f"Observe {name[:200]}",
+        "Perform one bounded observation through the generated package runtime",
+        {
+            "type": "object",
+            "properties": {"value": {"type": "string"}},
+            "required": ["value"],
+            "additionalProperties": False,
+        },
+        {
+            "type": "object",
+            "properties": {
+                "status": {"type": "string"},
+                "capability": {"type": "string"},
+                "label": {"type": "string"},
+            },
+            "required": ["status", "capability", "label"],
+            "additionalProperties": False,
+        },
+        EffectMetadata(EffectClassification.OBSERVATION, Reversibility.READ_ONLY),
+        verification=("adapter_output_schema", "action_completed"),
+    )
 
 
 def _source_for_package(package: IntegrationPackage, spec: _GenerationSpec) -> str:
     # The model may propose source for review, but the default generic worker
     # is used unless a source was explicitly supplied.  The reviewer remains
     # the independent authority for a supplied source.
-    return spec.source or _generic_worker_source(package.package_id, "Generated capability")
+    return spec.source or _generic_worker_source(
+        package.package_id, spec.name, package.action_specs
+    )
 
 
-def _generic_worker_source(package_id: str, label: str) -> str:
+def _generic_worker_source(
+    package_id: str, label: str, action_specs: Sequence[CapabilityActionSpec]
+) -> str:
     safe_id = json.dumps(package_id)
     safe_label = json.dumps(label[:256])
+    action_ids = json.dumps([item.action_id for item in action_specs], separators=(",", ":"))
+    output_schemas = json.dumps(
+        {item.action_id: action_schema_dict(item.output_schema) for item in action_specs},
+        sort_keys=True,
+        separators=(",", ":"),
+    )
     return (
         "import json\n"
         "import sys\n\n"
         f"PACKAGE_ID = {safe_id}\n"
         f"LABEL = {safe_label}\n\n"
+        f"ACTION_IDS = frozenset({action_ids})\n"
+        f"OUTPUT_SCHEMAS = {output_schemas}\n\n"
+        "def default_value(schema, key):\n"
+        "    kind = schema.get('type')\n"
+        "    if kind == 'object':\n"
+        "        properties = schema.get('properties', {})\n"
+        "        required = schema.get('required', ())\n"
+        "        return {name: default_value(properties[name], name) for name in required}\n"
+        "    if kind == 'array':\n"
+        "        return []\n"
+        "    if kind == 'string':\n"
+        "        return PACKAGE_ID if key == 'capability' else 'observed'\n"
+        "    if kind == 'integer':\n"
+        "        return 0\n"
+        "    if kind == 'number':\n"
+        "        return 0.0\n"
+        "    if kind == 'boolean':\n"
+        "        return False\n"
+        "    raise ValueError('unsupported output schema')\n\n"
         "for line in sys.stdin:\n"
         "    try:\n"
         "        incoming = json.loads(line)\n"
         '        request_id = incoming["request_id"]\n'
         '        integration_id = incoming["integration_id"]\n'
-        '        payload = {"status": "observed", "capability": PACKAGE_ID, "label": LABEL}\n'
+        '        kind = incoming["kind"]\n'
+        '        if kind == "health":\n'
+        '            payload = {"status": "healthy", "capability": PACKAGE_ID}\n'
+        '        elif kind == "inspect":\n'
+        '            payload = {"status": "observed", "capability": PACKAGE_ID, "label": LABEL}\n'
+        '        elif kind in {"shadow", "canary"}:\n'
+        '            payload = {"status": kind, "capability": PACKAGE_ID, "label": LABEL}\n'
+        "        elif kind in ACTION_IDS:\n"
+        '            payload = default_value(OUTPUT_SCHEMAS[kind], "result")\n'
+        "        else:\n"
+        '            raise ValueError("unknown action")\n'
         "        outgoing = {\n"
         '            "version": 1,\n'
         '            "request_id": request_id,\n'
@@ -589,14 +829,25 @@ class ProductionPackageStore:
                 raise ProductionCapabilityError("Certified capability manifest is unavailable")
             manifest = _manifest_from_payload(json.loads(path.read_text(encoding="utf-8")))
             self._manifests[key] = manifest
+        expected_capabilities = (
+            {item.capability_id for item in package.action_specs}
+            if package.action_specs
+            else {package.package_id}
+        )
         if (
-            manifest.capability_id != package.package_id
-            or manifest.integration_owner != package.package_id
+            manifest.integration_owner != package.package_id
             or manifest.version != package.version
             or manifest.content_hash != package.package_hash
             or manifest.lifecycle is not CapabilityLifecycle.ACTIVE
+            or manifest.capability_id not in expected_capabilities
         ):
             raise ProductionCapabilityError("Capability manifest identity is not package-bound")
+        if package.action_specs and (
+            tuple(manifest.actions)
+            != ("inspect", *(item.action_id for item in package.action_specs))
+            or any(item.capability_id != manifest.capability_id for item in package.action_specs)
+        ):
+            raise ProductionCapabilityError("Capability manifest action contract is stale")
         return manifest
 
     def activation_request(
@@ -746,9 +997,10 @@ class ProductionPackageRuntime(PreparedPackageRuntime):
     async def request(self, kind: str, payload: Mapping[str, object]) -> dict[str, object]:
         if type(kind) is not str or not kind.strip() or not isinstance(payload, Mapping):
             raise ProductionCapabilityError("Package request is malformed")
+        normalized_payload = self._validate_action_request(kind, payload)
         self._active_requests += 1
         try:
-            return await asyncio.to_thread(self._request_blocking, kind, dict(payload))
+            return await asyncio.to_thread(self._request_blocking, kind, normalized_payload)
         finally:
             self._active_requests -= 1
 
@@ -806,6 +1058,28 @@ class ProductionPackageRuntime(PreparedPackageRuntime):
         except Exception as error:
             raise ProductionCapabilityError(
                 "Package execution failed in the native sandbox"
+            ) from error
+
+    def _validate_action_request(
+        self, kind: str, payload: Mapping[str, object]
+    ) -> dict[str, object]:
+        """Validate semantic action identity and input before starting a child."""
+
+        if kind in {"health", "inspect", "shadow", "canary"}:
+            return dict(payload)
+        from jarvis.generated_capability import GeneratedCapabilityError, validate_action_input
+
+        action = next(
+            (item for item in self.package.action_specs if item.action_id == kind),
+            None,
+        )
+        if action is None:
+            raise ProductionCapabilityError("Package request names an undeclared action")
+        try:
+            return validate_action_input(action, payload).model_dump(mode="json")
+        except GeneratedCapabilityError as error:
+            raise ProductionCapabilityError(
+                "Package request does not match action schema"
             ) from error
 
 
@@ -894,6 +1168,22 @@ class ProductionSandboxRunner:
                 "Mandatory AppContainer executable isolation was not established"
             )
         return status
+
+    def execute(
+        self,
+        package: IntegrationPackage,
+        action_id: str,
+        payload: Mapping[str, object],
+    ) -> tuple[SandboxSecurityStatus, dict[str, object]]:
+        """Run one bounded certification action in the real package sandbox."""
+
+        if not isinstance(package, IntegrationPackage) or type(action_id) is not str:
+            raise ProductionCapabilityError("Sandbox certification request is malformed")
+        if action_id not in {"health", "inspect", "shadow", "canary"} and not any(
+            item.action_id == action_id for item in package.action_specs
+        ):
+            raise ProductionCapabilityError("Sandbox certification action is undeclared")
+        return self._execute(package, action_id, payload)
 
     def _execute(
         self, package: IntegrationPackage, kind: str, payload: Mapping[str, object]
@@ -1160,6 +1450,7 @@ class CapabilityLifecycleRestorer:
             str(record.version),
             ";".join(reference),
             activation_state=record.state,
+            package_hash=record.package_hash,
         )
         try:
             existing = self._health.baseline(record.package_id)
@@ -1207,6 +1498,189 @@ class CapabilityLifecycleRestorer:
         )
 
 
+@dataclass(frozen=True, slots=True)
+class CertificationFunctionalCase:
+    """One bounded application-owned input used during package certification."""
+
+    case_id: str
+    action_id: str
+    input: Mapping[str, object]
+
+    def __post_init__(self) -> None:
+        if (
+            type(self.case_id) is not str
+            or not self.case_id.strip()
+            or len(self.case_id) > 128
+            or type(self.action_id) is not str
+            or not self.action_id.strip()
+            or len(self.action_id) > 64
+            or not isinstance(self.input, Mapping)
+        ):
+            raise ProductionCapabilityError("Certification functional case is malformed")
+        json.dumps(dict(self.input), sort_keys=True, separators=(",", ":"))
+
+
+@dataclass(frozen=True, slots=True)
+class FunctionalTestEvidence:
+    """Evidence from an actual bounded package action invocation."""
+
+    case_id: str
+    action_id: str
+    input_digest: str
+    actual_result_digest: str
+    expected_result_digest: str | None
+    output_schema_valid: bool
+    passed: bool
+    failure: str | None = None
+    recorded_at: datetime = field(default_factory=lambda: datetime.now(UTC))
+
+    def __post_init__(self) -> None:
+        for value, name in (
+            (self.case_id, "Certification case ID"),
+            (self.action_id, "Certification action ID"),
+            (self.input_digest, "Certification input digest"),
+            (self.actual_result_digest, "Certification result digest"),
+        ):
+            if type(value) is not str or not value.strip() or len(value) > 512:
+                raise ProductionCapabilityError(f"{name} is malformed")
+        if self.expected_result_digest is not None and (
+            type(self.expected_result_digest) is not str
+            or not self.expected_result_digest.strip()
+            or len(self.expected_result_digest) > 512
+        ):
+            raise ProductionCapabilityError("Certification expected digest is malformed")
+        if type(self.output_schema_valid) is not bool or type(self.passed) is not bool:
+            raise ProductionCapabilityError("Certification functional flags are malformed")
+        if self.failure is not None and (type(self.failure) is not str or len(self.failure) > 512):
+            raise ProductionCapabilityError("Certification failure detail is malformed")
+        if self.recorded_at.tzinfo is None:
+            raise ProductionCapabilityError("Certification evidence timestamp is malformed")
+
+
+CertificationOracle = Callable[[CapabilityActionSpec, Mapping[str, object]], Mapping[str, object]]
+
+
+@dataclass(frozen=True, slots=True)
+class PackageCertificationPlan:
+    """Trusted evidence requirements for one exact package hash."""
+
+    package_id: str
+    package_version: str
+    package_hash: str
+    functional_cases: tuple[CertificationFunctionalCase, ...]
+    semantic_oracle: CertificationOracle | None = field(default=None, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        if (
+            type(self.package_id) is not str
+            or not self.package_id.strip()
+            or type(self.package_version) is not str
+            or not self.package_version.strip()
+            or type(self.package_hash) is not str
+            or len(self.package_hash) != 64
+            or any(character not in "0123456789abcdef" for character in self.package_hash)
+            or type(self.functional_cases) is not tuple
+            or len(self.functional_cases) > 64
+            or any(
+                not isinstance(item, CertificationFunctionalCase) for item in self.functional_cases
+            )
+            or len({item.case_id for item in self.functional_cases}) != len(self.functional_cases)
+        ):
+            raise ProductionCapabilityError("Package certification plan is malformed")
+        if self.semantic_oracle is not None and not callable(self.semantic_oracle):
+            raise ProductionCapabilityError("Package certification oracle is malformed")
+
+
+def _certification_digest(value: object) -> str:
+    return sha256(
+        json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("utf-8")
+    ).hexdigest()
+
+
+def _certification_fixture(
+    schema: Mapping[str, object], *, key: str, package_id: str | None = None
+) -> object:
+    """Create a deterministic, bounded input from a validated object schema."""
+
+    enum = schema.get("enum")
+    if isinstance(enum, list) and enum:
+        return enum[0]
+    schema_type = schema.get("type")
+    if schema_type == "object":
+        properties = schema.get("properties", {})
+        required = schema.get("required", ())
+        if not isinstance(properties, Mapping) or not isinstance(required, list | tuple):
+            raise ProductionCapabilityError("Certification fixture schema is malformed")
+        return {
+            name: _certification_fixture(properties[name], key=name, package_id=package_id)
+            for name in required
+            if isinstance(name, str)
+            and name in properties
+            and isinstance(properties[name], Mapping)
+        }
+    if schema_type == "array":
+        return []
+    if schema_type == "string":
+        if key == "capability" and package_id is not None:
+            return package_id
+        if key in {"status", "label"}:
+            return "observed"
+        return "certification-input" if key != "salt" else "certification-salt"
+    if schema_type == "integer":
+        return 0
+    if schema_type == "number":
+        return 0.0
+    if schema_type == "boolean":
+        return False
+    raise ProductionCapabilityError("Certification fixture uses unsupported schema")
+
+
+def build_package_certification_plan(
+    package: IntegrationPackage,
+    *,
+    semantic_oracle: CertificationOracle | None = None,
+) -> PackageCertificationPlan:
+    """Derive package-specific cases from trusted validated action declarations."""
+
+    if not isinstance(package, IntegrationPackage):
+        raise ProductionCapabilityError("Certification package is malformed")
+    cases = tuple(
+        CertificationFunctionalCase(
+            f"{item.action_id}:deterministic",
+            item.action_id,
+            cast(Mapping[str, object], _certification_fixture(item.input_schema, key="input")),
+        )
+        for item in package.action_specs
+    )
+    effective_oracle = semantic_oracle
+    if effective_oracle is None:
+
+        def generic_oracle(
+            action: CapabilityActionSpec, _input: Mapping[str, object]
+        ) -> Mapping[str, object]:
+            if action.action_id != "observe":
+                raise ProductionCapabilityError(
+                    "No application-owned semantic oracle is configured for this action"
+                )
+            expected = _certification_fixture(
+                action.output_schema,
+                key="result",
+                package_id=action.package_id,
+            )
+            if not isinstance(expected, Mapping):
+                raise ProductionCapabilityError("Generic certification oracle is not an object")
+            return expected
+
+        effective_oracle = generic_oracle
+    return PackageCertificationPlan(
+        package.package_id,
+        str(package.version),
+        package.package_hash,
+        cases,
+        effective_oracle,
+    )
+
+
 class ProductionCertificationProvider:
     """Application-owned source/certification/activation request boundary."""
 
@@ -1215,21 +1689,79 @@ class ProductionCertificationProvider:
         store: ProductionPackageStore,
         sandbox: ProductionSandboxRunner,
         verification: VerificationEngine,
+        *,
+        semantic_oracle: CertificationOracle | None = None,
     ) -> None:
         self._store = store
         self._sandbox = sandbox
         self._verification = verification
+        self._semantic_oracle = semantic_oracle
 
     def sources(self, package: IntegrationPackage) -> tuple[PackageSourceFile, ...]:
         return self._store.source_files(package)
 
+    def plan(self, package: IntegrationPackage) -> PackageCertificationPlan:
+        plan = build_package_certification_plan(
+            package,
+            semantic_oracle=self._semantic_oracle,
+        )
+        if (
+            plan.package_id != package.package_id
+            or plan.package_version != str(package.version)
+            or plan.package_hash != package.package_hash
+        ):
+            raise ProductionCapabilityError("Certification plan is not package-bound")
+        return plan
+
     def hooks(self, package: IntegrationPackage) -> CertificationHooks:
-        def passed(label: str) -> CertificationStageResult:
-            return CertificationStageResult(True, (label,))
+        plan = self.plan(package)
+        functional: tuple[FunctionalTestEvidence, ...] | None = None
+
+        def functional_tests(item: IntegrationPackage) -> CertificationStageResult:
+            nonlocal functional
+            if item != package:
+                return CertificationStageResult(False, ("Certification package identity changed",))
+            functional = self._run_functional_tests(package, plan)
+            passed = bool(functional) and all(test.passed for test in functional)
+            return CertificationStageResult(
+                passed,
+                tuple(
+                    f"case={test.case_id};action={test.action_id};"
+                    f"input={test.input_digest};actual={test.actual_result_digest};"
+                    f"expected={test.expected_result_digest or 'unavailable'};"
+                    f"schema={test.output_schema_valid};passed={test.passed};"
+                    f"failure={test.failure or 'none'}"
+                    for test in functional
+                )
+                or ("No declared functional certification cases",),
+                verification=tuple(
+                    f"functional evidence:{test.case_id}" for test in functional if test.passed
+                ),
+            )
 
         def sandbox_test(item: IntegrationPackage) -> CertificationStageResult:
-            status = self._sandbox.probe(item)
-            return CertificationStageResult(True, (f"trusted sandbox probe: {status.mode.value}",))
+            status: SandboxSecurityStatus | None
+            try:
+                status, response = self._sandbox.execute(item, "health", {})
+                healthy = (
+                    status is not None
+                    and status.executable_isolation
+                    and response.get("status") == "healthy"
+                    and response.get("capability")
+                    in {item.package_id, *(spec.capability_id for spec in item.action_specs)}
+                )
+            except Exception:
+                healthy = False
+                status = self._sandbox.status()
+                response = {}
+            return CertificationStageResult(
+                healthy,
+                (
+                    f"mode={status.mode.value if status is not None else 'unavailable'};"
+                    f"isolated={status.executable_isolation if status is not None else False};"
+                    f"health_response={_certification_digest(response)}",
+                ),
+            )
 
         def authority(item: IntegrationPackage) -> CertificationStageResult:
             if item.permissions:
@@ -1239,21 +1771,144 @@ class ProductionCertificationProvider:
                 )
             return CertificationStageResult(
                 True,
-                ("read-only package authority surface",),
+                (f"declared permissions={len(item.permissions)}; authority remains broker-bound",),
                 shadow_eligible=True,
                 canary_eligible=True,
             )
 
+        def permission_diff(item: IntegrationPackage) -> CertificationStageResult:
+            return CertificationStageResult(
+                True,
+                (
+                    "validated permission surface:"
+                    f"{','.join(permission.value for permission in item.permissions) or 'none'}",
+                ),
+            )
+
+        def install(item: IntegrationPackage) -> CertificationStageResult:
+            try:
+                sources = self._store.source_files(item)
+                complete = {
+                    entry.path
+                    for entry in item.entries
+                    if entry.boundary is PackageBoundary.PACKAGE_CODE
+                } == {source.path for source in sources}
+                hashes_valid = all(
+                    sha256(source.content.encode("utf-8")).hexdigest()
+                    == item.entry_for(source.path).content_hash
+                    for source in sources
+                )
+                passed = complete and hashes_valid and item.package_hash == _package_digest(item)
+            except Exception:
+                passed = False
+            return CertificationStageResult(
+                passed,
+                (f"stored package content hash verified={passed}",),
+            )
+
+        def healthcheck(item: IntegrationPackage) -> CertificationStageResult:
+            try:
+                status, response = self._sandbox.execute(item, "health", {})
+                passed = (
+                    status.executable_isolation
+                    and response.get("status") == "healthy"
+                    and response.get("capability")
+                    in {item.package_id, *(spec.capability_id for spec in item.action_specs)}
+                )
+                details = (
+                    f"runtime health response digest={_certification_digest(response)};"
+                    f"isolated={status.executable_isolation}"
+                )
+            except Exception:
+                passed = False
+                details = "runtime health request failed"
+            return CertificationStageResult(passed, (details,), health=(details,))
+
+        def verification(item: IntegrationPackage) -> CertificationStageResult:
+            if item != package or functional is None:
+                return CertificationStageResult(False, ("Functional evidence was not produced",))
+            passed = bool(functional) and all(test.passed for test in functional)
+            return CertificationStageResult(
+                passed,
+                tuple(
+                    f"independent semantic oracle evaluated:{test.case_id}" for test in functional
+                ),
+                verification=tuple(
+                    f"semantic case passed:{test.case_id}" for test in functional if test.passed
+                ),
+            )
+
         return CertificationHooks(
             build=lambda item: BuiltPackage(item, self.sources(item)),
-            unit_tests=lambda item: passed("trusted package contract checks passed"),
+            unit_tests=functional_tests,
             sandbox_integration_test=sandbox_test,
-            permission_diff=lambda item: passed("permission diff is empty or broker-bound"),
+            permission_diff=permission_diff,
             authority_decision=authority,
-            install=lambda item: passed("package content is already stored in the package owner"),
-            healthcheck=lambda item: passed("package metadata health check passed"),
-            verification=lambda item: passed("trusted package metadata verification passed"),
+            install=install,
+            healthcheck=healthcheck,
+            verification=verification,
         )
+
+    def _run_functional_tests(
+        self, package: IntegrationPackage, plan: PackageCertificationPlan
+    ) -> tuple[FunctionalTestEvidence, ...]:
+        from jarvis.generated_capability import action_output_model, validate_action_input
+
+        results: list[FunctionalTestEvidence] = []
+        for case in plan.functional_cases:
+            action = next(
+                (item for item in package.action_specs if item.action_id == case.action_id), None
+            )
+            if action is None:
+                raise ProductionCapabilityError("Certification case names an undeclared action")
+            input_digest = _certification_digest(dict(case.input))
+            expected_digest: str | None = None
+            actual_digest = _certification_digest({"error": "no-result"})
+            output_valid = False
+            passed = False
+            failure: str | None = None
+            try:
+                validated = validate_action_input(action, case.input)
+                _, response = self._sandbox.execute(
+                    package, action.action_id, validated.model_dump(mode="json")
+                )
+                if not isinstance(response, Mapping):
+                    raise ProductionCapabilityError("Certification response is not an object")
+                output = action_output_model(action).model_validate(dict(response), strict=True)
+                normalized = cast(Mapping[str, object], output.model_dump(mode="json"))
+                actual_digest = _certification_digest(dict(normalized))
+                output_valid = True
+                if plan.semantic_oracle is not None:
+                    expected = plan.semantic_oracle(action, case.input)
+                    if not isinstance(expected, Mapping):
+                        raise ProductionCapabilityError("Certification oracle returned non-object")
+                    expected_output = action_output_model(action).model_validate(
+                        dict(expected), strict=True
+                    )
+                    expected_normalized = cast(
+                        Mapping[str, object], expected_output.model_dump(mode="json")
+                    )
+                    expected_digest = _certification_digest(dict(expected_normalized))
+                    passed = dict(normalized) == dict(expected_normalized)
+                    if not passed:
+                        failure = "independent semantic oracle mismatch"
+                else:
+                    failure = "independent semantic oracle unavailable"
+            except Exception as error:
+                failure = f"certification execution rejected:{type(error).__name__}"
+            results.append(
+                FunctionalTestEvidence(
+                    case.case_id,
+                    case.action_id,
+                    input_digest,
+                    actual_digest,
+                    expected_digest,
+                    output_valid,
+                    passed,
+                    failure,
+                )
+            )
+        return tuple(results)
 
     def request(
         self,
@@ -1385,16 +2040,25 @@ class ProductionActivationBoundary:
 
 class ProductionVerificationEvidence:
     def __init__(
-        self, registry: CapabilityRegistry, lifecycle: object, store: ProductionPackageStore
+        self,
+        registry: CapabilityRegistry,
+        lifecycle: object,
+        store: ProductionPackageStore,
+        *,
+        sandbox: ProductionSandboxRunner | None = None,
+        semantic_oracle: CertificationOracle | None = None,
     ) -> None:
         self._registry = registry
         self._lifecycle = lifecycle
         self._store = store
+        self._sandbox = sandbox
+        self._semantic_oracle = semantic_oracle
 
     async def collect(
         self, capability_id: str, original_goal: str, stage: AcquisitionStage
     ) -> Sequence[EvidenceRecord]:
-        del original_goal
+        if type(original_goal) is not str or not original_goal.strip():
+            return ()
         if stage is not AcquisitionStage.VERIFYING:
             return ()
         try:
@@ -1403,9 +2067,9 @@ class ProductionVerificationEvidence:
             return ()
         if manifest.lifecycle is not CapabilityLifecycle.ACTIVE:
             return ()
+        goal_digest = sha256(original_goal.encode("utf-8")).hexdigest()
         source = "trusted.capability.registry"
         if manifest.integration_owner.startswith("generated."):
-            source = "trusted.package.runtime"
             try:
                 package = self._store.load(
                     manifest.integration_owner, str(manifest.version), manifest.content_hash
@@ -1414,10 +2078,45 @@ class ProductionVerificationEvidence:
                     return ()
             except ProductionCapabilityError:
                 return ()
+            if self._sandbox is None:
+                return ()
+            try:
+                provider = ProductionCertificationProvider(
+                    self._store,
+                    self._sandbox,
+                    VerificationEngine(),
+                    semantic_oracle=self._semantic_oracle,
+                )
+                functional = provider._run_functional_tests(  # noqa: SLF001
+                    package, provider.plan(package)
+                )
+            except Exception:
+                return ()
+            if not functional or not all(item.passed for item in functional):
+                return ()
+            source = (
+                f"trusted.package.semantic:{package.package_id}:{package.version}:"
+                f"{package.package_hash}:goal={goal_digest}"
+            )
+            # The coordinator's verification plan names the capability; the
+            # source and bound digests carry the stronger semantic evidence.
+            criterion = f"capability:{capability_id}"
+            return (
+                EvidenceRecord(
+                    EvidenceType.CUSTOM,
+                    source,
+                    datetime.now(UTC),
+                    timedelta(minutes=5),
+                    1.0,
+                    criterion,
+                    criterion,
+                    level=VerificationLevel.INTEGRATION_VERIFIED,
+                ),
+            )
         return (
             EvidenceRecord(
                 EvidenceType.CUSTOM,
-                source,
+                f"{source}:goal={goal_digest}",
                 datetime.now(UTC),
                 timedelta(minutes=5),
                 1.0,
@@ -1534,9 +2233,19 @@ class ProductionProvisioningProvider:
 
 
 class ProductionSetupHandler:
+    def __init__(
+        self,
+        candidates: Callable[[SetupStep, SetupContext], tuple[SetupAdoptionCandidate, ...]]
+        | None = None,
+    ) -> None:
+        self._candidates = candidates
+
     async def inspect(self, step: SetupStep, context: SetupContext) -> SetupInspection:
-        del step, context
-        return SetupInspection(detail="Generic setup handler is ready for typed actions")
+        candidates = self._candidates(step, context) if self._candidates is not None else ()
+        return SetupInspection(
+            candidates=candidates,
+            detail="Generic setup handler is ready for typed actions",
+        )
 
     async def prepare(
         self,
@@ -1585,10 +2294,16 @@ class ProductionOpportunityPreparation:
                 (f"opportunity-research:{opportunity.opportunity_id}",),
             )
         report = await self._coordinator.prepare(acquisition)
+        if report.active or report.stage == "certifying":
+            state = OpportunityPreparationState.READY
+        elif report.stage == "waiting_for_approval":
+            state = OpportunityPreparationState.WAITING_FOR_AUTHORITY
+        elif report.stage == "recovering":
+            state = OpportunityPreparationState.UNKNOWN_OUTCOME
+        else:
+            state = OpportunityPreparationState.FAILED
         return OpportunityPreparationResult(
-            OpportunityPreparationState.READY
-            if report.evidence and not report.active
-            else OpportunityPreparationState.FAILED,
+            state,
             report.detail or "Trusted capability preparation completed",
             opportunity.likely_required_authority,
             tuple(report.evidence),
@@ -1618,38 +2333,250 @@ def _run_in_new_thread(coro: Coroutine[object, object, _ThreadResult]) -> _Threa
     return result[0]
 
 
+def _effect_payload(effect: EffectMetadata) -> dict[str, object]:
+    return {
+        "classification": effect.classification.value,
+        "reversibility": effect.reversibility.value,
+        "preview_supported": effect.preview_supported,
+        "compensation": effect.compensation,
+        "produced_artifacts": list(effect.produced_artifacts),
+        "emitted_events": list(effect.emitted_events),
+    }
+
+
+def _effect_from_payload(value: object) -> EffectMetadata:
+    if not isinstance(value, dict):
+        raise ProductionCapabilityError("Stored effect metadata is malformed")
+    preview_supported = value.get("preview_supported", False)
+    compensation = value.get("compensation")
+    produced_artifacts = value.get("produced_artifacts", [])
+    emitted_events = value.get("emitted_events", [])
+    if (
+        type(preview_supported) is not bool
+        or (compensation is not None and type(compensation) is not str)
+        or not isinstance(produced_artifacts, list | tuple)
+        or not isinstance(emitted_events, list | tuple)
+        or any(type(item) is not str for item in (*produced_artifacts, *emitted_events))
+    ):
+        raise ProductionCapabilityError("Stored effect metadata is malformed")
+    try:
+        return EffectMetadata(
+            EffectClassification(str(value["classification"])),
+            Reversibility(str(value["reversibility"])),
+            preview_supported,
+            compensation,
+            tuple(produced_artifacts),
+            tuple(emitted_events),
+        )
+    except (KeyError, TypeError, ValueError) as error:
+        raise ProductionCapabilityError("Stored effect metadata is malformed") from error
+
+
+def _action_spec_payload(spec: CapabilityActionSpec) -> dict[str, object]:
+    return {
+        "capability_id": spec.capability_id,
+        "package_id": spec.package_id,
+        "package_version": str(spec.package_version),
+        "package_hash": spec.package_hash,
+        "action_id": spec.action_id,
+        "semantic_name": spec.semantic_name,
+        "description": spec.description,
+        "input_schema": action_schema_dict(spec.input_schema),
+        "output_schema": action_schema_dict(spec.output_schema),
+        "effect": _effect_payload(spec.effect),
+        "required_permissions": [item.value for item in spec.required_permissions],
+        "target_scope": list(spec.target_scope),
+        "idempotent": spec.idempotent,
+        "retryable": spec.retryable,
+        "verification": list(spec.verification),
+        "compensation": spec.compensation,
+    }
+
+
+def _action_spec_from_payload(
+    value: object,
+    package_id: str,
+    version: SemanticVersion,
+    package_hash: str,
+) -> CapabilityActionSpec:
+    if not isinstance(value, dict):
+        raise ProductionCapabilityError("Stored action declaration is malformed")
+    if value.get("package_id") != package_id or value.get("package_version") != str(version):
+        raise ProductionCapabilityError("Stored action declaration identity is inconsistent")
+    if value.get("package_hash") != package_hash:
+        raise ProductionCapabilityError("Stored action declaration hash is inconsistent")
+    permissions = value.get("required_permissions", [])
+    target_scope = value.get("target_scope", [])
+    verification = value.get("verification", ["adapter_output_schema"])
+    input_schema = value.get("input_schema")
+    output_schema = value.get("output_schema")
+    compensation = value.get("compensation")
+    if (
+        not isinstance(permissions, list | tuple)
+        or not isinstance(target_scope, list | tuple)
+        or not isinstance(verification, list | tuple)
+        or not isinstance(input_schema, Mapping)
+        or not isinstance(output_schema, Mapping)
+        or any(type(item) is not str for item in (*permissions, *target_scope, *verification))
+        or type(value.get("idempotent", True)) is not bool
+        or type(value.get("retryable", False)) is not bool
+        or (compensation is not None and type(compensation) is not str)
+    ):
+        raise ProductionCapabilityError("Stored action declaration metadata is malformed")
+    try:
+        return CapabilityActionSpec(
+            str(value["capability_id"]),
+            package_id,
+            version,
+            package_hash,
+            str(value["action_id"]),
+            str(value["semantic_name"]),
+            str(value["description"]),
+            input_schema,
+            output_schema,
+            _effect_from_payload(value["effect"]),
+            tuple(
+                sorted(
+                    {Permission(item) for item in permissions},
+                    key=lambda item: item.value,
+                )
+            ),
+            tuple(target_scope),
+            bool(value.get("idempotent", True)),
+            bool(value.get("retryable", False)),
+            tuple(verification),
+            compensation,
+        )
+    except (KeyError, TypeError, ValueError) as error:
+        raise ProductionCapabilityError("Stored action declaration is malformed") from error
+
+
+def _stored_text_tuple(value: object, field: str) -> tuple[str, ...]:
+    if not isinstance(value, list | tuple) or any(
+        type(item) is not str or not item.strip() or len(item) > 2_000 or "\x00" in item
+        for item in value
+    ):
+        raise ProductionCapabilityError(f"{field} are malformed")
+    return tuple(value)
+
+
+def _stored_datetime(value: object) -> datetime | None:
+    if value is None:
+        return None
+    if type(value) is not str:
+        raise ProductionCapabilityError("Stored timestamp is malformed")
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError as error:
+        raise ProductionCapabilityError("Stored timestamp is malformed") from error
+    if parsed.tzinfo is None:
+        raise ProductionCapabilityError("Stored timestamp must be timezone-aware")
+    return parsed
+
+
 def _manifest_for(
     package: IntegrationPackage, request: CapabilityAcquisitionRequest
 ) -> CapabilityManifest:
     platform = ToolPlatform.WINDOWS if sys.platform.startswith("win") else ToolPlatform.LINUX
+    action_specs = package.action_specs
+    if action_specs:
+        capability_ids = {item.capability_id for item in action_specs}
+        if capability_ids != {request.gap.desired_capability}:
+            raise ProductionCapabilityError(
+                "Generated action capabilities do not match the requested gap"
+            )
+        actions = ("inspect", *(item.action_id for item in action_specs))
+        input_schema = action_schema_dict(action_specs[0].input_schema)
+        output_schema = action_schema_dict(action_specs[0].output_schema)
+        permissions = tuple(sorted(set(package.permissions), key=lambda item: item.value))
+        effect = (
+            action_specs[0].effect
+            if all(item.effect == action_specs[0].effect for item in action_specs)
+            else EffectMetadata(EffectClassification.UNKNOWN, Reversibility.UNKNOWN)
+        )
+        verification = tuple(
+            dict.fromkeys(item for action in action_specs for item in action.verification)
+        ) or ("trusted package runtime",)
+        network_domains = tuple(
+            sorted(
+                {
+                    scope
+                    for action in action_specs
+                    if Permission.NETWORK_REQUEST in action.required_permissions
+                    for scope in action.target_scope
+                }
+            )
+        )
+        if any(
+            item.effect.classification
+            in {
+                EffectClassification.DESTRUCTIVE,
+                EffectClassification.UNKNOWN,
+            }
+            for item in action_specs
+        ):
+            risk = Risk.CRITICAL
+        elif permissions or any(
+            item.effect.classification is EffectClassification.EXTERNAL_EFFECT
+            for item in action_specs
+        ):
+            risk = Risk.HIGH
+        elif any(
+            item.effect.classification is EffectClassification.LOCAL_MUTATION
+            for item in action_specs
+        ):
+            risk = Risk.MEDIUM
+        else:
+            risk = Risk.LOW
+    else:
+        actions = ("inspect",)
+        input_schema = {
+            "type": "object",
+            "properties": {},
+            "required": [],
+            "additionalProperties": False,
+        }
+        output_schema = {
+            "type": "object",
+            "properties": {
+                "status": {"type": "string"},
+                "capability": {"type": "string"},
+            },
+            "required": ["status", "capability"],
+            "additionalProperties": False,
+        }
+        permissions = package.permissions
+        risk = Risk.LOW
+        effect = EffectMetadata(EffectClassification.OBSERVATION, Reversibility.READ_ONLY)
+        verification = ("trusted package runtime",)
+        network_domains = ()
+    now = datetime.now(UTC)
     credential_references = tuple(item.name for item in package.secret_schema)
     return CapabilityManifest(
-        package.package_id,
-        package.package_id,
+        request.gap.desired_capability,
+        request.gap.desired_capability,
         package.version,
         package.package_id,
-        ("inspect",),
-        {"request": "object"},
-        {"status": "string", "capability": "string"},
-        package.permissions,
-        Risk.LOW,
+        actions,
+        input_schema,
+        output_schema,
+        permissions,
+        risk,
         frozenset({platform}),
-        False,
-        (),
+        Permission.NETWORK_REQUEST in permissions,
+        network_domains,
         credential_references,
         package.dependency_lock,
         package.settings_schema,
-        CapabilityHealth(
-            ToolHealthStatus.AVAILABLE, "certified package runtime", datetime.now(UTC)
-        ),
-        ("trusted package runtime",),
+        CapabilityHealth(ToolHealthStatus.AVAILABLE, "certified package runtime", now),
+        verification,
         package.ui_assets and ("declarative UI",) or (),
         ("package:" + package.package_id, "goal:" + str(request.goal_id or UUID(int=0))),
         package.package_hash,
         CapabilityLifecycle.ACTIVE,
-        EffectMetadata(EffectClassification.OBSERVATION, Reversibility.READ_ONLY),
+        effect,
         confidence=1.0,
-        last_verified=datetime.now(UTC),
+        last_verified=now,
     )
 
 
@@ -1698,6 +2625,7 @@ def _package_payload(package: IntegrationPackage) -> dict[str, object]:
         },
         "package_hash": package.package_hash,
         "ui_manifest_hash": package.ui_manifest_hash,
+        "action_specs": [_action_spec_payload(item) for item in package.action_specs],
     }
 
 
@@ -1706,6 +2634,9 @@ def _package_digest(package: IntegrationPackage) -> str:
 
     payload = _package_payload(package)
     payload.pop("package_hash", None)
+    for item in cast(list[object], payload.get("action_specs", [])):
+        if isinstance(item, dict):
+            item["package_hash"] = ""
     return sha256(
         json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
     ).hexdigest()
@@ -1733,6 +2664,17 @@ def _package_from_payload(value: object) -> IntegrationPackage:
     if not isinstance(value, dict) or value.get("schema") != 1:
         raise ProductionCapabilityError("Stored package schema is unsupported")
     try:
+        package_id = str(value["package_id"])
+        major, minor, patch = (int(item) for item in str(value["version"]).split("."))
+        version = SemanticVersion(major, minor, patch)
+        package_hash = str(value["package_hash"])
+        raw_action_specs = value.get("action_specs", ())
+        if not isinstance(raw_action_specs, list | tuple):
+            raise TypeError("Stored action declarations are malformed")
+        action_specs = tuple(
+            _action_spec_from_payload(item, package_id, version, package_hash)
+            for item in raw_action_specs
+        )
         provenance = PackageProvenance(**cast(dict[str, str], value["provenance"]))
         entries = tuple(
             PackageEntry(
@@ -1744,10 +2686,9 @@ def _package_from_payload(value: object) -> IntegrationPackage:
             )
             for item in cast(list[dict[str, object]], value["entries"])
         )
-        major, minor, patch = (int(item) for item in str(value["version"]).split("."))
         return IntegrationPackage(
-            str(value["package_id"]),
-            SemanticVersion(major, minor, patch),
+            package_id,
+            version,
             PackageLayout(**cast(dict[str, str], value["layout"])),
             entries,
             tuple(str(item) for item in value.get("tools", [])),
@@ -1779,9 +2720,10 @@ def _package_from_payload(value: object) -> IntegrationPackage:
             ),
             provenance,
             tuple(str(item) for item in value.get("dependency_lock", [])),
-            str(value["package_hash"]),
+            package_hash,
             PackageOperationPolicy(),
             str(value.get("ui_manifest_hash", "")),
+            action_specs=action_specs,
         )
     except (KeyError, TypeError, ValueError) as error:
         raise ProductionCapabilityError("Stored package metadata is malformed") from error
@@ -1793,8 +2735,36 @@ def _manifest_payload(manifest: CapabilityManifest) -> dict[str, object]:
         "name": manifest.name,
         "version": str(manifest.version),
         "integration_owner": manifest.integration_owner,
+        "actions": list(manifest.actions),
+        "input_schema": action_schema_dict(manifest.input_schema),
+        "output_schema": action_schema_dict(manifest.output_schema),
+        "permissions": [item.value for item in manifest.permissions],
+        "risk": manifest.risk.value,
+        "supported_platforms": [item.value for item in manifest.supported_platforms],
+        "network_required": manifest.network_required,
+        "network_domains": list(manifest.network_domains),
+        "credential_references": list(manifest.credential_references),
+        "dependencies": list(manifest.dependencies),
+        "configuration": list(manifest.configuration),
+        "health": {
+            "status": manifest.health.status.value,
+            "detail": manifest.health.detail,
+            "checked_at": (
+                manifest.health.checked_at.isoformat()
+                if manifest.health.checked_at is not None
+                else None
+            ),
+        },
+        "verification": list(manifest.verification),
+        "ui_voice": list(manifest.ui_voice),
+        "provenance": list(manifest.provenance),
         "content_hash": manifest.content_hash,
         "lifecycle": manifest.lifecycle.value,
+        "effect": _effect_payload(manifest.effect),
+        "confidence": manifest.confidence,
+        "last_verified": (
+            manifest.last_verified.isoformat() if manifest.last_verified is not None else None
+        ),
     }
 
 
@@ -1803,32 +2773,80 @@ def _manifest_from_payload(value: object) -> CapabilityManifest:
         raise ProductionCapabilityError("Stored capability manifest is malformed")
     try:
         major, minor, patch = (int(item) for item in str(value["version"]).split("."))
-        platform = ToolPlatform.WINDOWS if sys.platform.startswith("win") else ToolPlatform.LINUX
+        current_platform = (
+            ToolPlatform.WINDOWS if sys.platform.startswith("win") else ToolPlatform.LINUX
+        )
+        raw_platforms = value.get("supported_platforms", [current_platform.value])
+        if not isinstance(raw_platforms, list | tuple):
+            raise TypeError("Stored capability platforms are malformed")
+        platforms = frozenset(ToolPlatform(str(item)) for item in raw_platforms)
+        raw_actions = value.get("actions", ["inspect"])
+        actions = _stored_text_tuple(raw_actions, "Stored capability actions")
+        raw_permissions = value.get("permissions", [])
+        permissions = tuple(
+            sorted(
+                {
+                    Permission(str(item))
+                    for item in _stored_text_tuple(raw_permissions, "Stored permissions")
+                },
+                key=lambda item: item.value,
+            )
+        )
+        raw_health = value.get("health", {})
+        if not isinstance(raw_health, dict):
+            raise TypeError("Stored capability health is malformed")
+        health_checked = _stored_datetime(raw_health.get("checked_at"))
+        last_verified = _stored_datetime(value.get("last_verified"))
+        raw_effect = value.get(
+            "effect",
+            {"classification": "observation", "reversibility": "read_only"},
+        )
+        input_schema = value.get("input_schema")
+        output_schema = value.get("output_schema")
+        if not isinstance(input_schema, Mapping) or not isinstance(output_schema, Mapping):
+            raise TypeError("Stored capability schemas are malformed")
+        normalized_input = validate_action_schema(input_schema, "Stored capability input schema")
+        normalized_output = validate_action_schema(output_schema, "Stored capability output schema")
+        network_required = value.get("network_required", False)
+        if type(network_required) is not bool:
+            raise TypeError("Stored network requirement is malformed")
         return CapabilityManifest(
             str(value["capability_id"]),
             str(value["name"]),
             SemanticVersion(major, minor, patch),
             str(value["integration_owner"]),
-            ("inspect",),
-            {"request": "object"},
-            {"status": "string", "capability": "string"},
-            (),
-            Risk.LOW,
-            frozenset({platform}),
-            False,
-            (),
-            (),
-            (),
-            (),
-            CapabilityHealth(ToolHealthStatus.AVAILABLE, "certified package runtime"),
-            ("trusted package runtime",),
-            (),
-            ("stored package manifest",),
+            actions,
+            normalized_input,
+            normalized_output,
+            permissions,
+            Risk(str(value.get("risk", Risk.LOW.value))),
+            platforms,
+            network_required,
+            _stored_text_tuple(value.get("network_domains", []), "Stored network domains"),
+            _stored_text_tuple(
+                value.get("credential_references", []), "Stored credential references"
+            ),
+            _stored_text_tuple(value.get("dependencies", []), "Stored dependencies"),
+            _stored_text_tuple(value.get("configuration", []), "Stored configuration"),
+            CapabilityHealth(
+                ToolHealthStatus(str(raw_health.get("status", ToolHealthStatus.AVAILABLE.value))),
+                str(raw_health.get("detail", "certified package runtime")),
+                health_checked,
+            ),
+            _stored_text_tuple(
+                value.get("verification", ["trusted package runtime"]),
+                "Stored verification",
+            ),
+            _stored_text_tuple(value.get("ui_voice", []), "Stored UI metadata"),
+            _stored_text_tuple(
+                value.get("provenance", ["stored package manifest"]),
+                "Stored provenance",
+            ),
             str(value["content_hash"]),
             CapabilityLifecycle(str(value["lifecycle"])),
-            EffectMetadata(EffectClassification.OBSERVATION, Reversibility.READ_ONLY),
-            confidence=1.0,
-            last_verified=datetime.now(UTC),
+            _effect_from_payload(raw_effect),
+            confidence=float(value.get("confidence", 1.0)),
+            last_verified=last_verified,
         )
     except (KeyError, TypeError, ValueError) as error:
         raise ProductionCapabilityError("Stored capability manifest is malformed") from error
@@ -1836,6 +2854,8 @@ def _manifest_from_payload(value: object) -> CapabilityManifest:
 
 __all__ = [
     "AgentRuntimeCapabilityGenerator",
+    "CertificationFunctionalCase",
+    "CertificationOracle",
     "CapabilityGenerationProvider",
     "CapabilityLifecycleRestoreResult",
     "CapabilityLifecycleRestorer",
@@ -1852,4 +2872,7 @@ __all__ = [
     "ProductionSandboxRunner",
     "ProductionSetupHandler",
     "ProductionVerificationEvidence",
+    "FunctionalTestEvidence",
+    "PackageCertificationPlan",
+    "build_package_certification_plan",
 ]

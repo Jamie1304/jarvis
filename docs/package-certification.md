@@ -62,3 +62,26 @@ mismatched, or caller-fabricated evidence fails the `VERIFICATION` stage.
 render artifacts remain owned by ArtifactStore. Any package/source/UI manifest
 change requires a fresh attestation. Activation applies the same certification
 record and has an additional fail-closed UI-attestation binding check.
+
+## Production package-specific evidence
+
+Production composition derives a `PackageCertificationPlan` from the validated
+package hash and declared `CapabilityActionSpec` values. Each bounded
+`CertificationFunctionalCase` is sent to the exact package entrypoint through
+the native sandbox. `FunctionalTestEvidence` records the case/action IDs,
+input digest, actual result digest, expected digest, output-schema validation,
+and pass/fail result. A protocol-ready process or an `ACTIVE` registry row is
+not functional or semantic evidence.
+
+For the generic `observe` contract, the trusted application owns the expected
+bounded observation shape. Other actions require an application-owned semantic
+oracle; package output, model prose, and a package-supplied `verified` flag
+cannot supply that oracle. Missing or mismatched oracle evidence fails
+certification closed. Health requires a real bounded `health` request and a
+healthy response bound to the package's declared capability.
+
+The plan and evidence are bound to the exact package/version/hash. Changing
+source, dependencies, manifest, action schema, or the trusted verification
+contract requires fresh certification. Effectful actions additionally require
+the normal PermissionBroker and trusted broker/effect-observation path; this
+semantic certification does not claim an external effect occurred.

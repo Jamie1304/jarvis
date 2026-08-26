@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from datetime import UTC, datetime
 from hashlib import sha256
 from uuid import uuid4
 
@@ -39,6 +40,7 @@ from jarvis.integration_package import (
 )
 from jarvis.permissions.models import Risk
 from jarvis.provisioning import ProvisioningPlan, ProvisioningPlanState, ProvisioningResult
+from jarvis.resources import ResourceGovernor, ResourceSnapshot
 from jarvis.setup_conductor import (
     AdoptionCandidate as SetupAdoptionCandidate,
 )
@@ -134,6 +136,7 @@ def factory(
     setup_completed: bool = True,
     setup_candidate: SetupAdoptionCandidate | None = None,
     adoption_policy: AdoptionPolicy | None = None,
+    resource_governor: ResourceGovernor | None = None,
 ) -> CapabilityFactory:
     setup = SetupConductor(
         {"runtime": SetupFixture(completed=setup_completed, candidate=setup_candidate)},
@@ -141,11 +144,50 @@ def factory(
         lambda plan: _provision(plan),
         adoption_policy=adoption_policy,
     )
-    return CapabilityFactory(registry or CapabilityRegistry(), setup, generator)
+    return CapabilityFactory(
+        registry or CapabilityRegistry(), setup, generator, resource_governor=resource_governor
+    )
 
 
 async def _provision(plan: ProvisioningPlan) -> ProvisioningResult:
     return ProvisioningResult(plan.plan_id, ProvisioningPlanState.VERIFIED, (), "verified")
+
+
+class _ResourceTelemetry:
+    def snapshot(self) -> ResourceSnapshot:
+        return ResourceSnapshot(
+            datetime.now(UTC),
+            cpu_utilization=0.1,
+            cpu_cores=8,
+            ram_total_bytes=16_000,
+            ram_available_bytes=12_000,
+            disk_free_bytes=20_000,
+            on_ac_power=True,
+            battery_level=0.9,
+        )
+
+
+@pytest.mark.asyncio
+async def test_successful_acquisition_releases_resource_reservation_once() -> None:
+    governor = ResourceGovernor(_ResourceTelemetry())
+    current_gap = gap()
+    result = await factory(Generator(generated()), resource_governor=governor).acquire(
+        current_gap,
+        SolutionReport(
+            current_gap,
+            (SolutionOption("build", FactoryStrategy.GENERATE_ADAPTER, "generated"),),
+        ),
+        AdoptionCandidates(),
+        WorkspaceContext("resource-workspace"),
+        EnvironmentGraph(),
+        {},
+    )
+    assert result.resource_decision is not None
+    reservations = governor.reservations()
+    assert len(reservations) == 1
+    assert not governor.reservations(active_only=True)
+    assert reservations[0].release_reason is not None
+    assert reservations[0].release_reason.value == "complete"
 
 
 def generated(

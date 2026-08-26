@@ -15,7 +15,7 @@ import sqlite3
 import threading
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from pathlib import Path
 from typing import Protocol
@@ -35,10 +35,20 @@ from jarvis.planning.models import (
     EffectOutcome,
     ExecutionBudgets,
     FailureKind,
+    PlanningTask,
     PlanningTaskStatus,
 )
+from jarvis.planning.validation import PlanProposal
 from jarvis.task_controller import TaskController
 from jarvis.trace import TraceEventType, TraceService
+from jarvis.verification import (
+    EvidenceRecord,
+    EvidenceType,
+    VerificationEngine,
+    VerificationLevel,
+    VerificationPlan,
+    VerificationResult,
+)
 
 
 class GoalSupervisorError(RuntimeError):
@@ -334,6 +344,7 @@ class CapabilityAcquisitionReport:
     usage: GoalUsage = GoalUsage()
     evidence: tuple[str, ...] = ()
     detail: str = ""
+    stage: str | None = None
 
     def __post_init__(self) -> None:
         if type(self.active) is not bool:
@@ -343,6 +354,8 @@ class CapabilityAcquisitionReport:
         _labels(self.evidence, "Capability acquisition evidence")
         if self.detail:
             _text(self.detail, "Capability acquisition detail")
+        if self.stage is not None:
+            _text(self.stage, "Capability acquisition stage", 128)
 
 
 @dataclass(frozen=True, slots=True)
@@ -526,16 +539,48 @@ class FactoryCapabilityAcquirer:
 class PlanningGoalTaskRunner:
     """Run one bounded goal attempt through the canonical TaskController."""
 
-    def __init__(self, controller: TaskController) -> None:
+    def __init__(
+        self,
+        controller: TaskController,
+        *,
+        generated_planner: object | None = None,
+        verification_engine: VerificationEngine | None = None,
+        trace: TraceService | None = None,
+    ) -> None:
         self._controller = controller
+        self._generated_planner = generated_planner
+        if verification_engine is not None and type(verification_engine) is not VerificationEngine:
+            raise GoalSupervisorValidationError("Generated verification engine is malformed")
+        if trace is not None and type(trace) is not TraceService:
+            raise GoalSupervisorValidationError("Generated trace service is malformed")
+        self._verification = verification_engine
+        self._trace = trace
 
     async def run(self, intent: GoalIntent, budget: GoalBudget) -> GoalExecutionReport:
-        task = await self._controller.submit_task(
-            intent.original_outcome,
-            assumptions=intent.assumptions,
-            constraints=intent.constraints,
-            budgets=budget.planning_budgets(),
-        )
+        proposal: PlanProposal | None = None
+        if self._generated_planner is not None:
+            propose = getattr(self._generated_planner, "proposal_for", None)
+            if not callable(propose):
+                raise GoalSupervisorValidationError("Generated planner is malformed")
+            candidate = propose(intent)
+            if candidate is not None and not isinstance(candidate, PlanProposal):
+                raise GoalSupervisorValidationError(
+                    "Generated planner returned a malformed proposal"
+                )
+            proposal = candidate
+        if proposal is None:
+            task = await self._controller.submit_task(
+                intent.original_outcome,
+                assumptions=intent.assumptions,
+                constraints=intent.constraints,
+                budgets=budget.planning_budgets(),
+            )
+        else:
+            task = await self._controller.submit_proposal(
+                proposal,
+                budgets=budget.planning_budgets(),
+                provenance=("goal-supervisor.generated-action",),
+            )
         status = {
             PlanningTaskStatus.COMPLETED: GoalExecutionStatus.COMPLETED,
             PlanningTaskStatus.WAITING_FOR_PERMISSION: GoalExecutionStatus.WAITING_FOR_PERMISSION,
@@ -550,6 +595,23 @@ class PlanningGoalTaskRunner:
             and status is GoalExecutionStatus.FAILED
         )
         evidence = task.result_evidence or (task.error.evidence if task.error else ())
+        if proposal is not None and status is GoalExecutionStatus.COMPLETED:
+            verification = self._verify_generated_result(task, proposal)
+            verification_evidence = tuple(
+                f"generated-verification:{item}" for item in verification.missing_criteria
+            )
+            if verification.passed:
+                evidence = evidence + ("generated action independently verified",)
+            else:
+                evidence = evidence + verification_evidence
+                status = GoalExecutionStatus.FAILED
+            detail = (
+                "generated action completed and independently verified"
+                if verification.passed
+                else "generated action execution did not pass independent verification"
+            )
+        else:
+            detail = task.error.message if task.error else "task completed"
         return GoalExecutionReport(
             status,
             task.task_id,
@@ -557,10 +619,68 @@ class PlanningGoalTaskRunner:
                 retries=task.usage.retries,
             ),
             evidence,
-            task.error.message if task.error else "task completed",
+            detail,
             retry_safe,
             EffectOutcome.UNKNOWN_OUTCOME if unknown else None,
         )
+
+    def _verify_generated_result(
+        self, task: PlanningTask, proposal: PlanProposal
+    ) -> VerificationResult:
+        if self._verification is None:
+            raise GoalSupervisorValidationError(
+                "Generated action execution requires an application-owned verifier"
+            )
+        task_id = task.task_id
+        if not isinstance(task_id, UUID):  # pragma: no cover - PlanningTask validates this
+            raise GoalSupervisorValidationError("Generated task identity is malformed")
+        plan = self._controller.inspect_plan(task_id)
+        records: list[EvidenceRecord] = []
+        if plan is not None:
+            for step in plan.steps:
+                result = step.result
+                if result is None or not step.tool_id.startswith("generated."):
+                    continue
+                for criterion in step.expected_evidence:
+                    if (
+                        criterion not in result.evidence
+                        or step.expected_output not in result.output_json
+                    ):
+                        continue
+                    records.append(
+                        EvidenceRecord(
+                            EvidenceType.CUSTOM,
+                            "trusted.generated.adapter",
+                            datetime.now(UTC),
+                            timedelta(minutes=5),
+                            1.0,
+                            criterion,
+                            criterion,
+                            level=VerificationLevel.INTEGRATION_VERIFIED,
+                        )
+                    )
+        verification_plan = VerificationPlan(
+            proposal.goal,
+            tuple(proposal.completion_criteria),
+            allowed_evidence_types=frozenset({EvidenceType.CUSTOM}),
+            required_level=VerificationLevel.INTEGRATION_VERIFIED,
+            independent_observation_required=True,
+            ask_user_when_unobservable=False,
+        )
+        verification = self._verification.evaluate(verification_plan, records)
+        if self._trace is not None:
+            self._trace.record(
+                TraceEventType.VERIFICATION,
+                "Generated action result independently verified",
+                task_id=task_id,
+                correlation_id=task_id,
+                result={
+                    "passed": verification.passed,
+                    "missing_criteria": verification.missing_criteria,
+                },
+                evidence=tuple(item.expected for item in verification.evidence),
+            )
+        return verification
 
 
 class GoalSupervisorStore:

@@ -12,6 +12,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from enum import StrEnum
 
+from jarvis.capabilities import CapabilityActionSpec
 from jarvis.permissions.models import Permission
 from jarvis.tools.models import SemanticVersion
 
@@ -269,6 +270,7 @@ class IntegrationPackage:
     package_hash: str = ""
     operation_policy: PackageOperationPolicy = PackageOperationPolicy()
     ui_manifest_hash: str = ""
+    action_specs: tuple[CapabilityActionSpec, ...] = ()
 
     def __post_init__(self) -> None:
         _bounded(self.package_id, "Package ID", 128)
@@ -317,6 +319,19 @@ class IntegrationPackage:
             _hash(self.package_hash, "Package hash")
         if self.ui_manifest_hash:
             _hash(self.ui_manifest_hash, "UI manifest hash")
+        if not isinstance(self.action_specs, tuple) or len(self.action_specs) > 64:
+            raise PackageContractError("Package action declarations are invalid")
+        if any(not isinstance(action, CapabilityActionSpec) for action in self.action_specs):
+            raise PackageContractError("Package action declaration is invalid")
+        if len({item.action_id for item in self.action_specs}) != len(self.action_specs):
+            raise PackageContractError("Package action IDs must be unique")
+        for action in self.action_specs:
+            if action.package_id != self.package_id or action.package_version != self.version:
+                raise PackageContractError("Package action identity does not match package")
+            if self.package_hash and action.package_hash != self.package_hash:
+                raise PackageContractError("Package action hash does not match package")
+            if not set(action.required_permissions) <= set(self.permissions):
+                raise PackageContractError("Package action permissions exceed package permissions")
         if self.provenance is None:
             raise PackageContractError("Package provenance is required")
         declared_permissions = set(self.permissions)

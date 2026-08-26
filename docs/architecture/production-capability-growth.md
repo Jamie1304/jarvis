@@ -36,6 +36,25 @@ durable task/control authority; `PermissionBroker` remains mandatory for every
 effectful capability; `VerificationEngine` does not accept model or package
 claims as proof.
 
+Production `SolutionDiscovery` also receives a generic
+`EnvironmentAdoptionCandidateProvider`. It translates bounded local discovery
+observations into advisory candidates only; it does not authenticate or adopt
+them. `SetupConductor` re-inspects the exact candidate through the trusted
+adoption identity/provenance policy and performs the TOCTOU check before any
+attestation. If no compatible candidate is found, the factory continues to
+REUSE/BUILD. A local runtime observation is not offered as a candidate for an
+unrelated capability.
+
+`CapabilityFactory` owns its ResourceGovernor reservation with one
+`try/finally` release boundary. Successful and bounded non-exceptional results
+release as `COMPLETE`; exceptions release as `CRASH`; no terminal path can
+leave an active reservation or release it twice.
+
+Opportunity preparation preserves evidence for failed or uncertain work, but
+evidence does not imply readiness. Only a certified successful preparation is
+`READY_TO_PROPOSE`; waiting, failed, security-blocked, and unknown-outcome
+results remain non-ready and cannot be accepted as a proposal.
+
 ## Model and generation boundary
 
 The configured provider is resolved by `ProviderRegistry` and admitted by
@@ -67,9 +86,21 @@ runtime container object. If the mandatory native boundary cannot be
 established, certification/activation fails closed; it is not downgraded to a
 same-user unrestricted process.
 
-The v1 generated worker is observation-only. A future effectful package must
-declare a typed capability and use the normal trusted host/broker path. A
-package callback cannot create a trusted effect attestation or self-promote.
+The generated worker exposes only its diagnostics (`health`, `inspect`, and
+staged activation probes) plus the exact semantic actions declared in its
+validated `CapabilityActionSpec` records. Each declared action is wrapped by
+the application-owned `GeneratedCapabilityToolAdapter`; input and output
+schemas are strict, and the package process never receives ToolRegistry or
+PermissionBroker authority. Effectful actions must declare broker permissions
+and still use the normal trusted host/broker path. A package callback cannot
+create a trusted effect attestation or self-promote.
+
+The application obtains the activation-only registration port from the sealed
+`ToolRegistry` during composition. `PackageActivationService` supplies the
+exact package, certification, and durable ACTIVE lifecycle evidence; the port
+rejects unsealed registration, non-adapter tools, identity/hash mismatches,
+collisions, and replacement of built-in tools. Quarantine/deactivation removes
+the generated action projection.
 
 ## Activation and restart
 
@@ -108,12 +139,14 @@ retained only for deterministic fixture compositions and is never consulted by
 ## Deterministic proof
 
 `tests/test_v1_acceptance.py::test_v1_production_composition_acquires_randomized_capability_and_restores_it`
-uses no `RuntimeTestFixture`. It supplies only a synthetic provider through the
-production `ProviderRegistry`, then proves generation, package storage, review,
-native sandbox probe, certification, staged activation, trusted attestation,
-ACTIVE projection, safe local invocation, and restart restoration. Existing
-fixture tests remain explicitly test-only observations and do not replace this
-path.
+uses no `RuntimeTestFixture`. It supplies only a randomized synthetic provider
+and local package source through the production `ProviderRegistry`, then proves
+generation of a typed semantic action, package storage, review, native sandbox
+probe, certification, staged activation, trusted registration, selection by
+`PlanningEngine` through `ToolRegistry` and `PermissionBroker`, package-runtime
+execution, schema validation, `VerificationEngine` completion, and restart
+reuse with a different input. Existing fixture tests remain explicitly
+test-only observations and do not replace this path.
 
 The test uses `TestOnlyInMemorySecretBackend` only as an explicit deterministic
 test dependency. Normal production composition uses the Windows-backed

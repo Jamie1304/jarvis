@@ -13,7 +13,7 @@ from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from enum import StrEnum
 from hashlib import sha256
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Protocol
 from uuid import UUID
 
 from jarvis.capability_lifecycle import (
@@ -301,6 +301,14 @@ class _ActivationSession:
     previous: _ActivationSession | None = None
 
 
+class GeneratedActionRegistrar(Protocol):
+    """Trusted application hook for ACTIVE generated semantic actions."""
+
+    def activate(self, package: IntegrationPackage, certification: CertificationRecord) -> None: ...
+
+    def deactivate(self, package_id: str) -> None: ...
+
+
 class PackageActivationService:
     """The sole trusted state machine for staged package activation."""
 
@@ -315,6 +323,7 @@ class PackageActivationService:
         attestation_store: EffectAttestationStore,
         lifecycle_store: SQLiteCapabilityLifecycleStore | None = None,
         require_executable_isolation: bool = False,
+        generated_action_registrar: GeneratedActionRegistrar | None = None,
     ) -> None:
         if not isinstance(hot_load, HotLoadManager) or not isinstance(hooks, ActivationHooks):
             raise ActivationValidationError("Activation service dependencies are malformed")
@@ -331,7 +340,13 @@ class PackageActivationService:
             lifecycle_store, SQLiteCapabilityLifecycleStore
         ):
             raise ActivationValidationError("Capability lifecycle store is malformed")
+        if generated_action_registrar is not None and (
+            not callable(getattr(generated_action_registrar, "activate", None))
+            or not callable(getattr(generated_action_registrar, "deactivate", None))
+        ):
+            raise ActivationValidationError("Generated action registrar is malformed")
         self._lifecycle = lifecycle_store
+        self._generated_action_registrar = generated_action_registrar
         self._sessions: dict[tuple[str, SemanticVersion], _ActivationSession] = {}
         self._revisions: dict[tuple[str, SemanticVersion], int] = {}
         if self._lifecycle is not None:
@@ -420,7 +435,13 @@ class PackageActivationService:
                     request.package,
                     PackageCertification.from_record(request.certification),
                 )
+                self._publish_active(_ActivationSession(request, stored.record))
             except Exception as error:
+                self._deactivate_generated(request.package.package_id)
+                try:
+                    self._hot_load.remove(request.package.package_id)
+                except Exception:
+                    pass
                 raise ActivationError("Active package could not be safely restored") from error
         return stored.record
 
@@ -582,7 +603,24 @@ class PackageActivationService:
                 )
                 self._revisions[(package_id, version)] = pending_revision + 1
             return self._quarantine(session, "activation health/swap failed", (str(error),))
-        return self._advance(session, ActivationState.ACTIVE, "promoted by trusted lifecycle")
+        try:
+            active_record = self._advance(
+                session, ActivationState.ACTIVE, "promoted by trusted lifecycle"
+            )
+            self._publish_active(session)
+            return active_record
+        except Exception as error:
+            self._deactivate_generated(package_id)
+            rollback_evidence = self._rollback_active(session)
+            session.record = replace(
+                session.record,
+                rollback_evidence=session.record.rollback_evidence + rollback_evidence,
+            )
+            return self._advance(
+                session,
+                ActivationState.QUARANTINED,
+                f"generated action registration failed: {type(error).__name__}",
+            )
 
     def mark_degraded(
         self, package_id: str, version: SemanticVersion, detail: str
@@ -835,6 +873,7 @@ class PackageActivationService:
         return ("effect rollback succeeded",) if success else ("effect rollback failed",)
 
     def _rollback_active(self, session: _ActivationSession) -> tuple[str, ...]:
+        self._deactivate_generated(session.request.package.package_id)
         previous = session.previous
         if previous is not None:
             try:
@@ -842,8 +881,20 @@ class PackageActivationService:
                     previous.request.package,
                     PackageCertification.from_record(previous.request.certification),
                 )
+                self._publish_active(previous)
                 return ("previous certified version restored",)
-            except HotLoadError as error:
+            except Exception as error:
                 return (f"previous version restore failed: {error}",)
         self._hot_load.remove(session.request.package.package_id)
         return ("active package removed; no previous version was registered",)
+
+    def _publish_active(self, session: _ActivationSession) -> None:
+        registrar = self._generated_action_registrar
+        if registrar is None or not session.request.package.action_specs:
+            return
+        registrar.activate(session.request.package, session.request.certification)
+
+    def _deactivate_generated(self, package_id: str) -> None:
+        registrar = self._generated_action_registrar
+        if registrar is not None:
+            registrar.deactivate(package_id)

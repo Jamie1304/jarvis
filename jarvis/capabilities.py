@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import math
+import re
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
 from hashlib import sha256
+from types import MappingProxyType
 
 from jarvis.permissions.models import Permission, Risk
 from jarvis.tools.models import SemanticVersion, ToolHealthStatus, ToolPlatform
@@ -67,10 +70,196 @@ class EffectMetadata:
             raise CapabilityError("Effect classification is invalid")
         if not isinstance(self.reversibility, Reversibility):
             raise CapabilityError("Effect reversibility is invalid")
+        if type(self.preview_supported) is not bool:
+            raise CapabilityError("Effect preview metadata is invalid")
+        if type(self.produced_artifacts) is not tuple or type(self.emitted_events) is not tuple:
+            raise CapabilityError("Effect output metadata is invalid")
         if self.compensation is not None:
             _bounded(self.compensation, "Effect compensation", 1_000)
         _labels(self.produced_artifacts, "Produced artifacts", 32)
         _labels(self.emitted_events, "Emitted events", 32)
+
+
+_ACTION_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
+_ACTION_SCHEMA_KEYS = frozenset(
+    {
+        "type",
+        "properties",
+        "required",
+        "additionalProperties",
+        "items",
+        "title",
+        "description",
+        "minLength",
+        "maxLength",
+        "minimum",
+        "maximum",
+    }
+)
+_ACTION_SCHEMA_TYPES = frozenset({"object", "array", "string", "integer", "number", "boolean"})
+
+
+def _freeze_action_json(value: object) -> object:
+    if isinstance(value, Mapping):
+        return MappingProxyType(
+            {str(key): _freeze_action_json(item) for key, item in value.items()}
+        )
+    if isinstance(value, list | tuple):
+        return tuple(_freeze_action_json(item) for item in value)
+    return value
+
+
+def action_schema_dict(value: Mapping[str, object]) -> dict[str, object]:
+    """Return a detached JSON-compatible copy of an action schema."""
+
+    def thaw(item: object) -> object:
+        if isinstance(item, Mapping):
+            return {str(key): thaw(child) for key, child in item.items()}
+        if isinstance(item, tuple | list):
+            return [thaw(child) for child in item]
+        return item
+
+    result = thaw(value)
+    if not isinstance(result, dict):  # pragma: no cover - guarded by the contract
+        raise CapabilityError("Action schema is not an object")
+    return result
+
+
+def validate_action_schema(schema: object, field: str = "Action schema") -> dict[str, object]:
+    """Validate the bounded JSON-schema subset used by generated actions.
+
+    This intentionally supports a small data-only vocabulary.  It is not a
+    general JSON-schema interpreter and never permits executable validators.
+    """
+
+    def visit(value: object, path: str, depth: int) -> dict[str, object]:
+        if depth > 5 or not isinstance(value, Mapping):
+            raise CapabilityError(f"{path} must be a bounded object schema")
+        if len(value) > 64 or any(type(key) is not str for key in value):
+            raise CapabilityError(f"{path} has invalid properties")
+        unknown = set(value) - _ACTION_SCHEMA_KEYS
+        if unknown:
+            raise CapabilityError(f"{path} uses unsupported schema keywords")
+        schema_type = value.get("type")
+        if type(schema_type) is not str or schema_type not in _ACTION_SCHEMA_TYPES:
+            raise CapabilityError(f"{path} has an unsupported type")
+        normalized: dict[str, object] = {"type": schema_type}
+        for key in ("title", "description"):
+            if key in value:
+                item = value[key]
+                if type(item) is not str or not item.strip() or len(item) > 512 or "\x00" in item:
+                    raise CapabilityError(f"{path}.{key} is malformed")
+                normalized[key] = item
+        for key in ("minLength", "maxLength", "minimum", "maximum"):
+            if key in value:
+                item = value[key]
+                if type(item) is not int and type(item) is not float:
+                    raise CapabilityError(f"{path}.{key} is malformed")
+                if isinstance(item, float) and not math.isfinite(item):
+                    raise CapabilityError(f"{path}.{key} is malformed")
+                normalized[key] = item
+        if schema_type == "object":
+            properties = value.get("properties", {})
+            if not isinstance(properties, Mapping) or len(properties) > 64:
+                raise CapabilityError(f"{path}.properties is malformed")
+            normalized_properties = {
+                key: visit(item, f"{path}.properties.{key}", depth + 1)
+                for key, item in properties.items()
+                if type(key) is str and key.strip()
+            }
+            normalized["properties"] = normalized_properties
+            if len(normalized_properties) != len(properties):
+                raise CapabilityError(f"{path}.properties contains an invalid name")
+            required = value.get("required", ())
+            if not isinstance(required, list | tuple) or len(required) > 64:
+                raise CapabilityError(f"{path}.required is malformed")
+            if any(type(item) is not str or not item.strip() for item in required):
+                raise CapabilityError(f"{path}.required is malformed")
+            if len(set(required)) != len(required) or not set(required) <= set(properties):
+                raise CapabilityError(f"{path}.required is inconsistent")
+            normalized["required"] = list(required)
+            additional = value.get("additionalProperties", False)
+            if type(additional) is not bool or additional:
+                raise CapabilityError(f"{path} must reject additional properties")
+            normalized["additionalProperties"] = False
+        elif "properties" in value or "required" in value or "additionalProperties" in value:
+            raise CapabilityError(f"{path} has object-only keywords")
+        if schema_type == "array":
+            items = value.get("items")
+            if items is None:
+                raise CapabilityError(f"{path}.items is required")
+            normalized["items"] = visit(items, f"{path}.items", depth + 1)
+        elif "items" in value:
+            raise CapabilityError(f"{path} has array-only keywords")
+        return normalized
+
+    return visit(schema, field, 0)
+
+
+@dataclass(frozen=True, slots=True)
+class CapabilityActionSpec:
+    """Validated semantic action metadata bound to one exact package.
+
+    The declaration is a contract, not an authority grant.  A generated
+    action can become executable only after trusted review, certification,
+    activation, and registration by the application-owned adapter.
+    """
+
+    capability_id: str
+    package_id: str
+    package_version: SemanticVersion
+    package_hash: str
+    action_id: str
+    semantic_name: str
+    description: str
+    input_schema: Mapping[str, object]
+    output_schema: Mapping[str, object]
+    effect: EffectMetadata
+    required_permissions: tuple[Permission, ...] = ()
+    target_scope: tuple[str, ...] = ()
+    idempotent: bool = True
+    retryable: bool = False
+    verification: tuple[str, ...] = ("adapter_output_schema",)
+    compensation: str | None = None
+
+    def __post_init__(self) -> None:
+        _bounded(self.capability_id, "Action capability ID", 128)
+        _bounded(self.package_id, "Action package ID", 128)
+        if not isinstance(self.package_version, SemanticVersion):
+            raise CapabilityError("Action package version is invalid")
+        if self.package_hash and not re.fullmatch(r"[0-9a-fA-F]{64}", self.package_hash):
+            raise CapabilityError("Action package hash is invalid")
+        if not _ACTION_ID.fullmatch(self.action_id) or self.action_id in {"health", "inspect"}:
+            raise CapabilityError("Action ID is invalid or reserved")
+        _bounded(self.semantic_name, "Action semantic name", 256)
+        _bounded(self.description, "Action description", 2_000)
+        input_schema = validate_action_schema(self.input_schema, "Action input schema")
+        output_schema = validate_action_schema(self.output_schema, "Action output schema")
+        if input_schema.get("type") != "object" or output_schema.get("type") != "object":
+            raise CapabilityError("Generated action schemas must be objects")
+        object.__setattr__(self, "input_schema", _freeze_action_json(input_schema))
+        object.__setattr__(self, "output_schema", _freeze_action_json(output_schema))
+        if not isinstance(self.effect, EffectMetadata):
+            raise CapabilityError("Action effect metadata is invalid")
+        if (
+            any(not isinstance(item, Permission) for item in self.required_permissions)
+            or tuple(sorted(set(self.required_permissions), key=lambda item: item.value))
+            != self.required_permissions
+        ):
+            raise CapabilityError("Action permissions must be unique and sorted")
+        if (
+            self.effect.classification is not EffectClassification.OBSERVATION
+            and not self.required_permissions
+        ):
+            raise CapabilityError("Effectful generated actions must declare broker permissions")
+        _labels(self.target_scope, "Action target scope", 32)
+        if type(self.idempotent) is not bool or type(self.retryable) is not bool:
+            raise CapabilityError("Action retry metadata is invalid")
+        if self.retryable and not self.idempotent:
+            raise CapabilityError("Only idempotent actions may be retryable")
+        _labels(self.verification, "Action verification contract", 32)
+        if self.compensation is not None:
+            _bounded(self.compensation, "Action compensation", 1_000)
 
 
 @dataclass(frozen=True, slots=True)

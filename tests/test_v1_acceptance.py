@@ -2320,6 +2320,40 @@ async def test_v1_production_composition_acquires_randomized_capability_and_rest
 
     suffix = uuid4().hex[:12]
     capability = f"synthetic-capability-{suffix}"
+    action_id = f"transform-{suffix}"
+    input_value = f"input-{suffix}"
+    input_salt = f"salt-{uuid4().hex[:8]}"
+    expected_output = f"{input_value}|{input_salt}"
+    action_source = "\n".join(
+        (
+            "import json",
+            "import sys",
+            f"CAPABILITY_ID = {json.dumps(capability)}",
+            f"ACTION_ID = {json.dumps(action_id)}",
+            "for line in sys.stdin:",
+            "    try:",
+            "        message = json.loads(line)",
+            '        request_id = message["request_id"]',
+            '        integration_id = message["integration_id"]',
+            '        kind = message["kind"]',
+            '        if kind == "health":',
+            '            payload = {"status": "healthy", "capability": CAPABILITY_ID}',
+            '        elif kind == "inspect":',
+            '            payload = {"status": "observed", "capability": CAPABILITY_ID}',
+            '        elif kind in {"shadow", "canary"}:',
+            '            payload = {"status": kind, "capability": CAPABILITY_ID}',
+            "        elif kind == ACTION_ID:",
+            '            action_input = message["payload"]',
+            '            payload = {"result": action_input["value"] + "|" + action_input["salt"]}',
+            "        else:",
+            '            raise ValueError("action")',
+            '        print(json.dumps({"version": 1, "request_id": request_id, '
+            '"integration_id": integration_id, "kind": "result", "response": True, '
+            '"payload": payload}, separators=(",", ":")), flush=True)',
+            "    except (KeyError, TypeError, ValueError):",
+            "        break",
+        )
+    )
     response = json.dumps(
         {
             "kind": "response",
@@ -2327,6 +2361,35 @@ async def test_v1_production_composition_acquires_randomized_capability_and_rest
                 {
                     "name": f"Synthetic capability {suffix}",
                     "description": "A bounded randomized local capability",
+                    "actions": [
+                        {
+                            "action_id": action_id,
+                            "semantic_name": "Transform synthetic input",
+                            "description": "Transform two bounded synthetic strings",
+                            "input_schema": {
+                                "type": "object",
+                                "properties": {
+                                    "value": {"type": "string"},
+                                    "salt": {"type": "string"},
+                                },
+                                "required": ["value", "salt"],
+                                "additionalProperties": False,
+                            },
+                            "output_schema": {
+                                "type": "object",
+                                "properties": {"result": {"type": "string"}},
+                                "required": ["result"],
+                                "additionalProperties": False,
+                            },
+                            "effect": {
+                                "classification": "observation",
+                                "reversibility": "read_only",
+                            },
+                            "permissions": [],
+                            "verification": ["adapter_output_schema", "action_completed"],
+                        }
+                    ],
+                    "source": action_source,
                 },
                 sort_keys=True,
             ),
@@ -2360,6 +2423,15 @@ async def test_v1_production_composition_acquires_randomized_capability_and_rest
         settings,
         provider_registry=provider_registry,
         recovery_key_backend=recovery_backend,
+        certification_oracle=lambda action, action_input: (
+            {"result": str(action_input["value"]) + "|" + str(action_input["salt"])}
+            if action.action_id == action_id
+            else {
+                "status": "observed",
+                "capability": action.package_id,
+                "label": "observed",
+            }
+        ),
     )
     assert runtime.status is RuntimeStatus.READY, runtime.error
     assert runtime.container is not None
@@ -2384,6 +2456,9 @@ async def test_v1_production_composition_acquires_randomized_capability_and_rest
     assert container.compensation_observer_registry.sealed
     assert container.capability_lifecycle_restorer is not None
     assert container.component_doctor.__class__.__name__ == "ComponentDoctor"
+    built_in_tool_ids = frozenset(
+        manifest.tool_id for manifest in container.tool_registry.manifests()
+    )
 
     # Proactive preparation uses the production OpportunityEngine and the same
     # coordinator, but stops before activation or authority.  The second
@@ -2416,29 +2491,48 @@ async def test_v1_production_composition_acquires_randomized_capability_and_rest
     )
     assert opportunity is not None
     prepared_opportunity = await container.opportunity_engine.prepare(opportunity.opportunity_id)
-    assert prepared_opportunity.status is OpportunityStatus.READY_TO_PROPOSE
-    assert prepared_opportunity.preparation_state is OpportunityPreparationState.READY
-    assert prepared_opportunity.decision.value == "propose"
+    # This generated opportunity uses an action without an application-owned
+    # semantic oracle.  Certification therefore fails closed; evidence alone
+    # must not make the opportunity proposal-ready.
+    assert prepared_opportunity.status is OpportunityStatus.FAILED
+    assert prepared_opportunity.preparation_state is OpportunityPreparationState.FAILED
+    assert prepared_opportunity.decision.value == "prepare"
     assert prepared_opportunity.remaining_authority == ("trusted activation approval",)
     assert container.capability_acquisition.last_run is not None
-    assert container.capability_acquisition.last_run.stage is AcquisitionStage.CERTIFYING
+    assert container.capability_acquisition.last_run.stage in {
+        AcquisitionStage.CERTIFYING,
+        AcquisitionStage.WAITING_FOR_APPROVAL,
+    }
     assert container.capability_registry.manifests() == ()
 
     # Declining the prepared proposal records cooldown and does not activate it.
     declined = container.opportunity_engine.decline(opportunity.opportunity_id)
     assert declined.status is OpportunityStatus.DECLINED
     assert declined.cooldown_until is not None
+    assert container.tool_registry.find_by_capability(capability) == ()
 
     from jarvis.goal_supervisor import GoalBudget, GoalIntent, GoalStatus
 
     intent = GoalIntent(
-        "calculate 25% of 800",
+        f"perform randomized semantic transformation {suffix}",
         required_capabilities=(capability,),
+        metadata={
+            "generated_action_input": {"value": input_value, "salt": input_salt},
+            "generated_expected_output": expected_output,
+        },
     )
+    # The randomized capability is absent from the initial registry; no
+    # built-in tool can satisfy this challenge before acquisition.
+    assert container.tool_registry.find_by_capability(capability) == ()
     state = await container.goal_supervisor.start(intent, GoalBudget(max_model_calls=2))
+    generated_records = container.tool_registry.find_by_capability(capability)
+    assert generated_records, state
+    assert all(record.usable for record in generated_records), [
+        (record.registration_status, record.health) for record in generated_records
+    ]
     assert state.status is GoalStatus.COMPLETED, state.last_error
     assert state.capability_id is not None
-    assert state.capability_id.startswith("generated.")
+    assert state.capability_id == capability
     report = container.capability_acquisition.last_run
     assert report is not None
     assert report.stage is AcquisitionStage.ACTIVE
@@ -2452,8 +2546,32 @@ async def test_v1_production_composition_acquires_randomized_capability_and_rest
     assert run.certification is not None
     assert run.verification is not None
     assert run.verification.passed
-
     manifest = container.capability_registry.inspect(capability_id)
+    assert state.task_id is not None
+    plan = container.task_controller.inspect_plan(state.task_id)
+    assert plan is not None
+    assert len(plan.steps) == 1
+    assert plan.steps[0].tool_id.startswith("generated.")
+    assert action_id in plan.steps[0].tool_id
+    assert plan.steps[0].tool_id not in built_in_tool_ids
+    assert plan.steps[0].tool_id in {record.manifest.tool_id for record in generated_records}
+    assert plan.steps[0].result is not None
+    assert expected_output in plan.steps[0].result.output_json
+    trace = container.trace_service.get(task_id=state.task_id)
+    assert trace is not None
+    assert any(
+        item.event_type is TraceEventType.CAPABILITY_TOOL
+        and item.integration_id == manifest.integration_owner
+        for item in trace.events
+    )
+    generated_invocations = sum(
+        item.event_type is TraceEventType.CAPABILITY_TOOL
+        and item.integration_id == manifest.integration_owner
+        for item in trace.events
+    )
+    assert generated_invocations >= 1
+    assert any(item.event_type is TraceEventType.VERIFICATION for item in trace.events)
+
     assert manifest.lifecycle is CapabilityLifecycle.ACTIVE
     assert manifest.integration_owner.startswith("generated.")
     lifecycle = container.capability_lifecycle_store.load(
@@ -2463,10 +2581,6 @@ async def test_v1_production_composition_acquires_randomized_capability_and_rest
     assert lifecycle is not None
     assert lifecycle.record.state is ActivationState.ACTIVE
     assert lifecycle.record.package_hash == manifest.content_hash
-    assert (
-        container.invoke_capability(capability_id, "inspect", {"input": "safe"})["status"]
-        == "observed"
-    )
     await runtime.aclose()
 
     restarted = ApplicationRuntime.create(
@@ -2487,11 +2601,26 @@ async def test_v1_production_composition_acquires_randomized_capability_and_rest
     restored = restarted.container.capability_registry.inspect(capability_id)
     assert restored.integration_owner == manifest.integration_owner
     assert restored.content_hash == manifest.content_hash
-    assert (
-        restarted.container.invoke_capability(capability_id, "inspect", {})["capability"]
-        == capability_id
+    restored_tools = restarted.container.tool_registry.find_by_capability(capability)
+    assert len(restored_tools) == 1
+    assert restored_tools[0].tool.__class__.__name__ == "GeneratedCapabilityToolAdapter"
+    assert restored_tools[0].tool.manifest.tool_id.startswith("generated.")
+    resumed_intent = GoalIntent(
+        f"perform a second randomized semantic transformation {suffix}",
+        required_capabilities=(capability,),
+        metadata={
+            "generated_action_input": {
+                "value": f"second-{suffix}",
+                "salt": input_salt,
+            },
+            "generated_expected_output": f"second-{suffix}|{input_salt}",
+        },
     )
-    baseline = restarted.container.capability_health.baseline(capability_id)
+    resumed = await restarted.container.goal_supervisor.start(
+        resumed_intent, GoalBudget(max_model_calls=2)
+    )
+    assert resumed.status is GoalStatus.COMPLETED, resumed.last_error
+    baseline = restarted.container.capability_health.baseline(manifest.integration_owner)
     assert baseline.package_version == str(manifest.version)
     assert baseline.activation_state is ActivationState.ACTIVE
     restored_package = restarted.container.package_store.load(
