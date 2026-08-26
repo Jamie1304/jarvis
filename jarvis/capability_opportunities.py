@@ -264,6 +264,60 @@ class OpportunityStore(Protocol):
     def close(self) -> None: ...
 
 
+_PROPOSAL_STATUSES = frozenset({OpportunityStatus.READY_TO_PROPOSE, OpportunityStatus.PROPOSED})
+_NON_SUCCESS_PREPARATION_STATES = frozenset(
+    {
+        OpportunityPreparationState.FAILED,
+        OpportunityPreparationState.SECURITY_BLOCKED,
+        OpportunityPreparationState.UNKNOWN_OUTCOME,
+    }
+)
+
+
+def validate_opportunity_state(opportunity: CapabilityOpportunity) -> None:
+    """Validate lifecycle/preparation combinations that can carry authority."""
+    if opportunity.status in _PROPOSAL_STATUSES and (
+        opportunity.preparation_state is not OpportunityPreparationState.READY
+    ):
+        raise CapabilityOpportunityError(
+            "Proposal-ready opportunity must have successful preparation"
+        )
+    if (
+        opportunity.status
+        in {
+            OpportunityStatus.ACCEPTED,
+            OpportunityStatus.ACTIVATING,
+            OpportunityStatus.ACTIVE,
+        }
+        and opportunity.preparation_state in _NON_SUCCESS_PREPARATION_STATES
+    ):
+        raise CapabilityOpportunityError(
+            "Active opportunity cannot have failed or uncertain preparation"
+        )
+
+
+def _reconcile_opportunity_state(opportunity: CapabilityOpportunity) -> CapabilityOpportunity:
+    """Downgrade legacy/inconsistent durable state without treating failure as success."""
+    try:
+        validate_opportunity_state(opportunity)
+        return opportunity
+    except CapabilityOpportunityError:
+        preparation = opportunity.preparation_state
+        if preparation is OpportunityPreparationState.FAILED:
+            status = OpportunityStatus.FAILED
+            decision = OpportunityDecision.PREPARE
+        elif preparation is OpportunityPreparationState.SECURITY_BLOCKED:
+            status = OpportunityStatus.ARCHIVED
+            decision = OpportunityDecision.NONE
+        elif preparation is OpportunityPreparationState.UNKNOWN_OUTCOME:
+            status = OpportunityStatus.ASSESSING
+            decision = OpportunityDecision.PREPARE
+        else:
+            status = OpportunityStatus.PREPARING
+            decision = OpportunityDecision.PREPARE
+        return replace(opportunity, status=status, decision=decision)
+
+
 class SQLiteOpportunityStore:
     """The sole durable owner for opportunity evidence and decision state."""
 
@@ -308,15 +362,21 @@ class SQLiteOpportunityStore:
 
     def get(self, opportunity_id: UUID) -> CapabilityOpportunity | None:
         row = self._row(opportunity_id)
-        return _opportunity_from_json(json.loads(str(row[0]))) if row is not None else None
+        if row is None:
+            return None
+        opportunity = _opportunity_from_json(json.loads(str(row[0])))
+        reconciled = _reconcile_opportunity_state(opportunity)
+        if reconciled != opportunity:
+            self.save(reconciled, expected_revision=int(str(row[1])))
+        return reconciled
 
     def find_by_key(self, semantic_key: str) -> CapabilityOpportunity | None:
         _text(semantic_key, "Opportunity semantic key", 256)
         with self._lock:
             row = self._connection.execute(
-                "SELECT payload_json FROM opportunities WHERE semantic_key=?", (semantic_key,)
+                "SELECT opportunity_id FROM opportunities WHERE semantic_key=?", (semantic_key,)
             ).fetchone()
-        return _opportunity_from_json(json.loads(str(row[0]))) if row is not None else None
+        return self.get(UUID(str(row[0]))) if row is not None else None
 
     def revision(self, opportunity_id: UUID) -> int:
         row = self._row(opportunity_id)
@@ -381,9 +441,14 @@ class SQLiteOpportunityStore:
     def list(self) -> tuple[CapabilityOpportunity, ...]:
         with self._lock:
             rows = self._connection.execute(
-                "SELECT payload_json FROM opportunities ORDER BY updated_at"
+                "SELECT opportunity_id FROM opportunities ORDER BY updated_at"
             ).fetchall()
-        return tuple(_opportunity_from_json(json.loads(str(row[0]))) for row in rows)
+        opportunities: list[CapabilityOpportunity] = []
+        for row in rows:
+            opportunity = self.get(UUID(str(row[0])))
+            if opportunity is not None:
+                opportunities.append(opportunity)
+        return tuple(opportunities)
 
     def close(self) -> None:
         with self._lock:
@@ -410,12 +475,17 @@ class InMemoryOpportunityStore:
 
     def get(self, opportunity_id: UUID) -> CapabilityOpportunity | None:
         item = self._items.get(opportunity_id)
-        return item[0] if item else None
+        if item is None:
+            return None
+        reconciled = _reconcile_opportunity_state(item[0])
+        if reconciled != item[0]:
+            self._items[opportunity_id] = (reconciled, item[1])
+        return reconciled
 
     def find_by_key(self, semantic_key: str) -> CapabilityOpportunity | None:
         for opportunity, _ in self._items.values():
             if _semantic_key(opportunity.workspace, opportunity.semantic_need) == semantic_key:
-                return opportunity
+                return self.get(opportunity.opportunity_id)
         return None
 
     def revision(self, opportunity_id: UUID) -> int:
@@ -601,7 +671,7 @@ class CapabilityOpportunityEngine:
             status = OpportunityStatus.READY_TO_PROPOSE
             decision = OpportunityDecision.PROPOSE
         elif result.state is OpportunityPreparationState.WAITING_FOR_AUTHORITY:
-            status = OpportunityStatus.PROPOSED
+            status = OpportunityStatus.PREPARING
             decision = OpportunityDecision.PREPARE
         elif result.state is OpportunityPreparationState.SECURITY_BLOCKED:
             status = OpportunityStatus.ARCHIVED
@@ -633,10 +703,7 @@ class CapabilityOpportunityEngine:
 
     def proposal(self, opportunity_id: UUID) -> OpportunityProposal:
         opportunity = self._require(opportunity_id)
-        if opportunity.status not in {
-            OpportunityStatus.READY_TO_PROPOSE,
-            OpportunityStatus.PROPOSED,
-        }:
+        if not _can_propose(opportunity):
             raise CapabilityOpportunityError("Opportunity is not ready for a proposal")
         proposed = replace(
             opportunity,
@@ -661,12 +728,7 @@ class CapabilityOpportunityEngine:
         opportunity = self._require(opportunity_id)
         if not isinstance(request, CapabilityAcquisitionRequest):
             raise CapabilityOpportunityError("Accepted opportunity request is malformed")
-        if opportunity.status not in {
-            OpportunityStatus.READY_TO_PROPOSE,
-            OpportunityStatus.PROPOSED,
-            OpportunityStatus.ACCEPTED,
-            OpportunityStatus.ACTIVATING,
-        }:
+        if not _can_accept(opportunity):
             raise CapabilityOpportunityError("Opportunity cannot be accepted in its current state")
         self._assert_not_in_cooldown(opportunity)
         accepted = replace(
@@ -685,7 +747,7 @@ class CapabilityOpportunityEngine:
         except Exception as error:
             failed = replace(
                 activating,
-                status=OpportunityStatus.READY_TO_PROPOSE,
+                status=OpportunityStatus.FAILED,
                 preparation_state=OpportunityPreparationState.FAILED,
                 last_error=f"acquisition failed: {type(error).__name__}",
                 updated_at=_timestamp(self._clock(), "Opportunity clock"),
@@ -794,6 +856,35 @@ def _merge_evidence(
 def _validate_opportunity(opportunity: CapabilityOpportunity) -> None:
     if not isinstance(opportunity, CapabilityOpportunity):
         raise CapabilityOpportunityError("Opportunity is malformed")
+    validate_opportunity_state(opportunity)
+
+
+def _can_propose(opportunity: CapabilityOpportunity) -> bool:
+    try:
+        validate_opportunity_state(opportunity)
+    except CapabilityOpportunityError:
+        return False
+    return (
+        opportunity.status in _PROPOSAL_STATUSES
+        and opportunity.preparation_state is OpportunityPreparationState.READY
+    )
+
+
+def _can_accept(opportunity: CapabilityOpportunity) -> bool:
+    try:
+        validate_opportunity_state(opportunity)
+    except CapabilityOpportunityError:
+        return False
+    if opportunity.status in {
+        OpportunityStatus.READY_TO_PROPOSE,
+        OpportunityStatus.PROPOSED,
+        OpportunityStatus.ACCEPTED,
+    }:
+        return opportunity.preparation_state is OpportunityPreparationState.READY
+    return opportunity.status is OpportunityStatus.ACTIVATING and opportunity.preparation_state in {
+        OpportunityPreparationState.READY,
+        OpportunityPreparationState.WAITING_FOR_AUTHORITY,
+    }
 
 
 def _opportunity_to_json(opportunity: CapabilityOpportunity) -> dict[str, object]:
@@ -897,4 +988,5 @@ __all__ = [
     "OpportunityStatus",
     "OpportunityStore",
     "SQLiteOpportunityStore",
+    "validate_opportunity_state",
 ]

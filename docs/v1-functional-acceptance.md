@@ -43,8 +43,10 @@ The production-composition evidence is intentionally narrower and explicit:
 - The same test exercises `CapabilityOpportunityEngine.prepare()` through the production
   coordinator. Its intentionally oracle-less generated action fails certification closed and
   remains `FAILED`, proving evidence alone cannot produce `READY_TO_PROPOSE`; successful
-  certified preparation remains proposal-ready in the dedicated opportunity tests. Preparation
-  does not grant authority or activate a package.
+  certified preparation remains proposal-ready in the dedicated opportunity tests. An
+  acquisition exception is also durably `FAILED`; proposal and acceptance revalidate the
+  preparation state, including after restart. Preparation does not grant authority or
+  activate a package.
 - `test_v1_acceptance_production_composed_compensation_uses_trusted_observer` is the
   production-composed compensation/verification proof. It uses the sealed application-owned
   observer registry after restart; the fixture callback path is compatibility-only.

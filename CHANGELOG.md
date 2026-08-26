@@ -54,6 +54,9 @@ Release-candidate preparation for the minimal adaptive core.
 - Donor projects are reference/provenance material only; no donor runtime is a
   required dependency.
 - Speech recognition is not owner authentication for privileged approval.
+- Opportunity preparation failures are durably non-proposal-ready; proposal and
+  acceptance revalidate preparation state, and legacy inconsistent rows reconcile
+  fail closed without discarding diagnostic evidence.
 
 ### Known limitations
 

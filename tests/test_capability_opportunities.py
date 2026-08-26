@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 from collections.abc import Callable
 from dataclasses import replace
@@ -80,10 +81,27 @@ class _FailedResultPreparation:
         )
 
 
+class _StatePreparation:
+    def __init__(self, state: OpportunityPreparationState) -> None:
+        self.state = state
+
+    async def prepare(self, opportunity: object) -> OpportunityPreparationResult:
+        del opportunity
+        return OpportunityPreparationResult(self.state, "synthetic preparation state")
+
+
 class _FailingAcquisition(_Acquisition):
     async def acquire(self, request: CapabilityAcquisitionRequest) -> CapabilityAcquisitionReport:
         del request
         raise RuntimeError("synthetic acquisition failure")
+
+
+class _UnreconciledStore(InMemoryOpportunityStore):
+    """Synthetic store that lets proposal/accept tests exercise defense in depth."""
+
+    def get(self, opportunity_id: UUID) -> CapabilityOpportunity | None:
+        item = self._items.get(opportunity_id)
+        return item[0] if item is not None else None
 
 
 def _request(goal_id: UUID | None = None) -> CapabilityAcquisitionRequest:
@@ -303,10 +321,15 @@ async def test_failed_preparation_and_acquisition_are_recorded() -> None:
     await engine.prepare(opportunity.opportunity_id)
     with pytest.raises(CapabilityOpportunityError):
         await engine.accept(opportunity.opportunity_id, _request())
+    assert engine.get(opportunity.opportunity_id).status is OpportunityStatus.FAILED
     assert (
         engine.get(opportunity.opportunity_id).preparation_state
         is OpportunityPreparationState.FAILED
     )
+    with pytest.raises(CapabilityOpportunityError):
+        engine.proposal(opportunity.opportunity_id)
+    with pytest.raises(CapabilityOpportunityError):
+        await engine.accept(opportunity.opportunity_id, _request())
 
 
 @pytest.mark.asyncio
@@ -325,6 +348,195 @@ async def test_failed_preparation_with_evidence_is_not_proposal_ready() -> None:
     assert "preparation:failed" in prepared.evidence_references
     with pytest.raises(CapabilityOpportunityError):
         engine.proposal(opportunity.opportunity_id)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "state",
+    [
+        OpportunityPreparationState.SECURITY_BLOCKED,
+        OpportunityPreparationState.UNKNOWN_OUTCOME,
+        OpportunityPreparationState.WAITING_FOR_AUTHORITY,
+    ],
+)
+async def test_non_success_preparation_is_not_proposal_ready(
+    state: OpportunityPreparationState,
+) -> None:
+    engine = CapabilityOpportunityEngine(
+        InMemoryOpportunityStore(),
+        _Acquisition(),
+        preparation=_StatePreparation(state),
+        clock=lambda: NOW,
+    )
+    opportunity = _observe(engine, _evidence(f"state:{state}", "state:second"))
+    assert opportunity is not None
+    prepared = await engine.prepare(opportunity.opportunity_id)
+
+    assert prepared.preparation_state is state
+    assert prepared.status is not OpportunityStatus.READY_TO_PROPOSE
+    with pytest.raises(CapabilityOpportunityError):
+        engine.proposal(opportunity.opportunity_id)
+    with pytest.raises(CapabilityOpportunityError):
+        await engine.accept(opportunity.opportunity_id, _request())
+
+
+@pytest.mark.parametrize(
+    ("preparation_state", "expected_status"),
+    [
+        (OpportunityPreparationState.FAILED, OpportunityStatus.FAILED),
+        (OpportunityPreparationState.SECURITY_BLOCKED, OpportunityStatus.ARCHIVED),
+        (OpportunityPreparationState.UNKNOWN_OUTCOME, OpportunityStatus.ASSESSING),
+        (OpportunityPreparationState.WAITING_FOR_AUTHORITY, OpportunityStatus.PREPARING),
+    ],
+)
+def test_inconsistent_proposal_state_is_reconciled(
+    preparation_state: OpportunityPreparationState,
+    expected_status: OpportunityStatus,
+) -> None:
+    store = InMemoryOpportunityStore()
+    engine = _engine(store)
+    opportunity = _observe(engine, _evidence("reconcile:one", "reconcile:two"))
+    assert opportunity is not None
+    store._items[opportunity.opportunity_id] = (
+        replace(
+            opportunity,
+            status=OpportunityStatus.READY_TO_PROPOSE,
+            preparation_state=preparation_state,
+        ),
+        store.revision(opportunity.opportunity_id),
+    )
+
+    reconciled = engine.get(opportunity.opportunity_id)
+    assert reconciled.status is expected_status
+    assert reconciled.preparation_state is preparation_state
+    assert reconciled.evidence_references == opportunity.evidence_references
+
+
+def test_store_rejects_active_failed_preparation() -> None:
+    store = InMemoryOpportunityStore()
+    engine = _engine(store)
+    opportunity = _observe(engine, _evidence("invalid:one", "invalid:two"))
+    assert opportunity is not None
+    with pytest.raises(CapabilityOpportunityError):
+        store.save(
+            replace(
+                opportunity,
+                status=OpportunityStatus.ACTIVE,
+                preparation_state=OpportunityPreparationState.FAILED,
+            ),
+            expected_revision=store.revision(opportunity.opportunity_id),
+        )
+
+
+@pytest.mark.asyncio
+async def test_proposal_and_accept_fail_closed_when_store_returns_inconsistent_state() -> None:
+    store = _UnreconciledStore()
+    engine = _engine(store)
+    opportunity = _observe(engine, _evidence("unreconciled:one", "unreconciled:two"))
+    assert opportunity is not None
+    current = store._items[opportunity.opportunity_id][0]
+    store._items[opportunity.opportunity_id] = (
+        replace(
+            current,
+            status=OpportunityStatus.READY_TO_PROPOSE,
+            preparation_state=OpportunityPreparationState.FAILED,
+        ),
+        store.revision(opportunity.opportunity_id),
+    )
+
+    with pytest.raises(CapabilityOpportunityError):
+        engine.proposal(opportunity.opportunity_id)
+    with pytest.raises(CapabilityOpportunityError):
+        await engine.accept(opportunity.opportunity_id, _request())
+
+
+@pytest.mark.asyncio
+async def test_failed_acquisition_remains_rejected_after_restart(tmp_path: Path) -> None:
+    path = tmp_path / "failed-opportunity.sqlite3"
+    store = SQLiteOpportunityStore(path)
+    acquisition = _FailingAcquisition()
+    engine = _engine(store, acquisition)
+    opportunity = _observe(engine, _evidence("restart:one", "restart:two"))
+    assert opportunity is not None
+    await engine.prepare(opportunity.opportunity_id)
+    with pytest.raises(CapabilityOpportunityError):
+        await engine.accept(opportunity.opportunity_id, _request())
+    store.close()
+
+    restored_store = SQLiteOpportunityStore(path)
+    restored_engine = _engine(restored_store, _FailingAcquisition())
+    restored = restored_engine.get(opportunity.opportunity_id)
+    assert restored.status is OpportunityStatus.FAILED
+    assert restored.preparation_state is OpportunityPreparationState.FAILED
+    with pytest.raises(CapabilityOpportunityError):
+        restored_engine.proposal(opportunity.opportunity_id)
+    with pytest.raises(CapabilityOpportunityError):
+        await restored_engine.accept(opportunity.opportunity_id, _request())
+    restored_store.close()
+
+
+@pytest.mark.asyncio
+async def test_stale_proposal_is_rejected_after_opportunity_failure() -> None:
+    store = InMemoryOpportunityStore()
+    engine = _engine(store)
+    opportunity = _observe(engine, _evidence("stale:one", "stale:two"))
+    assert opportunity is not None
+    await engine.prepare(opportunity.opportunity_id)
+    engine.proposal(opportunity.opportunity_id)
+    proposed = store.get(opportunity.opportunity_id)
+    assert proposed is not None
+    failed = replace(
+        proposed,
+        status=OpportunityStatus.FAILED,
+        preparation_state=OpportunityPreparationState.FAILED,
+        last_error="synthetic failure after proposal",
+    )
+    store.save(failed, expected_revision=store.revision(opportunity.opportunity_id))
+
+    with pytest.raises(CapabilityOpportunityError):
+        engine.proposal(opportunity.opportunity_id)
+    with pytest.raises(CapabilityOpportunityError):
+        await engine.accept(opportunity.opportunity_id, _request())
+
+
+@pytest.mark.asyncio
+async def test_impossible_persisted_proposal_state_is_reconciled_fail_closed(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "legacy-opportunity.sqlite3"
+    store = SQLiteOpportunityStore(path)
+    engine = _engine(store)
+    opportunity = _observe(engine, _evidence("legacy:one", "legacy:two"))
+    assert opportunity is not None
+    prepared = engine.get(opportunity.opportunity_id)
+    payload = json.loads(
+        str(
+            store._connection.execute(
+                "SELECT payload_json FROM opportunities WHERE opportunity_id=?",
+                (str(opportunity.opportunity_id),),
+            ).fetchone()[0]
+        )
+    )
+    payload["status"] = OpportunityStatus.READY_TO_PROPOSE.value
+    payload["preparation_state"] = OpportunityPreparationState.FAILED.value
+    store._connection.execute(
+        "UPDATE opportunities SET payload_json=? WHERE opportunity_id=?",
+        (json.dumps(payload, sort_keys=True), str(opportunity.opportunity_id)),
+    )
+    store._connection.commit()
+    store.close()
+
+    restored_store = SQLiteOpportunityStore(path)
+    restored_engine = _engine(restored_store)
+    restored = restored_engine.get(prepared.opportunity_id)
+    assert restored.status is OpportunityStatus.FAILED
+    assert restored.preparation_state is OpportunityPreparationState.FAILED
+    assert restored.evidence_references == prepared.evidence_references
+    with pytest.raises(CapabilityOpportunityError):
+        restored_engine.proposal(prepared.opportunity_id)
+    with pytest.raises(CapabilityOpportunityError):
+        await restored_engine.accept(prepared.opportunity_id, _request())
+    restored_store.close()
 
 
 def test_opportunity_validation_and_retention_bounds_fail_closed() -> None:

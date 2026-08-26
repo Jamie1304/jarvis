@@ -53,11 +53,29 @@ prove ownership, user intent, safety, compatibility, or permission.
 The durable status vocabulary is:
 
 `DETECTED`, `ASSESSING`, `PREPARING`, `READY_TO_PROPOSE`, `PROPOSED`,
-`ACCEPTED`, `DECLINED`, `EXPIRED`, `ACTIVATING`, `ACTIVE`, and `ARCHIVED`.
+`ACCEPTED`, `DECLINED`, `EXPIRED`, `ACTIVATING`, `ACTIVE`, `FAILED`, and
+`ARCHIVED`.
 
 Preparation progress is separately recorded as `NOT_STARTED`, `RESEARCHING`,
 `DESIGNING`, `BUILDING`, `SANDBOX_TESTING`, `AUDITING`, `CERTIFYING`, `READY`,
-`WAITING_FOR_AUTHORITY`, or `FAILED`.
+`WAITING_FOR_AUTHORITY`, `FAILED`, `SECURITY_BLOCKED`, or `UNKNOWN_OUTCOME`.
+
+### State validity and failure reconciliation
+
+`READY_TO_PROPOSE` and `PROPOSED` are proposal-ready statuses only when the
+preparation state is exactly `READY`. `FAILED`, `SECURITY_BLOCKED`,
+`UNKNOWN_OUTCOME`, and waiting/in-progress preparation are never proposal-ready.
+The same predicate is rechecked by both `proposal()` and `accept()` against the
+current durable record, so a proposal cannot become authority after the
+opportunity has degraded.
+
+An acquisition exception is recorded as `FAILED` with preparation state
+`FAILED`, while retaining the opportunity's evidence and diagnostic error. It is
+not returned to `READY_TO_PROPOSE`. Durable stores validate new writes and
+reconcile legacy inconsistent rows on read: failed rows become `FAILED`,
+security-blocked rows become `ARCHIVED`, unknown outcomes become `ASSESSING`,
+and other waiting/incomplete rows become `PREPARING`. Reconciliation never
+interprets failure or uncertainty as successful preparation.
 
 ## Autonomous preparation
 
