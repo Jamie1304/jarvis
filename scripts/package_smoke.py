@@ -25,23 +25,23 @@ def _run(command: list[str], *, cwd: Path, env: dict[str, str] | None = None) ->
 def _ensure_build_tool(tool_dir: Path) -> dict[str, str]:
     environment = os.environ.copy()
     environment["PYTHONPATH"] = str(tool_dir)
-    try:
-        __import__("build")
-    except ImportError:
-        _run(
-            [
-                sys.executable,
-                "-m",
-                "pip",
-                "install",
-                "--disable-pip-version-check",
-                "--quiet",
-                "--target",
-                str(tool_dir),
-                "build==1.2.2",
-            ],
-            cwd=PROJECT_ROOT,
-        )
+    # Keep the frontend deterministic and separate from the caller's
+    # site-packages.  The project build backend is intentionally resolved by
+    # normal PEP 517 isolation from pyproject.toml below.
+    _run(
+        [
+            sys.executable,
+            "-m",
+            "pip",
+            "install",
+            "--disable-pip-version-check",
+            "--quiet",
+            "--target",
+            str(tool_dir),
+            "build==1.2.2",
+        ],
+        cwd=PROJECT_ROOT,
+    )
     return environment
 
 
@@ -136,7 +136,6 @@ def main() -> int:
                 sys.executable,
                 "-m",
                 "build",
-                "--no-isolation",
                 "--wheel",
                 "--sdist",
                 "--outdir",
@@ -175,7 +174,6 @@ def main() -> int:
                 sys.executable,
                 "-m",
                 "build",
-                "--no-isolation",
                 "--wheel",
                 "--outdir",
                 str(sdist_artifacts),
