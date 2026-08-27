@@ -69,8 +69,9 @@ The same predicate is rechecked by both `proposal()` and `accept()` against the
 current durable record, so a proposal cannot become authority after the
 opportunity has degraded.
 
-An acquisition exception is recorded as `FAILED` with preparation state
-`FAILED`, while retaining the opportunity's evidence and diagnostic error. It is
+An acquisition exception or preparation-provider exception is recorded as
+`FAILED` with preparation state `FAILED`, while retaining the opportunity's
+evidence and diagnostic error. It is
 not returned to `READY_TO_PROPOSE`. Durable stores validate new writes and
 reconcile legacy inconsistent rows on read: failed rows become `FAILED`,
 security-blocked rows become `ARCHIVED`, unknown outcomes become `ASSESSING`,

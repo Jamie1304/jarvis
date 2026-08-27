@@ -2464,6 +2464,7 @@ async def test_v1_production_composition_acquires_randomized_capability_and_rest
     # coordinator, but stops before activation or authority.  The second
     # verified observation is required by the normal evidence policy.
     from jarvis.capability_opportunities import (
+        CapabilityOpportunityError,
         OpportunityEvidence,
         OpportunityEvidenceSource,
         OpportunityPreparationState,
@@ -2505,10 +2506,10 @@ async def test_v1_production_composition_acquires_randomized_capability_and_rest
     }
     assert container.capability_registry.manifests() == ()
 
-    # Declining the prepared proposal records cooldown and does not activate it.
-    declined = container.opportunity_engine.decline(opportunity.opportunity_id)
-    assert declined.status is OpportunityStatus.DECLINED
-    assert declined.cooldown_until is not None
+    # A definitive preparation failure cannot be changed into a declined state;
+    # failed opportunities remain failed and cannot enter the proposal lifecycle.
+    with pytest.raises(CapabilityOpportunityError):
+        container.opportunity_engine.decline(opportunity.opportunity_id)
     assert container.tool_registry.find_by_capability(capability) == ()
 
     from jarvis.goal_supervisor import GoalBudget, GoalIntent, GoalStatus

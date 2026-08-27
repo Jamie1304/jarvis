@@ -276,6 +276,14 @@ _NON_SUCCESS_PREPARATION_STATES = frozenset(
 
 def validate_opportunity_state(opportunity: CapabilityOpportunity) -> None:
     """Validate lifecycle/preparation combinations that can carry authority."""
+    if opportunity.preparation_state is OpportunityPreparationState.FAILED and (
+        opportunity.status is not OpportunityStatus.FAILED
+    ):
+        raise CapabilityOpportunityError("Failed preparation must have failed opportunity status")
+    if opportunity.status is OpportunityStatus.FAILED and (
+        opportunity.preparation_state is not OpportunityPreparationState.FAILED
+    ):
+        raise CapabilityOpportunityError("Failed opportunity must have failed preparation state")
     if opportunity.status in _PROPOSAL_STATUSES and (
         opportunity.preparation_state is not OpportunityPreparationState.READY
     ):
@@ -303,8 +311,12 @@ def _reconcile_opportunity_state(opportunity: CapabilityOpportunity) -> Capabili
         return opportunity
     except CapabilityOpportunityError:
         preparation = opportunity.preparation_state
-        if preparation is OpportunityPreparationState.FAILED:
+        if (
+            preparation is OpportunityPreparationState.FAILED
+            or opportunity.status is OpportunityStatus.FAILED
+        ):
             status = OpportunityStatus.FAILED
+            preparation = OpportunityPreparationState.FAILED
             decision = OpportunityDecision.PREPARE
         elif preparation is OpportunityPreparationState.SECURITY_BLOCKED:
             status = OpportunityStatus.ARCHIVED
@@ -511,7 +523,11 @@ class InMemoryOpportunityStore:
         return revision
 
     def list(self) -> tuple[CapabilityOpportunity, ...]:
-        return tuple(item[0] for item in self._items.values())
+        return tuple(
+            opportunity
+            for opportunity_id in self._items
+            if (opportunity := self.get(opportunity_id)) is not None
+        )
 
     def close(self) -> None:
         return None
@@ -645,7 +661,7 @@ class CapabilityOpportunityEngine:
         except Exception as error:
             failed = replace(
                 assessing,
-                status=OpportunityStatus.DETECTED,
+                status=OpportunityStatus.FAILED,
                 preparation_state=OpportunityPreparationState.FAILED,
                 last_error=f"preparation failed: {type(error).__name__}",
                 updated_at=_timestamp(self._clock(), "Opportunity clock"),
