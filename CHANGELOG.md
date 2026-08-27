@@ -10,6 +10,9 @@ Release-candidate preparation for the minimal adaptive core.
 
 ### Added
 
+- Proprietary first-party `LICENSE.txt`, `EULA.txt`, and `PRIVACY_POLICY.txt`
+  documents with PEP 639 `LicenseRef-JARVIS-Proprietary` package metadata for
+  the current private-use/pre-commercial state.
 - Canonical PlanningEngine task execution with GoalSupervisor intent
   persistence and bounded Agent Runtime execution.
 - Trusted Core, PermissionBroker, policy, audit, CredentialVault and data
@@ -57,6 +60,9 @@ Release-candidate preparation for the minimal adaptive core.
 - Opportunity preparation failures are durably non-proposal-ready; proposal and
   acceptance revalidate preparation state, and legacy inconsistent rows reconcile
   fail closed without discarding diagnostic evidence.
+- Installed distributions now validate package-local trusted startup files against
+  their distribution `RECORD`; fresh artifact-only startup no longer depends on a
+  source checkout or generated project index.
 
 ### Known limitations
 

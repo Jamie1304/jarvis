@@ -30,6 +30,10 @@ from jarvis.security.modification_policy import (
     ModificationTrustLevel,
 )
 from jarvis.security.startup import (
+    InstalledDistributionIntegrityEvidenceProvider,
+    IntegrityEvidenceError,
+    IntegrityEvidenceProvider,
+    SourceCheckoutIntegrityEvidenceProvider,
     StartupSecurityConfiguration,
     StartupSecurityValidator,
     local_model_endpoint_is_safe,
@@ -57,6 +61,10 @@ __all__ = [
     "SecurityViolation",
     "SecurityViolationCode",
     "StartupSecurityConfiguration",
+    "InstalledDistributionIntegrityEvidenceProvider",
+    "IntegrityEvidenceError",
+    "IntegrityEvidenceProvider",
+    "SourceCheckoutIntegrityEvidenceProvider",
     "StartupSecurityReport",
     "StartupSecurityValidator",
     "UnknownIntegrityPathError",

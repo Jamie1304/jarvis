@@ -48,3 +48,15 @@ python scripts/quality.py
 ```
 
 See [docs/development.md](docs/development.md) for the complete workflow.
+
+## License
+
+First-party JARVIS software is proprietary software in private-use,
+pre-commercial development and is not currently offered for sale or under a
+paid subscription. Use is subject to [LICENSE.txt](LICENSE.txt) and
+[EULA.txt](EULA.txt). Current privacy practices are described in
+[PRIVACY_POLICY.txt](PRIVACY_POLICY.txt). Third-party components retain their
+separate license terms; donor projects are reference-only and are not required
+runtime dependencies. A geographic business/contact address and any other
+launch-specific legal details will be added to operative commercial materials
+before commercial publication.

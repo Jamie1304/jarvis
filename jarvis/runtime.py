@@ -228,8 +228,11 @@ from jarvis.resources import ResourceGovernor, SystemResourceTelemetry
 from jarvis.sandbox_proxies import HostProxy, HostProxyAudit, HostProxyManifest
 from jarvis.security import (
     SECURITY_POLICY_VERSION,
+    InstalledDistributionIntegrityEvidenceProvider,
+    IntegrityEvidenceProvider,
     SecurityViolation,
     SecurityViolationCode,
+    SourceCheckoutIntegrityEvidenceProvider,
     StartupSecurityConfiguration,
     StartupSecurityReport,
     StartupSecurityValidator,
@@ -959,6 +962,8 @@ class ApplicationRuntime:
         project_root: Path | None = None,
         browser_backend: BrowserAdapter | None = None,
         credential_vault: CredentialVault | None = None,
+        recovery_key_backend: SecretBackend | None = None,
+        integrity_evidence: IntegrityEvidenceProvider | None = None,
     ) -> ApplicationRuntime:
         """Load explicit process settings and map malformed input to safe mode."""
 
@@ -985,6 +990,17 @@ class ApplicationRuntime:
             project_root=project_root,
             browser_backend=browser_backend,
             credential_vault=credential_vault,
+            recovery_key_backend=recovery_key_backend,
+            integrity_evidence=(
+                integrity_evidence
+                or (
+                    InstalledDistributionIntegrityEvidenceProvider()
+                    if settings.environment == "production"
+                    else SourceCheckoutIntegrityEvidenceProvider(
+                        Path(__file__).resolve().parents[1]
+                    )
+                )
+            ),
         )
 
     @classmethod
@@ -1002,6 +1018,7 @@ class ApplicationRuntime:
         trusted_application_tools: tuple[Tool[Any, Any], ...] = (),
         trusted_compensation_observers: Mapping[str, EffectStateObserverProvider] | None = None,
         certification_oracle: CertificationOracle | None = None,
+        integrity_evidence: IntegrityEvidenceProvider | None = None,
     ) -> ApplicationRuntime:
         if test_fixture is not None and settings.environment != "test":
             return cls(
@@ -1045,7 +1062,10 @@ class ApplicationRuntime:
             autonomous_scheduling_enabled=settings.autonomous_scheduling_enabled,
             ai_provider_local_only=provider_local_only,
         )
-        startup_validator = StartupSecurityValidator()
+        startup_validator = StartupSecurityValidator(
+            integrity_evidence
+            or SourceCheckoutIntegrityEvidenceProvider(Path(__file__).resolve().parents[1])
+        )
         security_report = startup_validator.validate(startup_config)
         if not security_report.valid:
             reason = security_report.violations[0].code.value
@@ -1254,7 +1274,11 @@ class ApplicationRuntime:
                 artifact_store=artifact_store,
             )
             root = resolved_project_root
-            knowledge = KnowledgeStore.load(root / "knowledge" / "generated" / "project-index.json")
+            knowledge_path = root / "knowledge" / "generated" / "project-index.json"
+            if knowledge_path.exists() or knowledge_path.is_symlink():
+                knowledge = KnowledgeStore.load(knowledge_path)
+            else:
+                knowledge = KnowledgeStore.empty()
             try:
                 provider = configured_provider_registry.create(
                     settings.ai_provider,

@@ -2,14 +2,23 @@
 
 from __future__ import annotations
 
+import base64
+import csv
+import hashlib
+import io
 import os
+from collections.abc import Callable
 from dataclasses import dataclass
+from importlib import metadata, resources
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from jarvis.security.integrity import SECURITY_POLICY_VERSION, RepositoryIntegrityClassifier
+from jarvis.security.integrity import (
+    SECURITY_POLICY_VERSION,
+    RepositoryIntegrityClassifier,
+    normalize_repository_path,
+)
 from jarvis.security.models import (
-    IntegrityClass,
     SecurityViolation,
     SecurityViolationCode,
     StartupSecurityReport,
@@ -37,6 +46,193 @@ class StartupSecurityConfiguration:
     ai_provider_local_only: bool = True
 
 
+class IntegrityEvidenceError(ValueError):
+    """Trusted startup evidence is missing, malformed, or inconsistent."""
+
+
+class IntegrityEvidenceProvider:
+    """Provide integrity evidence for one explicit composition context."""
+
+    def validate(self) -> None:
+        raise NotImplementedError
+
+
+_SOURCE_INTEGRITY_FILES = (
+    "jarvis/api.py",
+    "jarvis/improvement/workspace.py",
+    "jarvis/permissions/broker.py",
+    "jarvis/recovery.py",
+    "jarvis/runtime.py",
+    "jarvis/security/integrity.py",
+    "jarvis/security/startup.py",
+    "jarvis/tools/base.py",
+    "docs/security-constitution.md",
+    "scripts/quality.py",
+    "pyproject.toml",
+)
+_INSTALLED_INTEGRITY_FILES = (
+    "jarvis/api.py",
+    "jarvis/improvement/workspace.py",
+    "jarvis/permissions/broker.py",
+    "jarvis/recovery.py",
+    "jarvis/runtime.py",
+    "jarvis/security/integrity.py",
+    "jarvis/security/startup.py",
+    "jarvis/tools/base.py",
+)
+
+
+class SourceCheckoutIntegrityEvidenceProvider(IntegrityEvidenceProvider):
+    """Validate repository evidence used by source and CI composition."""
+
+    def __init__(self, root: Path) -> None:
+        if not isinstance(root, Path):
+            raise ValueError("Source integrity root is invalid")
+        self._root = root
+
+    def validate(self) -> None:
+        try:
+            root = self._root.expanduser().resolve(strict=True)
+        except (OSError, RuntimeError) as error:
+            raise IntegrityEvidenceError("source integrity root is unavailable") from error
+        if not root.is_dir() or root.is_symlink() or root.is_junction():
+            raise IntegrityEvidenceError("source integrity root is unsafe")
+        classifier = RepositoryIntegrityClassifier()
+        for relative in _SOURCE_INTEGRITY_FILES:
+            normalized = normalize_repository_path(relative)
+            path = root.joinpath(*normalized.split("/"))
+            try:
+                resolved = path.resolve(strict=True)
+            except (OSError, RuntimeError) as error:
+                raise IntegrityEvidenceError(
+                    f"source integrity evidence is missing: {normalized}"
+                ) from error
+            if (
+                not resolved.is_file()
+                or path.is_symlink()
+                or path.is_junction()
+                or not resolved.is_relative_to(root)
+                or _has_reparse_ancestor(path, root)
+            ):
+                raise IntegrityEvidenceError(f"source integrity evidence is unsafe: {normalized}")
+            try:
+                classified = classifier.classify(normalized)
+            except ValueError as error:
+                raise IntegrityEvidenceError(
+                    f"source integrity evidence is not classifiable: {normalized}"
+                ) from error
+            if classified.integrity_class.value != "trusted_core":
+                raise IntegrityEvidenceError(
+                    f"source integrity evidence is not trusted core: {normalized}"
+                )
+
+
+class InstalledDistributionIntegrityEvidenceProvider(IntegrityEvidenceProvider):
+    """Validate immutable evidence that exists in an installed distribution.
+
+    Package resources and ``RECORD`` establish installed-file consistency and
+    completeness.  They do not authenticate the publisher; release signing
+    and the recovery/update authority remain separate controls.
+    """
+
+    def __init__(
+        self,
+        distribution_loader: Callable[[str], metadata.Distribution] | None = None,
+    ) -> None:
+        self._distribution_loader = distribution_loader or metadata.distribution
+
+    def validate(self) -> None:
+        try:
+            distribution = self._distribution_loader("jarvis")
+            if distribution.version != _package_version():
+                raise IntegrityEvidenceError("installed package version is inconsistent")
+            files = distribution.files
+            if files is None:
+                raise IntegrityEvidenceError("installed package file inventory is unavailable")
+            file_names = {path.as_posix() for path in files}
+            if not any(name.endswith(".dist-info/RECORD") for name in file_names):
+                raise IntegrityEvidenceError("installed package RECORD is missing")
+            record_text = distribution.read_text("RECORD")
+            if not isinstance(record_text, str):
+                raise IntegrityEvidenceError("installed package RECORD is unreadable")
+            record = _record_hashes(record_text)
+            package_root = resources.files("jarvis")
+            for relative in _INSTALLED_INTEGRITY_FILES:
+                package_path = relative.removeprefix("jarvis/")
+                resource = package_root.joinpath(*package_path.split("/"))
+                if not resource.is_file():
+                    raise IntegrityEvidenceError(
+                        f"installed integrity resource is missing: {relative}"
+                    )
+                if relative not in file_names:
+                    raise IntegrityEvidenceError(
+                        f"installed integrity resource is absent from RECORD: {relative}"
+                    )
+                expected_hash, expected_size = record.get(relative, (None, None))
+                if expected_hash is None or expected_size is None:
+                    raise IntegrityEvidenceError(
+                        f"installed integrity resource has no RECORD hash: {relative}"
+                    )
+                content = resource.read_bytes()
+                actual_hash = (
+                    base64.urlsafe_b64encode(hashlib.sha256(content).digest())
+                    .rstrip(b"=")
+                    .decode("ascii")
+                )
+                if actual_hash != expected_hash or len(content) != expected_size:
+                    raise IntegrityEvidenceError(
+                        f"installed integrity resource failed RECORD validation: {relative}"
+                    )
+        except IntegrityEvidenceError:
+            raise
+        except (ImportError, KeyError, OSError, TypeError, ValueError) as error:
+            raise IntegrityEvidenceError("installed integrity evidence is malformed") from error
+
+
+def _record_hashes(value: str) -> dict[str, tuple[str | None, int | None]]:
+    """Parse the CSV RECORD inventory for required package members."""
+
+    result: dict[str, tuple[str | None, int | None]] = {}
+    try:
+        rows = csv.reader(io.StringIO(value, newline=""))
+        for row in rows:
+            if len(row) != 3 or not row[0] or row[0] in result:
+                raise IntegrityEvidenceError("installed package RECORD is malformed")
+            digest = row[1]
+            if not digest.startswith("sha256="):
+                result[row[0]] = (None, None)
+            else:
+                encoded = digest.removeprefix("sha256=")
+                if not encoded:
+                    raise IntegrityEvidenceError("installed package RECORD hash is malformed")
+                size = int(row[2])
+                if size < 0:
+                    raise IntegrityEvidenceError("installed package RECORD size is malformed")
+                result[row[0]] = (encoded, size)
+    except (csv.Error, ValueError) as error:
+        raise IntegrityEvidenceError("installed package RECORD is malformed") from error
+    return result
+
+
+def _package_version() -> str:
+    """Resolve version from the package itself, never from the repository."""
+
+    from jarvis.version import __version__
+
+    return __version__
+
+
+def _has_reparse_ancestor(path: Path, root: Path) -> bool:
+    """Reject symlink/junction components between a checkout root and file."""
+
+    current = path
+    while current != root:
+        if current.is_symlink() or current.is_junction():
+            return True
+        current = current.parent
+    return root.is_symlink() or root.is_junction()
+
+
 class StartupSecurityValidator:
     """Validate compiled v1 policy and requested capabilities before startup I/O."""
 
@@ -61,6 +257,13 @@ class StartupSecurityValidator:
         ),
     )
 
+    def __init__(self, integrity_evidence: IntegrityEvidenceProvider | None = None) -> None:
+        if integrity_evidence is not None and not isinstance(
+            integrity_evidence, IntegrityEvidenceProvider
+        ):
+            raise ValueError("Integrity evidence provider is invalid")
+        self._integrity_evidence = integrity_evidence
+
     def validate(self, config: StartupSecurityConfiguration) -> StartupSecurityReport:
         violations: list[SecurityViolation] = []
         if config.policy_version != SECURITY_POLICY_VERSION:
@@ -70,11 +273,16 @@ class StartupSecurityValidator:
                     "The configured security-policy version is not supported",
                 )
             )
-        if not self._classification_is_valid():
+        evidence = self._integrity_evidence or SourceCheckoutIntegrityEvidenceProvider(
+            Path(__file__).resolve().parents[2]
+        )
+        try:
+            evidence.validate()
+        except IntegrityEvidenceError:
             violations.append(
                 SecurityViolation(
                     SecurityViolationCode.POLICY_CLASSIFICATION_INVALID,
-                    "The compiled integrity classification is incomplete",
+                    "Trusted integrity evidence is unavailable or inconsistent",
                 )
             )
         for field_name, code in self._FLAG_CODES:
@@ -116,28 +324,6 @@ class StartupSecurityValidator:
             resolved_app_data_dir,
             resolved_project_root,
         )
-
-    @staticmethod
-    def _classification_is_valid() -> bool:
-        classifier = RepositoryIntegrityClassifier()
-        required = (
-            "jarvis/security/integrity.py",
-            "jarvis/permissions/broker.py",
-            "jarvis/tools/base.py",
-            "jarvis/runtime.py",
-            "jarvis/api.py",
-            "jarvis/improvement/workspace.py",
-            "docs/security-constitution.md",
-            "scripts/quality.py",
-            "pyproject.toml",
-        )
-        try:
-            return all(
-                classifier.classify(path).integrity_class is IntegrityClass.TRUSTED_CORE
-                for path in required
-            )
-        except ValueError:
-            return False
 
 
 def local_model_endpoint_is_safe(value: str) -> bool:

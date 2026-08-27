@@ -3,12 +3,17 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import hashlib
 import os
 import sys
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
+from importlib import resources
+from importlib.metadata import Distribution
 from inspect import signature
 from pathlib import Path
+from typing import cast
 from uuid import uuid4
 
 import pytest
@@ -20,8 +25,10 @@ from jarvis.improvement.workspace import TrustedWorkspaceChangeApplier
 from jarvis.permissions import SafetyClass, normalize_path
 from jarvis.runtime import ApplicationRuntime, RuntimePaths, RuntimeStatus
 from jarvis.security import (
+    InstalledDistributionIntegrityEvidenceProvider,
     IntegrityClass,
     IntegrityClassificationError,
+    IntegrityEvidenceError,
     MutationAuthority,
     MutationAuthorization,
     MutationAuthorizationSource,
@@ -32,6 +39,7 @@ from jarvis.security import (
     MutationStage,
     RepositoryIntegrityClassifier,
     SecurityViolationCode,
+    SourceCheckoutIntegrityEvidenceProvider,
     StartupSecurityConfiguration,
     StartupSecurityValidator,
 )
@@ -66,6 +74,107 @@ def test_integrity_classifier_uses_compiled_manifest(
     expected: IntegrityClass,
 ) -> None:
     assert RepositoryIntegrityClassifier().classify(path).integrity_class is expected
+
+
+def test_source_integrity_evidence_fails_closed_when_repository_files_are_missing(
+    tmp_path: Path,
+) -> None:
+    with pytest.raises(IntegrityEvidenceError):
+        SourceCheckoutIntegrityEvidenceProvider(tmp_path / "missing-source").validate()
+
+
+class _FakeDistribution:
+    def __init__(self, files: tuple[str, ...], version: str = "1.0.0") -> None:
+        from pathlib import PurePosixPath
+
+        self.files = tuple(PurePosixPath(path) for path in files)
+        self.version = version
+
+    def read_text(self, name: str) -> str | None:
+        if name != "RECORD":
+            return None
+        package_root = resources.files("jarvis")
+        rows: list[str] = []
+        for path in self.files:
+            relative = path.as_posix()
+            if not relative.startswith("jarvis/") or relative.endswith("/RECORD"):
+                continue
+            resource = package_root.joinpath(*relative.removeprefix("jarvis/").split("/"))
+            content = resource.read_bytes()
+            digest = (
+                base64.urlsafe_b64encode(hashlib.sha256(content).digest())
+                .rstrip(b"=")
+                .decode("ascii")
+            )
+            rows.append(f"{relative},sha256={digest},{len(content)}")
+        rows.append("jarvis-1.0.0.dist-info/RECORD,,")
+        return "\n".join(rows)
+
+
+def _installed_integrity_files() -> tuple[str, ...]:
+    return (
+        "jarvis/api.py",
+        "jarvis/improvement/workspace.py",
+        "jarvis/permissions/broker.py",
+        "jarvis/recovery.py",
+        "jarvis/runtime.py",
+        "jarvis/security/integrity.py",
+        "jarvis/security/startup.py",
+        "jarvis/tools/base.py",
+        "jarvis-1.0.0.dist-info/RECORD",
+    )
+
+
+def test_installed_integrity_evidence_uses_package_files_and_record() -> None:
+    provider = InstalledDistributionIntegrityEvidenceProvider(
+        lambda _name: cast(Distribution, _FakeDistribution(_installed_integrity_files()))
+    )
+
+    provider.validate()
+
+
+@pytest.mark.parametrize(
+    "files",
+    (
+        tuple(path for path in _installed_integrity_files() if path != "jarvis/runtime.py"),
+        tuple(path for path in _installed_integrity_files() if not path.endswith("/RECORD")),
+    ),
+)
+def test_installed_integrity_evidence_missing_data_fails_closed(
+    files: tuple[str, ...],
+) -> None:
+    provider = InstalledDistributionIntegrityEvidenceProvider(
+        lambda _name: cast(Distribution, _FakeDistribution(files))
+    )
+
+    with pytest.raises(IntegrityEvidenceError):
+        provider.validate()
+
+
+def test_installed_integrity_evidence_version_mismatch_fails_closed() -> None:
+    provider = InstalledDistributionIntegrityEvidenceProvider(
+        lambda _name: cast(Distribution, _FakeDistribution(_installed_integrity_files(), "9.9.9"))
+    )
+
+    with pytest.raises(IntegrityEvidenceError):
+        provider.validate()
+
+
+def test_installed_integrity_evidence_malformed_record_fails_closed() -> None:
+    class MalformedDistribution(_FakeDistribution):
+        def read_text(self, name: str) -> str | None:
+            del name
+            return "not,csv,integrity,metadata"
+
+    provider = InstalledDistributionIntegrityEvidenceProvider(
+        lambda _name: cast(
+            Distribution,
+            MalformedDistribution(_installed_integrity_files()),
+        )
+    )
+
+    with pytest.raises(IntegrityEvidenceError):
+        provider.validate()
 
 
 @pytest.mark.parametrize(

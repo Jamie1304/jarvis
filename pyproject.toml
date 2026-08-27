@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=75.0"]
+requires = ["setuptools>=77.0.3"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -7,6 +7,8 @@ name = "jarvis"
 dynamic = ["version"]
 description = "Local-first desktop AI agent engineering foundation"
 readme = "README.md"
+license = "LicenseRef-JARVIS-Proprietary"
+license-files = ["LICENSE.txt", "EULA.txt", "PRIVACY_POLICY.txt"]
 requires-python = ">=3.12"
 dependencies = [
     "cryptography==44.0.2",

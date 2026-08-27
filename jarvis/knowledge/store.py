@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import re
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import cast
 
@@ -35,6 +35,26 @@ class KnowledgeStore:
 
     def __init__(self, snapshot: KnowledgeSnapshot) -> None:
         self._snapshot = snapshot
+
+    @classmethod
+    def empty(cls) -> KnowledgeStore:
+        """Return an empty optional project-knowledge projection.
+
+        Installed distributions do not carry a developer checkout's generated
+        project index. Missing optional project knowledge is therefore an
+        empty projection; a present index is still parsed and validated.
+        """
+
+        return cls(
+            KnowledgeSnapshot(
+                schema_version=1,
+                generated_at=datetime.now(UTC),
+                revision=None,
+                items=(),
+                components=(),
+                tools=(),
+            )
+        )
 
     @property
     def snapshot(self) -> KnowledgeSnapshot:
