@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import math
 import os
@@ -211,7 +212,12 @@ async def test_windows_restricted_token_and_explicit_handle_boundary(
     trusted_handle_file = tmp_path / "trusted-handle.txt"
     trusted_handle_file.write_text("trusted-only", encoding="utf-8")
     file_descriptor = os.open(trusted_handle_file, os.O_RDONLY)
-    os.set_handle_inheritable(file_descriptor, True)
+    # os.open returns a CRT file descriptor on Windows.  The handle
+    # inheritability APIs and the child probe operate on the underlying
+    # native HANDLE, not on that descriptor number.
+    native_handle = msvcrt.get_osfhandle(file_descriptor)
+    os.set_handle_inheritable(native_handle, True)
+    assert os.get_handle_inheritable(native_handle) is True
     process = sandbox(
         tmp_path,
         limits=SandboxLimits(
@@ -240,7 +246,7 @@ async def test_windows_restricted_token_and_explicit_handle_boundary(
         try:
             result = await process.request(
                 "probe-handle",
-                {"handle": int(msvcrt.get_osfhandle(file_descriptor))},
+                {"handle": int(native_handle)},
             )
         except SandboxStartupError as error:
             diagnostics = error.diagnostics
@@ -251,6 +257,8 @@ async def test_windows_restricted_token_and_explicit_handle_boundary(
             return
         assert result["visible"] is False
     finally:
+        with contextlib.suppress(OSError):
+            os.set_handle_inheritable(native_handle, False)
         os.close(file_descriptor)
         await process.close()
 
