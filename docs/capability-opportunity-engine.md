@@ -78,6 +78,22 @@ security-blocked rows become `ARCHIVED`, unknown outcomes become `ASSESSING`,
 and other waiting/incomplete rows become `PREPARING`. Reconciliation never
 interprets failure or uncertainty as successful preparation.
 
+Ordinary observation of a non-expired `FAILED` opportunity preserves its
+terminal status, failed preparation state, decision, authority metadata, and
+diagnostic error while it merges any new passive evidence. Observation does
+not retry preparation or acquisition and cannot make the opportunity
+proposal-ready. Expiry and the existing decline/cooldown rules remain separate
+lifecycle boundaries; a failed opportunity is not reopened merely because
+additional evidence is observed.
+
+`prepare(opportunity_id)` is the existing explicit, application-owned retry
+operation. A caller must invoke it deliberately; `observe()` never invokes it.
+The operation records a new preparation attempt and re-enters `PREPARING`, but
+it does not grant proposal or activation authority. A retry that fails returns
+to `FAILED/FAILED`; only a newly successful, normally validated preparation may
+become `READY_TO_PROPOSE`. There is no implicit retry route and no separate
+retry API is required for this contract.
+
 ## Autonomous preparation
 
 When the configured preparation provider allows it, the engine may perform

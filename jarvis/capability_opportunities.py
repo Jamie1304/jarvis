@@ -602,6 +602,7 @@ class CapabilityOpportunityEngine:
             OpportunityStatus.ACCEPTED,
             OpportunityStatus.ACTIVATING,
             OpportunityStatus.ACTIVE,
+            OpportunityStatus.FAILED,
         }
         continuing = existing is not None and existing.status in continuing_statuses
         prior = existing if continuing else None

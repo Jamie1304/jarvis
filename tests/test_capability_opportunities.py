@@ -23,8 +23,10 @@ from jarvis.capability_opportunities import (
     CapabilityOpportunityEngine,
     CapabilityOpportunityError,
     InMemoryOpportunityStore,
+    OpportunityDecision,
     OpportunityEvidence,
     OpportunityEvidenceSource,
+    OpportunityPreparationProvider,
     OpportunityPreparationResult,
     OpportunityPreparationState,
     OpportunityStatus,
@@ -67,9 +69,29 @@ class _Acquisition:
 
 
 class _FailingPreparation:
+    def __init__(self) -> None:
+        self.calls = 0
+
     async def prepare(self, opportunity: object) -> OpportunityPreparationResult:
         del opportunity
+        self.calls += 1
         raise RuntimeError("synthetic preparation failure")
+
+
+class _RetryPreparation:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def prepare(self, opportunity: object) -> OpportunityPreparationResult:
+        del opportunity
+        self.calls += 1
+        if self.calls == 1:
+            raise RuntimeError("synthetic retryable failure")
+        return OpportunityPreparationResult(
+            OpportunityPreparationState.READY,
+            "synthetic retry succeeded",
+            evidence_references=("preparation:retry-success",),
+        )
 
 
 class _FailedResultPreparation:
@@ -92,8 +114,13 @@ class _StatePreparation:
 
 
 class _FailingAcquisition(_Acquisition):
+    def __init__(self) -> None:
+        super().__init__()
+        self.calls = 0
+
     async def acquire(self, request: CapabilityAcquisitionRequest) -> CapabilityAcquisitionReport:
         del request
+        self.calls += 1
         raise RuntimeError("synthetic acquisition failure")
 
 
@@ -154,12 +181,13 @@ def _engine(
     acquisition: _Acquisition | None = None,
     *,
     clock: list[datetime] | None = None,
+    preparation: OpportunityPreparationProvider | None = None,
 ) -> CapabilityOpportunityEngine:
     ticks = clock if clock is not None else [NOW]
     return CapabilityOpportunityEngine(
         store,
         acquisition or _Acquisition(),
-        preparation=_Preparation(),
+        preparation=preparation or _Preparation(),
         clock=lambda: ticks[0],
     )
 
@@ -338,6 +366,182 @@ async def test_failed_preparation_and_acquisition_are_recorded() -> None:
 
 
 @pytest.mark.asyncio
+async def test_failed_preparation_stays_failed_when_observed_again() -> None:
+    store = InMemoryOpportunityStore()
+    preparation = _FailingPreparation()
+    engine = CapabilityOpportunityEngine(
+        store,
+        _Acquisition(),
+        preparation=preparation,
+        clock=lambda: NOW,
+    )
+    opportunity = _observe(engine, _evidence("observe-failed:one", "observe-failed:two"))
+    assert opportunity is not None
+    with pytest.raises(CapabilityOpportunityError):
+        await engine.prepare(opportunity.opportunity_id)
+
+    failed = engine.get(opportunity.opportunity_id)
+    revision = store.revision(opportunity.opportunity_id)
+    same_evidence = _observe(engine, _evidence("observe-failed:one", "observe-failed:two"))
+    assert same_evidence is not None
+    assert same_evidence.status is OpportunityStatus.FAILED
+    assert same_evidence.preparation_state is OpportunityPreparationState.FAILED
+    assert same_evidence.decision is OpportunityDecision.PREPARE
+    assert same_evidence.last_error == failed.last_error
+    assert same_evidence.evidence_references == failed.evidence_references
+    assert store.revision(opportunity.opportunity_id) == revision + 1
+
+    new_evidence = _observe(
+        engine,
+        _evidence("observe-failed:one", "observe-failed:two", "observe-failed:three"),
+    )
+    assert new_evidence is not None
+    assert new_evidence.status is OpportunityStatus.FAILED
+    assert new_evidence.preparation_state is OpportunityPreparationState.FAILED
+    assert new_evidence.last_error == failed.last_error
+    assert "observe-failed:three" in new_evidence.evidence_references
+    assert preparation.calls == 1
+    with pytest.raises(CapabilityOpportunityError):
+        engine.proposal(opportunity.opportunity_id)
+    with pytest.raises(CapabilityOpportunityError):
+        await engine.accept(opportunity.opportunity_id, _request())
+
+
+@pytest.mark.asyncio
+async def test_failed_preparation_observation_stays_failed_after_two_restarts(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "failed-preparation-observation.sqlite3"
+    preparation = _FailingPreparation()
+    store = SQLiteOpportunityStore(path)
+    engine = CapabilityOpportunityEngine(
+        store,
+        _Acquisition(),
+        preparation=preparation,
+        clock=lambda: NOW,
+    )
+    opportunity = _observe(engine, _evidence("restart-observe:one", "restart-observe:two"))
+    assert opportunity is not None
+    with pytest.raises(CapabilityOpportunityError):
+        await engine.prepare(opportunity.opportunity_id)
+    first_failed = engine.get(opportunity.opportunity_id)
+    first_revision = store.revision(opportunity.opportunity_id)
+    store.close()
+
+    first_restart_store = SQLiteOpportunityStore(path)
+    first_restart = CapabilityOpportunityEngine(
+        first_restart_store,
+        _Acquisition(),
+        preparation=preparation,
+        clock=lambda: NOW,
+    )
+    observed = _observe(
+        first_restart,
+        _evidence("restart-observe:one", "restart-observe:two", "restart-observe:three"),
+    )
+    assert observed is not None
+    assert observed.status is OpportunityStatus.FAILED
+    assert observed.preparation_state is OpportunityPreparationState.FAILED
+    assert observed.last_error == first_failed.last_error
+    assert "restart-observe:three" in observed.evidence_references
+    assert first_restart_store.revision(opportunity.opportunity_id) == first_revision + 1
+    with pytest.raises(CapabilityOpportunityError):
+        first_restart.proposal(opportunity.opportunity_id)
+    first_restart_store.close()
+
+    second_restart_store = SQLiteOpportunityStore(path)
+    second_restart = _engine(second_restart_store)
+    restored = second_restart.get(opportunity.opportunity_id)
+    assert restored.status is OpportunityStatus.FAILED
+    assert restored.preparation_state is OpportunityPreparationState.FAILED
+    assert restored.last_error == first_failed.last_error
+    assert "restart-observe:three" in restored.evidence_references
+    assert preparation.calls == 1
+    second_restart_store.close()
+
+
+@pytest.mark.asyncio
+async def test_failed_acquisition_stays_failed_when_observed_again() -> None:
+    acquisition = _FailingAcquisition()
+    engine = _engine(InMemoryOpportunityStore(), acquisition)
+    opportunity = _observe(engine, _evidence("observe-acquisition:one", "observe-acquisition:two"))
+    assert opportunity is not None
+    await engine.prepare(opportunity.opportunity_id)
+    with pytest.raises(CapabilityOpportunityError):
+        await engine.accept(opportunity.opportunity_id, _request())
+
+    failed = engine.get(opportunity.opportunity_id)
+    observed = _observe(
+        engine,
+        _evidence(
+            "observe-acquisition:one",
+            "observe-acquisition:two",
+            "observe-acquisition:three",
+        ),
+    )
+    assert observed is not None
+    assert observed.status is OpportunityStatus.FAILED
+    assert observed.preparation_state is OpportunityPreparationState.FAILED
+    assert observed.last_error == failed.last_error
+    assert "observe-acquisition:three" in observed.evidence_references
+    assert acquisition.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_prepare_from_failed_is_explicit_application_owned_retry() -> None:
+    preparation = _RetryPreparation()
+    engine = CapabilityOpportunityEngine(
+        InMemoryOpportunityStore(),
+        _Acquisition(),
+        preparation=preparation,
+        clock=lambda: NOW,
+    )
+    opportunity = _observe(engine, _evidence("explicit-retry:one", "explicit-retry:two"))
+    assert opportunity is not None
+    with pytest.raises(CapabilityOpportunityError):
+        await engine.prepare(opportunity.opportunity_id)
+    failed = engine.get(opportunity.opportunity_id)
+    assert failed.status is OpportunityStatus.FAILED
+    assert failed.preparation_state is OpportunityPreparationState.FAILED
+
+    retried = await engine.prepare(opportunity.opportunity_id)
+    assert preparation.calls == 2
+    assert retried.status is OpportunityStatus.READY_TO_PROPOSE
+    assert retried.preparation_state is OpportunityPreparationState.READY
+    assert "preparation:retry-success" in retried.evidence_references
+    proposal = engine.proposal(opportunity.opportunity_id)
+    assert proposal.opportunity_id == opportunity.opportunity_id
+
+
+@pytest.mark.asyncio
+async def test_explicit_failed_result_stays_failed_when_observed_again() -> None:
+    engine = _engine(
+        InMemoryOpportunityStore(),
+        preparation=_FailedResultPreparation(),
+    )
+    opportunity = _observe(engine, _evidence("explicit-failed:one", "explicit-failed:two"))
+    assert opportunity is not None
+    failed = await engine.prepare(opportunity.opportunity_id)
+    assert failed.status is OpportunityStatus.FAILED
+    assert failed.preparation_state is OpportunityPreparationState.FAILED
+    assert failed.last_error == ""
+    observed = _observe(
+        engine,
+        _evidence("explicit-failed:one", "explicit-failed:two", "explicit-failed:three"),
+    )
+    assert observed is not None
+    assert observed.status is OpportunityStatus.FAILED
+    assert observed.preparation_state is OpportunityPreparationState.FAILED
+    assert observed.decision is failed.decision
+    assert observed.prepared_summary == failed.prepared_summary
+    assert observed.remaining_authority == failed.remaining_authority
+    assert observed.last_error == failed.last_error
+    assert "explicit-failed:three" in observed.evidence_references
+    with pytest.raises(CapabilityOpportunityError):
+        engine.proposal(opportunity.opportunity_id)
+
+
+@pytest.mark.asyncio
 async def test_failed_preparation_with_evidence_is_not_proposal_ready() -> None:
     engine = CapabilityOpportunityEngine(
         InMemoryOpportunityStore(),
@@ -351,6 +555,11 @@ async def test_failed_preparation_with_evidence_is_not_proposal_ready() -> None:
     assert prepared.status is OpportunityStatus.FAILED
     assert prepared.preparation_state is OpportunityPreparationState.FAILED
     assert "preparation:failed" in prepared.evidence_references
+    observed = _observe(engine, _evidence("workflow:failed-one", "workflow:failed-two"))
+    assert observed is not None
+    assert observed.status is OpportunityStatus.FAILED
+    assert observed.preparation_state is OpportunityPreparationState.FAILED
+    assert observed.last_error == prepared.last_error
     with pytest.raises(CapabilityOpportunityError):
         engine.proposal(opportunity.opportunity_id)
 

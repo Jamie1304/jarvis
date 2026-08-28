@@ -2499,6 +2499,20 @@ async def test_v1_production_composition_acquires_randomized_capability_and_rest
     assert prepared_opportunity.preparation_state is OpportunityPreparationState.FAILED
     assert prepared_opportunity.decision.value == "prepare"
     assert prepared_opportunity.remaining_authority == ("trusted activation approval",)
+    reobserved_opportunity = container.opportunity_engine.observe(
+        f"synthetic proactive capability {suffix}",
+        prepared_opportunity.evidence,
+        expected_benefit="prepare a bounded generic capability",
+        privacy_impact="no private credentials",
+        estimated_resource_cost="bounded local model and sandbox",
+        likely_required_authority=("trusted activation approval",),
+        workspace="production-v1-workspace",
+    )
+    assert reobserved_opportunity is not None
+    assert reobserved_opportunity.status is OpportunityStatus.FAILED
+    assert reobserved_opportunity.preparation_state is OpportunityPreparationState.FAILED
+    assert reobserved_opportunity.decision is prepared_opportunity.decision
+    assert reobserved_opportunity.last_error == prepared_opportunity.last_error
     assert container.capability_acquisition.last_run is not None
     assert container.capability_acquisition.last_run.stage in {
         AcquisitionStage.CERTIFYING,

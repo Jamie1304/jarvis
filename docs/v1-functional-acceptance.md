@@ -42,7 +42,9 @@ The production-composition evidence is intentionally narrower and explicit:
   arbitrary external package or an adopted machine binary is universally safe.
 - The same test exercises `CapabilityOpportunityEngine.prepare()` through the production
   coordinator. Its intentionally oracle-less generated action fails certification closed and
-  remains `FAILED`, proving evidence alone cannot produce `READY_TO_PROPOSE`; successful
+  remains `FAILED`, proving evidence alone cannot produce `READY_TO_PROPOSE`. Repeating ordinary
+  evidence observation preserves `FAILED/FAILED`, the failure decision, and the diagnostic error,
+  proving passive observation is not an implicit retry; successful
   certified preparation remains proposal-ready in the dedicated opportunity tests. An
   acquisition and preparation-provider exceptions are durably `FAILED`; proposal and
   acceptance revalidate the preparation state, including after restart. Preparation does not grant authority or
