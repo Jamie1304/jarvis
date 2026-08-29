@@ -127,8 +127,49 @@ class SubprocessTestAdapter(TestProcessAdapter):
         communication: asyncio.Task[tuple[bytes, bytes]],
     ) -> tuple[bytes, bytes]:
         if process.returncode is None:
-            process.kill()
-        return await communication
+            if sys.platform == "win32":
+                await SubprocessTestAdapter._terminate_windows_tree(process)
+            else:
+                process.kill()
+        try:
+            return await asyncio.wait_for(asyncio.shield(communication), timeout=5.0)
+        except TimeoutError:
+            # A descendant can retain an inherited pipe after the process tree
+            # was terminated.  Never let evidence reaping make the runner
+            # unbounded; retain the bounded diagnostic result instead.
+            if not communication.done():
+                communication.cancel()
+            await asyncio.gather(communication, return_exceptions=True)
+            return b"", b""
+
+    @staticmethod
+    async def _terminate_windows_tree(process: asyncio.subprocess.Process) -> None:
+        """Terminate only the runner-owned Windows process tree."""
+
+        system_root = os.environ.get("SystemRoot") or os.environ.get("SYSTEMROOT")
+        taskkill = Path(system_root or r"C:\Windows") / "System32" / "taskkill.exe"
+        try:
+            killer = await asyncio.create_subprocess_exec(
+                str(taskkill),
+                "/PID",
+                str(process.pid),
+                "/T",
+                "/F",
+                stdin=asyncio.subprocess.DEVNULL,
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            try:
+                await asyncio.wait_for(killer.wait(), timeout=5.0)
+            except TimeoutError:
+                killer.kill()
+                await asyncio.gather(killer.wait(), return_exceptions=True)
+        except (OSError, TimeoutError):
+            # The direct child is still ours and remains a safe fallback.  A
+            # missing tree-kill utility is observable as reduced cleanup, never
+            # as permission to target unrelated processes.
+            if process.returncode is None:
+                process.kill()
 
     @staticmethod
     def _safe_environment(*, allow_hardware: bool = False) -> dict[str, str]:
@@ -141,6 +182,10 @@ class SubprocessTestAdapter(TestProcessAdapter):
         }
         values["PYTHONUTF8"] = "1"
         values["PYTHONDONTWRITEBYTECODE"] = "1"
+        # Test mode is an explicit, narrowly accepted selector.  Arbitrary
+        # JARVIS_* values remain excluded from the sanitized child process.
+        if os.environ.get("JARVIS_ENVIRONMENT") == "test":
+            values["JARVIS_ENVIRONMENT"] = "test"
         if allow_hardware:
             values["JARVIS_WINDOWS_INTEGRATION"] = "true"
             if os.environ.get("JARVIS_CAMERA_INTEGRATION") == "true":

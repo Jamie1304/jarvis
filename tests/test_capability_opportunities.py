@@ -113,6 +113,20 @@ class _StatePreparation:
         return OpportunityPreparationResult(self.state, "synthetic preparation state")
 
 
+class _SecurityBlockingPreparation:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def prepare(self, opportunity: object) -> OpportunityPreparationResult:
+        del opportunity
+        self.calls += 1
+        return OpportunityPreparationResult(
+            OpportunityPreparationState.SECURITY_BLOCKED,
+            "Trusted policy blocked autonomous preparation",
+            evidence_references=("security:block",),
+        )
+
+
 class _FailingAcquisition(_Acquisition):
     def __init__(self) -> None:
         super().__init__()
@@ -925,3 +939,141 @@ def test_future_opportunity_schema_and_malformed_payload_fail_closed(tmp_path: P
         connection.execute("INSERT INTO opportunity_schema VALUES (99, 'future')")
     with pytest.raises(CapabilityOpportunityError):
         SQLiteOpportunityStore(future)
+
+
+@pytest.mark.asyncio
+async def test_security_block_is_terminal_under_observation_and_normal_actions() -> None:
+    preparation = _SecurityBlockingPreparation()
+    acquisition = _Acquisition()
+    engine = CapabilityOpportunityEngine(
+        InMemoryOpportunityStore(), acquisition, preparation=preparation, clock=lambda: NOW
+    )
+    opportunity = _observe(engine, _evidence("security:one", "security:two"))
+    assert opportunity is not None
+    blocked = await engine.prepare(opportunity.opportunity_id)
+    assert blocked.status is OpportunityStatus.ARCHIVED
+    assert blocked.preparation_state is OpportunityPreparationState.SECURITY_BLOCKED
+    assert blocked.decision is OpportunityDecision.NONE
+    summary = blocked.prepared_summary
+    references = blocked.evidence_references
+
+    same = _observe(engine, _evidence("security:one", "security:two"))
+    assert same is not None
+    assert same.status is OpportunityStatus.ARCHIVED
+    assert same.preparation_state is OpportunityPreparationState.SECURITY_BLOCKED
+    assert same.decision is OpportunityDecision.NONE
+    assert same.prepared_summary == summary
+    assert same.evidence_references == references
+
+    new = _observe(engine, _evidence("security:three", "security:four"))
+    assert new is not None
+    assert new.status is OpportunityStatus.ARCHIVED
+    assert new.preparation_state is OpportunityPreparationState.SECURITY_BLOCKED
+    assert new.prepared_summary == summary
+    assert "security:three" in new.evidence_references
+    with pytest.raises(CapabilityOpportunityError):
+        await engine.prepare(new.opportunity_id)
+    with pytest.raises(CapabilityOpportunityError):
+        engine.proposal(new.opportunity_id)
+    with pytest.raises(CapabilityOpportunityError):
+        await engine.accept(new.opportunity_id, _request())
+    with pytest.raises(CapabilityOpportunityError):
+        engine.decline(new.opportunity_id)
+    assert preparation.calls == 1
+    assert acquisition.requests == []
+
+
+@pytest.mark.asyncio
+async def test_security_block_survives_two_sqlite_restarts_and_expiry(tmp_path: Path) -> None:
+    path = tmp_path / "security-block.sqlite3"
+    clock = [NOW]
+    preparation = _SecurityBlockingPreparation()
+    store = SQLiteOpportunityStore(path)
+    engine = CapabilityOpportunityEngine(
+        store, _Acquisition(), preparation=preparation, clock=lambda: clock[0]
+    )
+    opportunity = engine.observe(
+        "security durable need",
+        _evidence("durable:one", "durable:two"),
+        expected_benefit="benefit",
+        privacy_impact="private",
+        estimated_resource_cost="small",
+        likely_required_authority=(),
+        workspace="workspace",
+        expiry=timedelta(seconds=1),
+    )
+    assert opportunity is not None
+    blocked = await engine.prepare(opportunity.opportunity_id)
+    store.close()
+
+    store = SQLiteOpportunityStore(path)
+    engine = CapabilityOpportunityEngine(
+        store, _Acquisition(), preparation=preparation, clock=lambda: clock[0]
+    )
+
+    def observe_durable(evidence: tuple[OpportunityEvidence, ...]) -> CapabilityOpportunity | None:
+        return engine.observe(
+            "security durable need",
+            evidence,
+            expected_benefit="benefit",
+            privacy_impact="private",
+            estimated_resource_cost="small",
+            likely_required_authority=(),
+            workspace="workspace",
+        )
+
+    clock[0] += timedelta(days=1)
+    for evidence in (
+        _evidence("durable:one", "durable:two"),
+        _evidence("durable:three", "durable:four"),
+    ):
+        observed = observe_durable(evidence)
+        assert observed is not None
+        assert observed.status is OpportunityStatus.ARCHIVED
+        assert observed.preparation_state is OpportunityPreparationState.SECURITY_BLOCKED
+    store.close()
+
+    store = SQLiteOpportunityStore(path)
+    restored = CapabilityOpportunityEngine(
+        store, _Acquisition(), preparation=preparation, clock=lambda: clock[0]
+    ).get(blocked.opportunity_id)
+    assert restored.status is OpportunityStatus.ARCHIVED
+    assert restored.preparation_state is OpportunityPreparationState.SECURITY_BLOCKED
+    assert restored.prepared_summary == blocked.prepared_summary
+    store.close()
+
+
+def test_security_block_invariant_reconciles_legacy_state() -> None:
+    store = InMemoryOpportunityStore()
+    engine = _engine(store)
+    opportunity = _observe(engine, _evidence("legacy:one", "legacy:two"))
+    assert opportunity is not None
+    store._items[opportunity.opportunity_id] = (
+        replace(
+            opportunity,
+            status=OpportunityStatus.DETECTED,
+            preparation_state=OpportunityPreparationState.SECURITY_BLOCKED,
+        ),
+        store.revision(opportunity.opportunity_id),
+    )
+    reconciled = engine.get(opportunity.opportunity_id)
+    assert reconciled.status is OpportunityStatus.ARCHIVED
+    assert reconciled.preparation_state is OpportunityPreparationState.SECURITY_BLOCKED
+    store._items[opportunity.opportunity_id] = (
+        replace(
+            reconciled,
+            preparation_state=OpportunityPreparationState.NOT_STARTED,
+        ),
+        store.revision(opportunity.opportunity_id),
+    )
+    repaired_archived = engine.get(opportunity.opportunity_id)
+    assert repaired_archived.status is OpportunityStatus.ARCHIVED
+    assert repaired_archived.preparation_state is OpportunityPreparationState.SECURITY_BLOCKED
+    with pytest.raises(CapabilityOpportunityError):
+        validate_opportunity_state(
+            replace(
+                opportunity,
+                status=OpportunityStatus.ARCHIVED,
+                preparation_state=OpportunityPreparationState.NOT_STARTED,
+            )
+        )

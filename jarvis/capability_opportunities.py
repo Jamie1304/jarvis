@@ -276,6 +276,16 @@ _NON_SUCCESS_PREPARATION_STATES = frozenset(
 
 def validate_opportunity_state(opportunity: CapabilityOpportunity) -> None:
     """Validate lifecycle/preparation combinations that can carry authority."""
+    if opportunity.preparation_state is OpportunityPreparationState.SECURITY_BLOCKED and (
+        opportunity.status is not OpportunityStatus.ARCHIVED
+    ):
+        raise CapabilityOpportunityError("Security-blocked opportunity must remain archived")
+    if opportunity.status is OpportunityStatus.ARCHIVED and (
+        opportunity.preparation_state is not OpportunityPreparationState.SECURITY_BLOCKED
+    ):
+        raise CapabilityOpportunityError(
+            "Archived opportunity must retain its security-blocked state"
+        )
     if opportunity.preparation_state is OpportunityPreparationState.FAILED and (
         opportunity.status is not OpportunityStatus.FAILED
     ):
@@ -318,8 +328,12 @@ def _reconcile_opportunity_state(opportunity: CapabilityOpportunity) -> Capabili
             status = OpportunityStatus.FAILED
             preparation = OpportunityPreparationState.FAILED
             decision = OpportunityDecision.PREPARE
-        elif preparation is OpportunityPreparationState.SECURITY_BLOCKED:
+        elif (
+            preparation is OpportunityPreparationState.SECURITY_BLOCKED
+            or opportunity.status is OpportunityStatus.ARCHIVED
+        ):
             status = OpportunityStatus.ARCHIVED
+            preparation = OpportunityPreparationState.SECURITY_BLOCKED
             decision = OpportunityDecision.NONE
         elif preparation is OpportunityPreparationState.UNKNOWN_OUTCOME:
             status = OpportunityStatus.ASSESSING
@@ -327,7 +341,12 @@ def _reconcile_opportunity_state(opportunity: CapabilityOpportunity) -> Capabili
         else:
             status = OpportunityStatus.PREPARING
             decision = OpportunityDecision.PREPARE
-        return replace(opportunity, status=status, decision=decision)
+        return replace(
+            opportunity,
+            status=status,
+            preparation_state=preparation,
+            decision=decision,
+        )
 
 
 class SQLiteOpportunityStore:
@@ -582,7 +601,12 @@ class CapabilityOpportunityEngine:
             return None
         key = _semantic_key(workspace_value, semantic)
         existing = self._store.find_by_key(key)
-        if existing is not None and existing.expires_at is not None and existing.expires_at <= now:
+        if (
+            existing is not None
+            and existing.preparation_state is not OpportunityPreparationState.SECURITY_BLOCKED
+            and existing.expires_at is not None
+            and existing.expires_at <= now
+        ):
             existing = replace(existing, status=OpportunityStatus.EXPIRED, updated_at=now)
             self._save(existing)
         if existing is not None and existing.status is OpportunityStatus.DECLINED:
@@ -604,7 +628,13 @@ class CapabilityOpportunityEngine:
             OpportunityStatus.ACTIVE,
             OpportunityStatus.FAILED,
         }
-        continuing = existing is not None and existing.status in continuing_statuses
+        continuing = existing is not None and (
+            existing.status in continuing_statuses
+            or (
+                existing.status is OpportunityStatus.ARCHIVED
+                and existing.preparation_state is OpportunityPreparationState.SECURITY_BLOCKED
+            )
+        )
         prior = existing if continuing else None
         opportunity = CapabilityOpportunity(
             existing.opportunity_id if existing is not None else uuid5(NAMESPACE_URL, key),
@@ -637,6 +667,14 @@ class CapabilityOpportunityEngine:
 
     async def prepare(self, opportunity_id: UUID) -> CapabilityOpportunity:
         opportunity = self._require(opportunity_id)
+        validate_opportunity_state(opportunity)
+        if (
+            opportunity.status is OpportunityStatus.ARCHIVED
+            and opportunity.preparation_state is OpportunityPreparationState.SECURITY_BLOCKED
+        ):
+            raise CapabilityOpportunityError(
+                "Security-blocked opportunity requires trusted reconsideration"
+            )
         self._assert_not_in_cooldown(opportunity)
         now = _timestamp(self._clock(), "Opportunity clock")
         assessing = replace(
@@ -791,6 +829,14 @@ class CapabilityOpportunityEngine:
 
     def decline(self, opportunity_id: UUID) -> CapabilityOpportunity:
         opportunity = self._require(opportunity_id)
+        validate_opportunity_state(opportunity)
+        if (
+            opportunity.status is OpportunityStatus.ARCHIVED
+            and opportunity.preparation_state is OpportunityPreparationState.SECURITY_BLOCKED
+        ):
+            raise CapabilityOpportunityError(
+                "Security-blocked opportunity cannot be declined into a new lifecycle state"
+            )
         now = _timestamp(self._clock(), "Opportunity clock")
         if opportunity.cooldown_until is None or opportunity.cooldown_until <= now:
             cooldown = now + timedelta(days=7)

@@ -31,6 +31,12 @@ coordinator and runtime-owned lifecycle store are used.
 
 The production-composition evidence is intentionally narrower and explicit:
 
+- Security-blocked opportunity state is a terminal production lifecycle
+  boundary: passive same/new evidence, expiry, restart, proposal, acceptance,
+  decline, and ordinary preparation cannot reopen it. Focused OpportunityEngine
+  regressions exercise the durable state and fail-closed prepare guard; a future
+  trusted security-reconsideration operation would be a separate contract.
+
 - `test_v1_production_composition_acquires_randomized_capability_and_restores_it` uses
   `Settings(environment="production")`, a registry-registered synthetic provider, no
   `RuntimeTestFixture`, and the concrete generator, package store/runtime, sandbox,

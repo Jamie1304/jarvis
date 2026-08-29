@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import sys
+import time
 from pathlib import Path
+from typing import Any, cast
 
 import pytest
 from jarvis.testing.diagnosis import TestFailureDiagnoser
@@ -398,6 +400,130 @@ def test_local_jarvis_smoke_definition_is_validated_and_localhost_only() -> None
     assert definition.suite.command.arguments[2] == "jarvis.api:app"
     with pytest.raises(ValueError):
         create_local_startup_smoke_definition(80)
+
+
+def test_safe_environment_propagates_only_canonical_test_selector(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("JARVIS_ENVIRONMENT", "test")
+    monkeypatch.setenv("API_KEY", "synthetic-secret")
+    monkeypatch.setenv("JARVIS_UNTRUSTED", "do-not-pass")
+    environment = SubprocessTestAdapter._safe_environment()
+
+    assert environment["JARVIS_ENVIRONMENT"] == "test"
+    assert "API_KEY" not in environment
+    assert "JARVIS_UNTRUSTED" not in environment
+
+    monkeypatch.delenv("JARVIS_ENVIRONMENT")
+    assert "JARVIS_ENVIRONMENT" not in SubprocessTestAdapter._safe_environment()
+
+    monkeypatch.setenv("JARVIS_ENVIRONMENT", "production")
+    assert "JARVIS_ENVIRONMENT" not in SubprocessTestAdapter._safe_environment()
+
+    hardware = SubprocessTestAdapter._safe_environment(allow_hardware=True)
+    assert hardware.get("JARVIS_WINDOWS_INTEGRATION") == "true"
+
+
+@pytest.mark.asyncio
+async def test_real_runner_preserves_launch_error_and_bounded_reaping(tmp_path: Path) -> None:
+    missing = Suite(
+        "missing-executable",
+        Category.UNIT,
+        Command(str(tmp_path / "missing-python.exe"), ()),
+        timeout_seconds=1,
+    )
+    adapter = SubprocessTestAdapter()
+    capture = await adapter.execute(missing.command, tmp_path, 1, asyncio.Event())
+    assert capture.launch_error == "FileNotFoundError"
+
+    communication = cast(
+        "asyncio.Task[tuple[bytes, bytes]]", asyncio.create_task(asyncio.sleep(30))
+    )
+    monkeypatch = pytest.MonkeyPatch()
+    try:
+
+        async def raise_timeout(*args: object, **kwargs: object) -> object:
+            del args, kwargs
+            raise TimeoutError
+
+        monkeypatch.setattr("jarvis.testing.runner.asyncio.wait_for", raise_timeout)
+
+        class Process:
+            returncode = 0
+
+        assert await SubprocessTestAdapter._terminate(cast(Any, Process()), communication) == (
+            b"",
+            b"",
+        )
+        assert communication.done()
+    finally:
+        monkeypatch.undo()
+
+
+@pytest.mark.asyncio
+async def test_windows_tree_cleanup_targets_only_owned_pid(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    del tmp_path
+    calls: list[tuple[str, ...]] = []
+
+    class Killer:
+        async def wait(self) -> int:
+            return 0
+
+        def kill(self) -> None:
+            calls.append(("killer-kill",))
+
+    async def create_killer(*args: str, **kwargs: object) -> Killer:
+        del kwargs
+        calls.append(args)
+        return Killer()
+
+    class Process:
+        pid = 32123
+        returncode = None
+
+        def kill(self) -> None:
+            calls.append(("process-kill",))
+
+    monkeypatch = pytest.MonkeyPatch()
+    try:
+        monkeypatch.setattr("jarvis.testing.runner.asyncio.create_subprocess_exec", create_killer)
+        monkeypatch.setenv("SystemRoot", r"C:\Windows")
+        await SubprocessTestAdapter._terminate_windows_tree(cast(Any, Process()))
+    finally:
+        monkeypatch.undo()
+
+    assert calls == [
+        (r"C:\Windows\System32\taskkill.exe", "/PID", "32123", "/T", "/F"),
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows process-tree contract")
+async def test_windows_timeout_reaps_descendant_holding_output_pipe(tmp_path: Path) -> None:
+    suite = Suite(
+        "windows-tree-timeout",
+        Category.UNIT,
+        Command(
+            sys.executable,
+            (
+                "-c",
+                "import subprocess,sys,time; "
+                "subprocess.Popen([sys.executable,'-c','import time; time.sleep(30)']); "
+                "time.sleep(30)",
+            ),
+        ),
+        timeout_seconds=0.1,
+    )
+    started = time.monotonic()
+    run = await ControlledTestRunner(
+        SuiteCatalog((suite,)), tmp_path, ArtifactStore(tmp_path / "artifacts")
+    ).run("windows-tree-timeout", "build", asyncio.Event())
+
+    assert run.status is RunStatus.TIMED_OUT
+    assert time.monotonic() - started < 10
 
 
 def test_health_payload_ready_accepts_jarvis_and_generic_contracts() -> None:

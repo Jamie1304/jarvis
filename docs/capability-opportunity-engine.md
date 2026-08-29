@@ -86,6 +86,21 @@ proposal-ready. Expiry and the existing decline/cooldown rules remain separate
 lifecycle boundaries; a failed opportunity is not reopened merely because
 additional evidence is observed.
 
+`SECURITY_BLOCKED` is a stronger terminal boundary than an ordinary failed
+attempt. It is durably paired with `ARCHIVED` and is preserved by passive
+observation, including after restart, when new evidence arrives, and after the
+opportunity retention expiry. The security summary and evidence are retained;
+time passing, evidence, model/package claims, `decline()`, and ordinary
+`prepare()` are not reconsideration authority. `prepare()` rejects this pair
+before changing state or invoking its provider. A future trusted security
+reconsideration operation may explicitly reopen a block only after validating
+changed trusted conditions; no such implicit v1 route exists.
+
+The central validator rejects both directions of the security invariant:
+`SECURITY_BLOCKED` cannot appear with a non-`ARCHIVED` status, and
+`ARCHIVED` cannot appear with a non-security-blocked preparation state. Legacy
+inconsistent rows are reconciled to the fail-closed pair by the durable store.
+
 `prepare(opportunity_id)` is the existing explicit, application-owned retry
 operation. A caller must invoke it deliberately; `observe()` never invokes it.
 The operation records a new preparation attempt and re-enters `PREPARING`, but
