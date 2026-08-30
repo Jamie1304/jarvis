@@ -7,6 +7,8 @@ import sys
 from jarvis.testing.models import SuiteOutputFormat, TestCategory, TestCommand, TestSuite
 from jarvis.testing.runner import TestSuiteCatalog
 
+_V1_ACCEPTANCE_TIMEOUT_SECONDS = 420
+
 
 def create_deterministic_suite_catalog() -> TestSuiteCatalog:
     """Return only test suites that never need real hardware or privileged tools."""
@@ -23,7 +25,6 @@ def create_deterministic_suite_catalog() -> TestSuiteCatalog:
                         "pytest",
                         "tests/test_orchestrator.py",
                         "tests/test_tools.py",
-                        "-q",
                     ),
                 ),
                 timeout_seconds=90,
@@ -35,7 +36,7 @@ def create_deterministic_suite_catalog() -> TestSuiteCatalog:
                 category=TestCategory.PERMISSIONS,
                 command=TestCommand(
                     sys.executable,
-                    ("-m", "pytest", "tests/test_permissions.py", "-q"),
+                    ("-m", "pytest", "tests/test_permissions.py"),
                 ),
                 timeout_seconds=90,
                 output_format=SuiteOutputFormat.PYTEST_TEXT,
@@ -46,12 +47,16 @@ def create_deterministic_suite_catalog() -> TestSuiteCatalog:
                 category=TestCategory.INTEGRATION,
                 command=TestCommand(
                     sys.executable,
-                    ("-m", "pytest", "tests/test_v1_acceptance.py", "-q"),
+                    ("-m", "pytest", "tests/test_v1_acceptance.py"),
                 ),
-                # Production-composition package generation, sandbox
-                # certification, and restart evidence are intentionally
-                # slower than the lower-level deterministic suites.
-                timeout_seconds=300,
+                # Production-composition package generation, Windows sandbox
+                # certification, staged activation, and restart evidence are
+                # intentionally slower than lower-level deterministic suites.
+                # The complete direct suite measured 286.98 seconds on the
+                # supported Windows validation host; retain a seven-minute
+                # hard bound for constrained runner startup/cleanup overhead
+                # rather than falsely timing out a completed composition run.
+                timeout_seconds=_V1_ACCEPTANCE_TIMEOUT_SECONDS,
                 output_format=SuiteOutputFormat.PYTEST_TEXT,
                 description=(
                     "Deterministic v1 acceptance through the default application composition root."

@@ -1,7 +1,7 @@
 # Capability Opportunity Engine
 
 **Status:** v1 production composition
-**Updated:** 2026-08-24
+**Updated:** 2026-08-30
 
 `CapabilityOpportunityEngine` is the production-owned queue for proactive
 capability preparation. It records a possible recurring need; it is not a task
@@ -71,11 +71,20 @@ opportunity has degraded.
 
 An acquisition exception or preparation-provider exception is recorded as
 `FAILED` with preparation state `FAILED`, while retaining the opportunity's
-evidence and diagnostic error. It is
-not returned to `READY_TO_PROPOSE`. Durable stores validate new writes and
-reconcile legacy inconsistent rows on read: failed rows become `FAILED`,
-security-blocked rows become `ARCHIVED`, unknown outcomes become `ASSESSING`,
-and other waiting/incomplete rows become `PREPARING`. Reconciliation never
+evidence and diagnostic error. It is not returned to `READY_TO_PROPOSE`.
+Durable stores validate new writes and reconcile legacy inconsistent rows on
+read. The central precedence rule is **most restrictive trusted signal wins**:
+
+- any `ARCHIVED` status or `SECURITY_BLOCKED` preparation state becomes exactly
+  `ARCHIVED / SECURITY_BLOCKED / NONE`;
+- otherwise an `UNKNOWN_OUTCOME` becomes exactly
+  `ASSESSING / UNKNOWN_OUTCOME / NONE`;
+- otherwise a failed marker becomes exactly `FAILED / FAILED / PREPARE`; and
+- other malformed incomplete rows become `PREPARING / <state> / PREPARE`.
+
+This means a legacy `ARCHIVED / FAILED`, `FAILED / SECURITY_BLOCKED`,
+`READY_TO_PROPOSE / SECURITY_BLOCKED`, or `ARCHIVED / UNKNOWN_OUTCOME` row
+cannot downgrade a security signal to retry semantics. Reconciliation never
 interprets failure or uncertainty as successful preparation.
 
 Ordinary observation of a non-expired `FAILED` opportunity preserves its
@@ -102,12 +111,19 @@ The central validator rejects both directions of the security invariant:
 inconsistent rows are reconciled to the fail-closed pair by the durable store.
 
 `prepare(opportunity_id)` is the existing explicit, application-owned retry
-operation. A caller must invoke it deliberately; `observe()` never invokes it.
-The operation records a new preparation attempt and re-enters `PREPARING`, but
-it does not grant proposal or activation authority. A retry that fails returns
-to `FAILED/FAILED`; only a newly successful, normally validated preparation may
-become `READY_TO_PROPOSE`. There is no implicit retry route and no separate
-retry API is required for this contract.
+operation for `FAILED / FAILED` only. A caller must invoke it deliberately;
+`observe()` never invokes it. The operation records a new preparation attempt
+and re-enters `PREPARING`, but it does not grant proposal or activation
+authority. A retry that fails returns to `FAILED/FAILED`; only a newly
+successful, normally validated preparation may become `READY_TO_PROPOSE`.
+
+`UNKNOWN_OUTCOME` is not ordinary `FAILED`. It means the trusted application
+does not know whether a preparation effect occurred, so the durable state stays
+`ASSESSING / UNKNOWN_OUTCOME / NONE`. Ordinary `observe()`, expiry, proposal,
+acceptance, decline, restart, and `prepare()` preserve or reject that state;
+none of them invoke the preparation provider again. A future trusted
+reconciliation/recovery operation would need its own evidence and transition
+contract. v1 deliberately has no implicit recovery shortcut.
 
 ## Autonomous preparation
 
@@ -128,6 +144,10 @@ Preparation must not:
 
 Preparation results are untrusted reports until the normal owner services
 validate them. A preparation result that claims activation is rejected.
+Opportunity summaries and diagnostic errors are durable metadata, not a secret
+channel: secret-shaped text is rejected before an opportunity is accepted or
+persisted. Evidence retains references, not raw credentials or retrieved
+personal context.
 
 ## User handoff and acceptance
 

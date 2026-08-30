@@ -570,7 +570,9 @@ class WindowsNativeProcess:
         self._returncode: int | None = None
         self.stdin: asyncio.StreamWriter | None = None
         self.stdout: asyncio.StreamReader | None = None
+        self.stderr: asyncio.StreamReader | None = None
         self._read_transport: Any = None
+        self._stderr_transport: Any = None
         self._write_transport: Any = None
         self._cleanup = cleanup
         self._cleanup_done = False
@@ -599,12 +601,19 @@ class WindowsNativeProcess:
         if result == 0xFFFFFFFF:
             raise _last_error("ResumeThread failed")
 
-    async def connect_streams(self, stdin_handle: int, stdout_handle: int, limit: int) -> None:
+    async def connect_streams(
+        self,
+        stdin_handle: int,
+        stdout_handle: int,
+        limit: int,
+        stderr_handle: int | None = None,
+    ) -> None:
         from asyncio import windows_utils
 
         loop = asyncio.get_running_loop()
-        read_pipe = windows_utils.PipeHandle(stdout_handle)
         write_pipe = windows_utils.PipeHandle(stdin_handle)
+        read_pipe = windows_utils.PipeHandle(stdout_handle)
+        error_pipe = windows_utils.PipeHandle(stderr_handle) if stderr_handle is not None else None
         reader = asyncio.StreamReader(limit=limit)
         read_protocol = asyncio.StreamReaderProtocol(reader, loop=loop)
         try:
@@ -612,6 +621,14 @@ class WindowsNativeProcess:
                 lambda: read_protocol,
                 read_pipe,
             )
+            if error_pipe is not None:
+                error_reader = asyncio.StreamReader(limit=limit)
+                error_protocol = asyncio.StreamReaderProtocol(error_reader, loop=loop)
+                self._stderr_transport, _ = await loop.connect_read_pipe(
+                    lambda: error_protocol,
+                    error_pipe,
+                )
+                self.stderr = error_reader
             write_protocol = asyncio.streams.FlowControlMixin(loop=loop)
             self._write_transport, _ = await loop.connect_write_pipe(
                 lambda: write_protocol,
@@ -621,6 +638,8 @@ class WindowsNativeProcess:
             self.stdout = reader
         except Exception:
             read_pipe.close()
+            if error_pipe is not None:
+                error_pipe.close()
             write_pipe.close()
             self.close_streams()
             raise
@@ -650,12 +669,14 @@ class WindowsNativeProcess:
     def close_streams(self) -> None:
         if self.stdin is not None:
             self.stdin.close()
-        for transport in (self._read_transport, self._write_transport):
+        for transport in (self._read_transport, self._stderr_transport, self._write_transport):
             if transport is not None:
                 transport.close()
         self.stdin = None
         self.stdout = None
+        self.stderr = None
         self._read_transport = None
+        self._stderr_transport = None
         self._write_transport = None
 
     def _close_native_handles(self) -> None:
@@ -675,6 +696,168 @@ class WindowsNativeProcess:
     def close(self) -> None:
         self.close_streams()
         self._close_native_handles()
+
+
+class WindowsJobProcessLauncher:
+    """Launch a trusted local child into a caller-owned Job before execution.
+
+    This launcher deliberately provides lifecycle containment only.  It is for
+    trusted, catalogued local processes such as the controlled test runner; it
+    is not the generated IntegrationPackage isolation boundary.  The root is
+    created suspended, receives only explicit standard handles, joins the Job,
+    and is then resumed, eliminating the root/descendant ownership race.
+    """
+
+    @classmethod
+    async def launch(
+        cls,
+        executable: str,
+        arguments: tuple[str, ...],
+        *,
+        cwd: str,
+        environment: dict[str, str],
+        limit: int,
+        job: _JobAssignment,
+    ) -> WindowsNativeProcess:
+        if sys.platform != "win32":
+            raise WindowsNativeProcessError("Windows Job launch is unavailable")
+        try:
+            native, stdin_handle, stdout_handle, stderr_handle = await asyncio.to_thread(
+                cls._launch_sync,
+                executable,
+                arguments,
+                cwd,
+                environment,
+                job,
+            )
+        except WindowsNativeProcessError:
+            raise
+        except Exception as error:
+            raise WindowsNativeProcessError("Native Windows Job launch failed") from error
+        try:
+            await native.connect_streams(stdin_handle, stdout_handle, limit, stderr_handle)
+        except Exception as error:
+            with contextlib.suppress(Exception):
+                native.terminate()
+            with contextlib.suppress(Exception):
+                native.close()
+            if isinstance(error, WindowsNativeProcessError):
+                raise
+            raise WindowsNativeProcessError("Native Windows Job stream setup failed") from error
+        return native
+
+    @classmethod
+    def _launch_sync(
+        cls,
+        executable: str,
+        arguments: tuple[str, ...],
+        cwd: str,
+        environment: dict[str, str],
+        job: _JobAssignment,
+    ) -> tuple[WindowsNativeProcess, int, int, int]:
+        if sys.platform != "win32":
+            raise WindowsNativeProcessError("Windows Job launch is unavailable")
+        from asyncio import windows_utils
+
+        kernel32 = ctypes.WinDLL("kernel32.dll", use_last_error=True)
+        advapi = ctypes.WinDLL("advapi32.dll", use_last_error=True)
+        WindowsRestrictedLauncher._configure_libraries(kernel32, advapi)
+        kernel32.CreateProcessW.argtypes = [
+            wintypes.LPCWSTR,
+            wintypes.LPWSTR,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            wintypes.BOOL,
+            wintypes.DWORD,
+            ctypes.c_void_p,
+            wintypes.LPCWSTR,
+            ctypes.c_void_p,
+            ctypes.POINTER(_ProcessInformation),
+        ]
+        kernel32.CreateProcessW.restype = wintypes.BOOL
+        handles: list[int] = []
+        native: WindowsNativeProcess | None = None
+        try:
+            child_stdin, parent_stdin = windows_utils.pipe(duplex=True)
+            parent_stdout, child_stdout = windows_utils.pipe(duplex=True)
+            parent_stderr, child_stderr = windows_utils.pipe(duplex=True)
+            handles.extend(
+                [
+                    child_stdin,
+                    parent_stdin,
+                    parent_stdout,
+                    child_stdout,
+                    parent_stderr,
+                    child_stderr,
+                ]
+            )
+            for handle in (child_stdin, child_stdout, child_stderr):
+                WindowsRestrictedLauncher._set_inheritable(kernel32, handle, True)
+            for handle in (parent_stdin, parent_stdout, parent_stderr):
+                WindowsRestrictedLauncher._set_inheritable(kernel32, handle, False)
+            startup, _attribute_buffer = WindowsRestrictedLauncher._startup_info(
+                kernel32,
+                [child_stdin, child_stdout, child_stderr],
+            )
+            command = ctypes.create_unicode_buffer(
+                subprocess.list2cmdline((executable, *arguments))
+            )
+            drive = cwd[:2] if len(cwd) >= 2 and cwd[1] == ":" else ""
+            drive_environment = f"={drive}={cwd}\0" if drive else ""
+            environment_block = ctypes.create_unicode_buffer(
+                drive_environment
+                + "".join(f"{key}={environment[key]}\0" for key in sorted(environment))
+                + "\0"
+            )
+            application = ctypes.create_unicode_buffer(executable)
+            working_directory = ctypes.create_unicode_buffer(cwd)
+            process_info = _ProcessInformation()
+            creation_flags = (
+                _CREATE_SUSPENDED
+                | _CREATE_NEW_PROCESS_GROUP
+                | _CREATE_NO_WINDOW
+                | _CREATE_UNICODE_ENVIRONMENT
+                | _EXTENDED_STARTUPINFO_PRESENT
+            )
+            try:
+                created = kernel32.CreateProcessW(
+                    application,
+                    command,
+                    None,
+                    None,
+                    True,
+                    creation_flags,
+                    environment_block,
+                    working_directory,
+                    ctypes.cast(ctypes.byref(startup), ctypes.c_void_p),
+                    ctypes.byref(process_info),
+                )
+            finally:
+                kernel32.DeleteProcThreadAttributeList(startup.lpAttributeList)
+                startup.lpAttributeList = None
+            if not created:
+                raise _last_error("CreateProcessW Job launch failed")
+            native = WindowsNativeProcess(
+                int(process_info.hProcess),
+                int(process_info.hThread),
+                int(process_info.dwProcessId),
+                kernel32,
+            )
+            job.assign_handle(native._process_handle, native.pid)
+            native.resume()
+            for handle in (child_stdin, child_stdout, child_stderr):
+                WindowsRestrictedLauncher._close_handle(kernel32, handle)
+            handles = [parent_stdin, parent_stdout, parent_stderr]
+            return native, parent_stdin, parent_stdout, parent_stderr
+        except Exception:
+            if native is not None:
+                with contextlib.suppress(Exception):
+                    native.terminate()
+                with contextlib.suppress(Exception):
+                    native.close()
+            for handle in handles:
+                WindowsRestrictedLauncher._close_handle(kernel32, handle)
+            raise
 
 
 class WindowsRestrictedLauncher:
@@ -1308,6 +1491,7 @@ class WindowsAppContainerLauncher:
 __all__ = [
     "SandboxSecurityStatus",
     "WindowsContainmentMode",
+    "WindowsJobProcessLauncher",
     "WindowsNativeProcess",
     "WindowsNativeProcessError",
     "WindowsAppContainerLauncher",

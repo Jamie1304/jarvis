@@ -204,6 +204,8 @@ class CapabilityOpportunity:
                 self.estimated_resource_cost,
                 *self.likely_required_authority,
                 *self.remaining_authority,
+                self.prepared_summary,
+                self.last_error,
             )
         )
 
@@ -276,24 +278,35 @@ _NON_SUCCESS_PREPARATION_STATES = frozenset(
 
 def validate_opportunity_state(opportunity: CapabilityOpportunity) -> None:
     """Validate lifecycle/preparation combinations that can carry authority."""
-    if opportunity.preparation_state is OpportunityPreparationState.SECURITY_BLOCKED and (
+    if (
+        opportunity.status is OpportunityStatus.ARCHIVED
+        or opportunity.preparation_state is OpportunityPreparationState.SECURITY_BLOCKED
+    ) and (
         opportunity.status is not OpportunityStatus.ARCHIVED
-    ):
-        raise CapabilityOpportunityError("Security-blocked opportunity must remain archived")
-    if opportunity.status is OpportunityStatus.ARCHIVED and (
-        opportunity.preparation_state is not OpportunityPreparationState.SECURITY_BLOCKED
+        or opportunity.preparation_state is not OpportunityPreparationState.SECURITY_BLOCKED
+        or opportunity.decision is not OpportunityDecision.NONE
     ):
         raise CapabilityOpportunityError(
-            "Archived opportunity must retain its security-blocked state"
+            "Archived or security-blocked opportunity must retain the terminal security state"
         )
-    if opportunity.preparation_state is OpportunityPreparationState.FAILED and (
+    if opportunity.preparation_state is OpportunityPreparationState.UNKNOWN_OUTCOME and (
+        opportunity.status is not OpportunityStatus.ASSESSING
+        or opportunity.decision is not OpportunityDecision.NONE
+    ):
+        raise CapabilityOpportunityError(
+            "Unknown preparation outcome must remain non-replayable and awaiting reconciliation"
+        )
+    if (
+        opportunity.status is OpportunityStatus.FAILED
+        or opportunity.preparation_state is OpportunityPreparationState.FAILED
+    ) and (
         opportunity.status is not OpportunityStatus.FAILED
+        or opportunity.preparation_state is not OpportunityPreparationState.FAILED
+        or opportunity.decision is not OpportunityDecision.PREPARE
     ):
-        raise CapabilityOpportunityError("Failed preparation must have failed opportunity status")
-    if opportunity.status is OpportunityStatus.FAILED and (
-        opportunity.preparation_state is not OpportunityPreparationState.FAILED
-    ):
-        raise CapabilityOpportunityError("Failed opportunity must have failed preparation state")
+        raise CapabilityOpportunityError(
+            "Failed opportunity must retain an explicit application-owned retry state"
+        )
     if opportunity.status in _PROPOSAL_STATUSES and (
         opportunity.preparation_state is not OpportunityPreparationState.READY
     ):
@@ -322,13 +335,6 @@ def _reconcile_opportunity_state(opportunity: CapabilityOpportunity) -> Capabili
     except CapabilityOpportunityError:
         preparation = opportunity.preparation_state
         if (
-            preparation is OpportunityPreparationState.FAILED
-            or opportunity.status is OpportunityStatus.FAILED
-        ):
-            status = OpportunityStatus.FAILED
-            preparation = OpportunityPreparationState.FAILED
-            decision = OpportunityDecision.PREPARE
-        elif (
             preparation is OpportunityPreparationState.SECURITY_BLOCKED
             or opportunity.status is OpportunityStatus.ARCHIVED
         ):
@@ -337,6 +343,13 @@ def _reconcile_opportunity_state(opportunity: CapabilityOpportunity) -> Capabili
             decision = OpportunityDecision.NONE
         elif preparation is OpportunityPreparationState.UNKNOWN_OUTCOME:
             status = OpportunityStatus.ASSESSING
+            decision = OpportunityDecision.NONE
+        elif (
+            preparation is OpportunityPreparationState.FAILED
+            or opportunity.status is OpportunityStatus.FAILED
+        ):
+            status = OpportunityStatus.FAILED
+            preparation = OpportunityPreparationState.FAILED
             decision = OpportunityDecision.PREPARE
         else:
             status = OpportunityStatus.PREPARING
@@ -603,7 +616,11 @@ class CapabilityOpportunityEngine:
         existing = self._store.find_by_key(key)
         if (
             existing is not None
-            and existing.preparation_state is not OpportunityPreparationState.SECURITY_BLOCKED
+            and existing.preparation_state
+            not in {
+                OpportunityPreparationState.SECURITY_BLOCKED,
+                OpportunityPreparationState.UNKNOWN_OUTCOME,
+            }
             and existing.expires_at is not None
             and existing.expires_at <= now
         ):
@@ -675,6 +692,10 @@ class CapabilityOpportunityEngine:
             raise CapabilityOpportunityError(
                 "Security-blocked opportunity requires trusted reconsideration"
             )
+        if opportunity.preparation_state is OpportunityPreparationState.UNKNOWN_OUTCOME:
+            raise CapabilityOpportunityError(
+                "Unknown preparation outcome requires trusted reconciliation before retry"
+            )
         self._assert_not_in_cooldown(opportunity)
         now = _timestamp(self._clock(), "Opportunity clock")
         assessing = replace(
@@ -733,7 +754,7 @@ class CapabilityOpportunityEngine:
             decision = OpportunityDecision.NONE
         elif result.state is OpportunityPreparationState.UNKNOWN_OUTCOME:
             status = OpportunityStatus.ASSESSING
-            decision = OpportunityDecision.PREPARE
+            decision = OpportunityDecision.NONE
         elif result.state is OpportunityPreparationState.FAILED:
             status = OpportunityStatus.FAILED
             decision = OpportunityDecision.PREPARE
@@ -804,6 +825,7 @@ class CapabilityOpportunityEngine:
                 activating,
                 status=OpportunityStatus.FAILED,
                 preparation_state=OpportunityPreparationState.FAILED,
+                decision=OpportunityDecision.PREPARE,
                 last_error=f"acquisition failed: {type(error).__name__}",
                 updated_at=_timestamp(self._clock(), "Opportunity clock"),
             )
@@ -837,6 +859,10 @@ class CapabilityOpportunityEngine:
             raise CapabilityOpportunityError(
                 "Security-blocked opportunity cannot be declined into a new lifecycle state"
             )
+        if opportunity.preparation_state is OpportunityPreparationState.UNKNOWN_OUTCOME:
+            raise CapabilityOpportunityError(
+                "Unknown preparation outcome cannot be declined into a new lifecycle state"
+            )
         now = _timestamp(self._clock(), "Opportunity clock")
         if opportunity.cooldown_until is None or opportunity.cooldown_until <= now:
             cooldown = now + timedelta(days=7)
@@ -864,6 +890,7 @@ class CapabilityOpportunityEngine:
                 OpportunityStatus.ARCHIVED,
                 OpportunityStatus.ACTIVE,
             }
+            and opportunity.preparation_state is not OpportunityPreparationState.UNKNOWN_OUTCOME
         ):
             opportunity = replace(opportunity, status=OpportunityStatus.EXPIRED, updated_at=now)
             self._save(opportunity)

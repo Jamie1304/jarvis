@@ -53,7 +53,9 @@ AppContainer launcher creates the child suspended, applies the capability-free
 security context and scoped ACLs, assigns it to the Job Object before resume,
 and configures kill-on-job-close, active-process and per-process memory limits.
 Standard-handle inheritance is explicit. Shutdown also performs bounded cleanup
-of locally observable descendants that broke away from the Job Object. That
+of exact locally observed descendants that escaped normal Job membership. The
+ledger binds each PID to its creation time and validates its native parent edge,
+so it never targets a process merely by executable name or a reused PID. That
 cleanup is lifecycle hygiene, not a guarantee against every breakaway.
 
 On non-Windows, the manager uses a new process session/group and bounded

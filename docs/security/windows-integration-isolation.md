@@ -76,14 +76,41 @@ protocol failure as proof of successful restricted-token execution. A native
 launcher setup failure remains an explicit unsupported result. AppContainer
 tests remain separate and continue to exercise the production contract.
 
+### Controlled test-runner process ownership
+
+The repository-controlled `ControlledTestRunner` is a separate trusted local
+test-infrastructure path, not an IntegrationPackage launch path. On Windows it
+reuses the sandbox module's native Job Object lifecycle primitive and launches
+the catalogued root process suspended through `WindowsJobProcessLauncher`.
+The root is assigned to the Job before it resumes; only explicit standard
+handles are inherited. In addition to normal Job membership, this trusted
+runner records a bounded per-run ownership ledger while the root is alive. A
+ledger entry binds a PID to its creation time and validates the current native
+parent edge before it is accepted. It can therefore terminate only an exact
+observed descendant, not a process name or a later PID reuse. The ledger is a
+fail-closed lifecycle backstop for the empirically observed nesting/breakaway
+edge where a normally exited root can leave an owned descendant retaining an
+output pipe.
+
+This runner does **not** claim AppContainer isolation: it uses the current
+trusted test identity and only establishes process lifecycle/resource ownership.
+It never runs generated package code or certifies a package. It does not use
+`taskkill`, a process-name-wide kill, or a mutable `PATH`/`SystemRoot` cleanup
+utility. Cleanup or native Job setup failure is trusted non-pass evidence. The
+ledger is intentionally not advertised as VM, kernel, dedicated-account, or
+universal breakaway prevention; AppContainer remains the generated-package OS
+containment contract.
+
 ### Process lifecycle containment
 
 `Job Object` membership is established while the child is suspended and before
 resume. When the native calls succeed, Windows provides active-process and
 memory limits for Job members and kill-on-job-close semantics. This is lifecycle
 containment, not a guarantee against every possible Job breakaway or kernel-level
-attack. The manager also performs bounded cleanup of locally observable
-descendants; that cleanup is application hygiene, not an OS security claim.
+attack. The manager may additionally perform bounded cleanup of exact
+creation-time-bound descendants observed while the root was alive; it does not
+search by executable name or accept a reused PID. This is fail-closed lifecycle
+hygiene, not an OS security claim about arbitrary deliberate escape.
 
 Timeout, cancellation, crash, malformed IPC, and shutdown all use the same
 owned termination path. A failed Job/profile/token/ACL/handle/process setup

@@ -2,7 +2,20 @@
 
 All notable JARVIS release changes are recorded here. Dates describe the
 working-tree release preparation date and are not a claim that a public release
-has been published.
+has been published. See [VERSION_LOG.md](VERSION_LOG.md) for factual
+development and release-candidate chronology.
+
+## [Unreleased]
+
+### Hardening
+
+- Mutable R4O hardening is preparing a future candidate after Candidate 11's
+  independent `R4_NO_GO`: fail-closed OpportunityEngine reconciliation,
+  non-replayable unknown preparation outcomes, controlled test-runner evidence,
+  deterministic automation draining, and release-documentation reconciliation.
+- No new candidate, tag, publication, or deployment is represented by this
+  section. Exact-SHA hosted CI and an independent audit remain required after a
+  separately authorized freeze.
 
 ## [1.0.0] - 2026-08-24
 

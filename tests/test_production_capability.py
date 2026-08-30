@@ -103,6 +103,7 @@ from jarvis.production_capability import (
     _action_spec_payload,
     _AgentLoopGenerationProvider,
     _build_generic_package,
+    _certification_fixture,
     _effect_from_payload,
     _GenerationSpec,
     _generic_worker_source,
@@ -113,7 +114,9 @@ from jarvis.production_capability import (
     _package_from_payload,
     _package_payload,
     _parse_generation_spec,
+    _run_in_new_thread,
     _safe_identifier,
+    _sandbox_python_executable,
     build_package_certification_plan,
 )
 from jarvis.provisioning import ProvisioningAction
@@ -2129,3 +2132,138 @@ async def test_production_verification_evidence_and_opportunity_boundaries(
     prepared = await ProductionOpportunityPreparation(coordinator).prepare(opportunity)
     assert prepared.state is OpportunityPreparationState.READY
     assert "unavailable" in prepared.prepared_summary
+
+
+@pytest.mark.asyncio
+async def test_production_runtime_helpers_and_verification_fail_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Production composition helpers reject malformed or contradictory boundary data."""
+
+    assert _certification_fixture({"enum": ["fixed"]}, key="value") == "fixed"
+    assert _certification_fixture(
+        {
+            "type": "object",
+            "properties": {
+                "capability": {"type": "string"},
+                "count": {"type": "integer"},
+                "enabled": {"type": "boolean"},
+                "items": {"type": "array"},
+            },
+            "required": ["capability", "count", "enabled", "items", "missing"],
+        },
+        key="input",
+        package_id="generated.synthetic",
+    ) == {
+        "capability": "generated.synthetic",
+        "count": 0,
+        "enabled": False,
+        "items": [],
+    }
+    assert _certification_fixture({"type": "string"}, key="salt") == "certification-salt"
+    assert _certification_fixture({"type": "number"}, key="value") == 0.0
+    for schema in (
+        {"type": "object", "properties": [], "required": []},
+        {"type": "object", "properties": {}, "required": "not-a-list"},
+        {"type": "null"},
+    ):
+        with pytest.raises(ProductionCapabilityError):
+            _certification_fixture(schema, key="input")
+
+    async def _thread_value() -> str:
+        return "trusted result"
+
+    async def _thread_failure() -> str:
+        raise RuntimeError("synthetic thread failure")
+
+    assert _run_in_new_thread(_thread_value()) == "trusted result"
+    with pytest.raises(RuntimeError, match="synthetic thread failure"):
+        _run_in_new_thread(_thread_failure())
+    assert _sandbox_python_executable().is_file()
+
+    store, generated, gap = await _generated(tmp_path)
+    package = generated.package
+    runtime = ProductionPackageRuntime(
+        package,
+        store,
+        tmp_path / "sandboxes",
+        ResourceGovernor(SystemResourceTelemetry()),
+    )
+    assert runtime.health_check().healthy
+    runtime.restore_state({"bounded": "state"})
+    assert runtime.export_state() == {"bounded": "state"}
+    with pytest.raises(HotLoadError, match="state is malformed"):
+        runtime.restore_state(cast(Mapping[str, object], {1: "not-a-string-key"}))
+    runtime._active_requests = 1  # noqa: SLF001 - verifies the owned runtime drain guard.
+    with pytest.raises(HotLoadError, match="active requests"):
+        runtime.drain()
+    runtime._active_requests = 0  # noqa: SLF001
+    with pytest.raises(ProductionCapabilityError, match="request is malformed"):
+        await runtime.request(cast(str, ""), {})
+    with pytest.raises(ProductionCapabilityError, match="undeclared"):
+        await runtime.request("missing-action", {})
+
+    def _request_blocking(kind: str, payload: Mapping[str, object]) -> dict[str, object]:
+        return {"kind": kind, "payload": dict(payload)}
+
+    monkeypatch.setattr(runtime, "_request_blocking", _request_blocking)
+    assert await runtime.request("health", {"probe": "bounded"}) == {
+        "kind": "health",
+        "payload": {"probe": "bounded"},
+    }
+    entrypoint = store.package_directory(package) / "code" / "entrypoint.py"
+    entrypoint.unlink()
+    assert not runtime.health_check().healthy
+    with pytest.raises(HotLoadError):
+        ProductionPackageRuntimeFactory(
+            store,
+            tmp_path / "sandboxes",
+            ResourceGovernor(SystemResourceTelemetry()),
+        ).prepare(package)
+
+    intact_store, intact_generated, intact_gap = await _generated(tmp_path / "intact")
+    manifest = intact_store.manifest(intact_generated.package, _request(intact_gap))
+    registry = CapabilityRegistry((manifest,))
+    assert (
+        await ProductionVerificationEvidence(
+            registry,
+            object(),
+            intact_store,
+            sandbox=None,
+        ).collect(manifest.capability_id, "goal", AcquisitionStage.VERIFYING)
+        == ()
+    )
+    assert (
+        await ProductionVerificationEvidence(
+            registry,
+            object(),
+            intact_store,
+            sandbox=cast(ProductionSandboxRunner, _FakeSandboxRunner()),
+        ).collect(manifest.capability_id, "", AcquisitionStage.VERIFYING)
+        == ()
+    )
+
+
+def test_lifecycle_restorer_certified_state_and_binding_fail_closed(tmp_path: Path) -> None:
+    """A durable CERTIFIED row is staged, and malformed health binding is rejected."""
+
+    store, generated, gap = asyncio.run(_generated(tmp_path))
+    package = generated.package
+    store.manifest(package, _request(gap))
+    certification = _restore_certification(package, store.source_files(package))
+    lifecycle = _RestoreLifecycleStore(
+        _stored_restore_record(package, certification, ActivationState.CERTIFIED)
+    )
+    restorer = CapabilityLifecycleRestorer(
+        cast(Any, lifecycle),
+        store,
+        cast(Any, _FakeSandboxRunner()),
+        cast(Any, _RestoreActivation(lifecycle.stored.record)),
+        CapabilityRegistry(),
+    )
+    result = restorer.restore_all()
+    assert not result[0].restored
+    assert result[0].resulting_state is ActivationState.CERTIFIED
+    with pytest.raises(ProductionCapabilityError, match="health service is malformed"):
+        restorer.bind_health(cast(CapabilityHealthService, object()))

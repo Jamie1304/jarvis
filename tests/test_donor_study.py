@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import replace
 from datetime import UTC, datetime
 from hashlib import sha256
+from pathlib import Path
 from typing import cast
 
 import pytest
@@ -25,6 +26,8 @@ NOW = datetime(2026, 8, 24, tzinfo=UTC)
 REVISION = "a" * 40
 FILE_DIGEST = sha256(b"source file at pinned revision").hexdigest()
 LICENSE_DIGEST = sha256(b"LICENSE at pinned revision").hexdigest()
+GOOSE_REVISION = "403fcc84c78e5676197219071f4740497fdd4af3"
+STALE_GOOSE_REVISION = "8d844eecbdfd65626a881c9e8784ae8dc6093f1d"
 
 
 def study(
@@ -248,3 +251,17 @@ def test_dependency_notes_are_metadata_only() -> None:
     )
     assert proposal.dependency_notes == ("No dependency additions are authorized",)
     assert not hasattr(DonorStudyService(), "install")
+
+
+def test_goose_reference_docs_use_the_single_verified_revision_and_no_runtime_claim() -> None:
+    root = Path(__file__).resolve().parents[1]
+    provenance = (root / "docs/reference/donor-provenance-map.md").read_text(encoding="utf-8")
+    study_doc = (root / "docs/reference/goose-architecture-study.md").read_text(encoding="utf-8")
+
+    for document in (provenance, study_doc):
+        assert GOOSE_REVISION in document
+        assert STALE_GOOSE_REVISION not in document
+    assert "Apache-2.0" in provenance
+    assert "no runtime dependency" in provenance.casefold()
+    assert "UNRESOLVED" not in study_doc
+    assert "No Goose package, binary, ACP runtime, MCP runtime" in study_doc

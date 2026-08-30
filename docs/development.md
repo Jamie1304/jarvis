@@ -1,22 +1,40 @@
 # Development
 
-JARVIS targets Python 3.12+ and Windows first. Create a virtual environment and install the pinned baseline:
+JARVIS targets Python 3.12+ and Windows first. From the repository root, use
+the Python launcher explicitly and install the locked development set. Confirm
+that the activated environment reports Python 3.12 before continuing:
 
 ```powershell
-python -m venv .venv
+py -0p
+py -3.12 --version
+py -3.12 -m venv .venv
 .\.venv\Scripts\Activate.ps1
+python --version
 python -m pip install -r requirements-dev.lock
-
-Production/runtime installation can use `requirements.lock`; development and test tools are isolated in `requirements-dev.lock`.
+python -m pip install -e ".[desktop]"
 ```
 
-Configuration precedence is: explicit `JARVIS_` process environment variables, then
-typed defaults in `jarvis/core/config.py`. Production startup never implicitly reads
-`.env` from the current working directory. A local launcher may load an owner-selected
-configuration file and export its values before starting JARVIS; never commit that file
-or its secrets.
+`requirements.lock` is the locked runtime baseline; `requirements-dev.lock`
+adds the locked tooling used by quality and tests. If this repository-local
+environment is stale, remove only `./.venv` from the repository root and
+recreate it with the commands above. Do not delete `.jarvis`, which may contain
+local application state.
 
-Run the health-only service with `python -m uvicorn jarvis.api:app --reload`. Run the full quality gate with `python scripts/quality.py`. It checks formatting, linting, static typing, tests, and the 90% coverage threshold.
+Configuration precedence is explicit `JARVIS_` process environment variables,
+then typed defaults in `jarvis/core/config.py`. Production startup does not
+implicitly read `.env` (`env_file=None`). A trusted owner launcher may export
+selected values before starting JARVIS; never commit that file or its secrets.
+For ordinary local use, prefer an owner-controlled `JARVIS_APP_DATA_DIR` outside
+the source checkout (for example, `$env:LOCALAPPDATA\JARVIS`) rather than relying
+on the `.jarvis` development default.
+
+Run the health surface with
+`python -m uvicorn jarvis.api:app --host 127.0.0.1 --port 8000`.
+Run the full synthetic quality gate with `$env:JARVIS_ENVIRONMENT = "test"`
+followed by `python scripts/quality.py`, then remove that environment variable.
+It checks formatting, linting, static typing, tests, and the 90% coverage
+threshold. `scripts/package_smoke.py` is separate: it deliberately starts an
+artifact-only production-mode runtime and must not inherit test mode.
 
 ## Optional Phase 6 Windows integration
 
@@ -124,11 +142,11 @@ unrelated conversation. Run `python -m pytest tests/test_multi_agent.py -q` and 
 
 ## Phase 1 manual smoke test
 
-1. Install [Ollama](https://ollama.com/) for Windows, then run `ollama pull llama3.2:3b`. Ollama normally starts its local server automatically; if it is not running, use `ollama serve` in a separate terminal.
+1. Install [Ollama](https://ollama.com/) for Windows, then run `ollama pull llama3.2:3b`. Ollama normally starts its local server automatically; if it is not running, use `ollama serve` in a separate terminal on the loopback default `http://127.0.0.1:11434`.
 2. Use `.env.example` only as a reference for variables exported by your trusted local
    launcher. Set `JARVIS_AI_MODEL` to a locally pulled model and leave
    `JARVIS_AI_ENDPOINT=http://127.0.0.1:11434`.
-3. Install the desktop client with `python -m pip install -e ".[desktop]"`, then start it with `python -m jarvis.desktop`.
+3. Install the desktop client with `.\.venv\Scripts\python.exe -m pip install -e ".[desktop]"`, then start it with `.\.venv\Scripts\python.exe -m jarvis.desktop`.
 4. Send `Jarvis, hoeveel is 25 procent van 800?`. The expected response is 200 (or an equivalent explanation).
 5. Microphone and TTS provider adapters are available for opt-in manual provider
    tests, but the canonical v1 runtime does not activate them. Do not treat

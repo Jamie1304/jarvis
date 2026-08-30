@@ -540,6 +540,101 @@ async def test_native_launch_setup_and_stream_failures_are_contained(
 
 
 @pytest.mark.asyncio
+async def test_job_launcher_is_typed_and_reaps_stream_setup_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The controlled-test Job launcher must not leak a half-started native child."""
+
+    async def launch() -> native.WindowsNativeProcess:
+        return await native.WindowsJobProcessLauncher.launch(
+            "python.exe",
+            ("-c", "pass"),
+            cwd="C:\\owned",
+            environment={"PYTHONUTF8": "1"},
+            limit=1024,
+            job=cast(Any, object()),
+        )
+
+    monkeypatch.setattr(sys, "platform", "linux")
+    with pytest.raises(native.WindowsNativeProcessError, match="Job launch is unavailable"):
+        await launch()
+
+    monkeypatch.setattr(sys, "platform", "win32")
+
+    def unexpected_sync(cls: object, *args: object) -> object:
+        del cls, args
+        raise RuntimeError("synthetic Job startup failure")
+
+    monkeypatch.setattr(
+        native.WindowsJobProcessLauncher,
+        "_launch_sync",
+        classmethod(unexpected_sync),
+    )
+    with pytest.raises(native.WindowsNativeProcessError, match="Job launch failed"):
+        await launch()
+
+    def native_sync(cls: object, *args: object) -> object:
+        del cls, args
+        raise native.WindowsNativeProcessError("synthetic native Job failure")
+
+    monkeypatch.setattr(
+        native.WindowsJobProcessLauncher,
+        "_launch_sync",
+        classmethod(native_sync),
+    )
+    with pytest.raises(native.WindowsNativeProcessError, match="synthetic native Job failure"):
+        await launch()
+
+    class _Process:
+        def __init__(self, error: Exception | None = None) -> None:
+            self._error = error
+            self.connected = False
+            self.terminated = False
+            self.closed = False
+
+        async def connect_streams(self, *args: object) -> None:
+            del args
+            if self._error is not None:
+                raise self._error
+            self.connected = True
+
+        def terminate(self) -> None:
+            self.terminated = True
+
+        def close(self) -> None:
+            self.closed = True
+
+    failing = _Process(RuntimeError("synthetic Job pipe failure"))
+    monkeypatch.setattr(
+        native.WindowsJobProcessLauncher,
+        "_launch_sync",
+        classmethod(lambda cls, *args: (failing, 1, 2, 3)),
+    )
+    with pytest.raises(native.WindowsNativeProcessError, match="Job stream setup failed"):
+        await launch()
+    assert failing.terminated and failing.closed
+
+    typed_failure = _Process(native.WindowsNativeProcessError("synthetic Job pipe typed failure"))
+    monkeypatch.setattr(
+        native.WindowsJobProcessLauncher,
+        "_launch_sync",
+        classmethod(lambda cls, *args: (typed_failure, 1, 2, 3)),
+    )
+    with pytest.raises(native.WindowsNativeProcessError, match="synthetic Job pipe typed failure"):
+        await launch()
+    assert typed_failure.terminated and typed_failure.closed
+
+    successful = _Process()
+    monkeypatch.setattr(
+        native.WindowsJobProcessLauncher,
+        "_launch_sync",
+        classmethod(lambda cls, *args: (successful, 1, 2, 3)),
+    )
+    assert await launch() is cast(native.WindowsNativeProcess, successful)
+    assert successful.connected
+
+
+@pytest.mark.asyncio
 async def test_native_connect_streams_closes_pipe_handles_on_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

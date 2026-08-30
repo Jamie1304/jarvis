@@ -98,7 +98,7 @@ server, physical voice/camera/audio path, desktop renderer, or adopted external 
 | 29 | Adoption identity/provenance | PASS | Synthetic tests bind stable file identity, content hash, signer status, independent dependency provenance, exact scope/expiry, and reject reparse, stale, changed, forged, or unavailable evidence |
 | 30 | Complete production capability growth | PASS | `test_v1_production_composition_acquires_randomized_capability_and_restores_it` uses no fixture, reaches generated package ACTIVE through the real AppContainer/certification/attestation path, selects the randomized typed action through PlanningEngine/ToolRegistry/PermissionBroker, validates output with VerificationEngine, and restores/reuses the exact package/version/hash after restart |
 
-## Current run
+## Earlier composition evidence
 
 The focused acceptance file contains 23 deterministic tests covering the rows above; the
 matrix has 30 scenarios because several tests prove multiple boundaries. The production
@@ -131,6 +131,44 @@ the complete generic package acquisition path are proven through `ApplicationRun
 changed package hashes fail closed. The fixture lifecycle restore callback remains a
 deterministic local package-resolution seam, not a donor runtime or a second lifecycle
 authority.
+
+## R4O mutable revalidation (2026-08-30)
+
+This later mutable revalidation supersedes the dated counts in the preceding
+historical evidence section; it does not create Candidate 12 or claim exact-SHA
+CI. The same default application composition path passed all 23 deterministic
+acceptance tests directly in 317.43 seconds. The hardened controlled runner
+also passed the suite twice in fresh owned Windows Job processes:
+
+- run `4caae60c-2d7f-4915-ba50-c19483864d64`: 23 passed;
+- run `56cddff2-2315-452f-badb-553da150e7f0`: 23 passed.
+
+The controlled-run records identify immutable Git HEAD Candidate 11 because a
+mutable working tree has no commit SHA of its own. They nevertheless executed
+the reviewed mutable files in this checkout. They are local prefreeze evidence,
+not Candidate 11 CI evidence and not Candidate 12 evidence.
+
+R4O specifically revalidated the adjacent release-critical boundaries:
+
+- `ARCHIVED` or `SECURITY_BLOCKED` durable opportunity data canonicalizes to
+  `ARCHIVED / SECURITY_BLOCKED / NONE`, including after SQLite restart; ordinary
+  observation, expiry, decline, proposal, acceptance, and preparation cannot
+  reopen it.
+- `UNKNOWN_OUTCOME` canonicalizes to `ASSESSING / UNKNOWN_OUTCOME / NONE` and
+  ordinary preparation cannot replay it. Explicit `FAILED / FAILED` retry
+  remains distinct.
+- The controlled runner requires coherent final pytest/structured output,
+  treats cancellation/timeout and cleanup errors as non-pass, bounds live
+  output, and uses exact owned Windows Job cleanup without process-name-wide
+  termination.
+
+Related mutable evidence: deterministic workflows passed 26, deterministic
+permissions passed 72 with one documented local symlink/junction capability
+skip, security/trusted-core regressions passed 447 with the same local skip,
+self-expansion regressions passed 156, and focused opportunity/runner/native
+tests passed 112. The direct and controlled acceptance suite continues to use
+randomized generic capability names and does not add a product-specific
+adapter or donor runtime.
 
 ## Evidence classification
 

@@ -21,6 +21,7 @@ import os
 import shutil
 import signal
 import sys
+import threading
 import time
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
@@ -373,6 +374,43 @@ def _sandbox_environment() -> dict[str, str]:
     return result
 
 
+@dataclass(frozen=True, slots=True)
+class _OwnedWindowsProcess:
+    """A PID bound to its creation time, preventing PID-reuse cleanup mistakes."""
+
+    process_id: int
+    creation_time: int
+
+
+class _WindowsProcessEntry(ctypes.Structure):
+    """Stable Toolhelp entry type shared by the ownership monitor threads."""
+
+    _fields_ = [
+        ("dwSize", wintypes.DWORD),
+        ("cntUsage", wintypes.DWORD),
+        ("th32ProcessID", wintypes.DWORD),
+        ("th32DefaultHeapID", ctypes.c_size_t),
+        ("th32ModuleID", wintypes.DWORD),
+        ("cntThreads", wintypes.DWORD),
+        ("th32ParentProcessID", wintypes.DWORD),
+        ("pcPriClassBase", wintypes.LONG),
+        ("dwFlags", wintypes.DWORD),
+        ("szExeFile", wintypes.WCHAR * 260),
+    ]
+
+
+class _WindowsProcessBasicInformation(ctypes.Structure):
+    """The minimal native process identity needed to validate a parent edge."""
+
+    _fields_ = [
+        ("reserved_1", ctypes.c_void_p),
+        ("peb_base_address", ctypes.c_void_p),
+        ("reserved_2", ctypes.c_void_p * 2),
+        ("process_id", ctypes.c_void_p),
+        ("parent_process_id", ctypes.c_void_p),
+    ]
+
+
 class _WindowsJob:  # pragma: no cover - opt-in native Windows integration
     """Small native Job Object wrapper for process-tree and resource ownership."""
 
@@ -383,11 +421,20 @@ class _WindowsJob:  # pragma: no cover - opt-in native Windows integration
     _PROCESS_SET_QUOTA = 0x0100
     _PROCESS_TERMINATE = 0x0001
     _PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+    _STILL_ACTIVE = 259
+    _OWNERSHIP_POLL_SECONDS = 0.01
 
-    def __init__(self, handle: int, library: Any) -> None:
+    def __init__(self, handle: int, library: Any, native_library: Any) -> None:
         self._handle = handle
         self._library = library
+        self._native_library = native_library
         self._root_process_id: int | None = None
+        self._owned_processes: dict[int, _OwnedWindowsProcess] = {}
+        self._ownership_lock = threading.Lock()
+        self._ownership_stop = threading.Event()
+        self._ownership_thread: threading.Thread | None = None
+        self._ownership_error: str | None = None
+        self._terminated = False
 
     @classmethod
     def create(cls, limits: SandboxLimits) -> _WindowsJob:
@@ -406,6 +453,28 @@ class _WindowsJob:  # pragma: no cover - opt-in native Windows integration
             library.SetInformationJobObject.restype = wintypes.BOOL
             library.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
             library.OpenProcess.restype = ctypes.c_void_p
+            library.GetProcessTimes.argtypes = [
+                ctypes.c_void_p,
+                ctypes.POINTER(wintypes.FILETIME),
+                ctypes.POINTER(wintypes.FILETIME),
+                ctypes.POINTER(wintypes.FILETIME),
+                ctypes.POINTER(wintypes.FILETIME),
+            ]
+            library.GetProcessTimes.restype = wintypes.BOOL
+            library.GetExitCodeProcess.argtypes = [ctypes.c_void_p, ctypes.POINTER(wintypes.DWORD)]
+            library.GetExitCodeProcess.restype = wintypes.BOOL
+            library.CreateToolhelp32Snapshot.argtypes = [wintypes.DWORD, wintypes.DWORD]
+            library.CreateToolhelp32Snapshot.restype = ctypes.c_void_p
+            library.Process32FirstW.argtypes = [
+                ctypes.c_void_p,
+                ctypes.POINTER(_WindowsProcessEntry),
+            ]
+            library.Process32FirstW.restype = wintypes.BOOL
+            library.Process32NextW.argtypes = [
+                ctypes.c_void_p,
+                ctypes.POINTER(_WindowsProcessEntry),
+            ]
+            library.Process32NextW.restype = wintypes.BOOL
             library.AssignProcessToJobObject.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
             library.AssignProcessToJobObject.restype = wintypes.BOOL
             library.TerminateJobObject.argtypes = [ctypes.c_void_p, wintypes.UINT]
@@ -414,10 +483,19 @@ class _WindowsJob:  # pragma: no cover - opt-in native Windows integration
             library.WaitForSingleObject.restype = wintypes.DWORD
             library.CloseHandle.argtypes = [ctypes.c_void_p]
             library.CloseHandle.restype = wintypes.BOOL
+            native_library = ctypes.WinDLL("ntdll.dll", use_last_error=True)
+            native_library.NtQueryInformationProcess.argtypes = [
+                ctypes.c_void_p,
+                wintypes.ULONG,
+                ctypes.c_void_p,
+                wintypes.ULONG,
+                ctypes.POINTER(wintypes.ULONG),
+            ]
+            native_library.NtQueryInformationProcess.restype = wintypes.LONG
             handle = library.CreateJobObjectW(None, None)
             if not handle:
                 raise OSError(ctypes.get_last_error(), "CreateJobObjectW failed")
-            job = cls(int(handle), library)
+            job = cls(int(handle), library, native_library)
             try:
                 job._set_limits(limits)
             except Exception:
@@ -502,93 +580,244 @@ class _WindowsJob:  # pragma: no cover - opt-in native Windows integration
             raise SandboxIsolationUnavailable("Sandbox process could not join its Job Object")
         if process_id is not None:
             self._root_process_id = process_id
+            self._record_process_handle(process_handle, process_id)
+            self._start_ownership_monitor()
 
     def terminate(self) -> None:
-        self._library.TerminateJobObject(self._handle, 1)
-        self._terminate_unowned_descendants()
+        """End the Job and every exact descendant observed while its root lived.
 
-    def _terminate_unowned_descendants(self) -> None:
-        """Best-effort cleanup for children that explicitly broke away.
-
-        A normal child is covered by the Job Object.  This narrow cleanup is
-        not an authority boundary: it exists only to avoid leaving a locally
-        owned process behind if a child used a supported Windows breakaway
-        path.  The descendant set is re-read a few times to bound PID-race
-        exposure and cleanup latency.
+        Windows normally assigns child processes to their parent's Job Object.
+        The owned ledger is an additional fail-closed safeguard for supported
+        breakaway/nesting edge cases: it records only descendants observed from
+        the assigned root while that root is alive, bound to creation time, and
+        never expands to a process-name-wide or ambient process search.
         """
 
-        root = getattr(self, "_root_process_id", None)
+        errors: list[str] = []
+        try:
+            self._capture_owned_tree()
+        except Exception as error:
+            errors.append(f"ownership_capture:{type(error).__name__}")
+        try:
+            self._stop_ownership_monitor()
+        except Exception as error:
+            errors.append(f"ownership_monitor:{type(error).__name__}")
+        if self._ownership_error is not None:
+            errors.append("ownership_monitor:failed")
+        if self._handle and not self._terminated:
+            if not self._library.TerminateJobObject(self._handle, 1):
+                errors.append("job_terminate:failed")
+            self._terminated = True
+        try:
+            self._terminate_recorded_processes()
+        except Exception as error:
+            errors.append(f"owned_process_cleanup:{type(error).__name__}")
+        if errors:
+            raise SandboxIsolationUnavailable("; ".join(sorted(set(errors))))
+
+    def _start_ownership_monitor(self) -> None:
+        if self._ownership_thread is not None:
+            return
+        monitor = threading.Thread(
+            target=self._monitor_owned_tree,
+            name="jarvis-windows-job-ownership",
+            daemon=True,
+        )
+        self._ownership_thread = monitor
+        monitor.start()
+
+    def _monitor_owned_tree(self) -> None:
+        while not self._ownership_stop.wait(self._OWNERSHIP_POLL_SECONDS):
+            try:
+                self._capture_owned_tree()
+            except Exception as error:
+                self._ownership_error = (
+                    f"Windows owned-process observation failed: {type(error).__name__}: {error}"
+                )
+                self._ownership_stop.set()
+                return
+
+    def _stop_ownership_monitor(self) -> None:
+        self._ownership_stop.set()
+        monitor = self._ownership_thread
+        if monitor is not None and monitor is not threading.current_thread():
+            monitor.join(timeout=1.0)
+            if monitor.is_alive():
+                raise SandboxIsolationUnavailable("Windows owned-process observation did not stop")
+
+    def _capture_owned_tree(self) -> None:
+        root = self._root_process_id
         if root is None:
             return
-        # A child can be created just as the root is terminated.  Keep the
-        # cleanup bounded, but allow enough time for that local process-tree
-        # observation to become visible before removing the owned directory.
+        with self._ownership_lock:
+            known = dict(self._owned_processes)
+        active = {
+            process_id
+            for process_id, owned in known.items()
+            if self._owned_process_is_active(owned)
+        }
+        if root not in active:
+            return
+        parents = self._process_parents()
+        frontier = set(active)
+        seen: set[int] = set()
+        while frontier:
+            parent_process_id = frontier.pop()
+            children = {
+                process_id
+                for process_id, observed_parent in parents.items()
+                if observed_parent == parent_process_id and process_id not in seen
+            }
+            seen.update(children)
+            for process_id in children:
+                if self._record_descendant(process_id, parent_process_id):
+                    frontier.add(process_id)
+
+    def _record_descendant(self, process_id: int, expected_parent_process_id: int) -> bool:
+        with self._ownership_lock:
+            parent = self._owned_processes.get(expected_parent_process_id)
+        if parent is None or not self._owned_process_is_active(parent):
+            return False
+        handle = self._library.OpenProcess(
+            self._PROCESS_QUERY_LIMITED_INFORMATION,
+            False,
+            process_id,
+        )
+        if not handle:
+            return False
+        try:
+            # The Toolhelp snapshot can race process exit and PID reuse.  The
+            # current native parent edge must still lead to an active exact
+            # owner before this PID enters the ledger.
+            if self._parent_process_id(handle) != expected_parent_process_id:
+                return False
+            return self._record_process_handle(handle, process_id)
+        finally:
+            self._library.CloseHandle(handle)
+
+    def _record_process_handle(self, process_handle: int, process_id: int) -> bool:
+        creation_time = self._creation_time(process_handle)
+        with self._ownership_lock:
+            existing = self._owned_processes.get(process_id)
+            if existing is None:
+                self._owned_processes[process_id] = _OwnedWindowsProcess(
+                    process_id,
+                    creation_time,
+                )
+                return True
+            # The original identity remains authoritative.  A reused PID is
+            # an unrelated process and must never be absorbed into or killed
+            # by this Job's exact ownership ledger.
+            return existing.creation_time == creation_time
+
+    def _parent_process_id(self, process_handle: int) -> int:
+        information = _WindowsProcessBasicInformation()
+        status = self._native_library.NtQueryInformationProcess(
+            process_handle,
+            0,
+            ctypes.byref(information),
+            ctypes.sizeof(information),
+            None,
+        )
+        if status != 0:
+            raise OSError(f"NtQueryInformationProcess failed with NTSTATUS {status}")
+        return int(information.parent_process_id or 0)
+
+    def _creation_time(self, process_handle: int) -> int:
+        creation = wintypes.FILETIME()
+        exit_time = wintypes.FILETIME()
+        kernel_time = wintypes.FILETIME()
+        user_time = wintypes.FILETIME()
+        if not self._library.GetProcessTimes(
+            process_handle,
+            ctypes.byref(creation),
+            ctypes.byref(exit_time),
+            ctypes.byref(kernel_time),
+            ctypes.byref(user_time),
+        ):
+            raise OSError(ctypes.get_last_error(), "GetProcessTimes failed")
+        return (int(creation.dwHighDateTime) << 32) | int(creation.dwLowDateTime)
+
+    def _owned_process_is_active(self, owned: _OwnedWindowsProcess) -> bool:
+        handle = self._library.OpenProcess(
+            self._PROCESS_QUERY_LIMITED_INFORMATION,
+            False,
+            owned.process_id,
+        )
+        if not handle:
+            return False
+        try:
+            if self._creation_time(handle) != owned.creation_time:
+                return False
+            exit_code = wintypes.DWORD()
+            if not self._library.GetExitCodeProcess(handle, ctypes.byref(exit_code)):
+                raise OSError(ctypes.get_last_error(), "GetExitCodeProcess failed")
+            return int(exit_code.value) == self._STILL_ACTIVE
+        finally:
+            self._library.CloseHandle(handle)
+
+    def _terminate_recorded_processes(self) -> None:
+        with self._ownership_lock:
+            owned_processes = tuple(self._owned_processes.values())
         for _ in range(20):
-            descendants = self._descendant_processes(root)
-            if not descendants:
+            active = tuple(
+                owned for owned in owned_processes if self._owned_process_is_active(owned)
+            )
+            if not active:
                 return
-            for process_id in descendants:
+            termination_failed = False
+            for owned in active:
                 handle = self._library.OpenProcess(
                     self._PROCESS_TERMINATE | self._PROCESS_QUERY_LIMITED_INFORMATION,
                     False,
-                    process_id,
+                    owned.process_id,
                 )
-                if handle:
-                    with contextlib.suppress(Exception):
-                        self._library.TerminateProcess(handle, 1)
+                if not handle:
+                    continue
+                try:
+                    if self._creation_time(handle) != owned.creation_time:
+                        continue
+                    if not self._library.TerminateProcess(handle, 1):
+                        termination_failed = True
+                finally:
                     self._library.CloseHandle(handle)
+            if termination_failed:
+                active = tuple(owned for owned in active if self._owned_process_is_active(owned))
+                if active:
+                    raise SandboxIsolationUnavailable("Windows owned-process termination failed")
             time.sleep(0.05)
+        active = tuple(owned for owned in owned_processes if self._owned_process_is_active(owned))
+        if active:
+            raise SandboxIsolationUnavailable("Windows owned process survived Job cleanup")
 
     def _descendant_processes(self, root_process_id: int) -> set[int]:
-        class ProcessEntry(ctypes.Structure):
-            _fields_ = [
-                ("dwSize", wintypes.DWORD),
-                ("cntUsage", wintypes.DWORD),
-                ("th32ProcessID", wintypes.DWORD),
-                ("th32DefaultHeapID", ctypes.c_size_t),
-                ("th32ModuleID", wintypes.DWORD),
-                ("cntThreads", wintypes.DWORD),
-                ("th32ParentProcessID", wintypes.DWORD),
-                ("pcPriClassBase", wintypes.LONG),
-                ("dwFlags", wintypes.DWORD),
-                ("szExeFile", wintypes.WCHAR * 260),
-            ]
+        entries = self._process_parents()
+        result: set[int] = set()
+        frontier = {root_process_id}
+        while frontier:
+            children = {
+                process_id
+                for process_id, parent_id in entries.items()
+                if parent_id in frontier and process_id not in result
+            }
+            result.update(children)
+            frontier = children
+        return result
 
-        self._library.CreateToolhelp32Snapshot.argtypes = [wintypes.DWORD, wintypes.DWORD]
-        self._library.CreateToolhelp32Snapshot.restype = ctypes.c_void_p
-        self._library.Process32FirstW.argtypes = [
-            ctypes.c_void_p,
-            ctypes.POINTER(ProcessEntry),
-        ]
-        self._library.Process32FirstW.restype = wintypes.BOOL
-        self._library.Process32NextW.argtypes = [
-            ctypes.c_void_p,
-            ctypes.POINTER(ProcessEntry),
-        ]
-        self._library.Process32NextW.restype = wintypes.BOOL
+    def _process_parents(self) -> dict[int, int]:
         snapshot = self._library.CreateToolhelp32Snapshot(0x00000002, 0)
         if not snapshot or int(snapshot) == -1:
-            return set()
+            return {}
         try:
             entries: dict[int, int] = {}
-            entry = ProcessEntry()
-            entry.dwSize = ctypes.sizeof(ProcessEntry)
+            entry = _WindowsProcessEntry()
+            entry.dwSize = ctypes.sizeof(_WindowsProcessEntry)
             if self._library.Process32FirstW(snapshot, ctypes.byref(entry)):
                 while True:
                     entries[int(entry.th32ProcessID)] = int(entry.th32ParentProcessID)
                     if not self._library.Process32NextW(snapshot, ctypes.byref(entry)):
                         break
-            result: set[int] = set()
-            frontier = {root_process_id}
-            while frontier:
-                children = {
-                    process_id
-                    for process_id, parent_id in entries.items()
-                    if parent_id in frontier and process_id not in result
-                }
-                result.update(children)
-                frontier = children
-            return result
+            return entries
         finally:
             self._library.CloseHandle(snapshot)
 
@@ -605,8 +834,33 @@ class _WindowsJob:  # pragma: no cover - opt-in native Windows integration
 
     def close(self) -> None:
         if self._handle:
-            self._library.CloseHandle(self._handle)
-            self._handle = 0
+            termination_error: Exception | None = None
+            try:
+                self.terminate()
+            except Exception as error:
+                termination_error = error
+            handle, self._handle = self._handle, 0
+            if not self._library.CloseHandle(handle):
+                raise SandboxIsolationUnavailable("Sandbox Job Object cleanup failed")
+            if termination_error is not None:
+                raise termination_error
+
+
+def create_owned_windows_job(*, max_processes: int, max_memory_bytes: int) -> _WindowsJob:
+    """Create the shared native Job Object used for trusted child ownership.
+
+    The function intentionally exposes lifecycle containment only.  Generated
+    executable integrations still require the stronger AppContainer launch
+    path in :class:`SandboxProcess`; callers must assign a suspended root
+    process before it is resumed.
+    """
+
+    limits = SandboxLimits(
+        max_processes=max_processes,
+        max_memory_bytes=max_memory_bytes,
+        windows_containment=WindowsContainmentMode.JOB_OBJECT_ONLY,
+    )
+    return _WindowsJob.create(limits)
 
 
 class SandboxProcess:
@@ -1075,6 +1329,7 @@ __all__ = [
     "SANDBOX_PROTOCOL_VERSION",
     "SandboxCancelled",
     "SandboxCleanupError",
+    "create_owned_windows_job",
     "SandboxConfigurationError",
     "SandboxError",
     "SandboxIsolationUnavailable",

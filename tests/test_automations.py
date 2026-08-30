@@ -162,6 +162,19 @@ async def _close(
     store.close()
 
 
+async def _eventually(predicate: object, *, timeout_seconds: float = 1.0) -> None:
+    """Wait for a durable observable state without encoding scheduler timing."""
+
+    if not callable(predicate):
+        raise TypeError("eventual predicate must be callable")
+    deadline = asyncio.get_running_loop().time() + timeout_seconds
+    while asyncio.get_running_loop().time() < deadline:
+        if predicate():
+            return
+        await asyncio.sleep(0.001)
+    assert predicate(), "durable automation state did not converge before the bound"
+
+
 @pytest.mark.asyncio
 async def test_trigger_condition_and_normal_planning_dispatch(tmp_path: Path) -> None:
     controller = _Controller()
@@ -469,12 +482,41 @@ async def test_queue_policy_drains_and_bounds_storm(tmp_path: Path) -> None:
         await asyncio.sleep(0)
         assert AutomationRunStatus.QUEUED in {run.status for run in service.runs()}
         controller.release.set()
-        await asyncio.sleep(0.05)
+        await _eventually(
+            lambda: len(controller.created) == 3
+            and all(run.status is not AutomationRunStatus.QUEUED for run in service.runs())
+        )
         assert len(controller.created) == 3
         assert AutomationRunStatus.DROPPED in {run.status for run in service.runs()}
         assert all(run.status is not AutomationRunStatus.QUEUED for run in service.runs())
     finally:
         await _close(service, store, bus)
+
+
+@pytest.mark.asyncio
+async def test_queue_policy_durably_drains_under_repeated_scheduler_interleavings(
+    tmp_path: Path,
+) -> None:
+    for iteration in range(50):
+        controller = _Controller()
+        definition = _definition(policy=ConcurrencyPolicy.QUEUE)
+        service, store, bus = await _service(tmp_path / str(iteration), controller, definition)
+        try:
+            for message in ("one", "two", "three", "four"):
+                await service.handle_event(_event(f"storm-{iteration}-{message}"))
+            controller.release.set()
+            await _eventually(
+                lambda controller=controller, service=service, definition=definition: len(
+                    controller.created
+                )
+                == 3
+                and {run.status for run in service.runs(definition.automation_id)}
+                <= {AutomationRunStatus.COMPLETED, AutomationRunStatus.DROPPED}
+            )
+            statuses = {run.status for run in service.runs(definition.automation_id)}
+            assert statuses == {AutomationRunStatus.COMPLETED, AutomationRunStatus.DROPPED}
+        finally:
+            await _close(service, store, bus)
 
 
 @pytest.mark.asyncio

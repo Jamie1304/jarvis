@@ -8,20 +8,20 @@ layer as a consequence of this study.
 
 ## Provenance boundary
 
-The checked-out JARVIS documentation does not contain the “reference pinned
-Goose revision” named in the task. That pin is therefore **UNRESOLVED** and no
-claim below treats a moving branch as the project pin. For orientation only,
-the current upstream branch was observed at:
+The JARVIS donor map records the verified Goose revision and license
+provenance. No claim below treats a moving branch as the project pin. The
+verified immutable reference record is:
 
 - Repository: <https://github.com/aaif-goose/goose>
-- Observed branch: `main`
-- Observed SHA: `8d844eecbdfd65626a881c9e8784ae8dc6093f1d`
-- Observation date: 2026-08-23
-- Upstream overview: <https://github.com/aaif-goose/goose/blob/main/documentation/docs/goose-architecture/goose-architecture.md>
+- Verified revision: `403fcc84c78e5676197219071f4740497fdd4af3`
+- License inspected: Apache-2.0 `LICENSE` (GitHub content SHA
+  `c83043d4494071fbd93ef245a14e573c5a8280c4`)
+- Verification date: 2026-08-30
+- Upstream overview: <https://github.com/aaif-goose/goose/blob/403fcc84c78e5676197219071f4740497fdd4af3/documentation/docs/goose-architecture/goose-architecture.md>
 
-The SHA above is not a substitute for the missing project pin. Before this
-document is used for implementation or licensing decisions, the project owner
-must supply the intended immutable revision and re-run the file-level study.
+The pin supports reference research only. It does not authorize a source port,
+package/binary/runtime dependency, ACP/MCP compatibility layer, or donor
+authority inside JARVIS.
 
 Disposition vocabulary:
 
@@ -36,9 +36,8 @@ Disposition vocabulary:
 
 ### AgentLoop
 
-- **Upstream file/revision:** `crates/goose/src/agents/agent.rs`, observed
-  `main@8d844eecbdfd65626a881c9e8784ae8dc6093f1d`; exact pinned revision
-  unresolved. Summary: the agent owns the interactive reply/process loop and
+- **Upstream file/revision:** `crates/goose/src/agents/agent.rs` at
+  `403fcc84c78e5676197219071f4740497fdd4af3`. Summary: the agent owns the interactive reply/process loop and
   routes provider messages, tool calls, results, and final responses.
 - **Problem:** turn-by-turn model interaction needs bounded continuation and a
   place to handle tool results.
@@ -60,8 +59,8 @@ Disposition vocabulary:
 ### Operation pipeline
 
 - **Upstream file/revision:** `crates/goose/src/agents/agent.rs` and
-  `documentation/docs/goose-architecture/goose-architecture.md`, observed
-  `main@8d844eecbdfd65626a881c9e8784ae8dc6093f1d`.
+  `documentation/docs/goose-architecture/goose-architecture.md` at
+  `403fcc84c78e5676197219071f4740497fdd4af3`.
 - **Problem:** provider output must become an executed operation and then be
   represented back to the provider.
 - **Approach:** request -> provider chat -> structured extension/tool call ->
@@ -79,8 +78,8 @@ Disposition vocabulary:
 ### Tool calling and unknown tools
 
 - **Upstream file/revision:** `crates/goose/src/agents/agent.rs` and the Goose
-  error-handling documentation linked from the architecture guide, observed
-  `main@8d844eecbdfd65626a881c9e8784ae8dc6093f1d`.
+  error-handling documentation linked from the architecture guide at
+  `403fcc84c78e5676197219071f4740497fdd4af3`.
 - **Problem:** providers can emit invalid JSON, missing tool names, or calls
   that are no longer available.
 - **Approach:** convert errors into tool responses so the model can continue.
@@ -98,8 +97,8 @@ Disposition vocabulary:
 
 - **Upstream file/revision:** `crates/goose/src/agents/agent.rs` plus the
   context-revision section of
-  `documentation/docs/goose-architecture/goose-architecture.md`, observed
-  `main@8d844eecbdfd65626a881c9e8784ae8dc6093f1d`.
+  `documentation/docs/goose-architecture/goose-architecture.md` at
+  `403fcc84c78e5676197219071f4740497fdd4af3`.
 - **Problem:** messages, tool output, resources, and instructions exceed the
   provider context budget.
 - **Approach:** remove stale material, summarize, and reduce verbose outputs;
@@ -117,7 +116,7 @@ Disposition vocabulary:
 ### Retry, repetition, and max turns
 
 - **Upstream file/revision:** `crates/goose/src/agents/agent.rs` and related
-  agent tests, observed `main@8d844eecbdfd65626a881c9e8784ae8dc6093f1d`.
+  agent tests at `403fcc84c78e5676197219071f4740497fdd4af3`.
 - **Problem:** a provider can repeat a call, loop indefinitely, or continue
   after a failed operation.
 - **Approach:** bounded turns and error feedback keep the loop progressing or
@@ -135,8 +134,7 @@ Disposition vocabulary:
 ### ProviderRegistry
 
 - **Upstream file/revision:** `crates/goose/src/providers/canonical/` and
-  provider configuration modules, observed
-  `main@8d844eecbdfd65626a881c9e8784ae8dc6093f1d`.
+  provider configuration modules at `403fcc84c78e5676197219071f4740497fdd4af3`.
 - **Problem:** multiple model providers need discovery and provider-specific
   configuration.
 - **Approach:** registry/catalog metadata maps provider/model choices to
@@ -154,7 +152,7 @@ Disposition vocabulary:
 ### Sessions
 
 - **Upstream file/revision:** `crates/goose/src/session/` and agent session
-  references, observed `main@8d844eecbdfd65626a881c9e8784ae8dc6093f1d`.
+  references at `403fcc84c78e5676197219071f4740497fdd4af3`.
 - **Problem:** conversations need identity, history, model settings, and
   restart/resume behavior.
 - **Approach:** session manager owns session records and exposes them to agent
@@ -173,8 +171,8 @@ Disposition vocabulary:
 
 - **Upstream file/revision:** `crates/goose/src/agents/extension_manager.rs`,
   `crates/goose/src/agents/mcp_client/`, and
-  `crates/goose/src/agents/platform_extensions/ext_manager.rs`, observed
-  `main@8d844eecbdfd65626a881c9e8784ae8dc6093f1d`.
+  `crates/goose/src/agents/platform_extensions/ext_manager.rs` at
+  `403fcc84c78e5676197219071f4740497fdd4af3`.
 - **Problem:** external servers expose discoverable tools and resources through
   a common protocol.
 - **Approach:** an extension manager starts/connects MCP extensions, lists
@@ -194,7 +192,7 @@ Disposition vocabulary:
 ### Skills
 
 - **Upstream file/revision:** `crates/goose/src/skills/` and the skills platform
-  extension, observed `main@8d844eecbdfd65626a881c9e8784ae8dc6093f1d`.
+  extension at `403fcc84c78e5676197219071f4740497fdd4af3`.
 - **Problem:** reusable instructions and workflows need discovery and
   injection into an agent context.
 - **Approach:** discover skill instructions from built-ins/filesystem and make
@@ -211,8 +209,8 @@ Disposition vocabulary:
 ### Custom agents and subagents/delegation
 
 - **Upstream file/revision:** `crates/goose/src/agents/` platform extension
-  modules, including orchestrator/summon-related modules, observed
-  `main@8d844eecbdfd65626a881c9e8784ae8dc6093f1d`.
+  modules, including orchestrator/summon-related modules at
+  `403fcc84c78e5676197219071f4740497fdd4af3`.
 - **Problem:** separate agents can handle parallel or specialized work.
 - **Approach:** create/manage agent sessions and delegate messages/tasks via an
   extension or agent manager.
@@ -230,9 +228,8 @@ Disposition vocabulary:
 ### Hooks
 
 - **Upstream file/revision:** Goose hook/event integration locations under
-  `crates/goose/src/` and extension/platform event code, observed
-  `main@8d844eecbdfd65626a881c9e8784ae8dc6093f1d`; exact hook file must be
-  rechecked at the missing pinned revision.
+  `crates/goose/src/` and extension/platform event code at
+  `403fcc84c78e5676197219071f4740497fdd4af3`.
 - **Problem:** lifecycle observers need to run before/after agent or tool
   operations.
 - **Approach:** hook-like notifications expose lifecycle events to UI,
@@ -249,8 +246,8 @@ Disposition vocabulary:
 ### Tool restrictions
 
 - **Upstream file/revision:** Goose permission/tool policy and extension
-  configuration areas under `crates/goose/src/`, observed
-  `main@8d844eecbdfd65626a881c9e8784ae8dc6093f1d`.
+  configuration areas under `crates/goose/src/` at
+  `403fcc84c78e5676197219071f4740497fdd4af3`.
 - **Problem:** available tools and extensions must be constrained by mode,
   configuration, or user choice.
 - **Approach:** Goose exposes extension/tool controls and permission-related
@@ -277,6 +274,7 @@ agent/extension authority, MCP management, custom-agent control plane, and
 mode semantics must not become JARVIS production architecture.
 
 No Goose package, binary, ACP runtime, MCP runtime, or donor implementation was
-added by this study. Because the project’s pinned revision was not found in the
-checked-out documentation, this note is not a substitute for a future
-revision-pinned provenance/licensing review.
+added by this study. The exact revision and its Apache-2.0 license were
+rechecked against the official upstream on 2026-08-30. This research record is
+still not permission to copy code, add a dependency, or make Goose a JARVIS
+runtime/security authority.

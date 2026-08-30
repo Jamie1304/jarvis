@@ -595,6 +595,8 @@ class AutomationService:
         self._debounced: dict[UUID, asyncio.Task[None]] = {}
         self._task_by_run: dict[UUID, asyncio.Task[None]] = {}
         self._traces: dict[UUID, ExecutionTrace] = {}
+        self._drain_task: asyncio.Task[None] | None = None
+        self._drain_requested = False
 
     async def start(self) -> None:
         if self._closed:
@@ -623,6 +625,11 @@ class AutomationService:
                 task.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
         self._dispatch_tasks.clear()
+        drain_task, self._drain_task = self._drain_task, None
+        self._drain_requested = False
+        if drain_task is not None:
+            drain_task.cancel()
+            await asyncio.gather(drain_task, return_exceptions=True)
         self._task_by_run.clear()
         self._active.clear()
 
@@ -805,7 +812,28 @@ class AutomationService:
             return
         except Exception:
             return
-        asyncio.create_task(self._drain_after_dispatch())
+        self._request_drain()
+
+    def _request_drain(self) -> None:
+        """Serialize durable queue draining and retain its lifecycle ownership."""
+
+        if self._closed:
+            return
+        self._drain_requested = True
+        if self._drain_task is None or self._drain_task.done():
+            self._drain_task = asyncio.create_task(self._drain_loop())
+
+    async def _drain_loop(self) -> None:
+        try:
+            while self._drain_requested:
+                self._drain_requested = False
+                await self._drain_after_dispatch()
+        finally:
+            current = asyncio.current_task()
+            if self._drain_task is current:
+                self._drain_task = None
+            if self._drain_requested and not self._closed:
+                self._request_drain()
 
     async def _drain_after_dispatch(self) -> None:
         for automation_id, active in tuple(self._active.items()):

@@ -25,8 +25,9 @@ handed to the existing proposal-and-test self-improvement pipeline.
 - **REJECT** means the concept conflicts with JARVIS architecture, security, or
   ownership rules.
 - Exact revisions below are immutable SHAs resolved from the official
-  repositories on 2026-08-23. Where a branch head is used, it is recorded as a
-  SHA rather than treated as a floating dependency.
+  repositories on 2026-08-23, except Goose, which was independently rechecked
+  against official upstream on 2026-08-30. Where a branch head is used, it is
+  recorded as a SHA rather than treated as a floating dependency.
 - License findings are source-repository findings at the pinned revision. They
   are not legal advice and do not cover third-party dependencies.
 
@@ -34,7 +35,7 @@ handed to the existing proposal-and-test self-improvement pipeline.
 
 | Donor | Official repository | Revision used | License inspected | Runtime decision |
 |---|---|---|---|---|
-| Goose | [aaif-goose/goose](https://github.com/aaif-goose/goose) | `main@8d844eecbdfd65626a881c9e8784ae8dc6093f1d` | Apache-2.0 `LICENSE` | Reference only; no runtime dependency |
+| Goose | [aaif-goose/goose](https://github.com/aaif-goose/goose) | `403fcc84c78e5676197219071f4740497fdd4af3` | Apache-2.0 `LICENSE` | Reference only; no runtime dependency |
 | Agent Zero | [agent0ai/agent-zero](https://github.com/agent0ai/agent-zero) | `v1.12@75b26e197ea80eeb1fc1c8d1f2a6a6572e9090cb` | MIT `LICENSE` | Reference only; no runtime/server/Docker/UI/memory dependency |
 | fullstack-agent | [jaredrhod/fullstack-agent](https://github.com/jaredrhod/fullstack-agent) | `main@e020fb7ed77356a5394b560df0a1db5a64e2ada6` | AGPL-3.0-or-later `LICENSE` | Reference only; no installer dependency |
 | Backtalk | [jaredrhod/backtalk](https://github.com/jaredrhod/backtalk) | `main@839a1c997f819ce17dfcfe9d764bc0fd39af8a3b` | AGPL-3.0-or-later `LICENSE` | Reference only; no voice runtime dependency |
@@ -45,6 +46,14 @@ handed to the existing proposal-and-test self-improvement pipeline.
 ## Goose
 
 ### Source and scope
+
+The official upstream repository and immutable commit were rechecked through
+GitHub's repository and commit metadata on 2026-08-30. `LICENSE` at
+`403fcc84c78e5676197219071f4740497fdd4af3` identifies Apache-2.0 (GitHub
+content SHA `c83043d4494071fbd93ef245a14e573c5a8280c4`). This is provenance
+evidence only: Goose source, package, binary, ACP, MCP runtime, server, and
+extension manager are not JARVIS dependencies, and there remains no approved
+PORT decision.
 
 Relevant files at the pinned SHA:
 

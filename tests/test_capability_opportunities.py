@@ -107,9 +107,11 @@ class _FailedResultPreparation:
 class _StatePreparation:
     def __init__(self, state: OpportunityPreparationState) -> None:
         self.state = state
+        self.calls = 0
 
     async def prepare(self, opportunity: object) -> OpportunityPreparationResult:
         del opportunity
+        self.calls += 1
         return OpportunityPreparationResult(self.state, "synthetic preparation state")
 
 
@@ -823,6 +825,7 @@ async def test_stale_proposal_is_rejected_after_opportunity_failure() -> None:
         proposed,
         status=OpportunityStatus.FAILED,
         preparation_state=OpportunityPreparationState.FAILED,
+        decision=OpportunityDecision.PREPARE,
         last_error="synthetic failure after proposal",
     )
     store.save(failed, expected_revision=store.revision(opportunity.opportunity_id))
@@ -903,6 +906,102 @@ def test_opportunity_validation_and_retention_bounds_fail_closed() -> None:
     for factory in malformed:
         with pytest.raises(CapabilityOpportunityError):
             factory()
+
+
+def test_opportunity_record_and_persisted_payload_contracts_fail_closed(tmp_path: Path) -> None:
+    """Durable opportunity input cannot smuggle malformed state past its owner."""
+
+    engine = _engine(InMemoryOpportunityStore())
+    opportunity = _observe(engine, _evidence("record:one", "record:two"))
+    assert opportunity is not None
+
+    malformed_records: tuple[Callable[[], object], ...] = (
+        lambda: replace(opportunity, opportunity_id=cast(UUID, "not-a-uuid")),
+        lambda: replace(opportunity, semantic_need=""),
+        lambda: replace(opportunity, evidence_references=("record:two", "record:one")),
+        lambda: replace(opportunity, evidence_references=("record:one",)),
+        lambda: replace(opportunity, evidence=cast(tuple[OpportunityEvidence, ...], ())),
+        lambda: replace(opportunity, confidence=1.1),
+        lambda: replace(
+            opportunity, likely_required_authority=tuple(str(item) for item in range(65))
+        ),
+        lambda: replace(opportunity, workspace="\x00workspace"),
+        lambda: replace(opportunity, created_at=datetime(2026, 1, 1)),
+        lambda: replace(opportunity, expires_at=NOW - timedelta(seconds=1)),
+        lambda: replace(opportunity, status=cast(OpportunityStatus, "active")),
+        lambda: replace(
+            opportunity,
+            preparation_state=cast(OpportunityPreparationState, "ready"),
+        ),
+        lambda: replace(opportunity, decision=cast(OpportunityDecision, "accept")),
+        lambda: replace(opportunity, prepared_summary="token=synthetic"),
+        lambda: replace(opportunity, remaining_authority=("credential_value=raw",)),
+        lambda: replace(opportunity, last_error="\x00error"),
+    )
+    for build in malformed_records:
+        with pytest.raises(CapabilityOpportunityError):
+            build()
+
+    for build in (
+        lambda: OpportunityPreparationResult(cast(OpportunityPreparationState, "ready"), "summary"),
+        lambda: OpportunityPreparationResult(OpportunityPreparationState.READY, ""),
+        lambda: OpportunityPreparationResult(
+            OpportunityPreparationState.READY,
+            "summary",
+            tuple(str(item) for item in range(65)),
+        ),
+        lambda: OpportunityPreparationResult(
+            OpportunityPreparationState.READY,
+            "summary",
+            activated=cast(bool, "yes"),
+        ),
+        lambda: OpportunityPreparationResult(
+            OpportunityPreparationState.READY,
+            "summary",
+            activated=True,
+        ),
+    ):
+        with pytest.raises(CapabilityOpportunityError):
+            build()
+
+    path = tmp_path / "payload-contract.sqlite3"
+    store = SQLiteOpportunityStore(path)
+    persisted = _engine(store).observe(
+        "persisted need",
+        _evidence("persisted:one", "persisted:two"),
+        expected_benefit="benefit",
+        privacy_impact="private",
+        estimated_resource_cost="small",
+        likely_required_authority=(),
+        workspace="workspace",
+    )
+    assert persisted is not None
+    assert store.list() == (persisted,)
+    assert store.get(uuid4()) is None
+    with pytest.raises(CapabilityOpportunityError):
+        store.revision(uuid4())
+    with pytest.raises(CapabilityOpportunityError):
+        store.find_by_key("\x00invalid")
+    with pytest.raises(CapabilityOpportunityError):
+        store.save(cast(CapabilityOpportunity, object()))
+
+    payload = json.loads(
+        str(
+            store._connection.execute(
+                "SELECT payload_json FROM opportunities WHERE opportunity_id=?",
+                (str(persisted.opportunity_id),),
+            ).fetchone()[0]
+        )
+    )
+    payload["evidence_references"] = "not-a-list"
+    store._connection.execute(
+        "UPDATE opportunities SET payload_json=? WHERE opportunity_id=?",
+        (json.dumps(payload, sort_keys=True), str(persisted.opportunity_id)),
+    )
+    store._connection.commit()
+    with pytest.raises(CapabilityOpportunityError, match="evidence_references"):
+        store.list()
+    store.close()
 
 
 def test_expired_opportunity_and_store_revision_are_explicit(tmp_path: Path) -> None:
@@ -1077,3 +1176,276 @@ def test_security_block_invariant_reconciles_legacy_state() -> None:
                 preparation_state=OpportunityPreparationState.NOT_STARTED,
             )
         )
+
+
+@pytest.mark.parametrize(
+    ("legacy_status", "legacy_preparation", "expected_status", "expected_preparation"),
+    [
+        (
+            OpportunityStatus.ARCHIVED,
+            OpportunityPreparationState.FAILED,
+            OpportunityStatus.ARCHIVED,
+            OpportunityPreparationState.SECURITY_BLOCKED,
+        ),
+        (
+            OpportunityStatus.FAILED,
+            OpportunityPreparationState.SECURITY_BLOCKED,
+            OpportunityStatus.ARCHIVED,
+            OpportunityPreparationState.SECURITY_BLOCKED,
+        ),
+        (
+            OpportunityStatus.READY_TO_PROPOSE,
+            OpportunityPreparationState.SECURITY_BLOCKED,
+            OpportunityStatus.ARCHIVED,
+            OpportunityPreparationState.SECURITY_BLOCKED,
+        ),
+        (
+            OpportunityStatus.PROPOSED,
+            OpportunityPreparationState.SECURITY_BLOCKED,
+            OpportunityStatus.ARCHIVED,
+            OpportunityPreparationState.SECURITY_BLOCKED,
+        ),
+        (
+            OpportunityStatus.ACCEPTED,
+            OpportunityPreparationState.SECURITY_BLOCKED,
+            OpportunityStatus.ARCHIVED,
+            OpportunityPreparationState.SECURITY_BLOCKED,
+        ),
+        (
+            OpportunityStatus.ASSESSING,
+            OpportunityPreparationState.SECURITY_BLOCKED,
+            OpportunityStatus.ARCHIVED,
+            OpportunityPreparationState.SECURITY_BLOCKED,
+        ),
+        (
+            OpportunityStatus.ARCHIVED,
+            OpportunityPreparationState.NOT_STARTED,
+            OpportunityStatus.ARCHIVED,
+            OpportunityPreparationState.SECURITY_BLOCKED,
+        ),
+        (
+            OpportunityStatus.ARCHIVED,
+            OpportunityPreparationState.READY,
+            OpportunityStatus.ARCHIVED,
+            OpportunityPreparationState.SECURITY_BLOCKED,
+        ),
+        (
+            OpportunityStatus.ARCHIVED,
+            OpportunityPreparationState.UNKNOWN_OUTCOME,
+            OpportunityStatus.ARCHIVED,
+            OpportunityPreparationState.SECURITY_BLOCKED,
+        ),
+        (
+            OpportunityStatus.READY_TO_PROPOSE,
+            OpportunityPreparationState.UNKNOWN_OUTCOME,
+            OpportunityStatus.ASSESSING,
+            OpportunityPreparationState.UNKNOWN_OUTCOME,
+        ),
+        (
+            OpportunityStatus.EXPIRED,
+            OpportunityPreparationState.UNKNOWN_OUTCOME,
+            OpportunityStatus.ASSESSING,
+            OpportunityPreparationState.UNKNOWN_OUTCOME,
+        ),
+        (
+            OpportunityStatus.FAILED,
+            OpportunityPreparationState.UNKNOWN_OUTCOME,
+            OpportunityStatus.ASSESSING,
+            OpportunityPreparationState.UNKNOWN_OUTCOME,
+        ),
+    ],
+)
+def test_legacy_state_matrix_uses_most_restrictive_signal(
+    legacy_status: OpportunityStatus,
+    legacy_preparation: OpportunityPreparationState,
+    expected_status: OpportunityStatus,
+    expected_preparation: OpportunityPreparationState,
+) -> None:
+    store = InMemoryOpportunityStore()
+    engine = _engine(store)
+    opportunity = _observe(engine, _evidence("matrix:one", "matrix:two"))
+    assert opportunity is not None
+    store._items[opportunity.opportunity_id] = (
+        replace(
+            opportunity,
+            status=legacy_status,
+            preparation_state=legacy_preparation,
+            decision=OpportunityDecision.PROPOSE,
+        ),
+        store.revision(opportunity.opportunity_id),
+    )
+
+    restored = engine.get(opportunity.opportunity_id)
+
+    assert restored.status is expected_status
+    assert restored.preparation_state is expected_preparation
+    assert restored.decision is OpportunityDecision.NONE
+
+
+@pytest.mark.parametrize(
+    ("legacy_status", "legacy_preparation"),
+    [
+        (OpportunityStatus.ARCHIVED, OpportunityPreparationState.FAILED),
+        (OpportunityStatus.FAILED, OpportunityPreparationState.SECURITY_BLOCKED),
+        (OpportunityStatus.READY_TO_PROPOSE, OpportunityPreparationState.SECURITY_BLOCKED),
+        (OpportunityStatus.PROPOSED, OpportunityPreparationState.SECURITY_BLOCKED),
+        (OpportunityStatus.ACCEPTED, OpportunityPreparationState.SECURITY_BLOCKED),
+        (OpportunityStatus.ASSESSING, OpportunityPreparationState.SECURITY_BLOCKED),
+        (OpportunityStatus.ARCHIVED, OpportunityPreparationState.NOT_STARTED),
+        (OpportunityStatus.ARCHIVED, OpportunityPreparationState.READY),
+        (OpportunityStatus.ARCHIVED, OpportunityPreparationState.UNKNOWN_OUTCOME),
+    ],
+)
+def test_sqlite_legacy_security_conflicts_reconcile_durably_fail_closed(
+    tmp_path: Path,
+    legacy_status: OpportunityStatus,
+    legacy_preparation: OpportunityPreparationState,
+) -> None:
+    path = tmp_path / f"legacy-{legacy_status.value}-{legacy_preparation.value}.sqlite3"
+    store = SQLiteOpportunityStore(path)
+    engine = _engine(store)
+    opportunity = _observe(engine, _evidence("sqlite-matrix:one", "sqlite-matrix:two"))
+    assert opportunity is not None
+    payload = json.loads(
+        str(
+            store._connection.execute(
+                "SELECT payload_json FROM opportunities WHERE opportunity_id=?",
+                (str(opportunity.opportunity_id),),
+            ).fetchone()[0]
+        )
+    )
+    payload.update(
+        {
+            "status": legacy_status.value,
+            "preparation_state": legacy_preparation.value,
+            "decision": OpportunityDecision.PROPOSE.value,
+        }
+    )
+    store._connection.execute(
+        "UPDATE opportunities SET payload_json=? WHERE opportunity_id=?",
+        (json.dumps(payload, sort_keys=True), str(opportunity.opportunity_id)),
+    )
+    store._connection.commit()
+    store.close()
+
+    restored_store = SQLiteOpportunityStore(path)
+    restored = _engine(restored_store).get(opportunity.opportunity_id)
+    assert restored.status is OpportunityStatus.ARCHIVED
+    assert restored.preparation_state is OpportunityPreparationState.SECURITY_BLOCKED
+    assert restored.decision is OpportunityDecision.NONE
+    restored_store.close()
+
+
+@pytest.mark.parametrize(
+    ("status", "preparation"),
+    [
+        (OpportunityStatus.ARCHIVED, OpportunityPreparationState.FAILED),
+        (OpportunityStatus.FAILED, OpportunityPreparationState.SECURITY_BLOCKED),
+        (OpportunityStatus.PROPOSED, OpportunityPreparationState.UNKNOWN_OUTCOME),
+    ],
+)
+def test_new_impossible_restrictive_state_writes_are_rejected(
+    status: OpportunityStatus,
+    preparation: OpportunityPreparationState,
+) -> None:
+    store = InMemoryOpportunityStore()
+    engine = _engine(store)
+    opportunity = _observe(engine, _evidence("reject:one", "reject:two"))
+    assert opportunity is not None
+
+    with pytest.raises(CapabilityOpportunityError):
+        store.save(
+            replace(
+                opportunity,
+                status=status,
+                preparation_state=preparation,
+                decision=OpportunityDecision.PROPOSE,
+            ),
+            expected_revision=store.revision(opportunity.opportunity_id),
+        )
+
+
+@pytest.mark.asyncio
+async def test_unknown_outcome_never_replays_or_changes_under_ordinary_actions() -> None:
+    clock = [NOW]
+    preparation = _StatePreparation(OpportunityPreparationState.UNKNOWN_OUTCOME)
+    engine = CapabilityOpportunityEngine(
+        InMemoryOpportunityStore(),
+        _Acquisition(),
+        preparation=preparation,
+        clock=lambda: clock[0],
+    )
+    opportunity = engine.observe(
+        "uncertain preparation",
+        _evidence("unknown:one", "unknown:two"),
+        expected_benefit="benefit",
+        privacy_impact="private",
+        estimated_resource_cost="small",
+        likely_required_authority=(),
+        workspace="workspace",
+        expiry=timedelta(seconds=1),
+    )
+    assert opportunity is not None
+    uncertain = await engine.prepare(opportunity.opportunity_id)
+    assert uncertain.status is OpportunityStatus.ASSESSING
+    assert uncertain.preparation_state is OpportunityPreparationState.UNKNOWN_OUTCOME
+    assert uncertain.decision is OpportunityDecision.NONE
+
+    clock[0] += timedelta(days=1)
+    observed = engine.observe(
+        "uncertain preparation",
+        _evidence("unknown:one", "unknown:two", "unknown:three"),
+        expected_benefit="benefit",
+        privacy_impact="private",
+        estimated_resource_cost="small",
+        likely_required_authority=(),
+        workspace="workspace",
+    )
+    assert observed is not None
+    assert observed.preparation_state is OpportunityPreparationState.UNKNOWN_OUTCOME
+    assert observed.status is OpportunityStatus.ASSESSING
+    assert "unknown:three" in observed.evidence_references
+    assert (
+        engine.get(opportunity.opportunity_id).preparation_state
+        is OpportunityPreparationState.UNKNOWN_OUTCOME
+    )
+    with pytest.raises(CapabilityOpportunityError):
+        await engine.prepare(opportunity.opportunity_id)
+    with pytest.raises(CapabilityOpportunityError):
+        engine.decline(opportunity.opportunity_id)
+    with pytest.raises(CapabilityOpportunityError):
+        engine.proposal(opportunity.opportunity_id)
+    with pytest.raises(CapabilityOpportunityError):
+        await engine.accept(opportunity.opportunity_id, _request())
+    assert preparation.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_unknown_outcome_persists_across_sqlite_restart_without_replay(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "unknown-outcome.sqlite3"
+    preparation = _StatePreparation(OpportunityPreparationState.UNKNOWN_OUTCOME)
+    store = SQLiteOpportunityStore(path)
+    engine = CapabilityOpportunityEngine(
+        store, _Acquisition(), preparation=preparation, clock=lambda: NOW
+    )
+    opportunity = _observe(engine, _evidence("unknown-restart:one", "unknown-restart:two"))
+    assert opportunity is not None
+    await engine.prepare(opportunity.opportunity_id)
+    store.close()
+
+    restored_preparation = _StatePreparation(OpportunityPreparationState.READY)
+    restored_store = SQLiteOpportunityStore(path)
+    restored_engine = CapabilityOpportunityEngine(
+        restored_store, _Acquisition(), preparation=restored_preparation, clock=lambda: NOW
+    )
+    restored = restored_engine.get(opportunity.opportunity_id)
+
+    assert restored.status is OpportunityStatus.ASSESSING
+    assert restored.preparation_state is OpportunityPreparationState.UNKNOWN_OUTCOME
+    assert restored.decision is OpportunityDecision.NONE
+    with pytest.raises(CapabilityOpportunityError):
+        await restored_engine.prepare(opportunity.opportunity_id)
+    assert restored_preparation.calls == 0
+    restored_store.close()
