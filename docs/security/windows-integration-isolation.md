@@ -112,6 +112,16 @@ creation-time-bound descendants observed while the root was alive; it does not
 search by executable name or accept a reused PID. This is fail-closed lifecycle
 hygiene, not an OS security claim about arbitrary deliberate escape.
 
+The authoritative empty-state observation is
+`QueryInformationJobObject(JobObjectBasicAccountingInformation)` with
+`ActiveProcesses == 0`. JARVIS does not treat `WaitForSingleObject` on a Job
+handle as an empty-state signal. Accounting/query failure remains fail closed;
+it is not converted into zero members. Normal root completion is first observed
+with bounded accounting polling, whereas timeout/cancellation requests owned
+termination and then requires the same `ActiveProcesses == 0` proof. Closing the
+Job remains the native kill-on-close backstop and is serialized against accounting
+queries.
+
 Timeout, cancellation, crash, malformed IPC, and shutdown all use the same
 owned termination path. A failed Job/profile/token/ACL/handle/process setup
 returns `SandboxIsolationUnavailable` and does not fall back to an unrestricted

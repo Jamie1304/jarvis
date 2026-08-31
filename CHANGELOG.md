@@ -9,6 +9,9 @@ development and release-candidate chronology.
 
 ### Hardening
 
+- Correct the trusted Windows controlled-test runner's Job-empty proof to use
+  native `QueryInformationJobObject` accounting (`ActiveProcesses == 0`) rather
+  than a Job-handle wait signal; query and cleanup failures remain non-pass.
 - Mutable R4O hardening is preparing a future candidate after Candidate 11's
   independent `R4_NO_GO`: fail-closed OpportunityEngine reconciliation,
   non-replayable unknown preparation outcomes, controlled test-runner evidence,

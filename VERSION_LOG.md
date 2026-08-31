@@ -42,6 +42,7 @@ not invent a status where the available release records did not establish one.
 | 9 | 2026-08-27 | `6cf44a7ced8f55ca194cad05903a48d75f77f400` | `5795cfeedd618d98573bb80f54cb7daecdad7f8d` | `release: fix opportunity preparation failure state for Jarvis v1.0.0 RC` | Exact-SHA green | `R4_NO_GO`: 104 PASS / 2 FAIL / 0 NOT_PROVEN; criteria 4 and 100 failed. Not packaging-authorized. |
 | 10 | 2026-08-28 | `ac7fc45f9332f004349e0c7c0868758cc036c8f2` | `6cf44a7ced8f55ca194cad05903a48d75f77f400` | `release: preserve failed opportunities across observation for Jarvis v1.0.0 RC` | Exact-SHA green | `R4_NO_GO`: 103 PASS / 3 FAIL / 0 NOT_PROVEN; criteria 4, 70, and 86 failed; criterion 100 passed. Not packaging-authorized. |
 | 11 | 2026-08-29 | `3bf78458ed5556aaaf72318911874dc85f919be1` | `ac7fc45f9332f004349e0c7c0868758cc036c8f2` | `release: fix security-blocked lifecycle and controlled test runner for Jarvis v1.0.0 RC` | Exact-SHA push CI green: run `33276631872`, job `99164379256` | `R4_NO_GO`: 98 PASS / 8 FAIL / 0 NOT_PROVEN; criteria 4, 17, 25, 26, 30, 70, 86, and 105 failed; criterion 100 passed. Not packaging-authorized. |
+| 12 | 2026-08-30 | `b55f8a4dd1364e0c588df0d63de1cd0025b18eba` | `3bf78458ed5556aaaf72318911874dc85f919be1` | `release: close Candidate 11 blockers for Jarvis v1.0.0 RC` | `RC_CI_FAILED`: run `33339183982`, job `99331570440`; quality/workflows/permissions passed, v1 acceptance failed `process_cleanup_failed`, package smoke skipped | Not independently R4-audited; immutable, not packaging-authorized. |
 
 Candidate 11's hosted CI result was real historical evidence for that exact
 commit, but the later independent audit found defects in the trusted release
@@ -50,12 +51,12 @@ not evidence for a later mutable tree.
 
 ## Current unreleased hardening
 
-The working tree after Candidate 11 is an R4O mutable remediation and prefreeze
-effort. It is **not Candidate 12** until a separately authorized freeze creates
-a new immutable commit. Its local validation, review, and exact future hosted
-CI requirements are tracked in
+Candidate 12 is immutable and permanently `RC_CI_FAILED`; it must not be
+amended or used as release evidence. The current working tree is an R4P mutable
+remediation of its Windows Job-empty predicate. Its local validation, review,
+and exact future Candidate 13 hosted-CI requirements are tracked in
 [docs/releases/v1.0.0-rc-preflight.md](docs/releases/v1.0.0-rc-preflight.md).
 
 No semantic version number is being assigned to this mutable work. Candidate
-12 can exist only after a normal commit and push, and its CI evidence must be
+13 can exist only after a normal commit and push, and its CI evidence must be
 for that exact resulting SHA.

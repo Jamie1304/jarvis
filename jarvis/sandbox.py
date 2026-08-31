@@ -411,10 +411,31 @@ class _WindowsProcessBasicInformation(ctypes.Structure):
     ]
 
 
+class _WindowsJobBasicAccountingInformation(ctypes.Structure):
+    """Win32 ``JOBOBJECT_BASIC_ACCOUNTING_INFORMATION``.
+
+    ``ActiveProcesses`` is Windows' accounting source for the number of
+    processes currently associated with a Job.  A Job handle's signalled state
+    has different semantics and must never be treated as an empty-Job test.
+    """
+
+    _fields_ = [
+        ("TotalUserTime", ctypes.c_longlong),  # LARGE_INTEGER
+        ("TotalKernelTime", ctypes.c_longlong),  # LARGE_INTEGER
+        ("ThisPeriodTotalUserTime", ctypes.c_longlong),  # LARGE_INTEGER
+        ("ThisPeriodTotalKernelTime", ctypes.c_longlong),  # LARGE_INTEGER
+        ("TotalPageFaultCount", wintypes.DWORD),
+        ("TotalProcesses", wintypes.DWORD),
+        ("ActiveProcesses", wintypes.DWORD),
+        ("TotalTerminatedProcesses", wintypes.DWORD),
+    ]
+
+
 class _WindowsJob:  # pragma: no cover - opt-in native Windows integration
     """Small native Job Object wrapper for process-tree and resource ownership."""
 
     _JOB_OBJECT_EXTENDED_LIMIT_INFORMATION = 9
+    _JOB_OBJECT_BASIC_ACCOUNTING_INFORMATION = 1
     _JOB_OBJECT_LIMIT_ACTIVE_PROCESS = 0x00000008
     _JOB_OBJECT_LIMIT_PROCESS_MEMORY = 0x00000100
     _JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000
@@ -423,6 +444,7 @@ class _WindowsJob:  # pragma: no cover - opt-in native Windows integration
     _PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
     _STILL_ACTIVE = 259
     _OWNERSHIP_POLL_SECONDS = 0.01
+    _ACTIVE_PROCESS_POLL_SECONDS = 0.025
 
     def __init__(self, handle: int, library: Any, native_library: Any) -> None:
         self._handle = handle
@@ -435,6 +457,7 @@ class _WindowsJob:  # pragma: no cover - opt-in native Windows integration
         self._ownership_thread: threading.Thread | None = None
         self._ownership_error: str | None = None
         self._terminated = False
+        self._lifecycle_lock = threading.RLock()
 
     @classmethod
     def create(cls, limits: SandboxLimits) -> _WindowsJob:
@@ -451,6 +474,14 @@ class _WindowsJob:  # pragma: no cover - opt-in native Windows integration
                 wintypes.DWORD,
             ]
             library.SetInformationJobObject.restype = wintypes.BOOL
+            library.QueryInformationJobObject.argtypes = [
+                ctypes.c_void_p,
+                wintypes.INT,
+                ctypes.c_void_p,
+                wintypes.DWORD,
+                ctypes.POINTER(wintypes.DWORD),
+            ]
+            library.QueryInformationJobObject.restype = wintypes.BOOL
             library.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
             library.OpenProcess.restype = ctypes.c_void_p
             library.GetProcessTimes.argtypes = [
@@ -604,16 +635,53 @@ class _WindowsJob:  # pragma: no cover - opt-in native Windows integration
             errors.append(f"ownership_monitor:{type(error).__name__}")
         if self._ownership_error is not None:
             errors.append("ownership_monitor:failed")
-        if self._handle and not self._terminated:
+        try:
+            active_processes = self.active_process_count()
+        except Exception as error:
+            errors.append(f"job_accounting:{type(error).__name__}")
+            active_processes = None
+        if active_processes and not self._terminated:
             if not self._library.TerminateJobObject(self._handle, 1):
                 errors.append("job_terminate:failed")
-            self._terminated = True
+            else:
+                self._terminated = True
         try:
             self._terminate_recorded_processes()
         except Exception as error:
             errors.append(f"owned_process_cleanup:{type(error).__name__}")
         if errors:
             raise SandboxIsolationUnavailable("; ".join(sorted(set(errors))))
+
+    def active_process_count(self) -> int:
+        """Return authoritative Windows Job membership accounting.
+
+        A query failure is containment evidence failure, never proof that the
+        Job is empty.  The lifecycle lock prevents a concurrent close from
+        invalidating the native handle while the accounting call is active.
+        """
+
+        with self._lifecycle_lock:
+            if not self._handle:
+                raise SandboxIsolationUnavailable("Windows Job Object is already closed")
+            accounting = _WindowsJobBasicAccountingInformation()
+            returned_length = wintypes.DWORD()
+            try:
+                succeeded = self._library.QueryInformationJobObject(
+                    self._handle,
+                    self._JOB_OBJECT_BASIC_ACCOUNTING_INFORMATION,
+                    ctypes.byref(accounting),
+                    ctypes.sizeof(accounting),
+                    ctypes.byref(returned_length),
+                )
+            except (AttributeError, OSError, TypeError, ValueError) as error:
+                raise SandboxIsolationUnavailable("Windows Job accounting query failed") from error
+            if not succeeded:
+                raise SandboxIsolationUnavailable("Windows Job accounting query failed")
+            if returned_length.value not in {0, ctypes.sizeof(accounting)}:
+                raise SandboxIsolationUnavailable(
+                    "Windows Job accounting query returned invalid data"
+                )
+            return int(accounting.ActiveProcesses)
 
     def _start_ownership_monitor(self) -> None:
         if self._ownership_thread is not None:
@@ -822,20 +890,33 @@ class _WindowsJob:  # pragma: no cover - opt-in native Windows integration
             self._library.CloseHandle(snapshot)
 
     async def wait_for_empty(self, timeout_seconds: float) -> bool:
-        """Wait until all descendants have left the Job Object."""
+        """Boundedly observe ``ActiveProcesses == 0`` through Job accounting."""
 
-        milliseconds = max(1, min(30_000, int(timeout_seconds * 1_000)))
-        result = await asyncio.to_thread(
-            self._library.WaitForSingleObject,
-            self._handle,
-            milliseconds,
-        )
-        return bool(result == 0)
+        if (
+            isinstance(timeout_seconds, bool)
+            or not isinstance(timeout_seconds, int | float)
+            or timeout_seconds < 0
+        ):
+            raise SandboxIsolationUnavailable("Windows Job empty-wait timeout is invalid")
+        deadline = time.monotonic() + float(timeout_seconds)
+        while True:
+            if await asyncio.to_thread(self.active_process_count) == 0:
+                return True
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return False
+            await asyncio.sleep(min(self._ACTIVE_PROCESS_POLL_SECONDS, remaining))
 
     def close(self) -> None:
-        if self._handle:
+        with self._lifecycle_lock:
+            if not self._handle:
+                return
             termination_error: Exception | None = None
             try:
+                # This preserves kill-on-close as the final native backstop.
+                # ``terminate()`` only calls TerminateJobObject when accounting
+                # still reports active Job members, so normal root completion
+                # is not needlessly terminated.
                 self.terminate()
             except Exception as error:
                 termination_error = error

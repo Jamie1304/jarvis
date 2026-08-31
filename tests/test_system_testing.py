@@ -542,6 +542,9 @@ async def test_runner_cancellation_wins_same_tick_owned_process_completion(
             return None
 
     class _OwnedJob:
+        def active_process_count(self) -> int:
+            return 0
+
         def terminate(self) -> None:
             return None
 
@@ -841,11 +844,17 @@ async def test_runner_reports_owned_cleanup_failure_before_nominal_success() -> 
             return 0
 
     class _FailingJob:
+        def __init__(self) -> None:
+            self.waits: list[float] = []
+
+        def active_process_count(self) -> int:
+            return 1
+
         def terminate(self) -> None:
             raise OSError("synthetic terminate failure")
 
         async def wait_for_empty(self, timeout_seconds: float) -> bool:
-            assert timeout_seconds == 5.0
+            self.waits.append(timeout_seconds)
             return False
 
         def close(self) -> None:
@@ -853,9 +862,70 @@ async def test_runner_reports_owned_cleanup_failure_before_nominal_success() -> 
 
     process = _CompletedProcess()
     wait_task = asyncio.create_task(process.wait())
-    error = await SubprocessTestAdapter._cleanup_process(process, wait_task, _FailingJob())
+    job = _FailingJob()
+    error = await SubprocessTestAdapter._cleanup_process(process, wait_task, job)
 
     assert error == "job_close:OSError;job_not_empty;job_terminate:OSError"
+    assert job.waits == [0.25, 5.0]
+
+
+@pytest.mark.asyncio
+async def test_runner_job_accounting_controls_cleanup_and_fails_closed() -> None:
+    class _CompletedProcess:
+        returncode = 0
+
+        async def wait(self) -> int:
+            return 0
+
+    class _AccountingJob:
+        def __init__(self, counts: list[int] | Exception) -> None:
+            self._counts = counts
+            self.terminated = 0
+            self.closed = 0
+
+        def active_process_count(self) -> int:
+            if isinstance(self._counts, Exception):
+                raise self._counts
+            if len(self._counts) > 1:
+                return self._counts.pop(0)
+            return self._counts[0]
+
+        def terminate(self) -> None:
+            self.terminated += 1
+            if isinstance(self._counts, list):
+                self._counts[:] = [0]
+
+        async def wait_for_empty(self, timeout_seconds: float) -> bool:
+            del timeout_seconds
+            return self.active_process_count() == 0
+
+        def close(self) -> None:
+            self.closed += 1
+
+    async def cleanup(job: _AccountingJob) -> str | None:
+        process = _CompletedProcess()
+        return await SubprocessTestAdapter._cleanup_process(
+            process,
+            asyncio.create_task(process.wait()),
+            job,
+        )
+
+    empty = _AccountingJob([0])
+    assert await cleanup(empty) is None
+    assert empty.terminated == 0
+    assert empty.closed == 1
+
+    active = _AccountingJob([1])
+    assert await cleanup(active) is None
+    assert active.terminated == 1
+    assert active.closed == 1
+
+    stuck = _AccountingJob([1])
+    stuck.terminate = lambda: None  # type: ignore[method-assign]
+    assert await cleanup(stuck) == "job_not_empty"
+
+    query_failure = _AccountingJob(OSError("synthetic accounting failure"))
+    assert await cleanup(query_failure) == "job_accounting:OSError"
 
 
 @pytest.mark.asyncio
@@ -1061,6 +1131,96 @@ async def _wait_for_file(path: Path, *, timeout_seconds: float = 5.0) -> None:
             return
         await asyncio.sleep(0.01)
     raise AssertionError(f"Timed out waiting for owned test readiness file: {path.name}")
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows Job accounting contract")
+async def test_windows_native_job_accounting_confirms_empty_normal_exit_stress(
+    tmp_path: Path,
+) -> None:
+    """Exercise the real Job accounting API, not a synthetic Job double."""
+
+    from jarvis.sandbox import create_owned_windows_job
+    from jarvis.windows_sandbox import WindowsJobProcessLauncher
+
+    for _iteration in range(25):
+        job = create_owned_windows_job(max_processes=4, max_memory_bytes=128 * 1024 * 1024)
+        process = None
+        try:
+            process = await WindowsJobProcessLauncher.launch(
+                sys.executable,
+                ("-c", "pass"),
+                cwd=str(tmp_path),
+                environment=SubprocessTestAdapter._safe_environment(temporary_directory=tmp_path),
+                limit=8_192,
+                job=job,
+            )
+            assert await process.wait() == 0
+            assert await job.wait_for_empty(2.0)
+            assert job.active_process_count() == 0
+        finally:
+            if process is not None:
+                process.close()
+            job.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows Job accounting contract")
+async def test_windows_native_job_accounting_reaps_exact_descendant(tmp_path: Path) -> None:
+    """A real Job owns and cleans its child tree without ambient process kills."""
+
+    from jarvis.sandbox import create_owned_windows_job
+    from jarvis.windows_sandbox import WindowsJobProcessLauncher
+
+    child_pid = tmp_path / "native-job-child.pid"
+    job = create_owned_windows_job(max_processes=4, max_memory_bytes=128 * 1024 * 1024)
+    process = None
+    try:
+        child_program = "import time; time.sleep(30)"
+        root_program = (
+            "from pathlib import Path; import subprocess, sys, time; "
+            "child = subprocess.Popen("
+            f"[sys.executable, '-c', {child_program!r}], close_fds=False); "
+            f"Path({str(child_pid)!r}).write_text(str(child.pid), encoding='utf-8'); "
+            "time.sleep(30)"
+        )
+        process = await WindowsJobProcessLauncher.launch(
+            sys.executable,
+            ("-c", root_program),
+            cwd=str(tmp_path),
+            environment=SubprocessTestAdapter._safe_environment(temporary_directory=tmp_path),
+            limit=8_192,
+            job=job,
+        )
+        await _wait_for_file(child_pid)
+        assert job.active_process_count() > 0
+        job.terminate()
+        assert await job.wait_for_empty(5.0)
+        assert job.active_process_count() == 0
+        assert not _windows_process_is_running(int(child_pid.read_text(encoding="utf-8")))
+        assert await process.wait() != 0
+    finally:
+        if process is not None:
+            process.close()
+        job.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows Job accounting contract")
+async def test_windows_controlled_runner_normal_exit_has_no_cleanup_error(tmp_path: Path) -> None:
+    """Direct regression for Candidate 12's false ``process_cleanup_failed``."""
+
+    capture = await SubprocessTestAdapter().execute(
+        Command(sys.executable, ("-c", "pass")),
+        tmp_path,
+        5.0,
+        asyncio.Event(),
+    )
+
+    assert capture.exit_code == 0
+    assert not capture.timed_out
+    assert not capture.cancelled
+    assert capture.cleanup_error is None
 
 
 @pytest.mark.asyncio

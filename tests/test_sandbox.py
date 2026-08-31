@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import ctypes
 import json
 import math
 import os
@@ -710,3 +711,27 @@ async def test_malformed_response_is_rejected_after_protocol_start(tmp_path: Pat
     with pytest.raises(SandboxProtocolError):
         await process.request("malformed-response", {})
     await process.close()
+
+
+def test_windows_job_accounting_query_is_authoritative_and_fails_closed() -> None:
+    """Unit coverage for the Win32 accounting binding behind native regressions."""
+
+    class _Library:
+        def QueryInformationJobObject(self, *args: object) -> bool:
+            assert args[1] == sandbox_module._WindowsJob._JOB_OBJECT_BASIC_ACCOUNTING_INFORMATION
+            accounting = cast(Any, args[2])._obj
+            accounting.ActiveProcesses = 2
+            cast(Any, args[4])._obj.value = ctypes.sizeof(accounting)
+            return True
+
+    job = sandbox_module._WindowsJob(123, _Library(), object())
+    assert job.active_process_count() == 2
+
+    class _FailingLibrary:
+        def QueryInformationJobObject(self, *args: object) -> bool:
+            del args
+            return False
+
+    failed = sandbox_module._WindowsJob(456, _FailingLibrary(), object())
+    with pytest.raises(SandboxIsolationUnavailable, match="accounting query failed"):
+        failed.active_process_count()

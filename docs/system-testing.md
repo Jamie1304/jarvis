@@ -32,6 +32,14 @@ containment for trusted repository tests, not generated-code isolation. On other
 platforms it owns a new process group. Timeout/cancellation has precedence over a
 simultaneous nominal completion, and cleanup failure prevents a nominal pass.
 
+Job emptiness is proven through `QueryInformationJobObject` with
+`JobObjectBasicAccountingInformation`: `ActiveProcesses == 0`. The runner never
+uses a Job handle's `WaitForSingleObject` signal state as an empty-Job predicate.
+After normal root completion it gives the accounting value a short bounded poll
+window before terminating remaining owned work; timeout and cancellation request
+owned termination immediately. In every case, a failed query, termination,
+accounting deadline, or close remains trusted non-pass evidence.
+
 The child receives a minimal bootstrap environment rather than the user's credential
 environment. Only an exact parent-selected `JARVIS_ENVIRONMENT=test` crosses this
 boundary for deterministic suites; arbitrary `JARVIS_*` values, credentials, and

@@ -58,6 +58,12 @@ ledger binds each PID to its creation time and validates its native parent edge,
 so it never targets a process merely by executable name or a reused PID. That
 cleanup is lifecycle hygiene, not a guarantee against every breakaway.
 
+Where JARVIS needs to prove that a Job has no remaining members, it queries
+`JobObjectBasicAccountingInformation.ActiveProcesses` through
+`QueryInformationJobObject`. A Job handle signal is not interpreted as process
+membership evidence. Query failure is containment failure, never an implicit
+empty Job.
+
 On non-Windows, the manager uses a new process session/group and bounded
 termination, but does not claim equivalent OS resource enforcement. Windows Job
 Object setup failure is an isolation failure; there is no silent uncontained

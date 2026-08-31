@@ -223,6 +223,7 @@ class SubprocessTestAdapter(TestProcessAdapter):
                 process,
                 wait_task,
                 job,
+                force_termination=timed_out or cancelled,
             )
             stream_error = await _drain_streams(stdout_task, stderr_task)
             finalize_error = await self._finalize_process(process)
@@ -237,7 +238,7 @@ class SubprocessTestAdapter(TestProcessAdapter):
                 output_truncated=stdout.truncated or stderr.truncated,
             )
         except asyncio.CancelledError:
-            await self._cleanup_process(process, wait_task, job)
+            await self._cleanup_process(process, wait_task, job, force_termination=True)
             await _drain_streams(stdout_task, stderr_task)
             await self._finalize_process(process)
             raise
@@ -251,23 +252,48 @@ class SubprocessTestAdapter(TestProcessAdapter):
         process: Any,
         wait_task: asyncio.Task[int],
         job: Any | None,
+        *,
+        force_termination: bool = False,
     ) -> str | None:
         errors: list[str] = []
         if job is not None:
-            try:
-                # A successful root exit is insufficient evidence that an
-                # owned descendant has gone away. Terminate the exact Job and
-                # wait for it to empty before a nominal run is adjudicated.
-                await asyncio.to_thread(job.terminate)
-            except Exception as error:
-                errors.append(f"job_terminate:{type(error).__name__}")
+            active_process_count = getattr(job, "active_process_count", None)
             wait_for_empty = getattr(job, "wait_for_empty", None)
-            if callable(wait_for_empty):
+            if not callable(active_process_count) or not callable(wait_for_empty):
+                errors.append("job_accounting:missing")
+            else:
                 try:
-                    if not await wait_for_empty(5.0):
-                        errors.append("job_not_empty")
+                    active_processes = await asyncio.to_thread(active_process_count)
+                    if isinstance(active_processes, bool) or not isinstance(active_processes, int):
+                        raise TypeError("Job active-process accounting is invalid")
+                    if active_processes < 0:
+                        raise ValueError("Job active-process accounting is invalid")
                 except Exception as error:
-                    errors.append(f"job_wait_empty:{type(error).__name__}")
+                    errors.append(f"job_accounting:{type(error).__name__}")
+                    active_processes = None
+                if active_processes is not None:
+                    try:
+                        # Completion of the root process can precede a final
+                        # accounting update.  Observe the bounded authoritative
+                        # count before deciding whether a normal completed run
+                        # has any owned work left to terminate.
+                        empty = await wait_for_empty(0.25 if not force_termination else 0.0)
+                    except Exception as error:
+                        errors.append(f"job_wait_empty:{type(error).__name__}")
+                        empty = False
+                    if force_termination or not empty:
+                        try:
+                            # The native Job only invokes TerminateJobObject
+                            # when ActiveProcesses is non-zero; its exact
+                            # descendant ledger remains a containment backstop.
+                            await asyncio.to_thread(job.terminate)
+                        except Exception as error:
+                            errors.append(f"job_terminate:{type(error).__name__}")
+                    try:
+                        if not await wait_for_empty(5.0):
+                            errors.append("job_not_empty")
+                    except Exception as error:
+                        errors.append(f"job_wait_empty:{type(error).__name__}")
             try:
                 # Kill-on-close remains the final backstop if a process was
                 # created during cleanup or native termination raced a child.
