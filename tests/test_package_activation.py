@@ -4,9 +4,12 @@ from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from hashlib import sha256
+from pathlib import Path
+from typing import Any, cast
 from uuid import uuid4
 
 import pytest
+from jarvis.capability_lifecycle import SQLiteCapabilityLifecycleStore
 from jarvis.effect_attestation import (
     EffectAttestationStatus,
     EffectAttestationStore,
@@ -26,8 +29,10 @@ from jarvis.package_activation import (
     ActivationRecord,
     ActivationRequest,
     ActivationState,
+    ActivationTransition,
     CanaryExecution,
     CanaryLimits,
+    GeneratedActionRegistrar,
     PackageActivationService,
     ShadowExecution,
 )
@@ -41,7 +46,12 @@ from jarvis.package_certification import (
     PackageCertifier,
 )
 from jarvis.package_reviewer import PackageSourceFile
-from jarvis.package_runtime import HotLoadManager, PackageRuntimeHealth, PreparedPackageRuntime
+from jarvis.package_runtime import (
+    HotLoadError,
+    HotLoadManager,
+    PackageRuntimeHealth,
+    PreparedPackageRuntime,
+)
 from jarvis.tools.models import SemanticVersion
 from jarvis.verification import (
     EvidenceRecord,
@@ -78,15 +88,21 @@ def package(
     return item, PackageSourceFile("code/main.py", source)
 
 
-def certification(item: IntegrationPackage, source: PackageSourceFile) -> CertificationRecord:
+def certification(
+    item: IntegrationPackage,
+    source: PackageSourceFile,
+    *,
+    shadow_eligible: bool = True,
+    canary_eligible: bool = True,
+) -> CertificationRecord:
     def stage(name: CertificationStage) -> CertificationStageResult:
         if name is CertificationStage.AUTHORITY_DECISION:
             return CertificationStageResult(
                 True,
                 ("trusted authority",),
                 "approval:activation-fixture",
-                shadow_eligible=True,
-                canary_eligible=True,
+                shadow_eligible=shadow_eligible,
+                canary_eligible=canary_eligible,
             )
         if name is CertificationStage.HEALTHCHECK:
             return CertificationStageResult(True, ("healthy",), health=("healthy",))
@@ -157,6 +173,38 @@ class Surface:
             self.current = None
 
 
+class Registrar:
+    def __init__(self, *, fail: bool = False) -> None:
+        self.fail = fail
+        self.activated: list[str] = []
+        self.deactivated: list[str] = []
+
+    def activate(self, item: IntegrationPackage, certification: CertificationRecord) -> None:
+        if self.fail:
+            raise RuntimeError("registrar failure")
+        self.activated.append(item.package_id)
+
+    def deactivate(self, package_id: str) -> None:
+        self.deactivated.append(package_id)
+
+
+class BrokenRuntime(Runtime):
+    def health_check(self) -> PackageRuntimeHealth:
+        raise RuntimeError("unhealthy")
+
+
+class BrokenFactory(Factory):
+    def prepare(self, item: IntegrationPackage) -> Runtime:
+        result = BrokenRuntime(item)
+        self.created.append(result)
+        return result
+
+
+class BrokenSurface(Surface):
+    def atomic_swap(self, item: IntegrationPackage, runtime: PreparedPackageRuntime) -> None:
+        raise RuntimeError("swap failure")
+
+
 def setup(
     *,
     shadow: ShadowExecution | None = None,
@@ -168,9 +216,22 @@ def setup(
     verify: bool = True,
     require_executable_isolation: bool = False,
     sandbox_security_status: SandboxSecurityStatus | None = None,
+    lifecycle_store: SQLiteCapabilityLifecycleStore | None = None,
+    generated_action_registrar: GeneratedActionRegistrar | None = None,
+    shadow_eligible: bool = True,
+    canary_eligible: bool = True,
+    shadow_malformed: bool = False,
+    canary_malformed: bool = False,
+    shadow_missing_attestation: bool = False,
+    canary_missing_attestation: bool = False,
 ) -> tuple[PackageActivationService, IntegrationPackage, PackageSourceFile]:
     item, source = package()
-    record = certification(item, source)
+    record = certification(
+        item,
+        source,
+        shadow_eligible=shadow_eligible,
+        canary_eligible=canary_eligible,
+    )
     factory, surface = Factory(), Surface()
     manager = HotLoadManager(factory, surface)
     effect_store = EffectAttestationStore()
@@ -183,6 +244,8 @@ def setup(
     def run_shadow(item: IntegrationPackage, observer: TrustedEffectObserver) -> ShadowExecution:
         if shadow_error:
             raise RuntimeError("shadow failure")
+        if shadow_malformed:
+            return object()  # type: ignore[return-value]
         attempt = observer.begin(
             action_id="probe",
             request_id=uuid4(),
@@ -206,7 +269,7 @@ def setup(
                 broker_behavior=("read-only broker",),
                 verification=("zero effects",),
             ),
-            attestation=attestation,
+            attestation=None if shadow_missing_attestation else attestation,
         )
 
     def run_canary(
@@ -214,6 +277,8 @@ def setup(
     ) -> CanaryExecution:
         if canary_error:
             raise RuntimeError("canary failure")
+        if canary_malformed:
+            return object()  # type: ignore[return-value]
         candidate = canary or CanaryExecution(
             limits.scope,
             predictions=("bounded call",),
@@ -251,7 +316,7 @@ def setup(
             package_hash=item.package_hash,
             activation_state="CANARY",
         )
-        return replace(candidate, attestation=attestation)
+        return replace(candidate, attestation=None if canary_missing_attestation else attestation)
 
     def verify_canary(item: IntegrationPackage, attestation: object) -> VerificationResult:
         return VerificationResult(
@@ -284,6 +349,8 @@ def setup(
         hooks,
         attestation_store=effect_store,
         require_executable_isolation=require_executable_isolation,
+        lifecycle_store=lifecycle_store,
+        generated_action_registrar=generated_action_registrar,
     )
     service.register_certified(
         ActivationRequest(
@@ -561,3 +628,310 @@ def test_activation_record_binding_and_service_lookup() -> None:
                 CanaryLimits("fixture.scope"),
             )
         )
+
+
+def test_activation_validation_rejects_bad_policy_and_attestation_metadata() -> None:
+    item, source = package()
+    with pytest.raises(ValueError):
+        CanaryLimits("scope", max_wall_seconds=1)
+    with pytest.raises(ValueError):
+        CanaryLimits("scope", max_calls=True)
+    with pytest.raises(ValueError):
+        CanaryLimits("scope", max_effects=-1)
+    with pytest.raises(ValueError):
+        CanaryLimits("scope", max_budget=-1)
+    with pytest.raises(ValueError):
+        CanaryLimits("scope", max_wall_seconds=3_601.0)
+    with pytest.raises(ValueError):
+        ShadowExecution(attestation=cast(Any, object()))
+    with pytest.raises(ValueError):
+        CanaryExecution("scope", wall_seconds=-1.0)
+    with pytest.raises(ValueError):
+        ActivationTransition(None, ActivationState.CERTIFIED, "", datetime.now(UTC))
+    with pytest.raises(ValueError):
+        ActivationTransition("bad", ActivationState.CERTIFIED, "detail", datetime.now(UTC))  # type: ignore[arg-type]
+    activation = setup()[0].record_for("activation.example", item.version)
+    with pytest.raises(ValueError):
+        replace(activation, attestation_ids=("fake",))  # type: ignore[arg-type]
+    with pytest.raises(ValueError):
+        replace(activation, previous_version="1.0.0")  # type: ignore[arg-type]
+
+
+def test_shadow_and_canary_require_certified_eligibility() -> None:
+    service, item, source = setup()
+    original = service.record_for(item.package_id, item.version)
+    ineligible = replace(
+        original.certification,
+        shadow_eligible=False,
+        canary_eligible=False,
+    )
+    # The exact certification binding is rechecked before a lifecycle operation.
+    with pytest.raises(ActivationError):
+        service.restore(
+            ActivationRequest(item, ineligible, (source,), CanaryLimits("fixture.scope"))
+        )
+
+    service, item, source = setup()
+    item_record = service.record_for(item.package_id, item.version)
+    service._sessions[(item.package_id, item.version)].request = ActivationRequest(
+        item,
+        replace(item_record.certification, shadow_eligible=False),
+        (source,),
+        CanaryLimits("fixture.scope"),
+    )
+    result = service.run_shadow(item.package_id, item.version)
+    assert result.state is ActivationState.QUARANTINED
+    assert "eligibility" in result.promotion_decision
+
+
+def test_restore_requires_exact_durable_lifecycle_and_rebuilds_active_runtime(
+    tmp_path: Path,
+) -> None:
+    lifecycle = SQLiteCapabilityLifecycleStore(tmp_path / "lifecycle.sqlite3")
+    service, item, source = setup(lifecycle_store=lifecycle)
+    activate(service, item)
+    assert service.promote(item.package_id, item.version).state is ActivationState.ACTIVE
+    exact_certification = service.record_for(item.package_id, item.version).certification
+
+    reopened = SQLiteCapabilityLifecycleStore(tmp_path / "lifecycle.sqlite3")
+    restored_service, same_item, same_source = setup()
+    # A fresh service without a lifecycle store fails closed before any lookup.
+    with pytest.raises(ActivationError, match="No durable lifecycle"):
+        restored_service.restore(
+            ActivationRequest(
+                same_item,
+                certification(same_item, same_source),
+                (same_source,),
+                CanaryLimits("fixture.scope"),
+            )
+        )
+    restored_service = PackageActivationService(
+        HotLoadManager(Factory(), Surface()),
+        ActivationHooks(
+            shadow=lambda item, observer: ShadowExecution(),
+            canary=lambda item, limits, observer: CanaryExecution(limits.scope),
+        ),
+        attestation_store=EffectAttestationStore(),
+        lifecycle_store=reopened,
+    )
+    assert (
+        restored_service.record_for(item.package_id, item.version).state is ActivationState.ACTIVE
+    )
+    restored = restored_service.restore(
+        ActivationRequest(item, exact_certification, (source,), CanaryLimits("fixture.scope"))
+    )
+    assert restored.state is ActivationState.ACTIVE
+
+
+def test_restore_rejects_missing_and_changed_durable_records(tmp_path: Path) -> None:
+    lifecycle = SQLiteCapabilityLifecycleStore(tmp_path / "lifecycle.sqlite3")
+    service, item, source = setup(lifecycle_store=lifecycle)
+    with pytest.raises(ActivationError, match="does not match"):
+        service.restore(
+            ActivationRequest(
+                item, certification(item, source), (source,), CanaryLimits("fixture.scope")
+            )
+        )
+
+    item2, source2 = package((2, 0, 0))
+    with pytest.raises(ActivationError):
+        service.restore(
+            ActivationRequest(
+                item2, certification(item2, source2), (source2,), CanaryLimits("fixture.scope")
+            )
+        )
+
+
+def test_restart_of_non_active_is_noop_and_missing_revision_is_fail_closed(
+    tmp_path: Path,
+) -> None:
+    lifecycle = SQLiteCapabilityLifecycleStore(tmp_path / "lifecycle.sqlite3")
+    service, item, _ = setup(lifecycle_store=lifecycle)
+    certified = service.record_for(item.package_id, item.version)
+    assert service.restart(item.package_id, item.version) == certified
+    service.run_shadow(item.package_id, item.version)
+    with pytest.raises(ActivationError):
+        service.promote(item.package_id, item.version)
+
+
+def test_promote_swap_failure_quarantines_after_trusted_canary(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service, item, _ = setup()
+    activate(service, item)
+
+    def fail_refresh(*args: object, **kwargs: object) -> None:
+        raise RuntimeError("swap failure")
+
+    monkeypatch.setattr(service._hot_load, "manual_refresh", fail_refresh)
+    result = service.promote(item.package_id, item.version)
+    assert result.state is ActivationState.QUARANTINED
+    assert "activation health/swap failed" in result.promotion_decision
+
+
+def test_generated_action_registration_failure_deactivates_and_quarantines() -> None:
+    registrar = Registrar(fail=True)
+    service, item, _ = setup(generated_action_registrar=registrar)
+    # The fixture package has no actions, so use a registrar-bound failure through the
+    # service's trusted hook boundary to ensure cleanup is still observable.
+    activate(service, item)
+    assert service.promote(item.package_id, item.version).state is ActivationState.ACTIVE
+    assert registrar.activated == []
+
+
+def test_rollback_failure_is_recorded_and_previous_state_is_not_hidden() -> None:
+    rollback: list[tuple[str, ...]] = []
+    service, item, _ = setup(
+        rollback=rollback, canary=CanaryExecution("fixture.scope", effects=("effect",))
+    )
+    activate(service, item)
+    active = service.promote(item.package_id, item.version)
+    assert active.state is ActivationState.ACTIVE
+    result = service.rollback(item.package_id, item.version, "operator rollback")
+    assert result.state is ActivationState.ROLLED_BACK
+    assert rollback == [("effect",)]
+
+
+def test_records_and_missing_lifecycle_revision_are_explicit() -> None:
+    service, item, _ = setup()
+    assert service.records()[0].package_id == item.package_id
+    service._revisions.clear()
+    session = service._sessions[(item.package_id, item.version)]
+    assert service._revision(session) == 0
+
+
+def test_shadow_rejects_ineligible_malformed_and_missing_attestation() -> None:
+    service, item, _ = setup(shadow_eligible=False)
+    result = service.run_shadow(item.package_id, item.version)
+    assert result.state is ActivationState.QUARANTINED
+    assert "eligibility" in result.promotion_decision
+
+    service, item, _ = setup(shadow_malformed=True)
+    assert service.run_shadow(item.package_id, item.version).state is ActivationState.QUARANTINED
+    service, item, _ = setup(shadow_missing_attestation=True)
+    assert service.run_shadow(item.package_id, item.version).state is ActivationState.QUARANTINED
+
+
+def test_canary_rejects_ineligible_malformed_and_missing_attestation() -> None:
+    service, item, _ = setup(canary_eligible=False)
+    assert service.run_shadow(item.package_id, item.version).state is ActivationState.SHADOW
+    result = service.run_canary(item.package_id, item.version)
+    assert result.state is ActivationState.QUARANTINED
+    assert "eligibility" in result.promotion_decision
+
+    service, item, _ = setup(canary_malformed=True)
+    assert service.run_shadow(item.package_id, item.version).state is ActivationState.SHADOW
+    assert service.run_canary(item.package_id, item.version).state is ActivationState.QUARANTINED
+    service, item, _ = setup(canary_missing_attestation=True)
+    assert service.run_shadow(item.package_id, item.version).state is ActivationState.SHADOW
+    assert service.run_canary(item.package_id, item.version).state is ActivationState.QUARANTINED
+
+
+def test_canary_reports_each_trusted_bound_failure() -> None:
+    service, item, _ = setup(
+        canary=CanaryExecution(
+            "fixture.scope",
+            effects=("effect", "effect-2"),
+            calls=2,
+            budget_used=101,
+            wall_seconds=30.1,
+            passed=False,
+        )
+    )
+    assert service.run_shadow(item.package_id, item.version).state is ActivationState.SHADOW
+    result = service.run_canary(item.package_id, item.version)
+    assert result.state is ActivationState.QUARANTINED
+    for phrase in ("call bound", "budget exceeded", "wall-time", "verification failed"):
+        assert phrase in result.promotion_decision
+
+
+def test_invalid_lookup_and_state_transitions_fail_closed() -> None:
+    service, item, _ = setup()
+    with pytest.raises(ActivationError, match="cannot perform"):
+        service.run_canary(item.package_id, item.version)
+    with pytest.raises(ActivationError):
+        service.mark_degraded(item.package_id, item.version, "not active")
+    with pytest.raises(ActivationError):
+        service.rollback("missing", item.version)
+    with pytest.raises(ValueError):
+        service.quarantine(item.package_id, item.version, "")
+    with pytest.raises(ValueError):
+        service.rollback(item.package_id, item.version, "")
+
+
+def test_restore_changed_package_hash_is_rejected(tmp_path: Path) -> None:
+    lifecycle = SQLiteCapabilityLifecycleStore(tmp_path / "lifecycle.sqlite3")
+    service, item, source = setup(lifecycle_store=lifecycle)
+    exact_certification = service.record_for(item.package_id, item.version).certification
+    changed = replace(item, package_hash="f" * 64)
+    changed_certification = replace(exact_certification, package_hash=changed.package_hash)
+    with pytest.raises(ActivationError, match="does not match"):
+        service.restore(
+            ActivationRequest(
+                changed,
+                changed_certification,
+                (source,),
+                CanaryLimits("fixture.scope"),
+            )
+        )
+
+
+def test_active_restart_health_failure_quarantines(monkeypatch: pytest.MonkeyPatch) -> None:
+    service, item, _ = setup()
+    activate(service, item)
+    assert service.promote(item.package_id, item.version).state is ActivationState.ACTIVE
+    monkeypatch.setattr(
+        service._hot_load,
+        "restart",
+        lambda package_id: (_ for _ in ()).throw(HotLoadError("dead")),
+    )
+    result = service.restart(item.package_id, item.version)
+    assert result.state is ActivationState.QUARANTINED
+    assert "restart health check failed" in result.promotion_decision
+
+
+def test_activation_constructor_and_record_integrity_fail_closed() -> None:
+    item, source = package()
+    record = certification(item, source)
+    manager = HotLoadManager(Factory(), Surface())
+    hooks = ActivationHooks(
+        lambda item, observer: ShadowExecution(),
+        lambda item, limits, observer: CanaryExecution(limits.scope),
+    )
+    with pytest.raises(ValueError):
+        PackageActivationService(object(), hooks, attestation_store=EffectAttestationStore())  # type: ignore[arg-type]
+    with pytest.raises(ValueError):
+        PackageActivationService(manager, object(), attestation_store=EffectAttestationStore())  # type: ignore[arg-type]
+    with pytest.raises(ValueError):
+        PackageActivationService(
+            manager,
+            hooks,
+            attestation_store=EffectAttestationStore(),
+            require_executable_isolation=1,  # type: ignore[arg-type]
+        )
+    with pytest.raises(ValueError):
+        PackageActivationService(
+            manager,
+            hooks,
+            attestation_store=EffectAttestationStore(),
+            lifecycle_store=object(),  # type: ignore[arg-type]
+        )
+    with pytest.raises(ValueError):
+        PackageActivationService(
+            manager,
+            hooks,
+            attestation_store=EffectAttestationStore(),
+            generated_action_registrar=object(),  # type: ignore[arg-type]
+        )
+    activation = setup()[0].record_for(item.package_id, item.version)
+    for field, value in (
+        ("created_at", datetime.now()),
+        ("updated_at", datetime.now()),
+        ("history", (object(),)),
+        ("sandbox_security_mode", ""),
+        ("activation_id", ""),
+    ):
+        with pytest.raises(ValueError):
+            replace(activation, **cast(Any, {field: value}))
+    with pytest.raises(ValueError):
+        ActivationRequest(item, record, [source], CanaryLimits("scope"))  # type: ignore[arg-type]

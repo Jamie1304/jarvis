@@ -87,6 +87,7 @@ _APP_TRANSITIONS: dict[ApplicationState, frozenset[ApplicationState]] = {
     ),
     ApplicationState.EXECUTING: frozenset(
         {
+            ApplicationState.THINKING,
             ApplicationState.VERIFYING,
             ApplicationState.WAITING_FOR_PERMISSION,
             ApplicationState.WAITING,
@@ -129,7 +130,9 @@ _APP_TRANSITIONS: dict[ApplicationState, frozenset[ApplicationState]] = {
 
 _TASK_TRANSITIONS: dict[TaskState, frozenset[TaskState]] = {
     TaskState.CREATED: frozenset({TaskState.THINKING, TaskState.CANCELLED, TaskState.ERROR}),
-    TaskState.THINKING: frozenset({TaskState.PLANNING, TaskState.ERROR, TaskState.CANCELLED}),
+    TaskState.THINKING: frozenset(
+        {TaskState.PLANNING, TaskState.WAITING, TaskState.ERROR, TaskState.CANCELLED}
+    ),
     TaskState.PLANNING: frozenset(
         {
             TaskState.WAITING_FOR_PERMISSION,
@@ -150,6 +153,7 @@ _TASK_TRANSITIONS: dict[TaskState, frozenset[TaskState]] = {
     ),
     TaskState.EXECUTING: frozenset(
         {
+            TaskState.THINKING,
             TaskState.VERIFYING,
             TaskState.WAITING_FOR_PERMISSION,
             TaskState.WAITING,
@@ -195,6 +199,24 @@ _TASK_TO_APP = {
     TaskState.WAITING: ApplicationState.WAITING,
     TaskState.RECOVERING: ApplicationState.RECOVERING,
     TaskState.ERROR: ApplicationState.ERROR,
+}
+
+# State pairs model the lifecycle graph.  The replan pairs added for the
+# PlanningEngine are deliberately narrower: a caller cannot relabel arbitrary
+# execution as planning without the event that represents the durable planner
+# transition.  The application handoff event is internal to foreground task
+# selection after a terminal task and is not a task replan.
+_EVENT_BOUND_TRANSITIONS: dict[
+    tuple[ApplicationState | TaskState, ApplicationState | TaskState],
+    frozenset[TransitionEvent],
+] = {
+    (TaskState.EXECUTING, TaskState.THINKING): frozenset({TransitionEvent.REPLAN_REQUESTED}),
+    (TaskState.THINKING, TaskState.WAITING): frozenset(
+        {TransitionEvent.PLAN_READY, TransitionEvent.EXECUTION_WAITING}
+    ),
+    (ApplicationState.EXECUTING, ApplicationState.THINKING): frozenset(
+        {TransitionEvent.REPLAN_REQUESTED, TransitionEvent.TASK_COMPLETED}
+    ),
 }
 
 # Public read-only transition tables used by UI/docs/tests; callers cannot mutate policy.
@@ -440,12 +462,8 @@ class ApplicationStateMachine:
                 self._foreground_task = remaining[0].task_id
                 handoff_target: ApplicationState | None = _TASK_TO_APP.get(remaining[0].state)
                 if handoff_target is not None and handoff_target is not self._application_state:
-                    if handoff_target not in _APP_TRANSITIONS[self._application_state]:
-                        raise InvalidStateTransition(
-                            f"Application {self._application_state.value} cannot follow "
-                            f"foreground task {remaining[0].task_id}"
-                        )
                     old_state: ApplicationState = self._application_state
+                    self._ensure_allowed(old_state, handoff_target, event, remaining[0].task_id)
                     now = datetime.now(UTC)
                     self._application_state = ApplicationState(str(handoff_target))
                     self._record(
@@ -466,13 +484,9 @@ class ApplicationStateMachine:
             return
         if mapped_target is self._application_state:
             return
-        if mapped_target not in _APP_TRANSITIONS[self._application_state]:
-            raise InvalidStateTransition(
-                f"Application {self._application_state.value} cannot follow task "
-                f"{task_id} to {task_state.value}"
-            )
         now = datetime.now(UTC)
         previous_state: ApplicationState = self._application_state
+        self._ensure_allowed(previous_state, mapped_target, event, task_id)
         next_state: ApplicationState = ApplicationState(str(mapped_target))
         self._application_state = next_state
         self._record(
@@ -529,4 +543,12 @@ class ApplicationStateMachine:
             scope = f" for task {task_id}" if task_id else ""
             raise InvalidStateTransition(
                 f"Invalid transition{scope}: {current.value} -> {target.value} on {event.value}"
+            )
+        required_events = _EVENT_BOUND_TRANSITIONS.get((current, target))
+        if required_events is not None and event not in required_events:
+            scope = f" for task {task_id}" if task_id else ""
+            expected = ", ".join(sorted(item.value for item in required_events))
+            raise InvalidStateTransition(
+                f"Invalid transition{scope}: {current.value} -> {target.value} on {event.value}; "
+                f"expected one of {expected}"
             )

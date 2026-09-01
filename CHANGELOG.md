@@ -9,6 +9,14 @@ development and release-candidate chronology.
 
 ### Hardening
 
+- Preserve valid `EXECUTING -> THINKING -> WAITING/READY` projections when a
+  deterministic planning failure is replanned, and keep generated capability
+  requests within a finite 60-second native sandbox bound under host load.
+- Replace installed-startup subset checks with full canonical `RECORD`
+  inventory validation for the installed `jarvis/` and matching dist-info
+  trees. This rejects non-critical package and dist-info tampering, including
+  a changed `INSTALLER` record hash, while retaining only the standard narrow
+  exceptions for `RECORD` itself and validated Python bytecode caches.
 - Correct the trusted Windows controlled-test runner's Job-empty proof to use
   native `QueryInformationJobObject` accounting (`ActiveProcesses == 0`) rather
   than a Job-handle wait signal; query and cleanup failures remain non-pass.

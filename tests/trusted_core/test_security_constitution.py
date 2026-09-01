@@ -9,13 +9,13 @@ import os
 import sys
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
-from importlib import resources
 from importlib.metadata import Distribution
 from inspect import signature
 from pathlib import Path
 from typing import cast
 from uuid import uuid4
 
+import jarvis.security.startup as startup_security
 import pytest
 from jarvis.computer.models import CommandDefinition
 from jarvis.computer.terminal import SubprocessCommandAdapter
@@ -25,6 +25,7 @@ from jarvis.improvement.workspace import TrustedWorkspaceChangeApplier
 from jarvis.permissions import SafetyClass, normalize_path
 from jarvis.runtime import ApplicationRuntime, RuntimePaths, RuntimeStatus
 from jarvis.security import (
+    SECURITY_POLICY_VERSION,
     InstalledDistributionIntegrityEvidenceProvider,
     IntegrityClass,
     IntegrityClassificationError,
@@ -84,97 +85,505 @@ def test_source_integrity_evidence_fails_closed_when_repository_files_are_missin
 
 
 class _FakeDistribution:
-    def __init__(self, files: tuple[str, ...], version: str = "1.0.0") -> None:
-        from pathlib import PurePosixPath
+    """A local installed-wheel layout; never a source-resource substitute."""
 
-        self.files = tuple(PurePosixPath(path) for path in files)
+    def __init__(self, root: Path, version: str = "1.0.0") -> None:
+        self.root = root
         self.version = version
 
-    def read_text(self, name: str) -> str | None:
-        if name != "RECORD":
-            return None
-        package_root = resources.files("jarvis")
-        rows: list[str] = []
-        for path in self.files:
-            relative = path.as_posix()
-            if not relative.startswith("jarvis/") or relative.endswith("/RECORD"):
+    def locate_file(self, path: object) -> Path:
+        raw = str(path).replace("\\", "/")
+        return self.root if raw in {"", "."} else self.root.joinpath(*raw.split("/"))
+
+
+def _record_digest(content: bytes) -> str:
+    return base64.urlsafe_b64encode(hashlib.sha256(content).digest()).rstrip(b"=").decode("ascii")
+
+
+def _write_test_record(root: Path, rows: list[tuple[str, str, str]] | None = None) -> Path:
+    record = root / "jarvis-1.0.0.dist-info" / "RECORD"
+    if rows is None:
+        rows = []
+        for path in sorted(root.rglob("*")):
+            if not path.is_file() or path == record:
                 continue
-            resource = package_root.joinpath(*relative.removeprefix("jarvis/").split("/"))
-            content = resource.read_bytes()
-            digest = (
-                base64.urlsafe_b64encode(hashlib.sha256(content).digest())
-                .rstrip(b"=")
-                .decode("ascii")
+            content = path.read_bytes()
+            rows.append(
+                (
+                    path.relative_to(root).as_posix(),
+                    f"sha256={_record_digest(content)}",
+                    str(len(content)),
+                )
             )
-            rows.append(f"{relative},sha256={digest},{len(content)}")
-        rows.append("jarvis-1.0.0.dist-info/RECORD,,")
-        return "\n".join(rows)
+        rows.append((record.relative_to(root).as_posix(), "", ""))
+    record.write_text("\n".join(",".join(row) for row in rows) + "\n", encoding="utf-8")
+    return record
 
 
-def _installed_integrity_files() -> tuple[str, ...]:
-    return (
-        "jarvis/api.py",
-        "jarvis/improvement/workspace.py",
-        "jarvis/permissions/broker.py",
-        "jarvis/recovery.py",
-        "jarvis/runtime.py",
-        "jarvis/security/integrity.py",
-        "jarvis/security/startup.py",
-        "jarvis/tools/base.py",
-        "jarvis-1.0.0.dist-info/RECORD",
+def _installed_test_distribution(tmp_path: Path) -> tuple[_FakeDistribution, Path]:
+    root = tmp_path / "site-packages"
+    contents = {
+        "jarvis/api.py": "api = 1\n",
+        "jarvis/improvement/workspace.py": "workspace = 1\n",
+        "jarvis/permissions/broker.py": "broker = 1\n",
+        "jarvis/recovery.py": "recovery = 1\n",
+        "jarvis/runtime.py": "runtime = 1\n",
+        "jarvis/security/integrity.py": "integrity = 1\n",
+        "jarvis/security/startup.py": "startup = 1\n",
+        "jarvis/tools/base.py": "base = 1\n",
+        "jarvis/noncritical.py": "ordinary = 1\n",
+        "jarvis-1.0.0.dist-info/METADATA": "Name: jarvis\nVersion: 1.0.0\n",
+        "jarvis-1.0.0.dist-info/WHEEL": "Wheel-Version: 1.0\n",
+        "jarvis-1.0.0.dist-info/top_level.txt": "jarvis\n",
+        "jarvis-1.0.0.dist-info/INSTALLER": "pip\n",
+        "jarvis-1.0.0.dist-info/REQUESTED": "",
+        "jarvis-1.0.0.dist-info/licenses/LICENSE.txt": "license\n",
+    }
+    for relative, content in contents.items():
+        path = root / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content, encoding="utf-8")
+    _write_test_record(root)
+    return _FakeDistribution(root), root
+
+
+def _installed_provider(
+    distribution: _FakeDistribution,
+) -> InstalledDistributionIntegrityEvidenceProvider:
+    return InstalledDistributionIntegrityEvidenceProvider(
+        lambda _name: cast(Distribution, distribution)
     )
 
 
-def test_installed_integrity_evidence_uses_package_files_and_record() -> None:
-    provider = InstalledDistributionIntegrityEvidenceProvider(
-        lambda _name: cast(Distribution, _FakeDistribution(_installed_integrity_files()))
+def _replace_record_row(record: Path, relative: str, replacement: str) -> None:
+    rows = record.read_text(encoding="utf-8").splitlines()
+    record.write_text(
+        "\n".join(replacement if row.startswith(f"{relative},") else row for row in rows) + "\n",
+        encoding="utf-8",
     )
 
-    provider.validate()
+
+def test_installed_integrity_evidence_validates_complete_wheel_inventory(tmp_path: Path) -> None:
+    distribution, _root = _installed_test_distribution(tmp_path)
+
+    _installed_provider(distribution).validate()
 
 
 @pytest.mark.parametrize(
-    "files",
+    "relative",
     (
-        tuple(path for path in _installed_integrity_files() if path != "jarvis/runtime.py"),
-        tuple(path for path in _installed_integrity_files() if not path.endswith("/RECORD")),
+        "jarvis/security/integrity.py",
+        "jarvis/noncritical.py",
+        "jarvis-1.0.0.dist-info/METADATA",
+        "jarvis-1.0.0.dist-info/WHEEL",
+        "jarvis-1.0.0.dist-info/top_level.txt",
+        "jarvis-1.0.0.dist-info/INSTALLER",
+        "jarvis-1.0.0.dist-info/licenses/LICENSE.txt",
     ),
 )
-def test_installed_integrity_evidence_missing_data_fails_closed(
-    files: tuple[str, ...],
+def test_installed_integrity_evidence_detects_any_recorded_member_mutation(
+    tmp_path: Path,
+    relative: str,
 ) -> None:
-    provider = InstalledDistributionIntegrityEvidenceProvider(
-        lambda _name: cast(Distribution, _FakeDistribution(files))
+    distribution, root = _installed_test_distribution(tmp_path)
+    (root / relative).write_text("tampered\n", encoding="utf-8")
+
+    with pytest.raises(IntegrityEvidenceError):
+        _installed_provider(distribution).validate()
+
+
+def test_installed_integrity_evidence_rejects_installer_record_tamper_with_startup_policy(
+    tmp_path: Path,
+) -> None:
+    distribution, root = _installed_test_distribution(tmp_path)
+    record = root / "jarvis-1.0.0.dist-info" / "RECORD"
+    _replace_record_row(
+        record,
+        "jarvis-1.0.0.dist-info/INSTALLER",
+        "jarvis-1.0.0.dist-info/INSTALLER,sha256=" + "A" * 43 + ",4",
     )
 
     with pytest.raises(IntegrityEvidenceError):
-        provider.validate()
-
-
-def test_installed_integrity_evidence_version_mismatch_fails_closed() -> None:
-    provider = InstalledDistributionIntegrityEvidenceProvider(
-        lambda _name: cast(Distribution, _FakeDistribution(_installed_integrity_files(), "9.9.9"))
+        _installed_provider(distribution).validate()
+    report = StartupSecurityValidator(_installed_provider(distribution)).validate(
+        _startup_config(tmp_path)
     )
+    assert SecurityViolationCode.POLICY_CLASSIFICATION_INVALID in {
+        violation.code for violation in report.violations
+    }
 
-    with pytest.raises(IntegrityEvidenceError):
-        provider.validate()
 
-
-def test_installed_integrity_evidence_malformed_record_fails_closed() -> None:
-    class MalformedDistribution(_FakeDistribution):
-        def read_text(self, name: str) -> str | None:
-            del name
-            return "not,csv,integrity,metadata"
-
-    provider = InstalledDistributionIntegrityEvidenceProvider(
-        lambda _name: cast(
-            Distribution,
-            MalformedDistribution(_installed_integrity_files()),
+@pytest.mark.parametrize(
+    "mutation",
+    (
+        "remove_recorded_member",
+        "add_unrecorded_member",
+        "remove_record_row",
+        "fake_record_row",
+        "duplicate_record_row",
+        "size_tamper",
+        "unsafe_record_path",
+        "malformed_digest",
+        "hashless_regular_member",
+        "bad_record_self",
+    ),
+)
+def test_installed_integrity_evidence_rejects_complete_inventory_tampering(
+    tmp_path: Path,
+    mutation: str,
+) -> None:
+    distribution, root = _installed_test_distribution(tmp_path)
+    record = root / "jarvis-1.0.0.dist-info" / "RECORD"
+    baseline = record.read_text(encoding="utf-8")
+    if mutation == "remove_recorded_member":
+        (root / "jarvis/noncritical.py").unlink()
+    elif mutation == "add_unrecorded_member":
+        (root / "jarvis/extra.py").write_text("extra\n", encoding="utf-8")
+    elif mutation == "remove_record_row":
+        record.write_text(
+            "\n".join(line for line in baseline.splitlines() if "noncritical.py" not in line),
+            encoding="utf-8",
         )
+    elif mutation == "fake_record_row":
+        record.write_text(
+            baseline + "jarvis/fake.py,sha256=" + _record_digest(b"fake") + ",4\n", encoding="utf-8"
+        )
+    elif mutation == "duplicate_record_row":
+        line = next(line for line in baseline.splitlines() if "noncritical.py" in line)
+        record.write_text(baseline + line.replace("/", "\\", 1) + "\n", encoding="utf-8")
+    elif mutation == "size_tamper":
+        row = next(line for line in baseline.splitlines() if "INSTALLER" in line)
+        record.write_text(
+            baseline.replace(row, row.rsplit(",", 1)[0] + ",999999"), encoding="utf-8"
+        )
+    elif mutation == "unsafe_record_path":
+        record.write_text(
+            baseline + "../outside.py,sha256=" + _record_digest(b"x") + ",1\n", encoding="utf-8"
+        )
+    elif mutation == "malformed_digest":
+        record.write_text(baseline.replace("sha256=", "sha512=", 1), encoding="utf-8")
+    elif mutation == "hashless_regular_member":
+        _replace_record_row(record, "jarvis/noncritical.py", "jarvis/noncritical.py,,")
+    else:
+        record.write_text(
+            baseline.replace(
+                "jarvis-1.0.0.dist-info/RECORD,,",
+                "jarvis-1.0.0.dist-info/RECORD,sha256=" + _record_digest(b"self") + ",4",
+            ),
+            encoding="utf-8",
+        )
+
+    with pytest.raises(IntegrityEvidenceError):
+        _installed_provider(distribution).validate()
+
+
+def test_installed_integrity_evidence_handles_bounded_optional_pyc_only(tmp_path: Path) -> None:
+    distribution, root = _installed_test_distribution(tmp_path)
+    cache = root / "jarvis" / "__pycache__"
+    cache.mkdir()
+    (cache / "noncritical.cpython-312.pyc").write_bytes(b"bytecode")
+    _installed_provider(distribution).validate()
+
+    (cache / "unknown.cpython-312.pyc").write_bytes(b"bytecode")
+    with pytest.raises(IntegrityEvidenceError):
+        _installed_provider(distribution).validate()
+
+
+def test_installed_integrity_evidence_missing_record_fails_closed(tmp_path: Path) -> None:
+    distribution, root = _installed_test_distribution(tmp_path)
+    (root / "jarvis-1.0.0.dist-info" / "RECORD").unlink()
+
+    with pytest.raises(IntegrityEvidenceError):
+        _installed_provider(distribution).validate()
+
+
+@pytest.mark.parametrize(
+    "unsafe_path",
+    (
+        "../outside.py",
+        "/absolute.py",
+        r"\\server\share\file.py",
+        "C:/Windows/system.py",
+        "jarvis/NUL.py",
+        "jarvis/file.py:stream",
+    ),
+)
+def test_installed_integrity_evidence_rejects_unsafe_record_paths(
+    tmp_path: Path,
+    unsafe_path: str,
+) -> None:
+    distribution, root = _installed_test_distribution(tmp_path)
+    record = root / "jarvis-1.0.0.dist-info" / "RECORD"
+    record.write_text(
+        record.read_text(encoding="utf-8") + f"{unsafe_path},sha256={_record_digest(b'x')},1\n",
+        encoding="utf-8",
     )
 
     with pytest.raises(IntegrityEvidenceError):
+        _installed_provider(distribution).validate()
+
+
+def test_installed_integrity_evidence_version_or_dist_info_ambiguity_fails_closed(
+    tmp_path: Path,
+) -> None:
+    distribution, root = _installed_test_distribution(tmp_path)
+    mismatch = _FakeDistribution(root, "9.9.9")
+    with pytest.raises(IntegrityEvidenceError):
+        _installed_provider(mismatch).validate()
+
+    duplicate = root / "jarvis-copy.dist-info"
+    duplicate.mkdir()
+    (duplicate / "METADATA").write_text("Name: jarvis\nVersion: 1.0.0\n", encoding="utf-8")
+    with pytest.raises(IntegrityEvidenceError):
+        _installed_provider(distribution).validate()
+
+
+@pytest.mark.parametrize(
+    "failure",
+    (ImportError, KeyError, OSError, TypeError, ValueError, UnicodeError),
+)
+def test_installed_integrity_loader_failures_fail_closed(
+    failure: type[Exception],
+) -> None:
+    def load(_name: str) -> Distribution:
+        raise failure("synthetic loader failure")
+
+    provider = InstalledDistributionIntegrityEvidenceProvider(load)
+
+    with pytest.raises(IntegrityEvidenceError, match="malformed"):
         provider.validate()
+
+
+@pytest.mark.parametrize(
+    "record_text",
+    (
+        "",
+        "jarvis/noncritical.py,sha256=x\n",
+        "jarvis/noncritical.py,sha256=A,1\n",
+        "jarvis/noncritical.py,sha256=" + "A" * 43 + ",not-a-size\n",
+        "jarvis/noncritical.py,sha256=" + "A" * 43 + ",-1\n",
+    ),
+)
+def test_installed_integrity_rejects_malformed_record_integrity_fields(
+    tmp_path: Path,
+    record_text: str,
+) -> None:
+    distribution, root = _installed_test_distribution(tmp_path)
+    record = root / "jarvis-1.0.0.dist-info" / "RECORD"
+    record.write_text(record_text, encoding="utf-8")
+
+    with pytest.raises(IntegrityEvidenceError):
+        _installed_provider(distribution).validate()
+
+
+def test_installed_integrity_rejects_unreadable_metadata(tmp_path: Path) -> None:
+    distribution, root = _installed_test_distribution(tmp_path)
+    (root / "jarvis-1.0.0.dist-info" / "METADATA").write_bytes(b"Name: \xff\n")
+
+    with pytest.raises(IntegrityEvidenceError, match="unreadable"):
+        _installed_provider(distribution).validate()
+
+
+def test_installed_integrity_rejects_package_file_instead_of_directory(tmp_path: Path) -> None:
+    distribution, root = _installed_test_distribution(tmp_path)
+    package = root / "jarvis"
+    package.rename(root / "jarvis-tree")
+    package.write_text("not a package directory\n", encoding="utf-8")
+
+    with pytest.raises(IntegrityEvidenceError, match="invalid"):
+        _installed_provider(distribution).validate()
+
+
+def test_installed_integrity_rejects_unsafe_installed_root(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    distribution, root = _installed_test_distribution(tmp_path)
+    real_root = root.resolve()
+    monkeypatch.setattr(
+        startup_security,
+        "_is_reparse_point",
+        lambda path: path.resolve() == real_root,
+    )
+
+    with pytest.raises(IntegrityEvidenceError, match="root is unsafe"):
+        _installed_provider(distribution).validate()
+
+
+def test_installed_integrity_rejects_record_external_reference(tmp_path: Path) -> None:
+    distribution, root = _installed_test_distribution(tmp_path)
+    record = root / "jarvis-1.0.0.dist-info" / "RECORD"
+    baseline = record.read_text(encoding="utf-8")
+    record.write_text(
+        baseline + "other-package/file.py,sha256=" + _record_digest(b"x") + ",1\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(IntegrityEvidenceError, match="external path"):
+        _installed_provider(distribution).validate()
+
+
+def test_installed_integrity_rejects_missing_installed_root(tmp_path: Path) -> None:
+    distribution = _FakeDistribution(tmp_path / "missing-site-packages")
+
+    with pytest.raises(IntegrityEvidenceError, match="root is unavailable"):
+        _installed_provider(distribution).validate()
+
+
+def test_installed_integrity_rejects_missing_metadata(tmp_path: Path) -> None:
+    distribution, root = _installed_test_distribution(tmp_path)
+    (root / "jarvis-1.0.0.dist-info" / "METADATA").unlink()
+
+    with pytest.raises(IntegrityEvidenceError, match="dist-info is ambiguous"):
+        _installed_provider(distribution).validate()
+
+
+def test_installed_integrity_rejects_missing_package_directory(tmp_path: Path) -> None:
+    distribution, root = _installed_test_distribution(tmp_path)
+    (root / "jarvis").rename(root / "jarvis-tree")
+
+    with pytest.raises(IntegrityEvidenceError, match="package directory is ambiguous"):
+        _installed_provider(distribution).validate()
+
+
+def test_installed_integrity_allows_missing_recorded_optional_pyc(tmp_path: Path) -> None:
+    distribution, root = _installed_test_distribution(tmp_path)
+    record = root / "jarvis-1.0.0.dist-info" / "RECORD"
+    baseline = record.read_text(encoding="utf-8")
+    pyc = "jarvis/__pycache__/noncritical.cpython-312.pyc"
+    record.write_text(
+        baseline + f"{pyc},sha256={_record_digest(b'bytecode')},8\n",
+        encoding="utf-8",
+    )
+
+    _installed_provider(distribution).validate()
+
+
+def test_installed_integrity_rejects_unrelated_pyc_name(tmp_path: Path) -> None:
+    distribution, root = _installed_test_distribution(tmp_path)
+    cache = root / "jarvis" / "__pycache__"
+    cache.mkdir()
+    (cache / ".pyc").write_bytes(b"bytecode")
+
+    with pytest.raises(IntegrityEvidenceError, match="unrecorded member"):
+        _installed_provider(distribution).validate()
+
+
+def test_installed_integrity_rejects_reparse_child(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    distribution, root = _installed_test_distribution(tmp_path)
+    package = root / "jarvis"
+    real_is_reparse = startup_security._is_reparse_point
+    monkeypatch.setattr(
+        startup_security,
+        "_is_reparse_point",
+        lambda path: path == package or real_is_reparse(path),
+    )
+
+    with pytest.raises(IntegrityEvidenceError, match="reparse point"):
+        _installed_provider(distribution).validate()
+
+
+def test_installed_integrity_rejects_member_read_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    distribution, root = _installed_test_distribution(tmp_path)
+    real_read_bytes = Path.read_bytes
+    target = root / "jarvis" / "noncritical.py"
+
+    def fail_target(path: Path) -> bytes:
+        if path == target:
+            raise OSError("synthetic read failure")
+        return real_read_bytes(path)
+
+    monkeypatch.setattr(Path, "read_bytes", fail_target)
+
+    with pytest.raises(IntegrityEvidenceError, match="malformed"):
+        _installed_provider(distribution).validate()
+
+
+def test_source_integrity_rejects_a_file_as_checkout_root(tmp_path: Path) -> None:
+    root = tmp_path / "checkout"
+    root.write_text("not a directory\n", encoding="utf-8")
+
+    with pytest.raises(IntegrityEvidenceError, match="unsafe"):
+        SourceCheckoutIntegrityEvidenceProvider(root).validate()
+
+
+def test_source_integrity_rejects_missing_required_evidence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "checkout"
+    root.mkdir()
+    monkeypatch.setattr(
+        startup_security, "_SOURCE_INTEGRITY_FILES", ("jarvis/security/startup.py",)
+    )
+
+    with pytest.raises(IntegrityEvidenceError, match="missing"):
+        SourceCheckoutIntegrityEvidenceProvider(root).validate()
+
+
+def test_source_integrity_rejects_non_trusted_classification(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "checkout"
+    evidence = root / "jarvis" / "security" / "startup.py"
+    evidence.parent.mkdir(parents=True)
+    evidence.write_text("startup = 1\n", encoding="utf-8")
+    monkeypatch.setattr(
+        startup_security, "_SOURCE_INTEGRITY_FILES", ("jarvis/security/startup.py",)
+    )
+
+    class _NonTrustedClassifier:
+        def classify(self, _path: str) -> object:
+            class _Classification:
+                class _Class:
+                    value = "production_core"
+
+                integrity_class = _Class()
+
+            return _Classification()
+
+    monkeypatch.setattr(startup_security, "RepositoryIntegrityClassifier", _NonTrustedClassifier)
+
+    with pytest.raises(IntegrityEvidenceError, match="trusted core"):
+        SourceCheckoutIntegrityEvidenceProvider(root).validate()
+
+
+def test_startup_validator_rejects_invalid_integrity_provider() -> None:
+    with pytest.raises(ValueError, match="provider is invalid"):
+        StartupSecurityValidator(object())  # type: ignore[arg-type]
+
+
+def test_startup_validator_fails_closed_on_policy_and_capability_flags(tmp_path: Path) -> None:
+    changes: dict[str, object] = {"policy_version": SECURITY_POLICY_VERSION + 1}
+    changes.update({field_name: True for field_name, _code in StartupSecurityValidator._FLAG_CODES})
+    config = _startup_config(tmp_path, **changes)
+    report = StartupSecurityValidator().validate(config)
+
+    codes = {violation.code for violation in report.violations}
+    assert SecurityViolationCode.POLICY_VERSION_UNSUPPORTED in codes
+    assert all(code in codes for _field, code in StartupSecurityValidator._FLAG_CODES)
+
+
+@pytest.mark.parametrize(
+    "endpoint",
+    ("http://127.0.0.1:not-a-port", "http://127.0.0.1:0", "http://127.0.0.1:65536"),
+)
+def test_startup_validator_rejects_malformed_model_endpoint(
+    tmp_path: Path,
+    endpoint: str,
+) -> None:
+    report = StartupSecurityValidator().validate(_startup_config(tmp_path, ai_endpoint=endpoint))
+
+    assert SecurityViolationCode.MODEL_ENDPOINT_NOT_LOCAL in {
+        violation.code for violation in report.violations
+    }
 
 
 @pytest.mark.parametrize(

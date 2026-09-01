@@ -65,7 +65,7 @@ from jarvis.planning import (
     StepResult,
     StructuredStepEdit,
 )
-from jarvis.state import ApplicationStateMachine
+from jarvis.state import ApplicationStateMachine, TaskState, TransitionEvent
 from jarvis.task_controller import PlanningTaskController
 from jarvis.tools.base import Tool
 from jarvis.tools.models import (
@@ -727,6 +727,47 @@ async def test_replan_consumes_failure_evidence_and_preserves_constraints(tmp_pa
     assert harness.advisor.replan_evidence[0].observed_evidence == ("window-not-found",)
     assert harness.advisor.replan_evidence[0].original_constraints == tuple(constraints)
     assert harness.store.load_plan(task.task_id).version == 2  # type: ignore[union-attr]
+
+
+@pytest.mark.asyncio
+async def test_replan_after_execution_failure_updates_state_projection(
+    tmp_path: Path,
+) -> None:
+    """A failed effectless step may replan directly from the executing state."""
+
+    first = _plan(_step("prepare"))
+    second = _plan(_step("prepare"))
+    state_machine = ApplicationStateMachine()
+    executor = _Executor(
+        (
+            StepExecutionResult(
+                StepExecutionStatus.DETERMINISTIC_FAILURE,
+                error_code="missing-window",
+                error_message="Meeting window was not available",
+            ),
+            _result("prepare-ready"),
+        )
+    )
+    harness = _harness(
+        tmp_path,
+        (first, second),
+        (),
+        executor=executor,
+        state_machine=state_machine,
+    )
+
+    task = await harness.engine.submit("Prepare my system for a meeting")
+
+    assert task.status is PlanningTaskStatus.COMPLETED
+    snapshot = state_machine.task(task.task_id)
+    assert snapshot is not None
+    assert snapshot.state is TaskState.COMPLETED
+    assert any(
+        transition.from_state is TaskState.EXECUTING
+        and transition.to_state is TaskState.THINKING
+        and transition.event is TransitionEvent.REPLAN_REQUESTED
+        for transition in state_machine.history(task.task_id)
+    )
 
 
 @pytest.mark.asyncio

@@ -7,7 +7,7 @@ import sys
 from jarvis.testing.models import SuiteOutputFormat, TestCategory, TestCommand, TestSuite
 from jarvis.testing.runner import TestSuiteCatalog
 
-_V1_ACCEPTANCE_TIMEOUT_SECONDS = 420
+_V1_ACCEPTANCE_TIMEOUT_SECONDS = 600
 
 
 def create_deterministic_suite_catalog() -> TestSuiteCatalog:
@@ -53,9 +53,10 @@ def create_deterministic_suite_catalog() -> TestSuiteCatalog:
                 # certification, staged activation, and restart evidence are
                 # intentionally slower than lower-level deterministic suites.
                 # The complete direct suite measured 286.98 seconds on the
-                # supported Windows validation host; retain a seven-minute
-                # hard bound for constrained runner startup/cleanup overhead
-                # rather than falsely timing out a completed composition run.
+                # supported Windows validation host and 461.06 seconds in the
+                # R4Q constrained validation environment.  Retain a finite
+                # ten-minute execution bound with measured headroom; this is
+                # not a product or security authorization timeout.
                 timeout_seconds=_V1_ACCEPTANCE_TIMEOUT_SECONDS,
                 output_format=SuiteOutputFormat.PYTEST_TEXT,
                 description=(

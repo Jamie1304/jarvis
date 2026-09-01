@@ -22,18 +22,45 @@ dependency of an installed package.
 ## Installed distribution
 
 Production composition uses `InstalledDistributionIntegrityEvidenceProvider`.
-It uses only evidence available from the installed `jarvis` distribution:
+It uses only evidence available from the installed `jarvis` distribution, and
+does not consult a source checkout, source resources, or an editable-install
+fallback.
 
-- the installed distribution version must equal `jarvis.__version__`;
-- package-local trusted runtime/security files must exist;
-- the distribution file inventory must contain `RECORD`; and
-- `RECORD` SHA-256 and size entries must match the package-local files used by
-  the trusted startup path.
+The provider resolves one physical site-packages root from package metadata and
+requires exactly one safe `jarvis/` directory and one matching `*.dist-info/`
+directory whose `METADATA` declares `Name: jarvis` and the installed package
+version. It then reads `RECORD` directly from that dist-info directory and
+independently enumerates both trees. Package metadata is not accepted as a
+substitute for that filesystem inventory.
 
-This proves installed-file consistency and completeness for the checked
-members. `RECORD` is not a publisher signature and does not authenticate who
-produced the distribution. Release signing, recovery authentication, and
-update authority remain separate controls.
+For every normal member, the canonical `RECORD` path must be safe, unique after
+Windows separator/case normalization, confined to `jarvis/` or the exact
+matching dist-info tree, and carry both an SHA-256 digest and a decimal byte
+size. The actual regular file must exist under that same tree and match both.
+Conversely, every actual normal file in those trees must be represented in
+`RECORD`; therefore this includes package modules, non-critical support
+modules, `METADATA`, `WHEEL`, `top_level.txt`, `INSTALLER`, `REQUESTED`, legal
+metadata files, and other installed dist-info members. Missing rows, fake rows,
+extra files, duplicate/case-colliding rows, malformed digests/sizes, traversal,
+absolute/UNC/drive/reserved-device paths, and reparse points fail closed.
+
+`RECORD` itself is the deliberately narrow self-hash exception: it must have
+one exact blank hash/size row. Python bytecode is also deliberately bounded:
+only `jarvis/**/__pycache__/<recorded-source-stem>.*.pyc` is allowed without a
+normal file row, because installers may create or omit that cache after wheel
+installation. It cannot authorize arbitrary unrecorded files, paths outside
+JARVIS, or a source fallback.
+
+The explicit Trusted Core subset remains a minimum-presence assertion on top
+of the full inventory; it is no longer the completeness boundary. In
+particular, mutating only the `INSTALLER` hash in `RECORD` is rejected even
+when no Trusted Core source file changes.
+
+This proves installer-recorded installed-file consistency, not publisher
+identity or immutable authenticity. An attacker able to coherently replace a
+member *and* rewrite `RECORD` is outside the protection provided by the wheel
+format alone. Release signing, authenticated update/recovery authority,
+filesystem ACLs, and the Trusted Core mutation gates remain separate controls.
 
 Missing, malformed, inconsistent, or future/unsupported evidence fails closed
 with `POLICY_CLASSIFICATION_INVALID`. No model output, generated package, or
@@ -63,7 +90,7 @@ Windows Credential Manager and fails closed when that backend cannot be used.
 | Evidence | Classification |
 |---|---|
 | Source checkout files and source policy | Source/CI evidence |
-| Package-local trusted modules | Installed runtime evidence |
+| Full `jarvis/` and matching dist-info inventory | Installed runtime evidence |
 | Wheel `RECORD` hashes and sizes | Installed-file consistency, not publisher authenticity |
 | Project knowledge index | Optional external generated data |
 | Release signing and recovery authority | Separate authenticated release/recovery controls |

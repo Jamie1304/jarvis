@@ -4,9 +4,12 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import sqlite3
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 
+import jarvis.runtime as runtime_module
 import pytest
 from jarvis import application
 from jarvis.browser_broker import BrowserCapabilityStatus
@@ -232,3 +235,154 @@ def test_runtime_enters_safe_mode_after_bounded_startup_crash_loop(tmp_path: Pat
     assert runtime.status is RuntimeStatus.SAFE_MODE
     assert runtime.container is None
     assert runtime.error == "recovery crash-loop guard entered safe mode"
+
+
+def test_runtime_paths_reject_file_and_escaped_storage_entries(tmp_path: Path) -> None:
+    root = tmp_path / "runtime"
+    root.mkdir()
+    (root / "logs").write_text("not a directory", encoding="utf-8")
+    paths = RuntimePaths.from_root(root)
+    with pytest.raises(OSError, match="not a directory"):
+        paths.ensure_directories()
+
+    safe = RuntimePaths.from_root(tmp_path / "safe")
+    escaped = replace(safe, logs=tmp_path / "outside")
+    with pytest.raises(OSError, match="escaped"):
+        escaped.validate_storage_layout()
+
+
+def test_runtime_paths_reject_root_file(tmp_path: Path) -> None:
+    root = tmp_path / "root-file"
+    root.write_text("file", encoding="utf-8")
+    with pytest.raises(OSError, match="not a directory"):
+        RuntimePaths.from_root(root).ensure_directories()
+
+
+def test_runtime_create_rejects_fixture_outside_test_environment(tmp_path: Path) -> None:
+    runtime = ApplicationRuntime.create(
+        Settings(app_data_dir=tmp_path / "data", environment="local"),
+        test_fixture=object(),  # type: ignore[arg-type]
+    )
+    assert runtime.status is RuntimeStatus.SAFE_MODE
+    assert runtime.container is None
+    assert "test environment" in (runtime.error or "")
+
+
+def test_runtime_create_rejects_malformed_provider_registry(tmp_path: Path) -> None:
+    runtime = ApplicationRuntime.create(
+        Settings(app_data_dir=tmp_path / "data", ai_provider="ollama"),
+        provider_registry=object(),  # type: ignore[arg-type]
+    )
+    assert runtime.status is RuntimeStatus.SAFE_MODE
+    assert runtime.error == "trusted provider registry is malformed"
+
+
+def test_runtime_create_rejects_malformed_permission_policy_after_path_setup(
+    tmp_path: Path,
+) -> None:
+    runtime = ApplicationRuntime.create(
+        Settings(app_data_dir=tmp_path / "data", ai_provider="ollama"),
+        permission_policy=object(),  # type: ignore[arg-type]
+    )
+    assert runtime.status is RuntimeStatus.ERROR
+    assert runtime.container is None
+    assert "startup failed" in (runtime.error or "")
+
+
+def test_runtime_create_rejects_unknown_provider_during_composition(tmp_path: Path) -> None:
+    runtime = ApplicationRuntime.create(
+        Settings(
+            app_data_dir=tmp_path / "data",
+            ai_provider="unknown-provider",
+            ai_endpoint="http://127.0.0.1:11434",
+        )
+    )
+    assert runtime.status is RuntimeStatus.SAFE_MODE
+    assert runtime.container is None
+    assert "security policy rejected startup" in (runtime.error or "")
+
+
+def test_runtime_startup_failure_after_recovery_is_reported_as_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        runtime_module,
+        "compute_application_build_hash",
+        lambda root: (_ for _ in ()).throw(RuntimeError("hash failure")),
+    )
+    runtime = ApplicationRuntime.create(
+        Settings(app_data_dir=tmp_path / "data", ai_provider="ollama")
+    )
+    assert runtime.status is RuntimeStatus.ERROR
+    assert runtime.container is None
+    assert runtime.error == "startup failed: RuntimeError"
+
+
+def test_runtime_persistence_failure_enters_safe_mode(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def fail_state_store(*args: object, **kwargs: object) -> object:
+        raise sqlite3.DatabaseError("synthetic schema failure")
+
+    monkeypatch.setattr(runtime_module, "SQLiteStateStore", fail_state_store)
+    runtime = ApplicationRuntime.create(
+        Settings(app_data_dir=tmp_path / "data", ai_provider="ollama")
+    )
+    assert runtime.status is RuntimeStatus.SAFE_MODE
+    assert runtime.container is None
+    assert runtime.error == "persistence unavailable: DatabaseError"
+
+
+def test_runtime_logging_failure_is_contained(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        runtime_module,
+        "configure_logging",
+        lambda level: (_ for _ in ()).throw(OSError("logging unavailable")),
+    )
+    runtime = ApplicationRuntime.create(
+        Settings(app_data_dir=tmp_path / "data", ai_provider="ollama")
+    )
+    assert runtime.status is RuntimeStatus.ERROR
+    assert runtime.container is None
+    assert runtime.error == "startup failed: OSError"
+
+
+def test_create_from_environment_maps_malformed_settings_to_safe_mode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "jarvis.runtime.get_settings", lambda: (_ for _ in ()).throw(ValueError("bad"))
+    )
+    runtime = ApplicationRuntime.create_from_environment()
+    assert runtime.status is RuntimeStatus.SAFE_MODE
+    assert runtime.container is None
+    assert runtime.error == "security policy rejected startup: configuration_invalid"
+
+
+@pytest.mark.asyncio
+async def test_runtime_application_boundary_rejects_unknown_capability(tmp_path: Path) -> None:
+    runtime = ApplicationRuntime.create(
+        Settings(app_data_dir=tmp_path / "data", ai_provider="ollama")
+    )
+    assert runtime.container is not None
+    with pytest.raises(KeyError, match="not active"):
+        runtime.container.invoke_capability("missing", "inspect", {})
+    await runtime.aclose()
+
+
+@pytest.mark.asyncio
+async def test_runtime_creates_scoped_ui_harness_through_application_container(
+    tmp_path: Path,
+) -> None:
+    from tests.test_ui_simulation import package as ui_package
+
+    runtime = ApplicationRuntime.create(
+        Settings(app_data_dir=tmp_path / "data", ai_provider="ollama")
+    )
+    assert runtime.container is not None
+    item = ui_package()
+    harness = runtime.container.create_ui_simulation_harness(item, workspace_id="workspace-a")
+    assert harness._workspace_id == "workspace-a"
+    await runtime.aclose()

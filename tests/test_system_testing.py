@@ -91,7 +91,8 @@ def test_v1_acceptance_catalog_timeout_remains_bounded_for_measured_composition_
     suite = create_deterministic_suite_catalog().get("v1-acceptance")
 
     assert suite is not None
-    assert suite.timeout_seconds == 420
+    assert suite.timeout_seconds == 600
+    assert 0 < suite.timeout_seconds <= 600
 
 
 class FakeAdapter(ProcessAdapter):

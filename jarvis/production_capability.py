@@ -1032,7 +1032,11 @@ class ProductionPackageRuntime(PreparedPackageRuntime):
             integration_id=_safe_identifier(self.package.package_id, limit=64),
             parent_directory=self._sandbox_root,
             limits=SandboxLimits(
-                timeout_seconds=15.0,
+                # The generated tool contract permits a 60-second bounded
+                # request.  Keep certification and active invocation aligned;
+                # native Windows process startup can consume more than 15s on
+                # a busy host without indicating an effect failure.
+                timeout_seconds=60.0,
                 max_processes=1,
                 windows_containment=WindowsContainmentMode.APPCONTAINER,
                 appcontainer_runtime_root=executable.parent,
@@ -1196,7 +1200,7 @@ class ProductionSandboxRunner:
             integration_id=_safe_identifier(package.package_id, limit=64),
             parent_directory=self._sandbox_root,
             limits=SandboxLimits(
-                timeout_seconds=15.0,
+                timeout_seconds=60.0,
                 max_processes=1,
                 windows_containment=WindowsContainmentMode.APPCONTAINER,
                 appcontainer_runtime_root=executable.parent,

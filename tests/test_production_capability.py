@@ -121,6 +121,7 @@ from jarvis.production_capability import (
 )
 from jarvis.provisioning import ProvisioningAction
 from jarvis.resources import ResourceGovernor, SystemResourceTelemetry
+from jarvis.sandbox import SandboxLimits
 from jarvis.setup_conductor import SetupContext, SetupStep
 from jarvis.tools.base import Tool
 from jarvis.tools.harness import ToolHarness
@@ -318,6 +319,14 @@ class _UnsafeSandboxProcess(_FakeSandboxProcess):
     def __init__(self, *args: object, **kwargs: object) -> None:
         super().__init__(*args, **kwargs)
         self.security_status = _status(isolated=False)
+
+
+class _CapturingSandboxProcess(_FakeSandboxProcess):
+    limits: list[SandboxLimits] = []
+
+    def __init__(self, *args: object, **kwargs: object) -> None:
+        self.limits.append(cast(SandboxLimits, kwargs["limits"]))
+        super().__init__(*args, **kwargs)
 
 
 class _FakeSandboxRunner:
@@ -1062,6 +1071,26 @@ async def test_production_runtime_uses_fake_native_process_boundary(
 
 
 @pytest.mark.asyncio
+async def test_production_runtime_keeps_bounded_request_timeout_aligned_with_tool_contract(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store, generated, _ = await _generated(tmp_path)
+    _CapturingSandboxProcess.limits.clear()
+    monkeypatch.setattr("jarvis.production_capability.SandboxProcess", _CapturingSandboxProcess)
+    runtime = ProductionPackageRuntime(
+        generated.package,
+        store,
+        tmp_path / "sandboxes",
+        ResourceGovernor(SystemResourceTelemetry()),
+    )
+
+    await runtime.request("inspect", {})
+
+    assert _CapturingSandboxProcess.limits
+    assert _CapturingSandboxProcess.limits[-1].timeout_seconds == 60.0
+
+
+@pytest.mark.asyncio
 async def test_generated_action_adapter_is_a_typed_tool_boundary(tmp_path: Path) -> None:
     _, generated, _ = await _generated(tmp_path)
     package = generated.package
@@ -1213,6 +1242,18 @@ async def test_generated_action_adapter_validates_nested_io_and_effect_metadata(
     )
     assert effect_result.status is ToolResultStatus.UNKNOWN_OUTCOME
     assert effect_result.effect_disposition is ToolEffectDisposition.UNKNOWN
+
+    successful_effectful_adapter = GeneratedCapabilityToolAdapter(
+        effectful_spec,
+        cast(Any, lambda *_args: {"result": "package-reported completion"}),
+    )
+    successful_effect_result = await successful_effectful_adapter._execute_authorized(  # noqa: SLF001
+        context,
+        successful_effectful_adapter.input_model.model_validate({"value": "bounded"}, strict=True),
+    )
+    assert successful_effect_result.status is ToolResultStatus.UNKNOWN_OUTCOME
+    assert successful_effect_result.output is None
+    assert successful_effect_result.effect_disposition is ToolEffectDisposition.UNKNOWN
 
     critical_spec = _action_spec(
         action_id="destructive",

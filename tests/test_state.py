@@ -91,6 +91,55 @@ def test_invalid_transition_fails_without_mutating_state() -> None:
         )
 
 
+def test_replan_projection_transitions_require_canonical_events() -> None:
+    """The visible replan path cannot be requested through an unrelated event."""
+
+    machine = ApplicationStateMachine()
+    task_id = _task(machine)
+    _advance(machine, task_id, [TaskState.THINKING, TaskState.PLANNING, TaskState.EXECUTING])
+
+    with pytest.raises(InvalidStateTransition, match="replan_requested"):
+        machine.transition_task(
+            task_id,
+            TaskState.THINKING,
+            TransitionEvent.TASK_FAILED,
+            reason="untrusted relabel",
+        )
+    assert _snapshot(machine, task_id).state is TaskState.EXECUTING
+    assert machine.application_state.value == ApplicationState.EXECUTING.value
+
+    machine.transition_task(
+        task_id,
+        TaskState.THINKING,
+        TransitionEvent.REPLAN_REQUESTED,
+        reason="canonical durable replan",
+    )
+    machine.transition_task(
+        task_id,
+        TaskState.WAITING,
+        TransitionEvent.PLAN_READY,
+        reason="canonical replacement plan ready",
+    )
+
+    assert _snapshot(machine, task_id).state is TaskState.WAITING
+    assert machine.application_state.value == ApplicationState.WAITING.value
+
+
+def test_application_replan_transition_rejects_unrelated_event() -> None:
+    machine = ApplicationStateMachine()
+    task_id = _task(machine)
+    _advance(machine, task_id, [TaskState.THINKING, TaskState.PLANNING, TaskState.EXECUTING])
+
+    with pytest.raises(InvalidStateTransition, match="replan_requested"):
+        machine.transition_application(
+            ApplicationState.THINKING,
+            TransitionEvent.EXECUTION_STARTED,
+            reason="untrusted relabel",
+            task_id=task_id,
+        )
+    assert machine.application_state is ApplicationState.EXECUTING
+
+
 @pytest.mark.parametrize(
     ("current", "target"),
     [

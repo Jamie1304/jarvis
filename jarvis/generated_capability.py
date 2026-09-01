@@ -214,7 +214,11 @@ class GeneratedCapabilityToolAdapter(Tool[BaseModel, BaseModel]):
             supported_platforms=frozenset(
                 {ToolPlatform.WINDOWS, ToolPlatform.LINUX, ToolPlatform.MACOS}
             ),
-            timeout_seconds=30.0,
+            # Native Windows process startup can exceed the request budget on
+            # a busy host.  Keep this finite and aligned with the production
+            # sandbox boundary rather than turning scheduler contention into
+            # an ambiguous tool failure.
+            timeout_seconds=60.0,
             implementation_id=(
                 f"generated-adapter:{spec.package_id}:{spec.package_version}:"
                 f"{spec.package_hash}:{spec.action_id}"
@@ -268,6 +272,20 @@ class GeneratedCapabilityToolAdapter(Tool[BaseModel, BaseModel]):
                     if self.manifest.declared_permissions
                     else ToolEffectDisposition.NO_EFFECT
                 ),
+            )
+        if self.manifest.declared_permissions:
+            # A generated runtime's well-formed response proves only that the
+            # sandbox returned data.  It is not an application-owned
+            # observation that the requested real-world effect occurred.
+            # Until a trusted broker attestation is supplied on this execution
+            # path, fail closed into recovery rather than letting package text
+            # satisfy a plan's output/evidence verification rule.
+            self._record_trace(context, "generated effect requires trusted attestation", False)
+            return ToolResult.failure(
+                ToolResultStatus.UNKNOWN_OUTCOME,
+                "generated_effect_requires_trusted_attestation",
+                "A generated action reported a privileged effect without trusted confirmation",
+                effect_disposition=ToolEffectDisposition.UNKNOWN,
             )
         evidence_value = (
             f"generated-action:{self.package_id}:{self.package_version}:"

@@ -11,6 +11,7 @@ import tempfile
 import venv
 import zipfile
 from pathlib import Path
+from textwrap import dedent
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 _LEGAL_FILES = ("LICENSE.txt", "EULA.txt", "PRIVACY_POLICY.txt")
@@ -78,6 +79,203 @@ def _audit_legal_metadata(wheel: Path, sdist: Path) -> None:
                 raise RuntimeError(f"sdist omitted legal file: {filename}")
 
 
+def _installed_record_integrity_smoke() -> str:
+    """Return an installed-only negative smoke for the full RECORD validator."""
+
+    return dedent(
+        """
+        from importlib import metadata
+        from pathlib import Path
+
+        from jarvis.security.startup import (
+            InstalledDistributionIntegrityEvidenceProvider,
+            IntegrityEvidenceError,
+        )
+
+        provider = InstalledDistributionIntegrityEvidenceProvider()
+        provider.validate()
+        distribution = metadata.distribution("jarvis")
+        root = Path(distribution.locate_file(""))
+        dist_info = next(
+            child for child in root.iterdir()
+            if child.is_dir()
+            and child.name.casefold().endswith(".dist-info")
+            and (child / "METADATA").is_file()
+            and "Name: jarvis" in (child / "METADATA").read_text(encoding="utf-8")
+        )
+        record = dist_info / "RECORD"
+
+        def must_reject(label, mutate, restore):
+            provider.validate()
+            mutate()
+            try:
+                provider.validate()
+            except IntegrityEvidenceError:
+                pass
+            else:
+                raise AssertionError(f"installed RECORD regression accepted: {label}")
+            finally:
+                restore()
+            provider.validate()
+
+        noncritical = root / "jarvis" / "adoption.py"
+        original_noncritical = noncritical.read_bytes()
+        must_reject(
+            "noncritical member mutation",
+            lambda: noncritical.write_bytes(original_noncritical + b"\\n# record-smoke\\n"),
+            lambda: noncritical.write_bytes(original_noncritical),
+        )
+
+        must_reject(
+            "noncritical member deletion",
+            noncritical.unlink,
+            lambda: noncritical.write_bytes(original_noncritical),
+        )
+
+        trusted_core = root / "jarvis" / "security" / "integrity.py"
+        original_trusted_core = trusted_core.read_bytes()
+        must_reject(
+            "trusted-core member deletion",
+            trusted_core.unlink,
+            lambda: trusted_core.write_bytes(original_trusted_core),
+        )
+
+        installer = dist_info / "INSTALLER"
+        original_installer = installer.read_bytes()
+        must_reject(
+            "INSTALLER content mutation",
+            lambda: installer.write_bytes(original_installer + b"record-smoke\\n"),
+            lambda: installer.write_bytes(original_installer),
+        )
+
+        metadata_file = dist_info / "METADATA"
+        original_metadata = metadata_file.read_bytes()
+        must_reject(
+            "METADATA content mutation",
+            lambda: metadata_file.write_bytes(original_metadata + b"\\nX-Record-Smoke: 1\\n"),
+            lambda: metadata_file.write_bytes(original_metadata),
+        )
+
+        legal_file = dist_info / "licenses" / "LICENSE.txt"
+        original_legal = legal_file.read_bytes()
+        must_reject(
+            "legal metadata mutation",
+            lambda: legal_file.write_bytes(original_legal + b"\\nrecord-smoke\\n"),
+            lambda: legal_file.write_bytes(original_legal),
+        )
+
+        original_record = record.read_bytes()
+        def tamper_installer_record():
+            rows = record.read_text(encoding="utf-8").splitlines()
+            replacement = []
+            changed = False
+            for row in rows:
+                if row.startswith(f"{dist_info.name}/INSTALLER,sha256="):
+                    replacement.append(f"{dist_info.name}/INSTALLER,sha256={'A' * 43},4")
+                    changed = True
+                else:
+                    replacement.append(row)
+            if not changed:
+                raise AssertionError("installed wheel did not record INSTALLER")
+            record.write_text("\\n".join(replacement) + "\\n", encoding="utf-8")
+        must_reject(
+            "INSTALLER RECORD hash only",
+            tamper_installer_record,
+            lambda: record.write_bytes(original_record),
+        )
+
+        def tamper_installer_size():
+            rows = record.read_text(encoding="utf-8").splitlines()
+            replacement = []
+            changed = False
+            for row in rows:
+                if row.startswith(f"{dist_info.name}/INSTALLER,sha256="):
+                    replacement.append(row.rsplit(",", 1)[0] + ",999999")
+                    changed = True
+                else:
+                    replacement.append(row)
+            if not changed:
+                raise AssertionError("installed wheel did not record INSTALLER")
+            record.write_text("\\n".join(replacement) + "\\n", encoding="utf-8")
+        must_reject(
+            "INSTALLER RECORD size only",
+            tamper_installer_size,
+            lambda: record.write_bytes(original_record),
+        )
+
+        def remove_noncritical_record_row():
+            record.write_text(
+                "\\n".join(
+                    row for row in record.read_text(encoding="utf-8").splitlines()
+                    if not row.startswith("jarvis/adoption.py,")
+                ) + "\\n",
+                encoding="utf-8",
+            )
+        must_reject(
+            "RECORD row removal",
+            remove_noncritical_record_row,
+            lambda: record.write_bytes(original_record),
+        )
+
+        must_reject(
+            "fake RECORD row",
+            lambda: record.write_text(
+                record.read_text(encoding="utf-8")
+                + "jarvis/_record_smoke_fake.py,sha256=" + "A" * 43 + ",1\\n",
+                encoding="utf-8",
+            ),
+            lambda: record.write_bytes(original_record),
+        )
+
+        must_reject(
+            "malformed RECORD",
+            lambda: record.write_text("not,a,valid,record\\n", encoding="utf-8"),
+            lambda: record.write_bytes(original_record),
+        )
+
+        extra = root / "jarvis" / "_record_smoke_extra.py"
+        must_reject(
+            "unrecorded package member",
+            lambda: extra.write_text("extra = True\\n", encoding="utf-8"),
+            lambda: extra.unlink(missing_ok=True),
+        )
+
+        cache = root / "jarvis" / "__pycache__"
+        cache.mkdir(exist_ok=True)
+        allowed_pyc = cache / "adoption.cpython-312.pyc"
+        original_allowed_pyc = allowed_pyc.read_bytes() if allowed_pyc.exists() else None
+        allowed_pyc.write_bytes(b"synthetic-bytecode")
+        provider.validate()
+        if original_allowed_pyc is None:
+            allowed_pyc.unlink()
+        else:
+            allowed_pyc.write_bytes(original_allowed_pyc)
+        disallowed_pyc = cache / "unknown.cpython-312.pyc"
+        must_reject(
+            "unrelated bytecode cache",
+            lambda: disallowed_pyc.write_bytes(b"synthetic-bytecode"),
+            lambda: disallowed_pyc.unlink(missing_ok=True),
+        )
+
+        class VersionMismatchDistribution:
+            version = "0.0.0"
+
+            def locate_file(self, path):
+                return distribution.locate_file(path)
+
+        try:
+            InstalledDistributionIntegrityEvidenceProvider(
+                lambda _name: VersionMismatchDistribution()
+            ).validate()
+        except IntegrityEvidenceError:
+            pass
+        else:
+            raise AssertionError("installed version mismatch was accepted")
+        print("installed wheel full RECORD integrity tamper matrix: PASS")
+        """
+    )
+
+
 def _artifact_smoke(wheel: Path, root: Path, label: str) -> None:
     environment = os.environ.copy()
     environment.pop("PYTHONPATH", None)
@@ -119,6 +317,11 @@ def _artifact_smoke(wheel: Path, root: Path, label: str) -> None:
         "asyncio.run(runtime.aclose()); asyncio.run(runtime.aclose())"
     )
     _run([str(python), "-c", smoke], cwd=working_root, env=environment)
+    _run(
+        [str(python), "-c", _installed_record_integrity_smoke()],
+        cwd=working_root,
+        env=environment,
+    )
 
 
 def main() -> int:
