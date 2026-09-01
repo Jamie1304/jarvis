@@ -1,14 +1,14 @@
 """Desktop application entry point."""
 
-from jarvis.bootstrap import create_assistant_service
-from jarvis.core.config import get_settings
+from jarvis.bootstrap import create_application_runtime, create_assistant_from_runtime
 from jarvis.frontend.desktop import run_desktop_app
 
 
 def main() -> int:
     """Create the configured local application and run its optional desktop UI."""
 
-    return run_desktop_app(create_assistant_service(get_settings()))
+    runtime = create_application_runtime()
+    return run_desktop_app(create_assistant_from_runtime(runtime))
 
 
 if __name__ == "__main__":

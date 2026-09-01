@@ -1,17 +1,55 @@
-"""UI-facing application service for the limited Phase 1 conversation flow."""
+"""UI-facing application service for bounded conversational flows."""
 
-from collections.abc import AsyncIterator
+import asyncio
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterable
 from dataclasses import dataclass
 from enum import StrEnum
 from uuid import UUID
 
 from jarvis.ai.models import ProviderHealth
-from jarvis.autonomy.models import Task
-from jarvis.autonomy.orchestrator import AgentOrchestrator
+from jarvis.control_center import (
+    ControlCenterSection,
+    ControlCenterService,
+    ControlCenterSnapshot,
+    OutputMedium,
+    OutputMediumProfile,
+    OutputMediumProfileRegistry,
+    SemanticActionMetadata,
+    TrustedPermissionPrompt,
+    TrustedPermissionSurface,
+)
 from jarvis.conversation.service import ConversationService
 from jarvis.core.errors import ConversationError, ServiceUnavailableError, SpeechDisabledError
+from jarvis.desktop_shell import (
+    FirstRunWizard,
+    LaunchProfile,
+    LaunchProfileRegistry,
+    LaunchProfileSelection,
+    OnboardingResult,
+    StartupWarmupRegistry,
+    TestDriveRegistry,
+    TestDriveReport,
+    WarmupResult,
+)
+from jarvis.memory.control import (
+    MemoryControlEntry,
+    MemoryControlQuery,
+    MemoryControlReference,
+    MemoryControlService,
+    MemoryCorrection,
+    MemoryVerificationRequestView,
+)
+from jarvis.memory.models import RetentionPolicy
+from jarvis.permissions.models import ActionDescriptor, ApprovalRequest, PermissionRequest
+from jarvis.planning.editing import PlanEdit, PlanInspection, PlanRevision
+from jarvis.planning.models import OwnedPlan, PlanningTask
+from jarvis.setup_conductor import SetupContext
 from jarvis.speech.stt import SpeechToTextService, Transcription
-from jarvis.speech.tts import TextToSpeechService
+from jarvis.speech.tts import SpeakableChunker, TextToSpeechService
+from jarvis.state import ApplicationStateMachine
+from jarvis.state.models import ApplicationState
+from jarvis.task_controller import TaskController
+from jarvis.voice.activation import AudioFrame, LocalVoiceController, VoiceStatus
 
 
 class AssistantEventKind(StrEnum):
@@ -53,13 +91,150 @@ class JarvisAssistantService:
         normalizer: InputNormalizer | None = None,
         stt: SpeechToTextService | None = None,
         tts: TextToSpeechService | None = None,
-        orchestrator: AgentOrchestrator | None = None,
+        task_controller: TaskController | None = None,
+        voice: LocalVoiceController | None = None,
+        state_machine: ApplicationStateMachine | None = None,
+        response_session_rebuilder: Callable[[], Awaitable[None]] | None = None,
+        onboarding: FirstRunWizard | None = None,
+        test_drive: TestDriveRegistry | None = None,
+        startup_warmup: StartupWarmupRegistry | None = None,
+        launch_profiles: LaunchProfileRegistry | None = None,
+        control_center: ControlCenterService | None = None,
+        permission_surface: TrustedPermissionSurface | None = None,
+        output_profiles: OutputMediumProfileRegistry | None = None,
+        memory_control: MemoryControlService | None = None,
     ) -> None:
         self._conversation = conversation
         self._normalizer = normalizer or InputNormalizer()
         self._stt = stt
         self._tts = tts
-        self._orchestrator = orchestrator
+        self._task_controller = task_controller
+        self._voice = voice
+        self._state_machine = state_machine
+        self._response_session_rebuilder = response_session_rebuilder
+        self._onboarding = onboarding
+        self._test_drive = test_drive
+        self._startup_warmup = startup_warmup
+        self._launch_profiles = launch_profiles or LaunchProfileRegistry()
+        self._control_center = control_center
+        self._permission_surface = permission_surface or TrustedPermissionSurface()
+        self._output_profiles = output_profiles or OutputMediumProfileRegistry()
+        self._memory_control = memory_control
+
+    @property
+    def launch_profiles(self) -> LaunchProfileRegistry:
+        """Expose profile selection without changing security policy."""
+
+        return self._launch_profiles
+
+    def select_launch_profile(self, profile: LaunchProfile) -> LaunchProfileSelection:
+        return self._launch_profiles.select(profile)
+
+    @property
+    def control_center(self) -> ControlCenterService:
+        if self._control_center is None:
+            raise ServiceUnavailableError("Control center is not configured")
+        return self._control_center
+
+    async def refresh_control_center(
+        self, section: ControlCenterSection | None = None
+    ) -> ControlCenterSnapshot:
+        return await self.control_center.refresh(section)
+
+    async def refresh_semantic_actions(
+        self, section: ControlCenterSection | None = None
+    ) -> tuple[SemanticActionMetadata, ...]:
+        """Return trusted action metadata for voice or desktop discovery."""
+
+        snapshot = await self.refresh_control_center(section)
+        views = snapshot.sections if section is None else (snapshot.section(section),)
+        actions = tuple(action for view in views for item in view.items for action in item.actions)
+        return actions
+
+    @property
+    def memory_control(self) -> MemoryControlService:
+        """Return the trusted application memory facade used by UI adapters."""
+
+        if self._memory_control is None:
+            raise ServiceUnavailableError("Memory controls are not configured")
+        return self._memory_control
+
+    def inspect_memory(
+        self, query: MemoryControlQuery | None = None
+    ) -> tuple[MemoryControlEntry, ...]:
+        return self.memory_control.inspect(query)
+
+    def correct_memory(
+        self, reference: MemoryControlReference, correction: MemoryCorrection
+    ) -> MemoryControlEntry:
+        return self.memory_control.correct(reference, correction)
+
+    def delete_memory(self, reference: MemoryControlReference) -> bool:
+        return self.memory_control.delete(reference)
+
+    def forget_memory_category(self, category: str, *, workspace_id: str | None = None) -> int:
+        return self.memory_control.forget_category(category, workspace_id=workspace_id)
+
+    def export_memory(
+        self, query: MemoryControlQuery | None = None
+    ) -> tuple[dict[str, object], ...]:
+        return self.memory_control.export(query)
+
+    def change_memory_retention(
+        self, reference: MemoryControlReference, retention: RetentionPolicy
+    ) -> MemoryControlEntry:
+        return self.memory_control.change_retention(reference, retention)
+
+    def pause_memory_learning(self, paused: bool) -> bool:
+        return self.memory_control.pause_learning(paused)
+
+    def mark_memory_explicit(self, reference: MemoryControlReference) -> MemoryControlEntry:
+        return self.memory_control.mark_explicit(reference)
+
+    def request_memory_reverification(
+        self, reference: MemoryControlReference, *, reason: str = "user requested re-verification"
+    ) -> MemoryVerificationRequestView:
+        return self.memory_control.request_reverification(reference, reason=reason)
+
+    def output_profile(self, medium: OutputMedium) -> OutputMediumProfile:
+        return self._output_profiles.get(medium)
+
+    def format_for_medium(self, text: str, medium: OutputMedium) -> str:
+        return self.output_profile(medium).format(text)
+
+    def render_permission_prompt(
+        self,
+        request: ApprovalRequest | PermissionRequest,
+        operation: ActionDescriptor | None = None,
+    ) -> TrustedPermissionPrompt:
+        """Render one trusted permission object for desktop and voice surfaces."""
+
+        return self._permission_surface.present(request, operation)
+
+    async def run_onboarding(
+        self,
+        context: SetupContext,
+        *,
+        run_id: UUID | None = None,
+        cancellation: asyncio.Event | None = None,
+    ) -> OnboardingResult:
+        if self._onboarding is None:
+            raise ServiceUnavailableError("First-run onboarding is not configured")
+        if not isinstance(context, SetupContext):
+            raise ConversationError("Onboarding context is malformed")
+        return await self._onboarding.run(context, run_id=run_id, cancellation=cancellation)
+
+    async def run_test_drive(self, *, skip: Iterable[str] = ()) -> TestDriveReport:
+        if self._test_drive is None:
+            raise ServiceUnavailableError("Test-drive checks are not configured")
+        if not isinstance(self._test_drive, TestDriveRegistry):
+            raise ServiceUnavailableError("Test-drive checks are malformed")
+        return await self._test_drive.run(skip=skip)
+
+    def start_startup_warmup(self) -> asyncio.Task[tuple[WarmupResult, ...]]:
+        if self._startup_warmup is None:
+            raise ServiceUnavailableError("Startup warmup is not configured")
+        return self._startup_warmup.start()
 
     def create_conversation(self, system_prompt: str | None = None) -> UUID:
         """Create a UI conversation with optional system context."""
@@ -84,6 +259,36 @@ class JarvisAssistantService:
     def tts_enabled(self) -> bool:
         return self._tts is not None and self._tts.enabled
 
+    @property
+    def voice_status(self) -> VoiceStatus | None:
+        """Return the UI-safe voice state, when optional voice is configured."""
+
+        return self._voice.status if self._voice is not None else None
+
+    @property
+    def application_state(self) -> ApplicationState:
+        """Read-only global lifecycle state for UI rendering."""
+
+        return (
+            self._state_machine.application_state
+            if self._state_machine is not None
+            else ApplicationState.IDLE
+        )
+
+    async def handle_voice_frame(self, frame: AudioFrame) -> None:
+        """Forward one transient frame to the configured voice state machine."""
+
+        if self._voice is None:
+            raise SpeechDisabledError("Voice activation is disabled")
+        await self._voice.handle_frame(frame)
+
+    async def interrupt_voice(self, text: str) -> None:
+        """Apply an explicit voice interruption through the central task adapter."""
+
+        if self._voice is None:
+            raise SpeechDisabledError("Voice activation is disabled")
+        await self._voice.interrupt(text)
+
     async def start_recording(self) -> None:
         """Start transient microphone recording."""
 
@@ -98,55 +303,131 @@ class JarvisAssistantService:
             raise SpeechDisabledError("Speech-to-text is disabled")
         return await self._stt.stop_and_transcribe()
 
-    async def create_task(self, conversation_id: UUID, user_request: str) -> Task:
-        """Create a bounded agent task without changing ordinary chat behavior."""
+    async def create_task(self, conversation_id: UUID, user_request: str) -> PlanningTask:
+        """Create a canonical persisted plan; conversation identity remains UI context only."""
 
-        return await self._require_orchestrator().create_task(
-            conversation_id, self._normalizer.normalize(user_request)
+        del conversation_id
+        return await self._require_task_controller().create_task(
+            self._normalizer.normalize(user_request)
         )
 
-    async def run_task(self, task_id: UUID) -> Task:
-        """Run a previously created bounded task."""
+    async def run_task(self, task_id: UUID) -> PlanningTask:
+        """Run a previously created canonical task."""
 
-        return await self._require_orchestrator().run(task_id)
+        return await self._require_task_controller().run_task(task_id)
 
-    async def submit_task(self, conversation_id: UUID, user_request: str) -> Task:
-        """Create and execute a bounded task as one operation."""
+    async def submit_task(self, conversation_id: UUID, user_request: str) -> PlanningTask:
+        """Create and execute a canonical persisted task."""
 
-        return await self._require_orchestrator().submit(
-            conversation_id, self._normalizer.normalize(user_request)
+        del conversation_id
+        return await self._require_task_controller().submit_task(
+            self._normalizer.normalize(user_request)
         )
 
-    async def cancel_task(self, task_id: UUID) -> Task:
+    async def cancel_task(self, task_id: UUID) -> PlanningTask:
         """Request clean cancellation of a running task."""
 
-        return await self._require_orchestrator().cancel(task_id)
+        return await self._require_task_controller().cancel_task(task_id)
 
-    async def stream_text(self, conversation_id: UUID, text: str) -> AsyncIterator[AssistantEvent]:
-        """Normalize text and stream a response, optionally speaking after completion."""
+    def inspect_plan(self, task_id: UUID) -> PlanInspection | None:
+        """Expose plan facts through the canonical application task service."""
+
+        return self._require_task_controller().inspect_plan_details(task_id)
+
+    def list_plan_revisions(self, task_id: UUID) -> tuple[OwnedPlan, ...]:
+        """Return persisted revisions without exposing a planner to the UI."""
+
+        return self._require_task_controller().list_plan_revisions(task_id)
+
+    async def edit_plan(self, task_id: UUID, edit: PlanEdit) -> PlanRevision:
+        return await self._require_task_controller().edit_plan(task_id, edit)
+
+    async def checkpoint_plan(self, task_id: UUID, edit: PlanEdit) -> PlanRevision:
+        return await self._require_task_controller().checkpoint_plan(task_id, edit)
+
+    async def replan_task(
+        self, task_id: UUID, *, additional_constraints: tuple[str, ...] = ()
+    ) -> PlanRevision:
+        return await self._require_task_controller().replan_task(
+            task_id, additional_constraints=additional_constraints
+        )
+
+    async def stream_text(
+        self,
+        conversation_id: UUID,
+        text: str,
+        *,
+        medium: OutputMedium = OutputMedium.DESKTOP,
+    ) -> AsyncIterator[AssistantEvent]:
+        """Stream text and begin TTS as soon as a safe sentence is available."""
 
         normalized = self._normalizer.normalize(text)
+        profile = self.output_profile(medium)
         yield AssistantEvent(AssistantEventKind.STREAMING, "Assistant is responding")
         response = ""
-        async for update in self._conversation.stream_reply(conversation_id, normalized):
-            response += update.content
-            yield AssistantEvent(AssistantEventKind.TEXT, update.content, done=update.done)
-        if self._tts is not None and self._tts.enabled and response:
-            yield AssistantEvent(AssistantEventKind.TTS, "Speaking response")
-            await self._tts.speak(response)
-            yield AssistantEvent(AssistantEventKind.TTS, "TTS idle", done=True)
-        yield AssistantEvent(AssistantEventKind.STREAMING, "Assistant ready", done=True)
+        tts_queue: asyncio.Queue[str | None] | None = None
+        tts_task: asyncio.Task[None] | None = None
+        if self._tts is not None and self._tts.enabled:
+            tts_queue = asyncio.Queue(maxsize=8)
+
+            async def speakable_chunks() -> AsyncIterator[str]:
+                chunker = SpeakableChunker()
+                while True:
+                    item = await tts_queue.get()
+                    if item is None:
+                        for chunk in chunker.finish():
+                            yield chunk
+                        return
+                    for chunk in chunker.feed(item):
+                        yield chunk
+
+            tts_task = self._tts.start_incremental(speakable_chunks())
+        try:
+            async for update in self._conversation.stream_reply(conversation_id, normalized):
+                response += update.content
+                formatted_content = profile.format(update.content)
+                if tts_queue is not None:
+                    await tts_queue.put(formatted_content)
+                yield AssistantEvent(
+                    AssistantEventKind.TEXT,
+                    formatted_content,
+                    done=update.done,
+                )
+            if tts_queue is not None:
+                await tts_queue.put(None)
+            if tts_task is not None:
+                await tts_task
+            if response and self._tts is not None and self._tts.available:
+                yield AssistantEvent(AssistantEventKind.TTS, "Speaking response")
+                yield AssistantEvent(AssistantEventKind.TTS, "TTS idle", done=True)
+            yield AssistantEvent(AssistantEventKind.STREAMING, "Assistant ready", done=True)
+        except BaseException:
+            if self._tts is not None:
+                await self._tts.stop()
+            raise
+
+    async def barge_in(self, conversation_id: UUID) -> None:
+        """Stop output and invalidate the current response generation."""
+
+        self._conversation.cancel(conversation_id)
+        if self._tts is not None:
+            await self._tts.stop()
+        if self._response_session_rebuilder is not None:
+            await self._response_session_rebuilder()
 
     async def aclose(self) -> None:
         """Release local speech resources when the UI exits."""
 
-        if self._stt is not None:
-            await self._stt.aclose()
-        if self._tts is not None:
-            await self._tts.aclose()
+        if self._voice is not None:
+            await self._voice.aclose()
+        else:
+            if self._stt is not None:
+                await self._stt.aclose()
+            if self._tts is not None:
+                await self._tts.aclose()
         await self._conversation.aclose()
 
-    def _require_orchestrator(self) -> AgentOrchestrator:
-        if self._orchestrator is None:
-            raise ServiceUnavailableError("Task orchestration is not configured")
-        return self._orchestrator
+    def _require_task_controller(self) -> TaskController:
+        if self._task_controller is None:
+            raise ServiceUnavailableError("Canonical task controller is not configured")
+        return self._task_controller

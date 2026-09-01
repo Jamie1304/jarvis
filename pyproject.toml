@@ -1,14 +1,17 @@
 [build-system]
-requires = ["setuptools>=75.0"]
+requires = ["setuptools>=77.0.3"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "jarvis"
-version = "0.1.0"
+dynamic = ["version"]
 description = "Local-first desktop AI agent engineering foundation"
 readme = "README.md"
+license = "LicenseRef-JARVIS-Proprietary"
+license-files = ["LICENSE.txt", "EULA.txt", "PRIVACY_POLICY.txt"]
 requires-python = ">=3.12"
 dependencies = [
+    "cryptography==44.0.2",
     "fastapi==0.115.6",
     "httpx==0.28.1",
     "pydantic==2.10.5",
@@ -26,6 +29,8 @@ dev = [
     "ruff==0.9.10",
 ]
 desktop = ["PySide6==6.8.1"]
+windows = ["Pillow==11.1.0", "pywinauto==0.6.9"]
+camera = ["opencv-python==4.11.0.86"]
 speech = [
     "faster-whisper==1.1.0",
     "numpy==2.2.1",
@@ -36,6 +41,9 @@ speech = [
 
 [tool.setuptools.packages.find]
 include = ["jarvis*"]
+
+[tool.setuptools.dynamic]
+version = {attr = "jarvis.version.__version__"}
 
 [tool.ruff]
 target-version = "py312"
@@ -65,6 +73,9 @@ exclude = [
 addopts = "--strict-config --strict-markers"
 asyncio_mode = "auto"
 testpaths = ["tests"]
+markers = [
+    "windows_integration: optional real Windows desktop or hardware integration check",
+]
 
 [tool.coverage.run]
 branch = true

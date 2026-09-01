@@ -1,0 +1,20 @@
+JARVIS PROPRIETARY SOFTWARE LICENSE
+
+Copyright © 2026 Jamie Kanbier.
+All rights reserved.
+
+The JARVIS first-party software and associated first-party materials (the
+“Software”) are proprietary software owned by Jamie Kanbier. No ownership of
+the Software is transferred to a user. Use of the Software is permitted only
+under the applicable JARVIS End User License Agreement and, where JARVIS is
+commercially licensed, a valid applicable entitlement.
+
+Except as expressly permitted by that agreement or by mandatory applicable
+law, no permission is granted to copy, redistribute, sublicense, sell,
+publish, or create a competing redistributed version of the Software.
+
+Third-party components and materials are governed by their own licenses. Those
+licenses are not replaced or restricted by this notice.
+
+This notice is a license summary, not a substitute for the JARVIS End User
+License Agreement.

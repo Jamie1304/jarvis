@@ -14,6 +14,69 @@ class MessageRole(StrEnum):
     ASSISTANT = "assistant"
 
 
+class ModelRole(StrEnum):
+    GENERAL = "general"
+    REASONING = "reasoning"
+    CODING = "coding"
+    TOOL_USE = "tool_use"
+    VISION = "vision"
+    EMBEDDING = "embedding"
+    RERANKING = "reranking"
+    STT = "stt"
+    TTS = "tts"
+    IMAGE_GENERATION = "image_generation"
+
+
+class EvidenceKind(StrEnum):
+    PUBLISHED = "published"
+    COMMUNITY = "community"
+    MEASURED_ON_THIS_MACHINE = "measured_on_this_machine"
+
+
+@dataclass(frozen=True, slots=True)
+class EvidenceRecord:
+    """Provenance for hardware/model facts; measured data is explicitly scoped."""
+
+    kind: EvidenceKind
+    source: str
+    detail: str
+    captured_at: datetime | None = None
+    machine_scope: str | None = None
+    metrics: tuple[tuple[str, str], ...] = ()
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.kind, EvidenceKind):
+            raise ValueError("Evidence kind is invalid")
+        for name, value, limit in (
+            ("Evidence source", self.source, 256),
+            ("Evidence detail", self.detail, 2_000),
+        ):
+            if type(value) is not str or not value.strip() or len(value) > limit or "\x00" in value:
+                raise ValueError(f"{name} is invalid")
+        if self.captured_at is not None and self.captured_at.tzinfo is None:
+            raise ValueError("Evidence timestamp must be timezone-aware")
+        if self.kind is EvidenceKind.MEASURED_ON_THIS_MACHINE:
+            if self.captured_at is None or self.machine_scope != "this_machine":
+                raise ValueError("Measured evidence must identify this machine and timestamp")
+        elif self.machine_scope is not None:
+            raise ValueError("Only measured evidence may identify a machine")
+        if (
+            type(self.metrics) is not tuple
+            or len(self.metrics) > 64
+            or any(
+                type(key) is not str
+                or type(value) is not str
+                or not key.strip()
+                or len(key) > 128
+                or len(value) > 512
+                or "\x00" in key
+                or "\x00" in value
+                for key, value in self.metrics
+            )
+        ):
+            raise ValueError("Evidence metrics are invalid")
+
+
 @dataclass(frozen=True, slots=True)
 class ChatMessage:
     """A single conversation message independent of any AI provider SDK."""

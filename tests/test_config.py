@@ -1,5 +1,18 @@
+import tomllib
+from pathlib import Path
+
+from jarvis import __version__
 from jarvis.core.config import Settings
 from pytest import MonkeyPatch
+
+
+def test_release_version_is_consistent() -> None:
+    with Path("pyproject.toml").open("rb") as stream:
+        project = tomllib.load(stream)["project"]
+
+    assert __version__ == "1.0.0"
+    assert Settings(_env_file=None).version == __version__
+    assert project["dynamic"] == ["version"]
 
 
 def test_settings_have_safe_local_defaults(monkeypatch: MonkeyPatch) -> None:
@@ -14,6 +27,9 @@ def test_settings_have_safe_local_defaults(monkeypatch: MonkeyPatch) -> None:
         "JARVIS_AGENT_MAX_STEPS",
         "JARVIS_AGENT_TIMEOUT_SECONDS",
         "JARVIS_AGENT_MAX_REPLANS",
+        "JARVIS_MULTI_AGENT_ENABLED",
+        "JARVIS_MULTI_AGENT_MAX_CONCURRENCY",
+        "JARVIS_MULTI_AGENT_TIMEOUT_SECONDS",
     ):
         monkeypatch.delenv(name, raising=False)
     settings = Settings(_env_file=None)
@@ -28,6 +44,8 @@ def test_settings_have_safe_local_defaults(monkeypatch: MonkeyPatch) -> None:
     assert settings.stt_compute_type == "int8"
     assert settings.tts_enabled is False
     assert settings.agent_max_steps == 8
+    assert settings.multi_agent_enabled is False
+    assert settings.multi_agent_max_concurrency == 3
 
 
 def test_environment_values_override_defaults(monkeypatch: MonkeyPatch) -> None:
@@ -54,3 +72,20 @@ def test_numeric_stt_device_becomes_device_id(monkeypatch: MonkeyPatch) -> None:
     settings = Settings(_env_file=None)
 
     assert settings.stt_device == 26
+
+
+def test_settings_do_not_load_dotenv_from_current_directory(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    (tmp_path / ".env").write_text(
+        "JARVIS_REMOTE_APPROVAL_ENABLED=true\nJARVIS_AI_ENDPOINT=http://192.0.2.1:11434\n",
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("JARVIS_REMOTE_APPROVAL_ENABLED", raising=False)
+    monkeypatch.delenv("JARVIS_AI_ENDPOINT", raising=False)
+
+    settings = Settings()
+
+    assert settings.remote_approval_enabled is False
+    assert settings.ai_endpoint == "http://127.0.0.1:11434"

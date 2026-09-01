@@ -1,3 +1,4 @@
+import json
 from datetime import UTC, datetime
 from uuid import uuid4
 
@@ -5,7 +6,7 @@ import httpx
 import pytest
 from jarvis.ai.models import ChatMessage, GenerationRequest, MessageRole
 from jarvis.ai.providers.ollama import OllamaProvider
-from jarvis.core.errors import ProviderUnavailableError, StreamingInterruptedError
+from jarvis.core.errors import ProviderError, ProviderUnavailableError, StreamingInterruptedError
 
 from tests.fakes import FakeAIProvider
 
@@ -73,4 +74,54 @@ async def test_ollama_provider_rejects_interrupted_stream() -> None:
 
     with pytest.raises(StreamingInterruptedError):
         _ = [chunk async for chunk in provider.stream(request())]
+    await client.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "body, expected",
+    [
+        ({"message": {"content": "partial"}, "done": "false"}, StreamingInterruptedError),
+        ({"message": {"content": 17}, "done": True}, ProviderError),
+    ],
+)
+async def test_ollama_provider_rejects_malformed_stream_schema(
+    body: dict[str, object], expected: type[Exception]
+) -> None:
+    def malformed(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=(json.dumps(body) + "\n").encode())
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(malformed))
+    provider = OllamaProvider(
+        model="test-model",
+        endpoint="http://ollama.test",
+        timeout_seconds=1,
+        context_limit=1024,
+        client=client,
+    )
+
+    with pytest.raises(expected):
+        _ = [chunk async for chunk in provider.stream(request())]
+    await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_ollama_error_does_not_copy_untrusted_response_body() -> None:
+    secret = "prompt-or-token-from-server"
+
+    def rejected(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(500, text=secret)
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(rejected))
+    provider = OllamaProvider(
+        model="test-model",
+        endpoint="http://ollama.test",
+        timeout_seconds=1,
+        context_limit=1024,
+        client=client,
+    )
+
+    with pytest.raises(ProviderError) as raised:
+        await provider.generate(request())
+    assert secret not in str(raised.value)
     await client.aclose()

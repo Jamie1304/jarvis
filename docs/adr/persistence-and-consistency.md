@@ -1,0 +1,129 @@
+# ADR: Persistence and crash consistency
+
+## Decision
+
+JARVIS uses model A: `SQLitePlanningStore` is the authoritative durable source for
+canonical task, plan, step, budget, and operation-idempotency state. The
+`ApplicationStateMachine` is a durable but rebuildable projection for UI and
+diagnostic transition history. It must never advance before the planning task/plan
+transaction commits. The audit record follows the authoritative planning commit;
+the state projection and events follow it as non-authoritative observations.
+
+Memory, knowledge, and audit remain separate stores because they have different
+retention and authority boundaries. `SQLiteMemoryStore` remains the sole authority
+for durable memory records, conflict findings, quarantine, supersession, and
+confidence history. Consistency findings do not become instructions or approvals.
+They do not decide task completion. EventBus is in-process only and is never a
+persistence or authorization source.
+
+The authoritative-state map is the normative domain inventory. Durable owners
+are used only where restart changes correctness or user-visible continuity.
+Permission requests and receipts remain authoritative only inside the current
+`PermissionBroker` process: restart invalidates them and the durable task/step
+state causes a fresh exact request. Conversation context, live health,
+provisioning action state, hardware/model measurements, and resource
+reservations are intentionally ephemeral because they can be safely
+reconstructed by re-reading reality. Workflow templates, learned procedure
+candidates, workspace/profile definitions, and standalone provisioning
+transactions are not production-owned v1 persistence domains.
+
+`AgentSessionStore` and `ArtifactStore` now have explicit version-1 migration
+markers. They preserve compatible pre-marker databases and refuse future schema
+versions. Their stores remain separate: session synchronization/usage is not
+task truth, and artifact metadata/content is not evidence, memory, audit, or
+backup truth. Credential metadata is durable in `CredentialVault`, while raw
+secret bytes remain owned by the external Windows secure credential authority.
+
+Installation-specific regression definitions and run evidence are a separate
+durable domain owned by `GoldenWorkflowStore`. Golden workflows are immutable
+fingerprint-bound definitions; `GoldenWorkflowService` delegates outcome
+evaluation to `VerificationEngine` and never becomes task, plan, permission, or
+artifact authority. A missing applicable workflow, unavailable required
+integration/hardware, failed run, or fingerprint mismatch fails the change gate.
+Golden run history is bounded and run IDs are idempotent. User retirement and
+deletion are separate lifecycle operations; candidate/model output has no such
+mutation path.
+
+User-facing backup/export is a separate boundary from startup recovery. The
+composition root owns `BackupService` and its app-owned `backups/` directory,
+but component providers and appliers remain owned by their authoritative
+domain services. A `BackupBundle` is encrypted transport and migration input;
+it is never treated as a second task, memory, artifact, credential, package, or
+recovery store. `RecoveryStore` remains the authority for candidate/LKG
+startup rollback and crash-loop state.
+
+Backup uses reviewed `cryptography` primitives (PBKDF2-HMAC-SHA256 key
+derivation and AES-GCM authenticated encryption). The decryption key is never
+stored in the bundle and there is no plaintext fallback. Credential components
+are rejected; components may contain only opaque Vault references and can
+require reauthorization on another installation. Restore verifies authenticated
+content and component hashes before applying, previews conflicts, requires
+explicit migration/relink/recertification callbacks, and requires a technical
+snapshot/rollback callback before destructive application. A failed restore
+does not silently become a partially successful migration.
+
+## Transaction model
+
+Planning task/plan versions are written atomically in one SQLite transaction. The
+engine writes that unit before advancing the durable state projection. Planning and
+tool lifecycle events are best-effort observations and may be queued before a later
+planning write fails; consumers must reconcile them against the planning store. A
+projection write failure leaves planning truth intact, and startup rebuilds the
+projection from the planning store.
+
+SQLite stores enable foreign keys, WAL, a bounded busy timeout, ordered migrations,
+future-schema refusal, and `PRAGMA integrity_check`. Corrupt or future persistence
+opens place `ApplicationRuntime` in `SAFE_MODE`; no task is guessed, replayed, or
+silently repaired.
+
+Memory consistency remediation is explicit: revalidation appends evidence and a
+confidence event, user correction creates a replacement and supersession record,
+and quarantine only removes a record from normal retrieval. Duplicate or
+contradictory records are never merged because embeddings or lexical similarity
+looked close. Prompt-injected or impossible-provenance content is treated as data
+or quarantine evidence, never as a personal fact.
+
+## Restart semantics
+
+At startup, the runtime reconciles every planning task into the state projection.
+Tasks interrupted while executing, verifying, or replanning, or containing a
+running/verifying step, become `RECOVERING` with an `unknown_operation_outcome`
+error. They require explicit operator diagnosis and are not replayed.
+
+Tasks waiting for permission have their in-memory approval references invalidated.
+Their waiting step is requeued and a future run must enter `PermissionBroker` again,
+creating a fresh request bound to the exact current task, action, fingerprint,
+permission, scope, and expiry. No approval, receipt, remembered grant, or model
+claim is restored from a process restart.
+
+Candidate-build startup is owned by `RecoveryStore` and `RecoveryCoordinator`.
+Each attempt records the candidate and LKG build/snapshot/hash references, transaction,
+deadline, migration references, health result, and incident evidence. A failed
+candidate is not retried blindly: the coordinator performs one bounded
+`FAIL -> ROLLBACK -> RESTORE_LAST_KNOWN_GOOD -> START -> HEALTH_CHECK` path,
+reconciling migration state before restarting LKG. LKG failure enters Safe Mode;
+the crash-loop guard prevents indefinite restart. Recovery callbacks remain
+composition-root hooks and cannot grant permission or bypass policy. LKG is
+selected only through the `TrustedRecoveryAuthority` authenticated record;
+unsigned, stale, future, or unrelated records fail closed. No second store owns
+startup or rollback truth.
+
+## Audit and idempotency
+
+`SQLiteAuditSink` stores secret-safe permission records and planning lifecycle
+records. Broker records contain only names, fingerprints, normalized scopes,
+decisions, trusted approval identity/source, and outcomes—not raw arguments,
+prompts, credentials, clipboard values, or camera data.
+
+The planning store reserves a task/step idempotency key before an expensive action.
+The key is bound to a SHA-256 input fingerprint. A duplicate key with a different
+fingerprint fails closed; a duplicate exact reservation is never automatically
+executed again. This is a local crash barrier, not proof that a remote external
+effect did or did not occur; unknown external outcomes remain in recovery.
+
+## Consequences
+
+This avoids an unsafe dual authority between plan status and application state while
+preserving inspectable state history. It does not provide distributed transactions,
+cross-process locks, encrypted SQLite, or provider-specific exactly-once effects.
+Those require capability-specific adapters and remain explicit future work.

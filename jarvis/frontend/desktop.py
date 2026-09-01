@@ -7,6 +7,7 @@ from uuid import UUID
 
 from jarvis.application import AssistantEvent, AssistantEventKind, JarvisAssistantService
 from jarvis.core.errors import JarvisError
+from jarvis.desktop_shell import DesktopShellService, ShellSection
 
 
 def run_desktop_app(service: JarvisAssistantService) -> int:
@@ -29,6 +30,8 @@ def run_desktop_app(service: JarvisAssistantService) -> int:
         raise RuntimeError(
             "Desktop UI dependencies are missing; install the desktop extra"
         ) from error
+
+    shell = DesktopShellService(launch_profiles=service.launch_profiles)
 
     class TextWorker(QThread):  # type: ignore[misc]
         event = Signal(object)
@@ -81,8 +84,15 @@ def run_desktop_app(service: JarvisAssistantService) -> int:
         status = Signal(str)
 
         def run(self) -> None:
-            health = asyncio.run(service.provider_status())
+            health = asyncio.run(self._warm_and_check())
             self.status.emit("Connected" if health.available else f"Unavailable: {health.detail}")
+
+        async def _warm_and_check(self) -> Any:
+            try:
+                await service.start_startup_warmup()
+            except (JarvisError, RuntimeError):
+                pass
+            return await service.provider_status()
 
     class MainWindow(QMainWindow):  # type: ignore[misc]
         def __init__(self) -> None:
@@ -105,15 +115,29 @@ def run_desktop_app(service: JarvisAssistantService) -> int:
             self._stream_status = QLabel("Assistant: ready")
             self._speech_status = QLabel("STT: ready" if service.stt_enabled else "STT: disabled")
             self._tts_status = QLabel("TTS: ready" if service.tts_enabled else "TTS: disabled")
+            self._section_status = QLabel("Section: Home")
+            self._mode_status = QLabel(
+                "Mode: Safe Mode" if shell.state().safe_mode else "Mode: Normal"
+            )
             self._error = QLabel()
             self._error.setStyleSheet("color: #b00020")
 
             controls = QHBoxLayout()
+            navigation = QHBoxLayout()
+            for item in shell.navigation:
+                button = QPushButton(item.label)
+                button.clicked.connect(
+                    lambda _checked=False, section=item.section: self._select_section(section)
+                )
+                navigation.addWidget(button)
             controls.addWidget(self._input)
             controls.addWidget(self._send)
             controls.addWidget(self._microphone)
             layout.addWidget(self._history)
+            layout.addLayout(navigation)
             layout.addLayout(controls)
+            layout.addWidget(self._section_status)
+            layout.addWidget(self._mode_status)
             layout.addWidget(self._provider_status)
             layout.addWidget(self._stream_status)
             layout.addWidget(self._speech_status)
@@ -125,6 +149,10 @@ def run_desktop_app(service: JarvisAssistantService) -> int:
             self._input.returnPressed.connect(self._send_text)
             self._microphone.clicked.connect(self._toggle_microphone)
             self._refresh_provider_status()
+
+        def _select_section(self, section: ShellSection) -> None:
+            state = shell.select_section(section)
+            self._section_status.setText(f"Section: {state.active_section.value.title()}")
 
         def _refresh_provider_status(self) -> None:
             self._provider_worker = ProviderWorker(self)
