@@ -2,9 +2,16 @@ import re
 from dataclasses import replace
 from pathlib import Path
 
-from jarvis.qualification_manifest import manifest_dict, qualification_manifest, write_manifest
+from jarvis.qualification_manifest import (
+    direct_base_executable,
+    manifest_dict,
+    qualification_manifest,
+    resolve_qualification_manifest,
+    write_manifest,
+)
 from jarvis.qualification_routes import (
     validate_cp1_inventory,
+    validate_machine_routes,
     validate_manifest_routes,
     validate_quality_evidence,
     validate_semantic_contracts,
@@ -84,7 +91,7 @@ def test_route_preflight_rejects_bare_and_missing_routes() -> None:
         runner="pytest tests/test_recovery.py",
         required_executable="C:/missing/python.exe",
     )
-    result = validate_manifest_routes(Path.cwd(), tuple(stages))
+    result = validate_manifest_routes(Path.cwd(), tuple(stages), machine=True)
     assert result.bare_pytest == 1
     assert result.missing_executables
 
@@ -113,13 +120,54 @@ def test_route_preflight_rejects_bare_python_missing_target_and_prose() -> None:
             required_executable="C:/missing/python.exe",
             referenced_targets=("scripts/missing.py",),
         ),
-        replace(base, stage_id="QZ", runner="production contamination scanner"),
+        replace(
+            base,
+            stage_id="QZ",
+            runner="production contamination scanner",
+            required_executable=None,
+            referenced_targets=(),
+        ),
     )
     result = validate_manifest_routes(Path.cwd(), cases)
     assert result.bare_python == 1
-    assert result.missing_executables == ("QY",)
+    assert result.missing_executables == ()
     assert result.missing_targets == ("QY:scripts/missing.py",)
     assert result.placeholder_runners == ("QX", "QZ")
+
+
+def test_structural_routes_do_not_require_host_interpreters() -> None:
+    result = validate_manifest_routes(Path.cwd())
+    assert result.passed
+    assert result.missing_executables == ()
+
+
+def test_machine_routes_resolve_current_workstation() -> None:
+    result = validate_machine_routes(Path.cwd())
+    assert result.passed
+    assert result.inspected == 30
+    assert result.invokable == 27
+    assert result.well_defined == 3
+
+
+def test_machine_routes_remain_fail_closed_for_missing_executables() -> None:
+    stage = replace(
+        qualification_manifest()[0],
+        stage_id="QX",
+        required_executable="C:/definitely-missing/python.exe",
+    )
+    result = validate_manifest_routes(Path.cwd(), (stage,), machine=True)
+    assert result.missing_executables == ("QX",)
+
+
+def test_direct_base_resolution_is_host_derived_and_portable() -> None:
+    resolved = {stage.stage_id: stage for stage in resolve_qualification_manifest()}
+    executable = str(direct_base_executable())
+    assert resolved["Q01"].required_executable == executable
+    assert resolved["Q01"].runner.startswith(executable)
+    assert "C:\\Users\\jamie" not in Path("jarvis/qualification_manifest.py").read_text(
+        encoding="utf-8"
+    )
+    assert resolved["Q19"].required_executable == r".venv\Scripts\python.exe"
 
 
 def test_semantic_contract_preflight_closes_critical_routes_without_execution() -> None:

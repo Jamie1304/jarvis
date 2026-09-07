@@ -7,7 +7,8 @@ the shakedown artifact and is never implied by this manifest.
 from __future__ import annotations
 
 import json
-from dataclasses import asdict, dataclass
+import sys
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 
 
@@ -56,7 +57,9 @@ class QualificationStage:
         return asdict(self)
 
 
-BASE_PYTHON = r"C:\Users\jamie\AppData\Local\Programs\Python\Python312\python.exe"
+BASE_PYTHON = "{direct-base-python312}"
+DIRECT_BASE_INTERPRETER = "direct-base-python312"
+ORDINARY_VENV_INTERPRETER = "ordinary-venv"
 
 _STAGE_DATA: tuple[tuple[object, ...], ...] = (
     (
@@ -179,10 +182,7 @@ _STAGE_DATA: tuple[tuple[object, ...], ...] = (
     (
         "Q09",
         "formal real 3-of-3 acquisition campaign",
-        (
-            "C:\\Users\\jamie\\AppData\\Local\\Programs\\Python\\Python312\\python.exe "
-            "scripts/acceptance/run_formal_campaign.py --campaign three"
-        ),
+        (BASE_PYTHON + " scripts/acceptance/run_formal_campaign.py --campaign three"),
         "native Windows direct-base qualification",
         False,
         "direct-base-python312",
@@ -197,7 +197,7 @@ _STAGE_DATA: tuple[tuple[object, ...], ...] = (
         "Q10",
         "formal same-runtime capability-acquisition pair",
         (
-            "C:\\Users\\jamie\\AppData\\Local\\Programs\\Python\\Python312\\python.exe "
+            BASE_PYTHON + " "
             "-m pytest -m real_qualification "
             "tests/test_acceptance_evidence.py::test_real_same_runtime_pair_control"
         ),
@@ -218,10 +218,7 @@ _STAGE_DATA: tuple[tuple[object, ...], ...] = (
     (
         "Q11",
         "formal real final-ten acquisition campaign",
-        (
-            "C:\\Users\\jamie\\AppData\\Local\\Programs\\Python\\Python312\\python.exe "
-            "scripts/acceptance/run_formal_campaign.py --campaign ten"
-        ),
+        (BASE_PYTHON + " scripts/acceptance/run_formal_campaign.py --campaign ten"),
         "native Windows direct-base qualification",
         False,
         "direct-base-python312",
@@ -250,7 +247,7 @@ _STAGE_DATA: tuple[tuple[object, ...], ...] = (
         "Q13",
         "generated child denial",
         (
-            "C:\\Users\\jamie\\AppData\\Local\\Programs\\Python\\Python312\\python.exe "
+            BASE_PYTHON + " "
             "-m pytest tests/test_sandbox.py::test_appcontainer_boundary_is_explicit_and_observable"
         ),
         "native Windows",
@@ -325,10 +322,7 @@ _STAGE_DATA: tuple[tuple[object, ...], ...] = (
     (
         "Q18",
         "direct-base sandbox",
-        (
-            "C:\\Users\\jamie\\AppData\\Local\\Programs\\Python\\Python312\\python.exe "
-            "-m pytest tests/test_sandbox.py"
-        ),
+        (BASE_PYTHON + " -m pytest tests/test_sandbox.py"),
         "native Windows",
         False,
         "direct-base-python312",
@@ -518,27 +512,27 @@ _STAGE_DATA: tuple[tuple[object, ...], ...] = (
 
 _ROUTE_METADATA: dict[str, dict[str, object]] = {
     "Q01": {
-        "required_executable": r"C:\Users\jamie\AppData\Local\Programs\Python\Python312\python.exe",
+        "required_executable": BASE_PYTHON,
         "referenced_targets": ("scripts/acceptance/audit_source_identity.py",),
     },
     "Q02": {
-        "required_executable": r"C:\Users\jamie\AppData\Local\Programs\Python\Python312\python.exe",
+        "required_executable": BASE_PYTHON,
         "referenced_targets": ("tests/test_recovery.py", "tests/test_recovery_authority.py"),
     },
     "Q03": {
-        "required_executable": r"C:\Users\jamie\AppData\Local\Programs\Python\Python312\python.exe",
+        "required_executable": BASE_PYTHON,
         "referenced_targets": ("tests/test_acceptance_evidence.py",),
     },
     "Q04": {
-        "required_executable": r"C:\Users\jamie\AppData\Local\Programs\Python\Python312\python.exe",
+        "required_executable": BASE_PYTHON,
         "referenced_targets": ("scripts/acceptance/validate_specs.py",),
     },
     "Q05": {
-        "required_executable": r"C:\Users\jamie\AppData\Local\Programs\Python\Python312\python.exe",
+        "required_executable": BASE_PYTHON,
         "referenced_targets": ("tests/test_production_capability.py",),
     },
     "Q06": {
-        "required_executable": r"C:\Users\jamie\AppData\Local\Programs\Python\Python312\python.exe",
+        "required_executable": BASE_PYTHON,
         "referenced_targets": (
             "tests/test_sandbox.py",
             "tests/test_runtime.py",
@@ -546,47 +540,47 @@ _ROUTE_METADATA: dict[str, dict[str, object]] = {
         ),
     },
     "Q07": {
-        "required_executable": r"C:\Users\jamie\AppData\Local\Programs\Python\Python312\python.exe",
+        "required_executable": BASE_PYTHON,
         "referenced_targets": ("scripts/acceptance/run_acceptance.py",),
     },
     "Q08": {
-        "required_executable": r"C:\Users\jamie\AppData\Local\Programs\Python\Python312\python.exe",
+        "required_executable": BASE_PYTHON,
         "referenced_targets": ("tests/test_acceptance_evidence.py",),
     },
     "Q09": {
-        "required_executable": r"C:\Users\jamie\AppData\Local\Programs\Python\Python312\python.exe",
+        "required_executable": BASE_PYTHON,
         "referenced_targets": ("scripts/acceptance/run_formal_campaign.py",),
     },
     "Q10": {
-        "required_executable": r"C:\Users\jamie\AppData\Local\Programs\Python\Python312\python.exe",
+        "required_executable": BASE_PYTHON,
         "referenced_targets": ("tests/test_acceptance_evidence.py",),
     },
     "Q11": {
-        "required_executable": r"C:\Users\jamie\AppData\Local\Programs\Python\Python312\python.exe",
+        "required_executable": BASE_PYTHON,
         "referenced_targets": ("scripts/acceptance/run_formal_campaign.py",),
     },
     "Q12": {
-        "required_executable": r"C:\Users\jamie\AppData\Local\Programs\Python\Python312\python.exe",
+        "required_executable": BASE_PYTHON,
         "referenced_targets": ("tests/test_native_cleanup_recovery.py",),
     },
     "Q13": {
-        "required_executable": r"C:\Users\jamie\AppData\Local\Programs\Python\Python312\python.exe",
+        "required_executable": BASE_PYTHON,
         "referenced_targets": ("tests/test_sandbox.py",),
     },
     "Q14": {
-        "required_executable": r"C:\Users\jamie\AppData\Local\Programs\Python\Python312\python.exe",
+        "required_executable": BASE_PYTHON,
         "referenced_targets": ("tests/test_acceptance_evidence.py",),
     },
     "Q15": {
-        "required_executable": r"C:\Users\jamie\AppData\Local\Programs\Python\Python312\python.exe",
+        "required_executable": BASE_PYTHON,
         "referenced_targets": ("scripts/run_system_tests.py",),
     },
     "Q16": {
-        "required_executable": r"C:\Users\jamie\AppData\Local\Programs\Python\Python312\python.exe",
+        "required_executable": BASE_PYTHON,
         "referenced_targets": ("scripts/quality.py",),
     },
     "Q18": {
-        "required_executable": r"C:\Users\jamie\AppData\Local\Programs\Python\Python312\python.exe",
+        "required_executable": BASE_PYTHON,
         "referenced_targets": ("tests/test_sandbox.py",),
     },
     "Q19": {
@@ -594,22 +588,22 @@ _ROUTE_METADATA: dict[str, dict[str, object]] = {
         "referenced_targets": ("tests/test_windows_sandbox_native.py",),
     },
     "Q21": {
-        "required_executable": r"C:\Users\jamie\AppData\Local\Programs\Python\Python312\python.exe",
+        "required_executable": BASE_PYTHON,
         "referenced_targets": ("scripts/package_smoke.py",),
     },
     "Q22": {
-        "required_executable": r"C:\Users\jamie\AppData\Local\Programs\Python\Python312\python.exe",
+        "required_executable": BASE_PYTHON,
         "referenced_targets": ("tests/test_persistence.py", "tests/test_package_certification.py"),
     },
     "Q23": {
-        "required_executable": r"C:\Users\jamie\AppData\Local\Programs\Python\Python312\python.exe",
+        "required_executable": BASE_PYTHON,
         "referenced_targets": (
             "tests/test_effects.py",
             "tests/test_capability_acquisition_runtime.py",
         ),
     },
     "Q24": {
-        "required_executable": r"C:\Users\jamie\AppData\Local\Programs\Python\Python312\python.exe",
+        "required_executable": BASE_PYTHON,
         "referenced_targets": (
             "tests/trusted_core",
             "tests/test_recovery_authority.py",
@@ -617,15 +611,15 @@ _ROUTE_METADATA: dict[str, dict[str, object]] = {
         ),
     },
     "Q25": {
-        "required_executable": r"C:\Users\jamie\AppData\Local\Programs\Python\Python312\python.exe",
+        "required_executable": BASE_PYTHON,
         "referenced_targets": ("tests/test_recovery_authority.py",),
     },
     "Q27": {
-        "required_executable": r"C:\Users\jamie\AppData\Local\Programs\Python\Python312\python.exe",
+        "required_executable": BASE_PYTHON,
         "referenced_targets": ("tests/test_production_capability.py",),
     },
     "Q29": {
-        "required_executable": r"C:\Users\jamie\AppData\Local\Programs\Python\Python312\python.exe",
+        "required_executable": BASE_PYTHON,
         "referenced_targets": ("scripts/acceptance/audit_foundation_vision.py",),
     },
 }
@@ -638,6 +632,8 @@ _ROUTE_METADATA["Q20"] = {
     "validation_callable": "jarvis.qualification_routes:validate_quality_evidence(coverage)",
 }
 _ROUTE_METADATA["Q25"] = {
+    "required_executable": BASE_PYTHON,
+    "referenced_targets": ("tests/test_recovery_authority.py",),
     "semantic_contract": ("recovery authority", "symbol/executable binding"),
     "semantic_evidence": (
         "tests/test_recovery_authority.py::test_authority_verifies_each_bound_field_after_valid_authentication",
@@ -657,6 +653,8 @@ _ROUTE_METADATA["Q26"] = {
     ),
 }
 _ROUTE_METADATA["Q27"] = {
+    "required_executable": BASE_PYTHON,
+    "referenced_targets": ("tests/test_production_capability.py",),
     "semantic_contract": ("final contamination and terminal residue",),
     "semantic_evidence": (
         "tests/test_production_capability.py::test_production_sandbox_selection_and_protocol_history_fail_closed",
@@ -691,7 +689,36 @@ _ROUTE_METADATA["Q30"] = {
 STAGES: tuple[QualificationStage, ...] = tuple(QualificationStage(*row) for row in _STAGE_DATA)  # type: ignore[arg-type]
 
 
+def direct_base_executable() -> Path:
+    """Resolve the current machine's direct Python 3.12 installation."""
+
+    if sys.version_info[:2] != (3, 12):
+        raise RuntimeError("qualification requires Python 3.12")
+    executable = Path(getattr(sys, "_base_executable", sys.executable)).resolve()
+    if not executable.is_file():
+        raise FileNotFoundError(executable)
+    return executable
+
+
+def resolve_qualification_manifest(
+    stages: tuple[QualificationStage, ...] | None = None,
+) -> tuple[QualificationStage, ...]:
+    """Bind logical interpreter contracts to this machine for real execution."""
+
+    executable = str(direct_base_executable())
+    selected = stages if stages is not None else STAGES
+    resolved: list[QualificationStage] = []
+    for stage in selected:
+        bound = replace(stage, runner=stage.runner.replace(BASE_PYTHON, executable))
+        if stage.required_executable == BASE_PYTHON:
+            object.__setattr__(bound, "required_executable", executable)
+        resolved.append(bound)
+    return tuple(resolved)
+
+
 def qualification_manifest() -> tuple[QualificationStage, ...]:
+    """Return the portable structural manifest without probing this host."""
+
     return STAGES
 
 

@@ -7,7 +7,11 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
-from jarvis.qualification_manifest import QualificationStage, qualification_manifest
+from jarvis.qualification_manifest import (
+    QualificationStage,
+    qualification_manifest,
+    resolve_qualification_manifest,
+)
 
 _PYTHON = re.compile(r"(?P<path>(?:[A-Za-z]:)?[^ ]*python\.exe)", re.IGNORECASE)
 _TARGET = re.compile(r"(?:tests|scripts)/[A-Za-z0-9_./\\-]+(?:\.py)?")
@@ -162,9 +166,18 @@ def validate_semantic_contracts(root: Path) -> dict[str, object]:
 
 
 def validate_manifest_routes(
-    root: Path, stages: tuple[QualificationStage, ...] | None = None
+    root: Path,
+    stages: tuple[QualificationStage, ...] | None = None,
+    *,
+    machine: bool = False,
 ) -> RoutePreflight:
-    selected = stages if stages is not None else qualification_manifest()
+    selected = (
+        resolve_qualification_manifest(stages)
+        if machine
+        else stages
+        if stages is not None
+        else qualification_manifest()
+    )
     missing_executables: list[str] = []
     missing_targets: list[str] = []
     placeholder: list[str] = []
@@ -196,8 +209,9 @@ def validate_manifest_routes(
                 match = _PYTHON.search(runner)
                 executable = match.group("path") if match else None
             if executable is None:
-                placeholder.append(stage.stage_id)
-        if executable and executable != "git":
+                if stage.stage_id not in placeholder:
+                    placeholder.append(stage.stage_id)
+        if machine and executable and executable != "git":
             executable_path = (
                 Path(executable) if Path(executable).is_absolute() else root / executable
             )
@@ -225,3 +239,9 @@ def validate_manifest_routes(
         missing_targets=tuple(missing_targets),
         placeholder_runners=tuple(placeholder),
     )
+
+
+def validate_machine_routes(root: Path) -> RoutePreflight:
+    """Run the fail-closed executable-availability preflight for qualification."""
+
+    return validate_manifest_routes(root, machine=True)

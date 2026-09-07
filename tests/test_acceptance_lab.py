@@ -122,7 +122,7 @@ async def test_vm_environment_lease_binds_guest_evidence_and_releases(tmp_path: 
 
 @pytest.mark.asyncio
 async def test_runner_executes_vm_and_fault_boundaries_without_host_authority(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     class _CloneProvider(InMemoryVirtualizationProvider):
         async def export(self, instance_id: object, archive: Path) -> None:
@@ -142,6 +142,19 @@ async def test_runner_executes_vm_and_fault_boundaries_without_host_authority(
 
     provider = _CloneProvider()
     environment = VMAcceptanceEnvironment(provider, archive_root=tmp_path / "archives")
+
+    class _DeterministicHostObservation:
+        def __init__(self, *args: object) -> None:
+            del args
+
+        def snapshot(self) -> object:
+            return object()
+
+        def evidence(self, *args: object, **kwargs: object) -> object:
+            del args, kwargs
+            return SimpleNamespace(result=AcceptanceStatus.PASS)
+
+    monkeypatch.setattr(runner_module, "HostSideEffectMonitor", _DeterministicHostObservation)
     runner = AcceptanceRunner(tmp_path, tmp_path / "artifacts", environment)
     vm_spec = next(item for item in SPECS if item.test_id == "078")
     vm_result = await runner._execute(vm_spec, "vm-run", tmp_path / "run")  # noqa: SLF001
