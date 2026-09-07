@@ -143,10 +143,18 @@ def test_structural_routes_do_not_require_host_interpreters() -> None:
 
 def test_machine_routes_resolve_current_workstation() -> None:
     result = validate_machine_routes(Path.cwd())
-    assert result.passed
     assert result.inspected == 30
     assert result.invokable == 27
     assert result.well_defined == 3
+    q19_executable = Path.cwd() / ".venv" / "Scripts" / "python.exe"
+    if q19_executable.is_file():
+        assert result.passed
+        assert result.invokable == 27
+        assert result.missing_executables == ()
+    else:
+        assert not result.passed
+        assert result.invokable == 26
+        assert result.missing_executables == ("Q19",)
 
 
 def test_machine_routes_remain_fail_closed_for_missing_executables() -> None:
