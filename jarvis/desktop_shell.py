@@ -62,10 +62,15 @@ def _labels(values: Iterable[str], name: str, limit: int = 64) -> None:
 
 
 class ShellSection(StrEnum):
-    HOME = "home"
+    OVERVIEW = "overview"
+    HOME = "overview"
+    CHAT = "chat"
     TASKS = "tasks"
     MEMORY = "memory"
     CAPABILITIES = "capabilities"
+    TOOLS = "tools"
+    AUTOMATIONS = "automations"
+    PERMISSIONS = "permissions"
     ACTIVITY = "activity"
     SETTINGS = "settings"
 
@@ -144,10 +149,14 @@ class DesktopShellService:
     """Small UI-facing shell service with generic navigation only."""
 
     _NAVIGATION = (
-        ShellNavigationItem(ShellSection.HOME, "Home"),
+        ShellNavigationItem(ShellSection.OVERVIEW, "Overview"),
+        ShellNavigationItem(ShellSection.CHAT, "Chat"),
         ShellNavigationItem(ShellSection.TASKS, "Tasks"),
         ShellNavigationItem(ShellSection.MEMORY, "Memory"),
         ShellNavigationItem(ShellSection.CAPABILITIES, "Capabilities"),
+        ShellNavigationItem(ShellSection.TOOLS, "Tools"),
+        ShellNavigationItem(ShellSection.AUTOMATIONS, "Automations"),
+        ShellNavigationItem(ShellSection.PERMISSIONS, "Permissions"),
         ShellNavigationItem(ShellSection.ACTIVITY, "Activity"),
         ShellNavigationItem(ShellSection.SETTINGS, "Settings"),
     )
@@ -163,7 +172,7 @@ class DesktopShellService:
             raise DesktopShellValidationError("Safe Mode flag is malformed")
         _text(health, "Shell health", 128)
         self._launch_profiles = launch_profiles or LaunchProfileRegistry()
-        self._section = ShellSection.HOME
+        self._section = ShellSection.OVERVIEW
         self._safe_mode = safe_mode
         self._health = health
 

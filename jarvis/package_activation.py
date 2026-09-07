@@ -70,6 +70,18 @@ def _labels(values: Iterable[str], name: str, limit: int = 128) -> None:
         raise ActivationValidationError(f"{name} are malformed")
 
 
+def _broker_failure_evidence(stage: str, error: Exception) -> tuple[str, str]:
+    """Return bounded typed evidence without persisting exception text."""
+
+    error_type = type(error).__name__
+    if not error_type.isidentifier():
+        error_type = "UnknownException"
+    return (
+        f"{stage}_BROKER_EXCEPTION:{error_type}",
+        f"{stage.lower()} broker raised a trusted boundary exception",
+    )
+
+
 def _timestamp(value: datetime, name: str) -> None:
     if not isinstance(value, datetime) or value.tzinfo is None:
         raise ActivationValidationError(f"{name} must be timezone-aware")
@@ -461,7 +473,11 @@ class PackageActivationService:
             if not isinstance(result, ShadowExecution):
                 raise ActivationValidationError("Shadow broker returned malformed evidence")
         except Exception as error:
-            return self._quarantine(session, "Shadow broker failed", (str(error),))
+            return self._quarantine(
+                session,
+                "Shadow broker failed",
+                _broker_failure_evidence("SHADOW", error),
+            )
         try:
             attestation = self._trusted_attestation(
                 session, result.attestation, ActivationState.SHADOW
@@ -504,7 +520,11 @@ class PackageActivationService:
             if not isinstance(result, CanaryExecution):
                 raise ActivationValidationError("Canary broker returned malformed evidence")
         except Exception as error:
-            return self._quarantine(session, "Canary broker failed", (str(error),))
+            return self._quarantine(
+                session,
+                "Canary broker failed",
+                _broker_failure_evidence("CANARY", error),
+            )
         try:
             attestation = self._trusted_attestation(
                 session, result.attestation, ActivationState.CANARY

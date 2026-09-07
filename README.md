@@ -93,10 +93,13 @@ running. Do not point the local default at an unreviewed remote endpoint.
 
 ## Configuration is explicit
 
-JARVIS reads explicit `JARVIS_` process environment variables and typed defaults
-from [jarvis/core/config.py](jarvis/core/config.py). It does **not**
-automatically load `.env` (`env_file=None`). `.env.example` is a reference
-template, not an implicitly loaded runtime configuration file.
+JARVIS resolves configuration deterministically: explicit `JARVIS_ENV_FILE`, a
+project-root `.env` in a local checkout, `%LOCALAPPDATA%\JARVIS\config\.env`,
+then typed defaults. Explicit `JARVIS_` process environment variables retain
+precedence over file values and are displayed as overrides in Desktop Settings.
+Settings validates the complete candidate configuration and atomically replaces
+the selected `.env`; provider, speech, model, path, and security-sensitive
+settings require an explicit restart to take effect.
 
 Set values in a trusted PowerShell session or owner launcher, for example:
 
@@ -125,6 +128,31 @@ python -m jarvis.desktop
 Successful desktop startup opens the JARVIS window; provider availability is
 shown separately and does not grant optional hardware capability authority.
 Voice, camera, and computer-control features are not automatically enabled.
+
+The desktop UI is a rendering client. A dedicated backend-owner thread creates
+the one canonical runtime and retains one asyncio event loop for all runtime,
+SQLite, streaming, provider, speech, and shutdown work. Qt never calls a store
+directly. If runtime startup fails closed, Safe Mode provides bounded error
+details and Settings without enabling normal chat, tasks, speech, or capability
+execution.
+
+For literal loopback Ollama endpoints, JARVIS probes before optionally running
+one owned `ollama serve` process. A reachable server is always reused. The
+desktop distinguishes server availability, installed models (`/api/tags`),
+loaded models (`/api/ps`), and configured-model chat readiness; it never pulls
+a missing model automatically.
+
+When enabled, STT uses the runtime-owned faster-whisper and on-demand
+SoundDevice recorder. TTS prefers optional local Piper with pyttsx3 fallback.
+Piper is GPL-3.0-or-later third-party software; see
+[Piper licensing](docs/piper-licensing.md). It is not bundled by the base
+package, and commercial distribution needs separate review.
+
+Recovery identity is stored under the stable application configuration root,
+with a narrow legacy migration from `backups/installation-id`. This prevents
+recreated backup directories or temporary test roots from rotating recovery
+credential target identities. Automated tests use an in-memory recovery backend
+and do not write Windows Credential Manager targets.
 
 For a local health surface instead:
 

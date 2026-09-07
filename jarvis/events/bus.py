@@ -17,6 +17,12 @@ EventHandler = Callable[[EventEnvelope[EventPayload]], Awaitable[None]]
 
 
 class EventBus(Protocol):
+    @property
+    def closed(self) -> bool: ...
+
+    @property
+    def pending_consumer_count(self) -> int: ...
+
     async def publish(self, event: EventEnvelope[EventPayload]) -> bool: ...
     def publish_nowait(self, event: EventEnvelope[EventPayload]) -> bool: ...
     async def subscribe(self, handler: EventHandler) -> str: ...
@@ -63,6 +69,18 @@ class InMemoryEventBus:
         self._lock = asyncio.Lock()
         self._sync_lock = Lock()
         self._chain_counts: OrderedDict[UUID, int] = OrderedDict()
+
+    @property
+    def closed(self) -> bool:
+        """Return the owner-controlled terminal state for observation."""
+
+        return self._closed
+
+    @property
+    def pending_consumer_count(self) -> int:
+        """Return the number of live consumer owners without exposing queues."""
+
+        return len(self._subscribers)
 
     async def publish(self, event: EventEnvelope[EventPayload]) -> bool:
         if self._closed:

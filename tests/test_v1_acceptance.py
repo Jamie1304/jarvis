@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import os
 import shutil
 import sys
 from collections.abc import Mapping
@@ -22,6 +23,7 @@ from uuid import uuid4
 
 import httpx
 import pytest
+from jarvis.acceptance.evidence import collect_qualification_lifecycle
 from jarvis.ai.providers.registry import (
     ModelMetadata,
     ProviderDefinition,
@@ -45,6 +47,7 @@ from jarvis.capabilities import (
     EffectMetadata,
     EnvironmentGraph,
     Reversibility,
+    action_schema_dict,
 )
 from jarvis.capability_acquisition import (
     AcquisitionStage,
@@ -85,7 +88,7 @@ from jarvis.environment_discovery import (
     DiscoveryObservation,
     EnvironmentIdentity,
 )
-from jarvis.goal_supervisor import CapabilityAcquisitionRequest
+from jarvis.goal_supervisor import CapabilityAcquisitionRequest, RegistryGoalAnalyzer
 from jarvis.integration_package import (
     IntegrationPackage,
     PackageBoundary,
@@ -108,6 +111,8 @@ from jarvis.package_certification import (
     CertificationRequest,
     CertificationStage,
     CertificationStageResult,
+    package_fingerprints,
+    worker_compatibility_fingerprint,
 )
 from jarvis.package_reviewer import PackageSourceFile
 from jarvis.package_runtime import PackageRuntimeHealth, PreparedPackageRuntime
@@ -2310,6 +2315,181 @@ async def test_v1_acceptance_graceful_shutdown_and_no_isolated_authority(tmp_pat
 async def test_v1_production_composition_acquires_randomized_capability_and_restores_it(
     tmp_path: Path,
 ) -> None:
+    runtimes: list[ApplicationRuntime] = []
+    try:
+        await _run_v1_production_composition_acquires_randomized_capability_and_restores_it(
+            tmp_path, runtimes
+        )
+    finally:
+        for owned_runtime in reversed(runtimes):
+            await owned_runtime.aclose()
+
+
+def _lifecycle_terminal_detail(
+    container: object,
+    *,
+    goal_id: object,
+    goal_state: object | None,
+    acquisition_report: object | None,
+    qualification_run_id: str,
+) -> dict[str, object]:
+    container_any = cast(Any, container)
+    acquisition = container_any.capability_acquisition
+    run = getattr(acquisition, "last_run", None)
+    lifecycle: dict[str, object]
+    try:
+        lifecycle = collect_qualification_lifecycle(
+            container,
+            qualification_run_id=qualification_run_id,
+        ).as_dict()
+    except Exception as error:  # diagnostic projection cannot replace outcome
+        lifecycle = {
+            "result": "NOT_CAPTURED",
+            "error_class": type(error).__name__,
+        }
+    latest_diagnostic: Mapping[str, object] = {}
+    sandbox = getattr(container, "production_sandbox", None)
+    history = getattr(sandbox, "protocol_diagnostic_history", lambda: ())()
+    if history:
+        candidate = history[-1]
+        if isinstance(candidate, Mapping):
+            latest_diagnostic = candidate
+    security = getattr(sandbox, "status", lambda: None)()
+    registry_identity: str | None = None
+    capability_id = getattr(run, "capability_id", None)
+    if isinstance(capability_id, str):
+        try:
+            registry_identity = getattr(
+                container_any.capability_registry.inspect(capability_id),
+                "capability_id",
+                None,
+            )
+        except Exception:
+            registry_identity = None
+    package = None
+    action_id = None
+    package_id = getattr(run, "package_id", None)
+    package_version = getattr(run, "package_version", None)
+    package_hash = getattr(run, "package_hash", None)
+    if isinstance(package_id, str) and isinstance(package_hash, str):
+        try:
+            package = container_any.package_store.load(
+                package_id,
+                str(package_version or "1.0.0"),
+                package_hash,
+            )
+            if package.action_specs:
+                action_id = package.action_specs[0].action_id
+        except Exception:
+            package = None
+    job = latest_diagnostic.get("job")
+    observed_active = job.get("active_process_count") if isinstance(job, Mapping) else None
+    base_executable = getattr(sys, "_base_executable", None)
+    assert isinstance(base_executable, str)
+    goal = {
+        "applicable": goal_state is not None,
+        "goal_id": str(goal_id),
+        "status": (
+            getattr(getattr(goal_state, "status", None), "value", None)
+            if goal_state is not None
+            else "NOT_EXECUTED"
+        ),
+        "last_error": getattr(goal_state, "last_error", None),
+        "evidence": list(getattr(goal_state, "evidence", ())),
+        "task_id": (
+            str(cast(Any, goal_state).task_id)
+            if getattr(goal_state, "task_id", None) is not None
+            else None
+        ),
+        "capability_id": getattr(goal_state, "capability_id", None),
+    }
+    return {
+        "goal": goal,
+        "acquisition": {
+            "report": (
+                {
+                    "active": getattr(acquisition_report, "active", None),
+                    "stage": getattr(acquisition_report, "stage", None),
+                    "capability_id": getattr(acquisition_report, "capability_id", None),
+                    "detail": getattr(acquisition_report, "detail", None),
+                    "evidence": list(getattr(acquisition_report, "evidence", ())),
+                }
+                if acquisition_report is not None
+                else None
+            ),
+            "run_id": str(run.run_id) if run is not None else None,
+            "stage": getattr(getattr(run, "stage", None), "value", None),
+            "capability_id": capability_id,
+            "action_id": action_id,
+            "package_id": package_id,
+            "package_hash": package_hash,
+            "certification": (
+                {
+                    "result": "PASS" if getattr(run, "certification", None) else None,
+                    "manifest_fingerprint": lifecycle.get("manifest_fingerprint"),
+                    "stages": [
+                        {
+                            "stage": getattr(getattr(item, "stage", None), "value", None),
+                            "passed": item.passed,
+                        }
+                        for item in getattr(getattr(run, "certification", None), "stages", ())
+                    ],
+                }
+                if run is not None
+                else None
+            ),
+            "activation": (
+                {
+                    "activation_id": getattr(
+                        getattr(run, "activation", None), "activation_id", None
+                    ),
+                    "states": [
+                        getattr(getattr(item, "to_state", None), "value", None)
+                        for item in getattr(getattr(run, "activation", None), "history", ())
+                    ],
+                    "state": getattr(
+                        getattr(getattr(run, "activation", None), "state", None), "value", None
+                    ),
+                }
+                if run is not None
+                else None
+            ),
+            "registry_identity": registry_identity,
+            "persistence_result": lifecycle.get("persistence_result"),
+            "cleanup_transaction_ids": lifecycle.get("cleanup_transaction_ids", []),
+            "cleanup_states": lifecycle.get("cleanup_states", []),
+            "recovery_unresolved": lifecycle.get("unresolved_recovery_receipts", []),
+            "lifecycle_evidence": lifecycle,
+        },
+        "native": {
+            "runtime_id": getattr(container, "runtime_instance_id", None),
+            "worker_identity": latest_diagnostic.get("integration_id"),
+            "worker_pid": latest_diagnostic.get("pid"),
+            "worker_compatibility_hash": worker_compatibility_fingerprint(),
+            "interpreter": sys.executable,
+            "base_executable": base_executable,
+            "appcontainer": (
+                bool(getattr(security, "executable_isolation", False))
+                if security is not None
+                else None
+            ),
+            "job_limit": getattr(security, "max_processes", None),
+            "max_active": getattr(security, "max_processes", None),
+            "observed_active_process_count": observed_active,
+            "runtime_closed": bool(getattr(container, "closed", False)),
+            "eventbus_closed": bool(
+                getattr(getattr(container, "event_bus", None), "closed", False)
+            ),
+            "owned_pending_tasks": getattr(
+                getattr(container, "event_bus", None), "pending_consumer_count", None
+            ),
+        },
+    }
+
+
+async def _run_v1_production_composition_acquires_randomized_capability_and_restores_it(
+    tmp_path: Path, runtimes: list[ApplicationRuntime]
+) -> None:
     """Exercise the real production graph without a RuntimeTestFixture.
 
     The provider is synthetic, but it is registered through the same trusted
@@ -2318,42 +2498,29 @@ async def test_v1_production_composition_acquires_randomized_capability_and_rest
     hot-load, and verification boundaries.
     """
 
-    suffix = uuid4().hex[:12]
+    suffix = os.environ.get("JARVIS_R4R_REPLAY_SUFFIX") or uuid4().hex[:12]
     capability = f"synthetic-capability-{suffix}"
     action_id = f"transform-{suffix}"
     input_value = f"input-{suffix}"
-    input_salt = f"salt-{uuid4().hex[:8]}"
-    expected_output = f"{input_value}|{input_salt}"
-    action_source = "\n".join(
-        (
-            "import json",
-            "import sys",
-            f"CAPABILITY_ID = {json.dumps(capability)}",
-            f"ACTION_ID = {json.dumps(action_id)}",
-            "for line in sys.stdin:",
-            "    try:",
-            "        message = json.loads(line)",
-            '        request_id = message["request_id"]',
-            '        integration_id = message["integration_id"]',
-            '        kind = message["kind"]',
-            '        if kind == "health":',
-            '            payload = {"status": "healthy", "capability": CAPABILITY_ID}',
-            '        elif kind == "inspect":',
-            '            payload = {"status": "observed", "capability": CAPABILITY_ID}',
-            '        elif kind in {"shadow", "canary"}:',
-            '            payload = {"status": kind, "capability": CAPABILITY_ID}',
-            "        elif kind == ACTION_ID:",
-            '            action_input = message["payload"]',
-            '            payload = {"result": action_input["value"] + "|" + action_input["salt"]}',
-            "        else:",
-            '            raise ValueError("action")',
-            '        print(json.dumps({"version": 1, "request_id": request_id, '
-            '"integration_id": integration_id, "kind": "result", "response": True, '
-            '"payload": payload}, separators=(",", ":")), flush=True)',
-            "    except (KeyError, TypeError, ValueError):",
-            "        break",
-        )
+    input_salt = os.environ.get("JARVIS_R4R_REPLAY_SALT") or f"salt-{uuid4().hex[:8]}"
+    print(
+        "R4R_STRESS_CASE "
+        + json.dumps(
+            {
+                "capability_id": capability,
+                "action_id": action_id,
+                "input_value": input_value,
+                "input_salt": input_salt,
+                "replay_data": {
+                    "capability_suffix": suffix,
+                    "input_salt": input_salt,
+                },
+            },
+            sort_keys=True,
+        ),
+        flush=True,
     )
+    expected_output = f"{input_value}|{input_salt}"
     response = json.dumps(
         {
             "kind": "response",
@@ -2387,20 +2554,29 @@ async def test_v1_production_composition_acquires_randomized_capability_and_rest
                             },
                             "permissions": [],
                             "verification": ["adapter_output_schema", "action_completed"],
+                            "operation": "concat_strings",
+                            "fields": ["value", "salt"],
+                            "delimiter": "|",
                         }
                     ],
-                    "source": action_source,
                 },
                 sort_keys=True,
             ),
         },
         sort_keys=True,
     )
+    provider_instances: list[FakeAIProvider] = []
+
+    def create_provider(_configuration: Mapping[str, object]) -> FakeAIProvider:
+        provider = FakeAIProvider((response,))
+        provider_instances.append(provider)
+        return provider
+
     provider_registry = ProviderRegistry(
         (
             ProviderDefinition(
                 ProviderMetadata("synthetic-local", "Synthetic local provider", "1", True),
-                lambda _configuration: FakeAIProvider((response,)),
+                create_provider,
                 (
                     ModelMetadata(
                         "synthetic-model",
@@ -2433,6 +2609,7 @@ async def test_v1_production_composition_acquires_randomized_capability_and_rest
             }
         ),
     )
+    runtimes.append(runtime)
     assert runtime.status is RuntimeStatus.READY, runtime.error
     assert runtime.container is not None
     container = runtime.container
@@ -2464,7 +2641,6 @@ async def test_v1_production_composition_acquires_randomized_capability_and_rest
     # coordinator, but stops before activation or authority.  The second
     # verified observation is required by the normal evidence policy.
     from jarvis.capability_opportunities import (
-        CapabilityOpportunityError,
         OpportunityEvidence,
         OpportunityEvidenceSource,
         OpportunityPreparationState,
@@ -2492,12 +2668,41 @@ async def test_v1_production_composition_acquires_randomized_capability_and_rest
     )
     assert opportunity is not None
     prepared_opportunity = await container.opportunity_engine.prepare(opportunity.opportunity_id)
-    # This generated opportunity uses an action without an application-owned
-    # semantic oracle.  Certification therefore fails closed; evidence alone
-    # must not make the opportunity proposal-ready.
-    assert prepared_opportunity.status is OpportunityStatus.FAILED
-    assert prepared_opportunity.preparation_state is OpportunityPreparationState.FAILED
-    assert prepared_opportunity.decision.value == "prepare"
+    acquisition_run = container.capability_acquisition.last_run
+    provider = provider_instances[0] if provider_instances else None
+    preparation_diagnostic = {
+        "opportunity": {
+            "id": str(prepared_opportunity.opportunity_id),
+            "semantic_need": prepared_opportunity.semantic_need,
+            "status": prepared_opportunity.status.value,
+            "preparation_state": prepared_opportunity.preparation_state.value,
+            "decision": prepared_opportunity.decision.value,
+            "last_error": prepared_opportunity.last_error,
+            "remaining_authority": prepared_opportunity.remaining_authority,
+        },
+        "acquisition_run": repr(acquisition_run),
+        "provider": {
+            "provider_id": "synthetic-local",
+            "instance_count": len(provider_instances),
+            "configured_response_count": 1,
+            "request_count": len(provider.requests) if provider is not None else 0,
+        },
+        "flight_recorder": (
+            container.capability_acquisition.flight_recorder.as_dict()
+            if container.capability_acquisition.flight_recorder is not None
+            else None
+        ),
+        "persisted": repr(container.opportunity_store.get(prepared_opportunity.opportunity_id)),
+    }
+    print(
+        "R4R_SINGLE_PREPARATION " + json.dumps(preparation_diagnostic, sort_keys=True), flush=True
+    )
+    # The constrained default observation has a trusted generic semantic
+    # oracle. It may be certified for proposal, but remains inactive pending
+    # the ordinary trusted activation authority.
+    assert prepared_opportunity.status is OpportunityStatus.READY_TO_PROPOSE
+    assert prepared_opportunity.preparation_state is OpportunityPreparationState.READY
+    assert prepared_opportunity.decision.value == "propose"
     assert prepared_opportunity.remaining_authority == ("trusted activation approval",)
     reobserved_opportunity = container.opportunity_engine.observe(
         f"synthetic proactive capability {suffix}",
@@ -2509,8 +2714,8 @@ async def test_v1_production_composition_acquires_randomized_capability_and_rest
         workspace="production-v1-workspace",
     )
     assert reobserved_opportunity is not None
-    assert reobserved_opportunity.status is OpportunityStatus.FAILED
-    assert reobserved_opportunity.preparation_state is OpportunityPreparationState.FAILED
+    assert reobserved_opportunity.status is OpportunityStatus.READY_TO_PROPOSE
+    assert reobserved_opportunity.preparation_state is OpportunityPreparationState.READY
     assert reobserved_opportunity.decision is prepared_opportunity.decision
     assert reobserved_opportunity.last_error == prepared_opportunity.last_error
     assert container.capability_acquisition.last_run is not None
@@ -2520,10 +2725,9 @@ async def test_v1_production_composition_acquires_randomized_capability_and_rest
     }
     assert container.capability_registry.manifests() == ()
 
-    # A definitive preparation failure cannot be changed into a declined state;
-    # failed opportunities remain failed and cannot enter the proposal lifecycle.
-    with pytest.raises(CapabilityOpportunityError):
-        container.opportunity_engine.decline(opportunity.opportunity_id)
+    # Certification does not activate the package or grant an authority path.
+    # The owner may decline this inactive proposal without changing the registry.
+    container.opportunity_engine.decline(opportunity.opportunity_id)
     assert container.tool_registry.find_by_capability(capability) == ()
 
     from jarvis.goal_supervisor import GoalBudget, GoalIntent, GoalStatus
@@ -2539,12 +2743,156 @@ async def test_v1_production_composition_acquires_randomized_capability_and_rest
     # The randomized capability is absent from the initial registry; no
     # built-in tool can satisfy this challenge before acquisition.
     assert container.tool_registry.find_by_capability(capability) == ()
+
+    if os.environ.get("JARVIS_R4R_ACQUISITION_ONLY") == "1":
+        analysis = await RegistryGoalAnalyzer().analyze(intent, container.capability_registry)
+        research = await container.capability_acquisition.research(intent, analysis)
+        if research.acquisition is None:
+            raise AssertionError("production acquisition diagnostic produced no request")
+        acquisition_report = await container.capability_acquisition.acquire(research.acquisition)
+        await runtime.aclose()
+        diagnostic = _lifecycle_terminal_detail(
+            container,
+            goal_id=intent.goal_id,
+            goal_state=None,
+            acquisition_report=acquisition_report,
+            qualification_run_id=os.environ.get(
+                "JARVIS_R4R_QUALIFICATION_RUN_ID", f"single-{capability}"
+            ),
+        )
+        print("R4R_LIFECYCLE_TERMINAL " + json.dumps(diagnostic, sort_keys=True), flush=True)
+        assert acquisition_report.active, acquisition_report.detail
+        assert acquisition_report.stage == AcquisitionStage.ACTIVE.value
+        assert container.capability_acquisition.last_run is not None
+        assert container.capability_acquisition.last_run.stage is AcquisitionStage.ACTIVE
+        return
+
     state = await container.goal_supervisor.start(intent, GoalBudget(max_model_calls=2))
+    last_run = container.capability_acquisition.last_run
+    activation_record = None
+    if (
+        last_run is not None
+        and isinstance(last_run.package_id, str)
+        and isinstance(last_run.package_version, SemanticVersion)
+    ):
+        try:
+            activation_record = container.package_activation.record_for(
+                last_run.package_id,
+                last_run.package_version,
+            )
+        except Exception as error:  # pragma: no cover - diagnostic fallback
+            activation_record = f"diagnostic lookup failed: {error!r}"
+    diagnostic_state = {
+        "state": repr(state),
+        "last_run": repr(last_run),
+        "activation_record": repr(activation_record),
+        "sandbox_status": repr(container.production_sandbox.status()),
+        "sandbox_protocol_diagnostics": repr(container.production_sandbox.protocol_diagnostics()),
+        "flight_recorder": (
+            container.capability_acquisition.flight_recorder.as_dict()
+            if container.capability_acquisition.flight_recorder is not None
+            else None
+        ),
+    }
+    print(
+        "R4R_LIFECYCLE_TERMINAL "
+        + json.dumps(
+            _lifecycle_terminal_detail(
+                container,
+                goal_id=intent.goal_id,
+                goal_state=state,
+                acquisition_report=None,
+                qualification_run_id=f"goal-{capability}",
+            ),
+            sort_keys=True,
+        ),
+        flush=True,
+    )
+    candidate_evidence: dict[str, object] = {
+        "capability_id": capability,
+        "action_id": action_id,
+        "input": {"value": input_value, "salt": input_salt},
+        "expected_output": expected_output,
+        "package": None,
+        "manifest": None,
+        "worker_compatibility": "NOT_COMPUTED",
+    }
+    if last_run is not None and last_run.package_id and last_run.package_hash:
+        try:
+            candidate = container.package_store.load(
+                last_run.package_id,
+                last_run.package_version or "1.0.0",
+                last_run.package_hash,
+            )
+            sources = container.package_store.source_files(candidate)
+            source_hash, dependency_hash, manifest_hash = package_fingerprints(candidate, sources)
+            action = candidate.action_specs[0] if candidate.action_specs else None
+            payload = json.loads(sources[0].content) if sources else {}
+            candidate_evidence["package"] = {
+                "package_id": candidate.package_id,
+                "version": str(candidate.version),
+                "package_hash": candidate.package_hash,
+                "entries": [
+                    {
+                        "path": entry.path,
+                        "boundary": entry.boundary.value,
+                        "content_hash": entry.content_hash,
+                    }
+                    for entry in candidate.entries
+                ],
+                "dependencies": list(candidate.dependency_lock),
+                "permissions": [item.value for item in candidate.permissions],
+                "payload": {
+                    "path": sources[0].path if sources else None,
+                    "sha256": hashlib.sha256(sources[0].content.encode()).hexdigest()
+                    if sources
+                    else None,
+                    "bytes": len(sources[0].content.encode()) if sources else 0,
+                    "schema": payload.get("schema"),
+                    "format": payload.get("format"),
+                },
+                "fingerprints": {
+                    "source": source_hash,
+                    "dependency": dependency_hash,
+                    "manifest": manifest_hash,
+                },
+            }
+            if action is not None:
+                candidate_evidence["manifest"] = {
+                    "capability_id": action.capability_id,
+                    "integration_owner": candidate.package_id,
+                    "version": str(candidate.version),
+                    "actions": ["inspect", action.action_id],
+                    "input_schema": action_schema_dict(action.input_schema),
+                    "output_schema": action_schema_dict(action.output_schema),
+                    "permissions": [item.value for item in candidate.permissions],
+                    "dependencies": list(candidate.dependency_lock),
+                    "content_hash": candidate.package_hash,
+                }
+            from jarvis.package_certification import worker_compatibility_fingerprint
+
+            candidate_evidence["worker_compatibility"] = worker_compatibility_fingerprint()
+        except Exception as error:  # pragma: no cover - evidence must not mask outcome
+            candidate_evidence["package"] = {
+                "capture": "UNAVAILABLE",
+                "error_class": type(error).__name__,
+            }
+    print("R4R_STRESS_CANDIDATE " + json.dumps(candidate_evidence, sort_keys=True), flush=True)
+    if not container.tool_registry.find_by_capability(capability):
+        print(
+            "R4R_STRESS_FAILURE " + json.dumps(diagnostic_state, sort_keys=True),
+            flush=True,
+        )
     generated_records = container.tool_registry.find_by_capability(capability)
     assert generated_records, state
     assert all(record.usable for record in generated_records), [
         (record.registration_status, record.health) for record in generated_records
     ]
+    if state.status is not GoalStatus.COMPLETED:
+        print(
+            "R4R_STRESS_RUNTIME_FAILURE " + json.dumps(diagnostic_state, sort_keys=True),
+            flush=True,
+        )
     assert state.status is GoalStatus.COMPLETED, state.last_error
     assert state.capability_id is not None
     assert state.capability_id == capability
@@ -2561,6 +2909,36 @@ async def test_v1_production_composition_acquires_randomized_capability_and_rest
     assert run.certification is not None
     assert run.verification is not None
     assert run.verification.passed
+    qualification_evidence = collect_qualification_lifecycle(
+        container,
+        qualification_run_id=f"single-{capability_id}",
+    )
+    assert qualification_evidence.activation_id == run.activation.activation_id
+    assert qualification_evidence.active
+    assert qualification_evidence.cleanup_transaction_ids
+    assert qualification_evidence.result == "QUALIFICATION_PASS"
+    security_status = container.production_sandbox.status()
+    assert security_status is not None
+    print(
+        "R4R_STRESS_SECURITY "
+        + json.dumps(
+            {
+                "appcontainer_profile": security_status.appcontainer_profile,
+                "mode": security_status.mode.value,
+                "executable_isolation": security_status.executable_isolation,
+            },
+            sort_keys=True,
+        ),
+        flush=True,
+    )
+    if container.capability_acquisition.flight_recorder is not None:
+        print(
+            "R4R_FLIGHT "
+            + json.dumps(
+                container.capability_acquisition.flight_recorder.as_dict(), sort_keys=True
+            ),
+            flush=True,
+        )
     manifest = container.capability_registry.inspect(capability_id)
     assert state.task_id is not None
     plan = container.task_controller.inspect_plan(state.task_id)
@@ -2603,6 +2981,7 @@ async def test_v1_production_composition_acquires_randomized_capability_and_rest
         provider_registry=provider_registry,
         recovery_key_backend=recovery_backend,
     )
+    runtimes.append(restarted)
     assert restarted.status is RuntimeStatus.READY, restarted.error
     assert restarted.container is not None
     assert restarted.container.capability_lifecycle_restorer is not None
@@ -2657,6 +3036,7 @@ async def test_v1_production_composition_acquires_randomized_capability_and_rest
         provider_registry=provider_registry,
         recovery_key_backend=recovery_backend,
     )
+    runtimes.append(negative)
     assert negative.status is RuntimeStatus.READY, negative.error
     assert negative.container is not None
     assert negative.container.capability_lifecycle_restorer is not None

@@ -20,6 +20,7 @@ from jarvis.core.config import Settings
 from jarvis.credentials import CredentialVault
 from jarvis.effects import CompensationService
 from jarvis.environment_discovery import EnvironmentDiscoveryService
+from jarvis.events import InMemoryEventBus
 from jarvis.memory.control import MemoryControlService
 from jarvis.memory.services import MemoryConsistencyService
 from jarvis.planning.models import PlanningTaskStatus
@@ -93,7 +94,7 @@ async def test_canonical_runtime_calculates_and_recovers_persisted_task(tmp_path
     assert isinstance(runtime.container.memory_control, MemoryControlService)
     assert runtime.container.backup.installation_id
     assert runtime.container.paths.backups.is_dir()
-    assert (runtime.container.paths.backups / "installation-id").is_file()
+    assert (runtime.container.paths.config / "installation-id").is_file()
     assert runtime.container.user_model_store.database_path == (
         runtime.container.paths.user_model_database
     )
@@ -202,6 +203,33 @@ async def test_runtime_shutdown_is_idempotent(tmp_path: Path) -> None:
     await asyncio.gather(runtime.aclose(), runtime.aclose())
     await runtime.aclose()
     assert runtime.status.value == RuntimeStatus.STOPPED.value
+
+
+@pytest.mark.asyncio
+async def test_runtime_owner_closes_event_consumers_after_assertion_failure(
+    tmp_path: Path,
+) -> None:
+    runtime = ApplicationRuntime.create(
+        Settings(app_data_dir=tmp_path / "jarvis-data", ai_provider="ollama")
+    )
+    assert runtime.container is not None
+    event_bus = runtime.container.event_bus
+    assert isinstance(event_bus, InMemoryEventBus)
+
+    async def handler(_event: object) -> None:
+        return None
+
+    await event_bus.subscribe(handler)
+    owned_tasks = tuple(item[2] for item in event_bus._subscribers.values())  # noqa: SLF001
+    try:
+        with pytest.raises(AssertionError):
+            raise AssertionError("synthetic acceptance assertion failure")
+    finally:
+        await runtime.aclose()
+
+    assert runtime.status is RuntimeStatus.STOPPED
+    assert not event_bus._subscribers  # noqa: SLF001
+    assert all(task.done() for task in owned_tasks)
 
 
 def test_production_application_and_desktop_do_not_import_legacy_orchestrator() -> None:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import sqlite3
 from dataclasses import replace
 from datetime import UTC, datetime
@@ -23,6 +24,25 @@ from jarvis.state import SQLiteStateStore, StateStoreError
 from jarvis.state.models import ApplicationState, TaskState
 
 from tests.fakes import FakeAIProvider, FakeRecorder, FakeSttProvider, FakeTtsProvider
+
+
+def test_runtime_composes_optional_faster_whisper_and_piper_without_hardware(
+    tmp_path: Path,
+) -> None:
+    runtime = ApplicationRuntime.create(
+        Settings(
+            app_data_dir=tmp_path / "data",
+            ai_provider="ollama",
+            stt_enabled=True,
+            tts_enabled=True,
+            tts_provider="piper",
+        )
+    )
+
+    assert runtime.container is not None
+    assert runtime.container.stt is not None
+    assert runtime.container.tts is not None
+    asyncio.run(runtime.aclose())
 
 
 @pytest.mark.asyncio

@@ -374,3 +374,16 @@ async def test_stream_failure_stops_tts_and_barge_in_rebuilds_response_session()
     )
     await service.barge_in(service.create_conversation())
     assert rebuilt is True
+
+
+@pytest.mark.asyncio
+async def test_stop_speaking_does_not_create_or_cancel_a_conversation() -> None:
+    tts_provider = FakeTtsProvider()
+    service = JarvisAssistantService(
+        ConversationService(FakeAIProvider(), model="fake-model", context_limit=1024),
+        tts=TextToSpeechService(tts_provider, enabled=True),
+    )
+
+    await service.stop_speaking()
+
+    assert tts_provider.stopped is True

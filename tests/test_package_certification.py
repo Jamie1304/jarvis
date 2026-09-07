@@ -202,6 +202,9 @@ def test_each_certification_failure_stops_at_the_failed_stage(stage: Certificati
         PackageCertifier().certify(request(item), cert_hooks)
     assert failure.value.stage is stage
     assert failure.value.evidence[-1].stage is stage
+    assert failure.value.reason.gate is stage
+    assert failure.value.code == f"CERTIFICATION_{stage.value}_FAILED"
+    assert failure.value.safe_detail
     assert CertificationStage.CERTIFIED not in order
 
 

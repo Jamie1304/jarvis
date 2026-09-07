@@ -3,6 +3,8 @@ from __future__ import annotations
 import sqlite3
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
+from typing import Any, cast
 
 import pytest
 from jarvis.capability_lifecycle import (
@@ -265,6 +267,62 @@ def test_lifecycle_store_rejects_invalid_creation_and_duplicate_versions(tmp_pat
         store.create(record)
     assert store.load("missing", str(item.version)) is None
     assert len(store.list()) == 1
+    store.close()
+
+
+def test_lifecycle_store_rejects_malformed_attestation_and_revision_boundaries(
+    tmp_path: Path,
+) -> None:
+    _, item, _, record, store = _durable_fixture(tmp_path)
+    for reference in ("", "not-adoption", "adoption-attestation:" + "x" * 513):
+        with pytest.raises(CapabilityLifecycleError):
+            store.bind_adoption_attestation(
+                record,
+                attestation_reference=reference,
+                expected_revision=1,
+            )
+    with pytest.raises(CapabilityLifecycleError, match="no durable"):
+        store.bind_adoption_attestation(
+            cast(Any, SimpleNamespace(package_id="missing", version=record.version)),
+            attestation_reference="adoption-attestation:missing",
+            expected_revision=1,
+        )
+    with pytest.raises(CapabilityLifecycleError, match="revision"):
+        store.save(record, expected_revision=0)
+    with pytest.raises(CapabilityLifecycleError, match="transaction"):
+        store.save(record, expected_revision=1, transaction_state="PENDING")
+    other_item = _durable_fixture(tmp_path / "other")
+    missing_record = replace(
+        other_item[3],
+        package_id="missing",
+        certification=replace(other_item[3].certification, package_id="missing"),
+    )
+    with pytest.raises(CapabilityLifecycleError, match="no durable"):
+        store.save(missing_record, expected_revision=1)
+    other_item[4].close()
+    store.close()
+
+
+def test_lifecycle_schema_identity_and_runtime_swap_guards(tmp_path: Path) -> None:
+    database = tmp_path / "migration.sqlite3"
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            "CREATE TABLE capability_lifecycle_schema("
+            "version INTEGER PRIMARY KEY, name TEXT NOT NULL)"
+        )
+        connection.execute(
+            "INSERT INTO capability_lifecycle_schema(version, name) VALUES (1, 'wrong')"
+        )
+        connection.commit()
+    with pytest.raises(CapabilityLifecycleError, match="migration identity"):
+        SQLiteCapabilityLifecycleStore(database)
+
+    _, item, _, record, store = _durable_fixture(tmp_path / "runtime")
+    with pytest.raises(CapabilityLifecycleConcurrencyError):
+        store.begin_runtime_swap(replace(record, state=ActivationState.CANARY), expected_revision=1)
+    canary = replace(record, state=ActivationState.CANARY)
+    with pytest.raises(CapabilityLifecycleConcurrencyError):
+        store.abort_runtime_swap(canary, expected_revision=1)
     store.close()
 
 

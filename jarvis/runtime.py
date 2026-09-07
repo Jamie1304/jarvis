@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import os
 import re
 import sqlite3
+import sys
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -27,6 +29,7 @@ from jarvis.adoption import (
 from jarvis.agent_runtime import AgentLoop
 from jarvis.ai.model_manager import LocalModelManager
 from jarvis.ai.providers.base import AIProvider
+from jarvis.ai.providers.ollama_runtime import OllamaRuntimeManager
 from jarvis.ai.providers.registry import ProviderRegistry
 from jarvis.ai.routing import ProviderRouter
 from jarvis.ai.sessions import AgentSessionStore
@@ -157,6 +160,10 @@ from jarvis.memory.services import (
 )
 from jarvis.memory.store import MemoryMigrationError, SQLiteMemoryStore
 from jarvis.multi_agent.registry import AgentRegistry
+from jarvis.native_cleanup_recovery import (
+    RecoveryState,
+    reconcile_pending_native_cleanup,
+)
 from jarvis.package_activation import (
     ActivationHooks,
     ActivationRequest,
@@ -175,8 +182,9 @@ from jarvis.permissions import (
     PermissionBroker,
     PolicyEngine,
     SQLiteAuditSink,
+    TrustedApprovalAuthenticator,
 )
-from jarvis.permissions.models import Permission, Risk
+from jarvis.permissions.models import ApprovalSource, Permission, Risk
 from jarvis.planning.engine import (
     BrokeredPlanningStepExecutor,
     CompletionCriteriaVerifier,
@@ -196,6 +204,7 @@ from jarvis.production_capability import (
     CertificationOracle,
     ProductionActivationBoundary,
     ProductionCertificationProvider,
+    ProductionHostOperationBridge,
     ProductionLocalCandidateProvider,
     ProductionLocalDiscoveryProvider,
     ProductionOpportunityPreparation,
@@ -206,6 +215,7 @@ from jarvis.production_capability import (
     ProductionSandboxRunner,
     ProductionSetupHandler,
     ProductionVerificationEvidence,
+    TrustedHostOperation,
 )
 from jarvis.provisioning import (
     BrokerProvisioningAuthorizer,
@@ -245,6 +255,8 @@ from jarvis.setup_conductor import (
     SQLiteSetupStore,
 )
 from jarvis.skills import SkillRegistry
+from jarvis.speech.stt import FasterWhisperSttProvider, SoundDeviceRecorder, SpeechToTextService
+from jarvis.speech.tts import PiperTtsProvider, Pyttsx3TtsProvider, TextToSpeechService
 from jarvis.state import ApplicationStateMachine, SQLiteStateStore, StateStoreError
 from jarvis.task_controller import PlanningTaskController, TaskController
 from jarvis.testing.golden import GoldenWorkflowError, GoldenWorkflowService, GoldenWorkflowStore
@@ -587,10 +599,8 @@ class RuntimeTestFixture:
     compensation_state_provider: CompensationStateProvider | None = None
 
 
-# This backend is reachable only through the explicit ``test`` environment.
-# It keeps deterministic restart tests independent of the host credential
-# manager while production/local composition always selects the Windows-backed
-# implementation below.
+# This backend is reachable only from the test environment or pytest process.
+# It preserves authenticated restart behavior without writing host credentials.
 _TEST_RECOVERY_BACKEND = TestOnlyInMemorySecretBackend()
 
 
@@ -604,6 +614,9 @@ class RuntimeContainer:
     resource_governor: ResourceGovernor
     provider_router: ProviderRouter
     model_manager: LocalModelManager
+    ollama_runtime: OllamaRuntimeManager
+    stt: SpeechToTextService | None
+    tts: TextToSpeechService | None
     conversation: ConversationService
     event_bus: EventBus
     state_store: SQLiteStateStore
@@ -613,6 +626,7 @@ class RuntimeContainer:
     artifact_store: ArtifactStore
     mcp_manager: MCPExtensionManager
     permission_broker: PermissionBroker
+    desktop_approval_authenticator: TrustedApprovalAuthenticator
     sandbox_tool_bindings: Mapping[str, tuple[str, object]]
     tool_registry: ToolRegistry
     planning_store: SQLitePlanningStore
@@ -698,9 +712,12 @@ class RuntimeContainer:
     voice: object | None = None
     multi_agent: object | None = None
     improvement: object | None = None
+    runtime_instance_id: str = field(default_factory=lambda: uuid4().hex)
     automation_start_task: asyncio.Task[None] | None = None
     presence_start_task: asyncio.Task[None] | None = None
     trace_start_task: asyncio.Task[None] | None = None
+    native_cleanup_recovery_state: str = "CLEAN"
+    native_cleanup_recovery_reports: tuple[Mapping[str, object], ...] = ()
     _close_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False, repr=False)
     _closed: bool = field(default=False, init=False, repr=False)
 
@@ -867,6 +884,9 @@ class RuntimeContainer:
                 self.control_center,
                 self.conversation,
                 self.model_manager,
+                self.ollama_runtime,
+                self.stt,
+                self.tts,
                 self.session_store,
                 self.goal_supervisor_store,
                 self.setup_store,
@@ -919,6 +939,12 @@ class RuntimeContainer:
                         first_error = error
             if first_error is not None:
                 raise first_error
+
+    @property
+    def closed(self) -> bool:
+        """Expose owner terminality for bounded qualification observation."""
+
+        return self._closed
 
 
 class ApplicationRuntime:
@@ -1018,6 +1044,11 @@ class ApplicationRuntime:
         trusted_application_tools: tuple[Tool[Any, Any], ...] = (),
         trusted_compensation_observers: Mapping[str, EffectStateObserverProvider] | None = None,
         certification_oracle: CertificationOracle | None = None,
+        trusted_host_operations: Mapping[
+            str,
+            Callable[[Mapping[str, object]], Mapping[str, object]] | TrustedHostOperation,
+        ]
+        | None = None,
         integrity_evidence: IntegrityEvidenceProvider | None = None,
     ) -> ApplicationRuntime:
         if test_fixture is not None and settings.environment != "test":
@@ -1110,6 +1141,8 @@ class ApplicationRuntime:
         presence_projection: PresenceProjection | None = None
         presence_start_task: asyncio.Task[None] | None = None
         application_hash: str | None = None
+        native_cleanup_recovery_reports: tuple[Mapping[str, object], ...] = ()
+        native_cleanup_recovery_state = "CLEAN"
         transaction_id = str(uuid4())
         try:
             paths = RuntimePaths.from_root(resolved_app_data_dir)
@@ -1142,8 +1175,12 @@ class ApplicationRuntime:
             # The application hash covers the trusted JARVIS package loaded by
             # this process, not an optional user/project knowledge root.
             application_hash = compute_application_build_hash(Path(__file__).resolve().parents[1])
-            backup = BackupService(paths.backups)
-            if settings.environment == "test":
+            backup = BackupService(
+                paths.backups,
+                identity_root=paths.config,
+                legacy_identity_root=paths.backups,
+            )
+            if settings.environment == "test" or "PYTEST_CURRENT_TEST" in os.environ:
                 recovery_backend = (
                     test_fixture.recovery_key_backend
                     if test_fixture is not None and test_fixture.recovery_key_backend is not None
@@ -1158,10 +1195,39 @@ class ApplicationRuntime:
             recovery_authority.initialize(
                 allow_create=not (paths.recovery / "last-known-good.json").exists()
             )
+            assert recovery_authority is not None
             recovery = RecoveryStore(
                 paths.recovery,
                 trusted_authority=recovery_authority,
             )
+            try:
+                recovery_results = reconcile_pending_native_cleanup(
+                    paths.sandboxes,
+                    trusted_roots=(
+                        paths.sandboxes,
+                        paths.packages,
+                        Path(sys.base_prefix).resolve(),
+                        Path(sys.executable).resolve().parent,
+                    ),
+                    foreground_deadline_seconds=15.0,
+                    integrity_verifier=recovery_authority.verify_payload,
+                    integrity_signer=recovery_authority.sign_payload,
+                )
+                native_cleanup_recovery_reports = tuple(
+                    result.as_dict() for result in recovery_results
+                )
+                if any(result.state is not RecoveryState.CONFIRMED for result in recovery_results):
+                    native_cleanup_recovery_state = RecoveryState.BLOCKED.value
+            except Exception as error:
+                # Recovery failure never grants sandbox allocation.  The
+                # application can remain available for safe non-sandbox work.
+                native_cleanup_recovery_state = RecoveryState.BLOCKED.value
+                native_cleanup_recovery_reports = (
+                    {
+                        "state": RecoveryState.BLOCKED.value,
+                        "detail": f"startup recovery failed: {type(error).__name__}",
+                    },
+                )
             recovery_coordinator = RecoveryCoordinator(recovery)
             recovery_coordinator.begin_start(
                 transaction_id,
@@ -1199,10 +1265,12 @@ class ApplicationRuntime:
             )
             if not isinstance(policy, PolicyEngine):
                 raise ConfigurationError("Trusted permission policy is malformed")
+            desktop_approval_authenticator = TrustedApprovalAuthenticator(ApprovalSource.TRUSTED_UI)
             broker = PermissionBroker(
                 policy,
                 audit_sink=audit,
                 event_bus=events,
+                approval_context_verifier=desktop_approval_authenticator.verifier(),
             )
             sandbox_network_identity = object()
             broker.register_tool(
@@ -1213,6 +1281,16 @@ class ApplicationRuntime:
             sandbox_tool_bindings = {
                 "network.request": ("sandbox.network.request", sandbox_network_identity)
             }
+            generated_operation_identity = object()
+            broker.register_tool(
+                "sandbox.generated.operation",
+                generated_operation_identity,
+                frozenset(),
+            )
+            sandbox_tool_bindings["*"] = (
+                "sandbox.generated.operation",
+                generated_operation_identity,
+            )
             registry = ToolRegistry(
                 (CalculatorTool(), LocalTimeTool(), UnavailableWeatherTool()),
                 permission_broker=broker,
@@ -1296,6 +1374,45 @@ class ApplicationRuntime:
             resource_governor = ResourceGovernor(SystemResourceTelemetry())
             provider_router = ProviderRouter(configured_provider_registry, resource_governor)
             model_manager = LocalModelManager(paths.models)
+            ollama_runtime = OllamaRuntimeManager(
+                endpoint=settings.ai_endpoint,
+                model=settings.ai_model,
+                autostart=settings.ollama_autostart,
+                executable=settings.ollama_executable,
+                start_timeout_seconds=settings.ollama_start_timeout_seconds,
+                stop_owned_on_exit=settings.ollama_stop_owned_on_exit,
+            )
+            stt = (
+                SpeechToTextService(
+                    SoundDeviceRecorder(
+                        device=settings.stt_device, sample_rate=settings.stt_sample_rate
+                    ),
+                    FasterWhisperSttProvider(
+                        settings.stt_model,
+                        device=settings.stt_compute_device,
+                        compute_type=settings.stt_compute_type,
+                    ),
+                )
+                if settings.stt_enabled
+                else None
+            )
+            tts = None
+            if settings.tts_enabled:
+                if settings.tts_provider == "piper":
+                    tts = TextToSpeechService(
+                        PiperTtsProvider(
+                            model_path=settings.tts_piper_model_path,
+                            config_path=settings.tts_piper_config_path,
+                            output_device=settings.tts_output_device,
+                            use_cuda=settings.tts_use_cuda,
+                        ),
+                        enabled=True,
+                        fallback=Pyttsx3TtsProvider(voice=settings.tts_voice),
+                    )
+                else:
+                    tts = TextToSpeechService(
+                        Pyttsx3TtsProvider(voice=settings.tts_voice), enabled=True
+                    )
             agent_loop = AgentLoop(
                 provider,
                 registry,
@@ -1317,10 +1434,40 @@ class ApplicationRuntime:
             task_controller = PlanningTaskController(engine, broker)
             capability_gap_detector = CapabilityGapDetector(frozenset({"calculator", "local_time"}))
             package_store = ProductionPackageStore(paths.packages)
+            trusted_host_operation_handlers: dict[str, TrustedHostOperation] = {}
+            trusted_operation_bindings: dict[str, tuple[str, object]] = {}
+            for index, (operation, value) in enumerate((trusted_host_operations or {}).items()):
+                target = (
+                    value
+                    if isinstance(value, TrustedHostOperation)
+                    else TrustedHostOperation(value)
+                )
+                trusted_host_operation_handlers[operation] = target
+                identity = object()
+                tool_id = f"sandbox.generated.operation.{index}"
+                broker.register_tool(tool_id, identity, frozenset(target.required_permissions))
+                trusted_operation_bindings[operation] = (tool_id, identity)
+            sandbox_tool_bindings.update(trusted_operation_bindings)
+
+            def host_proxy_for_manifest(manifest: HostProxyManifest) -> HostProxy:
+                return HostProxy(
+                    manifest,
+                    broker,
+                    credential_broker=credential_broker,
+                    tool_bindings=sandbox_tool_bindings,
+                )
+
+            production_bridge = ProductionHostOperationBridge(
+                host_proxy_for_manifest,
+                trusted_host_operation_handlers,
+            )
+            assert recovery_authority is not None
             production_sandbox = ProductionSandboxRunner(
                 package_store,
                 paths.sandboxes,
                 resource_governor,
+                broker=production_bridge,
+                recovery_integrity_signer=recovery_authority.sign_payload,
             )
             discovery_providers: tuple[EnvironmentDiscoveryProvider, ...] = (
                 test_fixture.discovery_providers
@@ -1417,7 +1564,11 @@ class ApplicationRuntime:
                 test_fixture.package_runtime_factory
                 if test_fixture is not None
                 else ProductionPackageRuntimeFactory(
-                    package_store, paths.sandboxes, resource_governor
+                    package_store,
+                    paths.sandboxes,
+                    resource_governor,
+                    broker=production_bridge,
+                    recovery_integrity_signer=recovery_authority.sign_payload,
                 ),
                 test_fixture.package_registration_surface
                 if test_fixture is not None
@@ -2172,6 +2323,9 @@ class ApplicationRuntime:
                 resource_governor=resource_governor,
                 provider_router=provider_router,
                 model_manager=model_manager,
+                ollama_runtime=ollama_runtime,
+                stt=stt,
+                tts=tts,
                 conversation=ConversationService(
                     provider,
                     model=settings.ai_model,
@@ -2187,6 +2341,7 @@ class ApplicationRuntime:
                 artifact_store=artifact_store,
                 mcp_manager=mcp_manager,
                 permission_broker=broker,
+                desktop_approval_authenticator=desktop_approval_authenticator,
                 sandbox_tool_bindings=sandbox_tool_bindings,
                 tool_registry=registry,
                 planning_store=planning_store,
@@ -2274,6 +2429,8 @@ class ApplicationRuntime:
                 automation_start_task=automation_start_task,
                 presence_start_task=presence_start_task,
                 trace_start_task=trace_start_task,
+                native_cleanup_recovery_state=native_cleanup_recovery_state,
+                native_cleanup_recovery_reports=native_cleanup_recovery_reports,
             )
             snapshot = recovery.create_snapshot(
                 transaction_id=transaction_id,

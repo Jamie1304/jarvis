@@ -7,6 +7,7 @@ from enum import StrEnum
 from uuid import UUID
 
 from jarvis.ai.models import ProviderHealth
+from jarvis.ai.providers.ollama_runtime import OllamaRuntimeManager, OllamaRuntimeStatus
 from jarvis.control_center import (
     ControlCenterSection,
     ControlCenterService,
@@ -19,6 +20,10 @@ from jarvis.control_center import (
     TrustedPermissionSurface,
 )
 from jarvis.conversation.service import ConversationService
+from jarvis.core.environment_settings import (
+    EnvironmentSettingDescriptor,
+    EnvironmentSettingsService,
+)
 from jarvis.core.errors import ConversationError, ServiceUnavailableError, SpeechDisabledError
 from jarvis.desktop_shell import (
     FirstRunWizard,
@@ -103,6 +108,8 @@ class JarvisAssistantService:
         permission_surface: TrustedPermissionSurface | None = None,
         output_profiles: OutputMediumProfileRegistry | None = None,
         memory_control: MemoryControlService | None = None,
+        ollama_runtime: OllamaRuntimeManager | None = None,
+        environment_settings: EnvironmentSettingsService | None = None,
     ) -> None:
         self._conversation = conversation
         self._normalizer = normalizer or InputNormalizer()
@@ -120,6 +127,8 @@ class JarvisAssistantService:
         self._permission_surface = permission_surface or TrustedPermissionSurface()
         self._output_profiles = output_profiles or OutputMediumProfileRegistry()
         self._memory_control = memory_control
+        self._ollama_runtime = ollama_runtime
+        self._environment_settings = environment_settings
 
     @property
     def launch_profiles(self) -> LaunchProfileRegistry:
@@ -196,6 +205,21 @@ class JarvisAssistantService:
     ) -> MemoryVerificationRequestView:
         return self.memory_control.request_reverification(reference, reason=reason)
 
+    def list_tasks(self) -> tuple[PlanningTask, ...]:
+        """Return canonical task records without exposing the planning store."""
+
+        return self._require_task_controller().list_tasks()
+
+    def settings_descriptors(self) -> tuple[EnvironmentSettingDescriptor, ...]:
+        if self._environment_settings is None:
+            raise ServiceUnavailableError("Environment settings are not configured")
+        return self._environment_settings.descriptors()
+
+    def save_settings(self, updates: dict[str, object]) -> tuple[EnvironmentSettingDescriptor, ...]:
+        if self._environment_settings is None:
+            raise ServiceUnavailableError("Environment settings are not configured")
+        return self._environment_settings.save(updates)
+
     def output_profile(self, medium: OutputMedium) -> OutputMediumProfile:
         return self._output_profiles.get(medium)
 
@@ -250,6 +274,15 @@ class JarvisAssistantService:
         """Get UI-safe provider connectivity information."""
 
         return await self._conversation.provider_health()
+
+    async def ollama_status(self, *, ensure_running: bool = False) -> OllamaRuntimeStatus:
+        """Return model readiness separately from basic provider connectivity."""
+
+        if self._ollama_runtime is None:
+            raise ServiceUnavailableError("Ollama runtime management is not configured")
+        if ensure_running:
+            return await self._ollama_runtime.ensure_running()
+        return await self._ollama_runtime.status()
 
     @property
     def stt_enabled(self) -> bool:
@@ -414,6 +447,12 @@ class JarvisAssistantService:
             await self._tts.stop()
         if self._response_session_rebuilder is not None:
             await self._response_session_rebuilder()
+
+    async def stop_speaking(self) -> None:
+        """Stop local speech output without changing conversation state."""
+
+        if self._tts is not None:
+            await self._tts.stop()
 
     async def aclose(self) -> None:
         """Release local speech resources when the UI exits."""

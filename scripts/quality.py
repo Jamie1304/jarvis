@@ -9,7 +9,7 @@ def main() -> int:
         [sys.executable, "-m", "ruff", "format", "--check", "."],
         [sys.executable, "-m", "ruff", "check", "."],
         [sys.executable, "-m", "mypy", "jarvis", "tests"],
-        [sys.executable, "-m", "coverage", "run", "-m", "pytest"],
+        [sys.executable, "-m", "coverage", "run", "-m", "pytest", "-m", "not real_qualification"],
         [sys.executable, "-m", "coverage", "report"],
     ]
     for command in commands:

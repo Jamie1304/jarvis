@@ -52,6 +52,23 @@ not evidence for a later mutable tree.
 
 ## Current unreleased hardening
 
+Candidate 14 remains immutable at `77eaa48ea9370b792e9df51f2a43e1853873a0b8`.
+Current mutable work prepares a future Candidate 15 but does not create one.
+The desktop foundation moves canonical runtime creation and all SQLite-backed
+service calls to one backend-owner thread with a long-lived event loop, adds
+typed deterministic `.env` settings handling, and separates Ollama reachability
+from model/chat readiness. It also records Piper's optional GPL boundary and
+moves recovery installation identity to stable application configuration so
+temporary backup roots cannot grow Windows recovery credential targets.
+
+R4R-A3 classified six local sandbox failures as `CURRENT_AGENT_WINDOWS_JOB_CONTAINMENT`.
+The exact Candidate 14 source, current mutable source, and mutable source without
+the test environment fixture all failed identically under the agent's nested Job
+and virtual-environment redirector. The unchanged sandbox suite passed 24/24
+under the direct base interpreter. No sandbox source, tests, limit, or security
+policy changed. R4R-A4 adds trusted desktop memory/permission operations and
+read-only operational inspection without creating Candidate 15.
+
 Candidate 13 is immutable and retains its exact-source R4 result
 `R4_GO_SOURCE` (106 PASS / 0 FAIL / 0 NOT_PROVEN), but Run 30 package
 certification rejected its artifacts because installed-distribution integrity

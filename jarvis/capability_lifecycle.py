@@ -544,6 +544,7 @@ def _certification_to_json(record: object) -> str:
             "certified_at": record.certified_at.isoformat(),
             "ui_simulation_attestation_ref": record.ui_simulation_attestation_ref,
             "ui_simulation_attestation_digest": record.ui_simulation_attestation_digest,
+            "worker_compatibility": record.worker_compatibility,
         },
         sort_keys=True,
     )
@@ -650,6 +651,7 @@ def _stored_from_row(row: tuple[object, ...]) -> StoredLifecycleRecord:
         datetime.fromisoformat(str(cert_data["certified_at"])),
         cert_data.get("ui_simulation_attestation_ref"),
         cert_data.get("ui_simulation_attestation_digest"),
+        str(cert_data.get("worker_compatibility", "")),
     )
     history = tuple(
         ActivationTransition(

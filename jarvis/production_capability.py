@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import re
 import sys
 import threading
@@ -123,7 +124,7 @@ from jarvis.package_runtime import (
     PackageRuntimeHealth,
     PreparedPackageRuntime,
 )
-from jarvis.permissions.models import Permission, Risk
+from jarvis.permissions.models import Permission, PermissionScope, Risk
 from jarvis.provisioning import (
     ProvisioningAction,
     ProvisioningApplyResult,
@@ -133,6 +134,14 @@ from jarvis.provisioning import (
 )
 from jarvis.resources import ResourceGovernor, ResourcePriority
 from jarvis.sandbox import SandboxLimits, SandboxProcess
+from jarvis.sandbox_proxies import (
+    HostProxy,
+    HostProxyManifest,
+    HostProxyRequest,
+    ProxyCapability,
+    ProxyKind,
+    TypedActionRequest,
+)
 from jarvis.setup_conductor import (
     AdoptionCandidate as SetupAdoptionCandidate,
 )
@@ -163,6 +172,141 @@ if TYPE_CHECKING:
 
 class ProductionCapabilityError(RuntimeError):
     """A production capability boundary failed closed."""
+
+
+class ConstrainedPayloadBroker(Protocol):
+    """Trusted parent bridge for one explicitly declared payload operation."""
+
+    def __call__(
+        self,
+        package: IntegrationPackage,
+        action_id: str,
+        operation: str,
+        arguments: Mapping[str, object],
+    ) -> Mapping[str, object]: ...
+
+
+@dataclass(frozen=True, slots=True)
+class TrustedHostOperation:
+    """Application-owned target contract for one brokered operation."""
+
+    handler: Callable[[Mapping[str, object]], Mapping[str, object]]
+    required_permissions: tuple[Permission, ...] = ()
+    permission_scope: PermissionScope = PermissionScope()
+
+    def __post_init__(self) -> None:
+        if not callable(self.handler):
+            raise TypeError("Trusted host operation handler is not callable")
+        if not isinstance(self.permission_scope, PermissionScope):
+            raise TypeError("Trusted host operation scope is malformed")
+        if (
+            type(self.required_permissions) is not tuple
+            or any(not isinstance(item, Permission) for item in self.required_permissions)
+            or tuple(sorted(set(self.required_permissions), key=lambda item: item.value))
+            != self.required_permissions
+        ):
+            raise ValueError("Trusted host operation permissions are malformed")
+
+
+class ProductionHostOperationBridge:
+    """Trusted parent adapter for generic constrained broker calls.
+
+    Only the typed request crosses into the host proxy.  Operation handlers are
+    registered by trusted application composition; package data cannot create
+    or replace them.
+    """
+
+    def __init__(
+        self,
+        host_proxy: Callable[[HostProxyManifest], HostProxy],
+        handlers: Mapping[
+            str, Callable[[Mapping[str, object]], Mapping[str, object]] | TrustedHostOperation
+        ],
+    ) -> None:
+        self._host_proxy = host_proxy
+        self._request_history: list[UUID] = []
+        self._handlers = {
+            operation: value
+            if isinstance(value, TrustedHostOperation)
+            else TrustedHostOperation(value)
+            for operation, value in handlers.items()
+        }
+
+    def __call__(
+        self,
+        package: IntegrationPackage,
+        action_id: str,
+        operation: str,
+        arguments: Mapping[str, object],
+    ) -> Mapping[str, object]:
+        target = self._handlers.get(operation)
+        if target is None:
+            raise ProductionCapabilityError("BROKER_OPERATION_UNAVAILABLE")
+        if not isinstance(package, IntegrationPackage):
+            raise ProductionCapabilityError("BROKER_PACKAGE_INVALID")
+        action = next((item for item in package.action_specs if item.action_id == action_id), None)
+        if (
+            action is None
+            or action.operation != operation
+            or not package.package_hash
+            or action.package_id != package.package_id
+            or action.package_version != package.version
+            or action.package_hash != package.package_hash
+            or tuple(action.required_permissions) != target.required_permissions
+        ):
+            raise ProductionCapabilityError("BROKER_PERMISSION_REQUIREMENT_MISMATCH")
+        input_schema = action.input_schema.get("properties", {})
+        if not isinstance(input_schema, Mapping):
+            raise ProductionCapabilityError("BROKER_ACTION_SCHEMA_INVALID")
+        manifest = HostProxyManifest(
+            package.package_id,
+            str(package.version),
+            package.package_hash,
+            (
+                ProxyCapability(
+                    package.package_id,
+                    ProxyKind.DEVICE,
+                    (action_id,),
+                    None,
+                    tuple(str(key) for key in input_schema),
+                    required_permissions=action.required_permissions,
+                    binding_id=operation,
+                    permission_scope=target.permission_scope,
+                ),
+            ),
+        )
+        request = HostProxyRequest(
+            uuid4(),
+            package.package_id,
+            package.package_hash,
+            package.package_id,
+            action_id,
+            uuid4(),
+        )
+        self._request_history.append(request.request_id)
+        del self._request_history[:-256]
+
+        async def execute(action: str, payload: Mapping[str, object]) -> Mapping[str, object]:
+            del action
+            result = target.handler(payload)
+            if not isinstance(result, Mapping):
+                raise ProductionCapabilityError("Broker target returned a malformed result")
+            return dict(result)
+
+        result = asyncio.run(
+            self._host_proxy(manifest).invoke_typed(
+                TypedActionRequest(request, arguments),
+                kind=ProxyKind.DEVICE,
+                executor=execute,
+            )
+        )
+        return dict(result)
+
+    @property
+    def request_history(self) -> tuple[UUID, ...]:
+        """Bounded operation identities for trusted acceptance evidence."""
+
+        return tuple(self._request_history)
 
 
 class CapabilityGenerationProvider(Protocol):
@@ -313,7 +457,7 @@ class AgentRuntimeCapabilityGenerator:
         )
         spec = _parse_generation_spec(raw)
         package = _build_generic_package(gap, spec)
-        source = PackageSourceFile("code/entrypoint.py", _source_for_package(package, spec))
+        source = PackageSourceFile("code/payload.json", _constrained_payload(package, spec))
         generated = GeneratedCapabilityPackage(
             package,
             True,
@@ -348,6 +492,9 @@ class _GeneratedActionDraft:
     retryable: bool = False
     verification: tuple[str, ...] = ("adapter_output_schema",)
     compensation: str | None = None
+    operation: str = "default_output"
+    fields: tuple[str, ...] = ()
+    delimiter: str = ""
 
 
 def _parse_generation_spec(raw: str) -> _GenerationSpec:
@@ -371,10 +518,10 @@ def _parse_generation_spec(raw: str) -> _GenerationSpec:
         or "\x00" in description
     ):
         raise ProductionCapabilityError("Capability design description is malformed")
-    if source is not None and (
-        type(source) is not str or not source.strip() or len(source.encode("utf-8")) > 512 * 1024
-    ):
-        raise ProductionCapabilityError("Capability design source is malformed")
+    if source is not None:
+        raise ProductionCapabilityError(
+            "Legacy complete Python entrypoint is unsupported; regenerate a constrained payload"
+        )
     raw_actions = value.get("actions", [])
     if not isinstance(raw_actions, list) or len(raw_actions) > 64:
         raise ProductionCapabilityError("Capability action declarations are malformed")
@@ -468,12 +615,21 @@ def _parse_action_draft(value: object, index: int) -> _GeneratedActionDraft:
     idempotent = value.get("idempotent", True)
     retryable = value.get("retryable", False)
     compensation = value.get("compensation")
+    operation = value.get("operation", "default_output")
+    fields = value.get("fields", [])
+    delimiter = value.get("delimiter", "")
     if (
         type(idempotent) is not bool
         or type(retryable) is not bool
         or (retryable and not idempotent)
         or compensation is not None
         and (type(compensation) is not str or not compensation.strip())
+        or type(operation) is not str
+        or not operation.strip()
+        or not isinstance(fields, list)
+        or any(type(item) is not str or not item for item in fields)
+        or type(delimiter) is not str
+        or (operation == "concat_strings" and not fields)
     ):
         raise ProductionCapabilityError(f"Capability action {index} retry metadata is malformed")
     try:
@@ -490,6 +646,9 @@ def _parse_action_draft(value: object, index: int) -> _GeneratedActionDraft:
             retryable,
             tuple(raw_verification),
             compensation,
+            operation,
+            tuple(fields),
+            delimiter,
         )
     except (CapabilityError, ValueError) as error:
         raise ProductionCapabilityError(f"Capability action {index} is invalid") from error
@@ -529,10 +688,12 @@ def _build_generic_package(gap: CapabilityGap, spec: _GenerationSpec) -> Integra
             draft.retryable,
             draft.verification,
             draft.compensation,
+            draft.operation,
         )
         for draft in drafts
     )
-    source = spec.source or _generic_worker_source(package_id, spec.name, action_specs)
+    payload = _constrained_payload_data(package_id, spec.name, action_specs, spec)
+    source = json.dumps(payload, sort_keys=True, separators=(",", ":"))
     source_hash = sha256(source.encode("utf-8")).hexdigest()
     package = IntegrationPackage(
         package_id,
@@ -540,8 +701,8 @@ def _build_generic_package(gap: CapabilityGap, spec: _GenerationSpec) -> Integra
         PackageLayout(),
         (
             PackageEntry(
-                "python",
-                "code/entrypoint.py",
+                "constrained_payload",
+                "code/payload.json",
                 PackageBoundary.PACKAGE_CODE,
                 source_hash,
                 provenance,
@@ -555,6 +716,12 @@ def _build_generic_package(gap: CapabilityGap, spec: _GenerationSpec) -> Integra
             expected_repair_verification=("trusted runtime health",),
         ),
         provenance=provenance,
+        permissions=tuple(
+            sorted(
+                {permission for draft in drafts for permission in draft.permissions},
+                key=lambda item: item.value,
+            )
+        ),
         package_hash="",
         operation_policy=PackageOperationPolicy(),
         action_specs=action_specs,
@@ -593,85 +760,44 @@ def _default_action_draft(name: str) -> _GeneratedActionDraft:
     )
 
 
-def _source_for_package(package: IntegrationPackage, spec: _GenerationSpec) -> str:
-    # The model may propose source for review, but the default generic worker
-    # is used unless a source was explicitly supplied.  The reviewer remains
-    # the independent authority for a supplied source.
-    return spec.source or _generic_worker_source(
-        package.package_id, spec.name, package.action_specs
-    )
+def _constrained_payload_data(
+    package_id: str,
+    label: str,
+    action_specs: Sequence[CapabilityActionSpec],
+    spec: _GenerationSpec,
+) -> dict[str, object]:
+    drafts = {draft.action_id: draft for draft in spec.actions}
+    return {
+        "schema": "jarvis.constrained-action-payload/v1",
+        "package_id": package_id,
+        "label": label[:256],
+        "self_health": "healthy",
+        "dependencies": [],
+        "actions": {
+            action.action_id: {
+                "operation": drafts.get(action.action_id, _default_action_draft(label)).operation,
+                "fields": list(drafts.get(action.action_id, _default_action_draft(label)).fields),
+                "delimiter": drafts.get(action.action_id, _default_action_draft(label)).delimiter,
+                "output_schema": action_schema_dict(action.output_schema),
+            }
+            for action in action_specs
+        },
+    }
 
 
-def _generic_worker_source(
-    package_id: str, label: str, action_specs: Sequence[CapabilityActionSpec]
-) -> str:
-    safe_id = json.dumps(package_id)
-    safe_label = json.dumps(label[:256])
-    action_ids = json.dumps([item.action_id for item in action_specs], separators=(",", ":"))
-    output_schemas = json.dumps(
-        {item.action_id: action_schema_dict(item.output_schema) for item in action_specs},
+def _constrained_payload(package: IntegrationPackage, spec: _GenerationSpec) -> str:
+    return json.dumps(
+        _constrained_payload_data(package.package_id, spec.name, package.action_specs, spec),
         sort_keys=True,
         separators=(",", ":"),
-    )
-    return (
-        "import json\n"
-        "import sys\n\n"
-        f"PACKAGE_ID = {safe_id}\n"
-        f"LABEL = {safe_label}\n\n"
-        f"ACTION_IDS = frozenset({action_ids})\n"
-        f"OUTPUT_SCHEMAS = {output_schemas}\n\n"
-        "def default_value(schema, key):\n"
-        "    kind = schema.get('type')\n"
-        "    if kind == 'object':\n"
-        "        properties = schema.get('properties', {})\n"
-        "        required = schema.get('required', ())\n"
-        "        return {name: default_value(properties[name], name) for name in required}\n"
-        "    if kind == 'array':\n"
-        "        return []\n"
-        "    if kind == 'string':\n"
-        "        return PACKAGE_ID if key == 'capability' else 'observed'\n"
-        "    if kind == 'integer':\n"
-        "        return 0\n"
-        "    if kind == 'number':\n"
-        "        return 0.0\n"
-        "    if kind == 'boolean':\n"
-        "        return False\n"
-        "    raise ValueError('unsupported output schema')\n\n"
-        "for line in sys.stdin:\n"
-        "    try:\n"
-        "        incoming = json.loads(line)\n"
-        '        request_id = incoming["request_id"]\n'
-        '        integration_id = incoming["integration_id"]\n'
-        '        kind = incoming["kind"]\n'
-        '        if kind == "health":\n'
-        '            payload = {"status": "healthy", "capability": PACKAGE_ID}\n'
-        '        elif kind == "inspect":\n'
-        '            payload = {"status": "observed", "capability": PACKAGE_ID, "label": LABEL}\n'
-        '        elif kind in {"shadow", "canary"}:\n'
-        '            payload = {"status": kind, "capability": PACKAGE_ID, "label": LABEL}\n'
-        "        elif kind in ACTION_IDS:\n"
-        '            payload = default_value(OUTPUT_SCHEMAS[kind], "result")\n'
-        "        else:\n"
-        '            raise ValueError("unknown action")\n'
-        "        outgoing = {\n"
-        '            "version": 1,\n'
-        '            "request_id": request_id,\n'
-        '            "integration_id": integration_id,\n'
-        '            "kind": "result",\n'
-        '            "response": True,\n'
-        '            "payload": payload,\n'
-        "        }\n"
-        '        sys.stdout.write(json.dumps(outgoing, separators=(",", ":")) + "\\n")\n'
-        "        sys.stdout.flush()\n"
-        "    except (KeyError, TypeError, ValueError):\n"
-        "        break\n"
     )
 
 
 class ProductionPackageStore:
     """External package-content owner used by production package services."""
 
-    _SCHEMA = 1
+    _SCHEMA = 2
+    _FORMAT = "CONSTRAINED_WORKER_PAYLOAD"
 
     def __init__(self, root: Path) -> None:
         if not isinstance(root, Path) or not root.is_absolute():
@@ -696,11 +822,27 @@ class ProductionPackageStore:
         key = (package.package_id, str(package.version), package.package_hash)
         if not generated.source_files:
             raise ProductionCapabilityError("Generated package has no source snapshot")
+        if {source.path for source in generated.source_files} != {"code/payload.json"}:
+            raise ProductionCapabilityError(
+                "New-format packages must contain only constrained payload data"
+            )
+        if {
+            entry.path
+            for entry in package.entries
+            if entry.boundary is PackageBoundary.PACKAGE_CODE
+        } != {"code/payload.json"}:
+            raise ProductionCapabilityError("New-format package layout is invalid")
         for source in generated.source_files:
             package.entry_for(source.path)
             entry = package.entry_for(source.path)
             if sha256(source.content.encode("utf-8")).hexdigest() != entry.content_hash:
                 raise ProductionCapabilityError("Generated package source hash is inconsistent")
+            try:
+                from jarvis.sandbox_worker import PayloadError, validate_constrained_payload
+
+                validate_constrained_payload(source.content, package.package_id)
+            except PayloadError as error:
+                raise ProductionCapabilityError("Constrained package payload is invalid") from error
         if package.package_hash != _package_digest(package):
             raise ProductionCapabilityError("Generated package metadata hash is inconsistent")
         with self._lock:
@@ -791,6 +933,11 @@ class ProductionPackageStore:
             if not payload_path.is_file():
                 raise ProductionCapabilityError("Certified package contents are unavailable")
             payload = json.loads(payload_path.read_text(encoding="utf-8"))
+            if payload.get("schema") != self._SCHEMA or payload.get("format") != self._FORMAT:
+                raise ProductionCapabilityError(
+                    "LEGACY_COMPLETE_ENTRYPOINT package is quarantined; "
+                    "regeneration and recertification required"
+                )
             package = _package_from_payload(payload)
             if package.package_id != package_id or str(package.version) != version:
                 raise ProductionCapabilityError("Stored package identity does not match request")
@@ -942,10 +1089,35 @@ def _sandbox_python_executable() -> Path:
     """
 
     if sys.platform == "win32":
-        base = (Path(sys.base_prefix) / "python.exe").resolve()
-        if base.is_file():
-            return base
+        base = (Path(sys.base_prefix) / "pythonw.exe").resolve()
+        if not base.is_file():
+            raise ProductionCapabilityError(
+                "The required windowed AppContainer worker interpreter is unavailable"
+            )
+        return base
     return Path(sys.executable).resolve()
+
+
+def _materialized_worker(sandbox_root: Path) -> Path:
+    """Place an exact JARVIS-owned worker in the sandbox-owned runtime area.
+
+    The AppContainer ACL transaction can safely grant this owned directory;
+    package content never supplies this file or selects its bytes.
+    """
+
+    source = Path(__file__).with_name("sandbox_worker.py").resolve()
+    contents = source.read_bytes()
+    fingerprint = sha256(contents).hexdigest()
+    directory = sandbox_root.resolve() / "jarvis-worker" / fingerprint
+    directory.mkdir(parents=True, exist_ok=True)
+    target = directory / "sandbox_worker.py"
+    if target.exists() and target.read_bytes() != contents:
+        raise ProductionCapabilityError("Immutable sandbox worker materialization changed")
+    if not target.exists():
+        target.write_bytes(contents)
+    if sha256(target.read_bytes()).hexdigest() != fingerprint:
+        raise ProductionCapabilityError("Immutable sandbox worker verification failed")
+    return target
 
 
 class ProductionPackageRuntime(PreparedPackageRuntime):
@@ -955,11 +1127,15 @@ class ProductionPackageRuntime(PreparedPackageRuntime):
         store: ProductionPackageStore,
         sandbox_root: Path,
         resource_governor: ResourceGovernor,
+        broker: ConstrainedPayloadBroker | None = None,
+        recovery_integrity_signer: Callable[[Mapping[str, object]], str] | None = None,
     ) -> None:
         self.package = package
         self._store = store
         self._sandbox_root = sandbox_root
         self._governor = resource_governor
+        self._broker = broker
+        self._recovery_integrity_signer = recovery_integrity_signer
         self._state: dict[str, object] = {}
         self._active_requests = 0
 
@@ -1014,23 +1190,18 @@ class ProductionPackageRuntime(PreparedPackageRuntime):
         return _run_in_new_thread(self.request(kind, payload))
 
     def _request_blocking(self, kind: str, payload: Mapping[str, object]) -> dict[str, object]:
-        source = next(
-            (
-                item
-                for item in self._store.source_files(self.package)
-                if item.path == "code/entrypoint.py"
-            ),
-            None,
-        )
-        if source is None:
-            raise ProductionCapabilityError("Package entrypoint is unavailable")
         root = self._store.package_directory(self.package)
         executable = _sandbox_python_executable()
+        worker = _materialized_worker(self._sandbox_root)
+        payload_path = root / "code" / "payload.json"
+        if not payload_path.is_file():
+            raise ProductionCapabilityError("Constrained package payload is unavailable")
         process = SandboxProcess(
             executable,
-            (str(root / "code" / "entrypoint.py"),),
+            (str(worker), str(payload_path), self.package.package_id),
             integration_id=_safe_identifier(self.package.package_id, limit=64),
             parent_directory=self._sandbox_root,
+            recovery_integrity_signer=self._recovery_integrity_signer,
             limits=SandboxLimits(
                 # The generated tool contract permits a 60-second bounded
                 # request.  Keep certification and active invocation aligned;
@@ -1042,18 +1213,27 @@ class ProductionPackageRuntime(PreparedPackageRuntime):
                 appcontainer_runtime_root=executable.parent,
                 appcontainer_dependency_roots=(
                     Path(sys.base_prefix).resolve(),
-                    Path(sys.prefix).resolve(),
                     root / "code",
+                    worker.parent,
                 ),
             ),
             resource_governor=self._governor,
             resource_priority=ResourcePriority.USER_REQUESTED,
+            diagnostics_enabled=(
+                os.environ.get("JARVIS_R4R_TRACE_MODE", "TRACE_ON") == "TRACE_ON"
+                and os.environ.get("JARVIS_R4R_CHILD_TRACE", "on") != "off"
+            ),
+            diagnostic_mode=os.environ.get("JARVIS_R4R_TRACE_MODE", "TRACE_ON"),
+            parent_only_recorder=os.environ.get("JARVIS_R4R_PARENT_RECORDER") == "on",
         )
 
         async def run() -> dict[str, object]:
             await process.start()
             try:
-                return await process.request(kind, payload)
+                response = await process.request(kind, payload)
+                if response.get("status") != "broker_request":
+                    return response
+                return await self._finish_broker_request(process, self.package, kind, response)
             finally:
                 await process.close()
 
@@ -1063,6 +1243,37 @@ class ProductionPackageRuntime(PreparedPackageRuntime):
             raise ProductionCapabilityError(
                 "Package execution failed in the native sandbox"
             ) from error
+
+    async def _finish_broker_request(
+        self,
+        process: SandboxProcess,
+        package: IntegrationPackage,
+        action_id: str,
+        response: Mapping[str, object],
+    ) -> dict[str, object]:
+        action = next((item for item in package.action_specs if item.action_id == action_id), None)
+        arguments = response.get("arguments")
+        if (
+            self._broker is None
+            or action is None
+            or type(action.operation) is not str
+            or response.get("operation") != action.operation
+            or response.get("capability") != package.package_id
+            or not isinstance(arguments, Mapping)
+        ):
+            return {"status": "action_failed", "failure": "BROKER_REQUEST_REJECTED"}
+        try:
+            result = await asyncio.to_thread(
+                self._broker, package, action_id, action.operation, arguments
+            )
+            bounded = json.loads(json.dumps(dict(result), separators=(",", ":")))
+            if not isinstance(bounded, dict):
+                raise ValueError("broker result must be an object")
+        except Exception:
+            return {"status": "action_failed", "failure": "BROKER_FAILED"}
+        return await process.request(
+            "broker_result", {"operation": action.operation, "result": bounded}
+        )
 
     def _validate_action_request(
         self, kind: str, payload: Mapping[str, object]
@@ -1089,14 +1300,28 @@ class ProductionPackageRuntime(PreparedPackageRuntime):
 
 class ProductionPackageRuntimeFactory(PackageRuntimeFactory):
     def __init__(
-        self, store: ProductionPackageStore, sandbox_root: Path, governor: ResourceGovernor
+        self,
+        store: ProductionPackageStore,
+        sandbox_root: Path,
+        governor: ResourceGovernor,
+        broker: ConstrainedPayloadBroker | None = None,
+        recovery_integrity_signer: Callable[[Mapping[str, object]], str] | None = None,
     ) -> None:
         self._store = store
         self._sandbox_root = sandbox_root
         self._governor = governor
+        self._broker = broker
+        self._recovery_integrity_signer = recovery_integrity_signer
 
     def prepare(self, package: IntegrationPackage) -> PreparedPackageRuntime:
-        runtime = ProductionPackageRuntime(package, self._store, self._sandbox_root, self._governor)
+        runtime = ProductionPackageRuntime(
+            package,
+            self._store,
+            self._sandbox_root,
+            self._governor,
+            self._broker,
+            self._recovery_integrity_signer,
+        )
         health = runtime.health_check()
         if not health.healthy:
             raise HotLoadError(health.detail)
@@ -1137,15 +1362,47 @@ class ProductionSandboxRunner:
     """Trusted certification/activation sandbox probe and package runner."""
 
     def __init__(
-        self, store: ProductionPackageStore, sandbox_root: Path, governor: ResourceGovernor
+        self,
+        store: ProductionPackageStore,
+        sandbox_root: Path,
+        governor: ResourceGovernor,
+        broker: ConstrainedPayloadBroker | None = None,
+        recovery_integrity_signer: Callable[[Mapping[str, object]], str] | None = None,
     ) -> None:
         self._store = store
         self._sandbox_root = sandbox_root
         self._governor = governor
+        self._broker = broker
+        self._recovery_integrity_signer = recovery_integrity_signer
         self._last_status: SandboxSecurityStatus | None = None
+        self._last_protocol_diagnostics: dict[str, object] | None = None
+        self._protocol_diagnostic_history: list[dict[str, object]] = []
 
     def status(self) -> SandboxSecurityStatus | None:
         return self._last_status
+
+    def protocol_diagnostics(self) -> dict[str, object] | None:
+        """Return the latest bounded inner protocol observation."""
+
+        return self._last_protocol_diagnostics
+
+    def protocol_diagnostic_history(self) -> tuple[dict[str, object], ...]:
+        """Return bounded observations for each production sandbox instance."""
+
+        return tuple(self._protocol_diagnostic_history)
+
+    def _remember_protocol_diagnostics(self, value: object) -> None:
+        if not isinstance(value, Mapping):
+            return
+        item = dict(value)
+        self._last_protocol_diagnostics = item
+        self._protocol_diagnostic_history.append(item)
+        del self._protocol_diagnostic_history[:-256]
+        if os.environ.get("JARVIS_R4R_EVIDENCE_STREAM") == "on":
+            print(
+                "R4R_SANDBOX_EVIDENCE " + json.dumps(item, sort_keys=True, separators=(",", ":")),
+                flush=True,
+            )
 
     def available_status(self) -> SandboxSecurityStatus | None:
         if sys.platform != "win32" or not WindowsAppContainerLauncher.available():
@@ -1194,11 +1451,13 @@ class ProductionSandboxRunner:
     ) -> tuple[SandboxSecurityStatus, dict[str, object]]:
         root = self._store.package_directory(package)
         executable = _sandbox_python_executable()
+        worker = _materialized_worker(self._sandbox_root)
         process = SandboxProcess(
             executable,
-            (str(root / "code" / "entrypoint.py"),),
+            (str(worker), str(root / "code" / "payload.json"), package.package_id),
             integration_id=_safe_identifier(package.package_id, limit=64),
             parent_directory=self._sandbox_root,
+            recovery_integrity_signer=self._recovery_integrity_signer,
             limits=SandboxLimits(
                 timeout_seconds=60.0,
                 max_processes=1,
@@ -1206,12 +1465,18 @@ class ProductionSandboxRunner:
                 appcontainer_runtime_root=executable.parent,
                 appcontainer_dependency_roots=(
                     Path(sys.base_prefix).resolve(),
-                    Path(sys.prefix).resolve(),
                     root / "code",
+                    worker.parent,
                 ),
             ),
             resource_governor=self._governor,
             resource_priority=ResourcePriority.USER_REQUESTED,
+            diagnostics_enabled=(
+                os.environ.get("JARVIS_R4R_TRACE_MODE", "TRACE_ON") == "TRACE_ON"
+                and os.environ.get("JARVIS_R4R_CHILD_TRACE", "on") != "off"
+            ),
+            diagnostic_mode=os.environ.get("JARVIS_R4R_TRACE_MODE", "TRACE_ON"),
+            parent_only_recorder=os.environ.get("JARVIS_R4R_PARENT_RECORDER") == "on",
         )
 
         async def run() -> tuple[SandboxSecurityStatus, dict[str, object]]:
@@ -1221,13 +1486,58 @@ class ProductionSandboxRunner:
                 if status is None:
                     raise ProductionCapabilityError("Sandbox did not report security status")
                 response = await process.request(kind, payload)
+                if response.get("status") == "broker_request":
+                    response = await self._finish_broker_request(process, package, kind, response)
+                diagnostics = getattr(process, "protocol_diagnostics", None)
+                if diagnostics is not None:
+                    self._last_protocol_diagnostics = diagnostics.as_dict()
                 return status, response
             finally:
                 await process.close()
+                diagnostics = getattr(process, "protocol_diagnostics", None)
+                if diagnostics is not None:
+                    observed = diagnostics.as_dict()
+                    observed["cleanup_observations"] = [
+                        dict(item)
+                        for item in getattr(process, "cleanup_observations", ())
+                        if isinstance(item, Mapping)
+                    ]
+                    self._remember_protocol_diagnostics(observed)
 
         status, response = _run_in_new_thread(run())
         self._last_status = status
         return status, response
+
+    async def _finish_broker_request(
+        self,
+        process: SandboxProcess,
+        package: IntegrationPackage,
+        action_id: str,
+        response: Mapping[str, object],
+    ) -> dict[str, object]:
+        action = next((item for item in package.action_specs if item.action_id == action_id), None)
+        arguments = response.get("arguments")
+        if (
+            self._broker is None
+            or action is None
+            or type(action.operation) is not str
+            or response.get("operation") != action.operation
+            or response.get("capability") != package.package_id
+            or not isinstance(arguments, Mapping)
+        ):
+            return {"status": "action_failed", "failure": "BROKER_REQUEST_REJECTED"}
+        try:
+            result = await asyncio.to_thread(
+                self._broker, package, action_id, action.operation, arguments
+            )
+            bounded = json.loads(json.dumps(dict(result), separators=(",", ":")))
+            if not isinstance(bounded, dict):
+                raise ValueError("broker result must be an object")
+        except Exception:
+            return {"status": "action_failed", "failure": "BROKER_FAILED"}
+        return await process.request(
+            "broker_result", {"operation": action.operation, "result": bounded}
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -1745,6 +2055,7 @@ class ProductionCertificationProvider:
 
         def sandbox_test(item: IntegrationPackage) -> CertificationStageResult:
             status: SandboxSecurityStatus | None
+            failure_detail: str | None = None
             try:
                 status, response = self._sandbox.execute(item, "health", {})
                 healthy = (
@@ -1758,13 +2069,19 @@ class ProductionCertificationProvider:
                 healthy = False
                 status = self._sandbox.status()
                 response = {}
-            return CertificationStageResult(
-                healthy,
-                (
+                failure_detail = self._sandbox_failure_detail("sandbox startup request failed")
+            details = (
+                failure_detail
+                if failure_detail is not None
+                else (
                     f"mode={status.mode.value if status is not None else 'unavailable'};"
                     f"isolated={status.executable_isolation if status is not None else False};"
-                    f"health_response={_certification_digest(response)}",
-                ),
+                    f"health_response={_certification_digest(response)}"
+                )
+            )
+            return CertificationStageResult(
+                healthy,
+                (details,),
             )
 
         def authority(item: IntegrationPackage) -> CertificationStageResult:
@@ -1825,7 +2142,7 @@ class ProductionCertificationProvider:
                 )
             except Exception:
                 passed = False
-                details = "runtime health request failed"
+                details = self._sandbox_failure_detail("runtime health request failed")
             return CertificationStageResult(passed, (details,), health=(details,))
 
         def verification(item: IntegrationPackage) -> CertificationStageResult:
@@ -1928,6 +2245,34 @@ class ProductionCertificationProvider:
         self, package: IntegrationPackage, request: CapabilityAcquisitionRequest
     ) -> CapabilityManifest:
         return self._store.manifest(package, request)
+
+    def _sandbox_failure_detail(self, prefix: str) -> str:
+        """Retain bounded parent-owned startup evidence in certification failures."""
+
+        diagnostics = self._sandbox.protocol_diagnostics()
+        if not isinstance(diagnostics, Mapping):
+            return prefix
+        phase = diagnostics.get("phase")
+        classification = diagnostics.get("classification")
+        pid = diagnostics.get("pid")
+        exit_code = diagnostics.get("exit_code")
+        response_received = diagnostics.get("response_received")
+        job = diagnostics.get("job")
+        job_state = job.get("state") if isinstance(job, Mapping) else None
+        job_active = job.get("active_process_count") if isinstance(job, Mapping) else None
+        fields = (
+            ("protocol_phase", phase),
+            ("classification", classification),
+            ("pid", pid),
+            ("exit_code", exit_code),
+            ("response_received", response_received),
+            ("job_state", job_state),
+            ("job_active_process_count", job_active),
+        )
+        bounded = ";".join(
+            f"{key}={str(value)[:128]}" for key, value in fields if value is not None
+        )
+        return f"{prefix};{bounded}" if bounded else prefix
 
 
 class ProductionActivationBoundary:
@@ -2394,6 +2739,7 @@ def _action_spec_payload(spec: CapabilityActionSpec) -> dict[str, object]:
         "retryable": spec.retryable,
         "verification": list(spec.verification),
         "compensation": spec.compensation,
+        "operation": spec.operation,
     }
 
 
@@ -2425,6 +2771,7 @@ def _action_spec_from_payload(
         or type(value.get("idempotent", True)) is not bool
         or type(value.get("retryable", False)) is not bool
         or (compensation is not None and type(compensation) is not str)
+        or type(value.get("operation", "default_output")) is not str
     ):
         raise ProductionCapabilityError("Stored action declaration metadata is malformed")
     try:
@@ -2450,6 +2797,7 @@ def _action_spec_from_payload(
             bool(value.get("retryable", False)),
             tuple(verification),
             compensation,
+            str(value.get("operation", "default_output")),
         )
     except (KeyError, TypeError, ValueError) as error:
         raise ProductionCapabilityError("Stored action declaration is malformed") from error
@@ -2589,7 +2937,8 @@ def _package_payload(package: IntegrationPackage) -> dict[str, object]:
     if provenance is None:
         raise ProductionCapabilityError("Package provenance is missing")
     return {
-        "schema": 1,
+        "schema": 2,
+        "format": "CONSTRAINED_WORKER_PAYLOAD",
         "package_id": package.package_id,
         "version": str(package.version),
         "layout": asdict(package.layout),
@@ -2665,7 +3014,11 @@ def _legacy_package_folder(package_id: str) -> str:
 
 
 def _package_from_payload(value: object) -> IntegrationPackage:
-    if not isinstance(value, dict) or value.get("schema") != 1:
+    if (
+        not isinstance(value, dict)
+        or value.get("schema") != 2
+        or value.get("format") != "CONSTRAINED_WORKER_PAYLOAD"
+    ):
         raise ProductionCapabilityError("Stored package schema is unsupported")
     try:
         package_id = str(value["package_id"])
@@ -2864,7 +3217,9 @@ __all__ = [
     "CapabilityLifecycleRestoreResult",
     "CapabilityLifecycleRestorer",
     "ProductionActivationBoundary",
+    "ProductionHostOperationBridge",
     "ProductionCapabilityError",
+    "TrustedHostOperation",
     "ProductionCertificationProvider",
     "ProductionLocalCandidateProvider",
     "ProductionLocalDiscoveryProvider",

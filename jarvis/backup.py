@@ -324,14 +324,17 @@ class BackupService:
         root: Path,
         *,
         installation_id: str | None = None,
+        identity_root: Path | None = None,
+        legacy_identity_root: Path | None = None,
         component_sources: Mapping[str, ComponentProvider] | None = None,
         component_appliers: Mapping[str, ComponentApplier] | None = None,
     ) -> None:
         self._root = _safe_directory(root)
+        resolved_identity_root = _safe_directory(identity_root or root)
         self._installation_id = (
             _text(installation_id, "installation_id")
             if installation_id is not None
-            else _load_or_create_installation_id(self._root)
+            else _load_or_migrate_installation_id(resolved_identity_root, legacy_identity_root)
         )
         self._sources = dict(component_sources or {})
         self._appliers = dict(component_appliers or {})
@@ -970,6 +973,42 @@ def _load_or_create_installation_id(root: Path) -> str:
     identity = f"installation-{uuid4().hex}"
     _atomic_write(identity_path, identity.encode("ascii"))
     return identity
+
+
+def _load_or_migrate_installation_id(root: Path, legacy_root: Path | None) -> str:
+    """Load stable identity first, then perform a narrow legacy migration."""
+
+    identity_path = root / "installation-id"
+    stable = _read_installation_id(identity_path)
+    if stable is not None:
+        if legacy_root is not None:
+            legacy = _read_installation_id(_safe_directory(legacy_root) / "installation-id")
+            if legacy is not None and legacy != stable:
+                raise BackupError("Stable and legacy installation identities disagree")
+        return stable
+    if legacy_root is None:
+        return _load_or_create_installation_id(root)
+    legacy_identity = _read_installation_id(_safe_directory(legacy_root) / "installation-id")
+    if legacy_identity is None:
+        return _load_or_create_installation_id(root)
+    _atomic_write(identity_path, legacy_identity.encode("ascii"))
+    return legacy_identity
+
+
+def _read_installation_id(identity_path: Path) -> str | None:
+    _assert_no_reparse_path(identity_path)
+    if (
+        not identity_path.exists()
+        and not identity_path.is_symlink()
+        and not identity_path.is_junction()
+    ):
+        return None
+    if identity_path.is_symlink() or identity_path.is_junction() or not identity_path.is_file():
+        raise BackupError("Backup installation identity is unsafe")
+    try:
+        return _text(identity_path.read_text(encoding="ascii").strip(), "installation_id")
+    except (OSError, UnicodeError) as error:
+        raise BackupError("Backup installation identity is unavailable") from error
 
 
 def _atomic_write(destination: Path, data: bytes) -> None:

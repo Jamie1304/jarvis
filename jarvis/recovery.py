@@ -357,6 +357,33 @@ class TrustedRecoveryAuthority:
         ).encode("utf-8")
         return hmac.new(key, encoded, hashlib.sha256).hexdigest()
 
+    @staticmethod
+    def _payload_bytes(payload: Mapping[str, object]) -> bytes:
+        if not isinstance(payload, Mapping) or any(type(key) is not str for key in payload):
+            raise RecoveryAuthenticationError("trusted payload is malformed")
+        try:
+            return json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        except (TypeError, ValueError) as error:
+            raise RecoveryAuthenticationError("trusted payload is not serializable") from error
+
+    def sign_payload(self, payload: Mapping[str, object]) -> str:
+        """Sign a bounded trusted receipt payload with the existing secure key."""
+
+        return hmac.new(self._get_key(), self._payload_bytes(payload), hashlib.sha256).hexdigest()
+
+    def verify_payload(self, payload: Mapping[str, object], integrity: str) -> bool:
+        """Verify a trusted receipt payload without exposing its key material."""
+
+        if type(integrity) is not str or len(integrity) != hashlib.sha256().digest_size * 2:
+            return False
+        try:
+            expected = hmac.new(
+                self._get_key(), self._payload_bytes(payload), hashlib.sha256
+            ).hexdigest()
+        except (RecoveryError, CredentialNotFound, SecretBackendUnavailable):
+            return False
+        return hmac.compare_digest(integrity, expected)
+
     def _promote(
         self,
         *,

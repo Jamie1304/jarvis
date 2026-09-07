@@ -1,5 +1,6 @@
 """Typed, environment-aware application settings."""
 
+import os
 from functools import lru_cache
 from pathlib import Path
 from typing import Literal
@@ -8,6 +9,37 @@ from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from jarvis.version import __version__
+
+
+def default_app_data_dir() -> Path:
+    """Return the stable local application-data root without using the CWD."""
+
+    if os.name == "nt":
+        local_app_data = os.environ.get("LOCALAPPDATA")
+        if local_app_data:
+            return Path(local_app_data) / "JARVIS"
+    return Path.home() / ".local" / "share" / "JARVIS"
+
+
+def resolve_environment_file(
+    *, project_root: Path | None = None, app_data_dir: Path | None = None
+) -> Path | None:
+    """Resolve only explicit or JARVIS-owned configuration files, in precedence order."""
+
+    explicit = os.environ.get("JARVIS_ENV_FILE")
+    candidates: tuple[Path, ...] = ((Path(explicit).expanduser(),) if explicit else ()) + (
+        (project_root or Path(__file__).resolve().parents[2]) / ".env",
+        (app_data_dir or default_app_data_dir()) / "config" / ".env",
+    )
+    for candidate in candidates:
+        resolved = candidate.resolve(strict=False)
+        if candidate.is_symlink():
+            raise ValueError("JARVIS environment file must not be a symlink")
+        if resolved.exists():
+            if not resolved.is_file():
+                raise ValueError("JARVIS environment file is not a regular file")
+            return resolved
+    return None
 
 
 class Settings(BaseSettings):
@@ -49,7 +81,16 @@ class Settings(BaseSettings):
     multi_agent_enabled: bool = False
     multi_agent_max_concurrency: int = Field(default=3, gt=0, le=16)
     multi_agent_timeout_seconds: float = Field(default=120.0, gt=0, le=3_600)
-    app_data_dir: Path = Path(".jarvis")
+    app_data_dir: Path = Field(default_factory=default_app_data_dir)
+    ollama_autostart: bool = True
+    ollama_executable: Path | None = None
+    ollama_start_timeout_seconds: float = Field(default=20.0, gt=0, le=120)
+    ollama_stop_owned_on_exit: bool = False
+    tts_provider: Literal["piper", "pyttsx3"] = "piper"
+    tts_piper_model_path: Path | None = None
+    tts_piper_config_path: Path | None = None
+    tts_output_device: str | int | None = None
+    tts_use_cuda: bool = False
     mcp_enabled: bool = False
     mcp_config_path: Path | None = None
     computer_enabled: bool = False
@@ -85,4 +126,4 @@ class Settings(BaseSettings):
 def get_settings() -> Settings:
     """Return the process-wide settings instance."""
 
-    return Settings()
+    return Settings(_env_file=resolve_environment_file())

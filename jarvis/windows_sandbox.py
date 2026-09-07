@@ -13,15 +13,20 @@ when called anywhere except Windows.
 from __future__ import annotations
 
 import asyncio
+import base64
 import contextlib
 import ctypes
 import ctypes.wintypes as wintypes
+import hashlib
 import os
 import subprocess
 import sys
+import threading
+import time
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any, Protocol
+from uuid import uuid4
 
 
 class WindowsContainmentMode(StrEnum):
@@ -78,6 +83,19 @@ class WindowsNativeProcessError(RuntimeError):
     """A native restricted-token process could not be created safely."""
 
 
+class NativeCleanupState(StrEnum):
+    """Trusted observation state for ACL/profile cleanup.
+
+    A foreground deadline is deliberately not a terminal native observation.
+    """
+
+    REQUESTED = "CLEANUP_REQUESTED"
+    RUNNING = "CLEANUP_RUNNING"
+    CONFIRMED = "CLEANUP_CONFIRMED"
+    FAILED_CONFIRMED = "CLEANUP_FAILED_CONFIRMED"
+    OUTCOME_UNKNOWN = "CLEANUP_OUTCOME_UNKNOWN"
+
+
 class _JobAssignment(Protocol):
     def assign_handle(self, process_handle: int, process_id: int | None = None) -> None:
         """Assign a suspended process handle to the Job Object."""
@@ -93,12 +111,15 @@ if sys.platform == "win32":  # pragma: no cover - exercised by Windows CI/manual
     _EXTENDED_STARTUPINFO_PRESENT = 0x00080000
     _PROC_THREAD_ATTRIBUTE_HANDLE_LIST = 0x00020002
     _PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES = 0x00020009
+    _PROC_THREAD_ATTRIBUTE_CHILD_PROCESS_POLICY = 0x0002000E
+    _PROCESS_CREATION_CHILD_PROCESS_RESTRICTED = 0x00000001
     _HANDLE_FLAG_INHERIT = 0x00000001
     _STARTF_USESTDHANDLES = 0x00000100
     _INFINITE = 0xFFFFFFFF
     _STILL_ACTIVE = 259
     _ERROR_INSUFFICIENT_BUFFER = 122
     _ERROR_SUCCESS = 0
+    _ERROR_FILE_NOT_FOUND = 0x80070490
     _ERROR_ALREADY_EXISTS = 183
     _HRESULT_ALREADY_EXISTS = 0x800700B7
     _TOKEN_DUPLICATE = 0x0002
@@ -324,14 +345,101 @@ class _AppContainerProfile:
         except (AttributeError, OSError, TypeError, ValueError) as error:
             raise WindowsNativeProcessError("AppContainer profile setup failed") from error
 
-    def close(self, *, delete: bool = True) -> None:
+    @classmethod
+    def derive(cls, name: str) -> _AppContainerProfile:
+        """Derive an existing profile SID without creating a profile.
+
+        Recovery uses this API before issuing the exact-name delete.  The
+        derived SID is an independently observed binding; it is not accepted
+        merely because a receipt supplied a name.
+        """
+
+        if sys.platform != "win32":
+            raise WindowsNativeProcessError("AppContainer is unavailable")
+        if not isinstance(name, str) or not name or len(name) > 50:
+            raise WindowsNativeProcessError("AppContainer profile name is invalid")
+        try:
+            userenv = ctypes.WinDLL("userenv.dll", use_last_error=True)
+            kernel32 = ctypes.WinDLL("kernel32.dll", use_last_error=True)
+            userenv.DeriveAppContainerSidFromAppContainerName.argtypes = [
+                wintypes.LPCWSTR,
+                ctypes.POINTER(ctypes.c_void_p),
+            ]
+            userenv.DeriveAppContainerSidFromAppContainerName.restype = ctypes.c_long
+            kernel32.LocalFree.argtypes = [ctypes.c_void_p]
+            kernel32.LocalFree.restype = ctypes.c_void_p
+            sid = ctypes.c_void_p()
+            result = (
+                int(userenv.DeriveAppContainerSidFromAppContainerName(name, ctypes.byref(sid)))
+                & 0xFFFFFFFF
+            )
+            if result != _ERROR_SUCCESS or not sid.value:
+                raise _last_error("AppContainer profile SID derivation failed")
+            return cls(name, int(sid.value), userenv, kernel32)
+        except WindowsNativeProcessError:
+            raise
+        except (AttributeError, OSError, TypeError, ValueError) as error:
+            raise WindowsNativeProcessError("AppContainer profile derivation failed") from error
+
+    def sid_text(self) -> str:
+        """Return the exact native SID text for this profile."""
+
+        if not self.sid:
+            raise WindowsNativeProcessError("AppContainer SID is unavailable")
+        try:
+            advapi = ctypes.WinDLL("advapi32.dll", use_last_error=True)
+            advapi.ConvertSidToStringSidW.argtypes = [
+                ctypes.c_void_p,
+                ctypes.POINTER(ctypes.c_void_p),
+            ]
+            advapi.ConvertSidToStringSidW.restype = wintypes.BOOL
+            sid_text = ctypes.c_void_p()
+            if not advapi.ConvertSidToStringSidW(self.sid, ctypes.byref(sid_text)):
+                raise _last_error("ConvertSidToStringSidW failed")
+            try:
+                if not sid_text.value:
+                    raise WindowsNativeProcessError("AppContainer SID text is unavailable")
+                return ctypes.wstring_at(sid_text.value)
+            finally:
+                if sid_text.value:
+                    self._kernel32.LocalFree(sid_text)
+        except WindowsNativeProcessError:
+            raise
+        except (AttributeError, OSError, TypeError, ValueError) as error:
+            raise WindowsNativeProcessError("AppContainer SID inspection failed") from error
+
+    def sid_bytes(self) -> bytes:
+        """Return a bounded binary SID snapshot for semantic ACL observation."""
+
+        if not self.sid:
+            raise WindowsNativeProcessError("AppContainer SID is unavailable")
+        try:
+            advapi = ctypes.WinDLL("advapi32.dll", use_last_error=True)
+            advapi.GetLengthSid.argtypes = [ctypes.c_void_p]
+            advapi.GetLengthSid.restype = wintypes.DWORD
+            length = int(advapi.GetLengthSid(ctypes.c_void_p(self.sid)))
+            if not 8 <= length <= 68:
+                raise WindowsNativeProcessError("AppContainer SID length is invalid")
+            return ctypes.string_at(self.sid, length)
+        except WindowsNativeProcessError:
+            raise
+        except (AttributeError, OSError, TypeError, ValueError) as error:
+            raise WindowsNativeProcessError("AppContainer SID inspection failed") from error
+
+    def close(self, *, delete: bool = True) -> str:
+        result_name = "RETAINED"
         if self.sid:
             self._kernel32.LocalFree(self.sid)
             self.sid = 0
         if delete:
             result = int(self._userenv.DeleteAppContainerProfile(self.name)) & 0xFFFFFFFF
-            if result not in {_ERROR_SUCCESS, 0x80070490}:  # profile already absent
+            if result == _ERROR_SUCCESS:
+                result_name = "DELETED"
+            elif result == _ERROR_FILE_NOT_FOUND:  # profile already absent
+                result_name = "ALREADY_ABSENT"
+            else:
                 raise _last_error("AppContainer profile cleanup failed")
+        return result_name
 
     def folder_path(self) -> str:
         """Return the OS-owned LOCALAPPDATA root for this profile."""
@@ -399,14 +507,20 @@ class _AppContainerAclLease:
         path: str,
         security_descriptor: int,
         old_dacl: int,
+        old_dacl_bytes: bytes,
+        sid_bytes: bytes,
         advapi: Any,
         kernel32: Any,
+        resource_kind: str = "trusted_acl_resource",
     ) -> None:
         self.path = path
         self._security_descriptor = security_descriptor
         self._old_dacl = old_dacl
+        self._old_dacl_bytes = old_dacl_bytes
+        self._sid_bytes = sid_bytes
         self._advapi = advapi
         self._kernel32 = kernel32
+        self.resource_kind = resource_kind
         self._released = False
 
     @classmethod
@@ -418,6 +532,7 @@ class _AppContainerAclLease:
         access: int,
         advapi: Any | None = None,
         kernel32: Any | None = None,
+        resource_kind: str = "trusted_acl_resource",
     ) -> _AppContainerAclLease:
         if sys.platform != "win32":
             raise WindowsNativeProcessError("AppContainer ACLs are unavailable")
@@ -473,6 +588,23 @@ class _AppContainerAclLease:
             kernel32.LocalFree.argtypes = [ctypes.c_void_p]
             kernel32.LocalFree.restype = ctypes.c_void_p
 
+            class _AclSizeInformation(ctypes.Structure):
+                _fields_ = [
+                    ("AceCount", wintypes.DWORD),
+                    ("AclBytesInUse", wintypes.DWORD),
+                    ("AclBytesFree", wintypes.DWORD),
+                ]
+
+            advapi.GetAclInformation.argtypes = [
+                ctypes.c_void_p,
+                ctypes.c_void_p,
+                wintypes.DWORD,
+                wintypes.DWORD,
+            ]
+            advapi.GetAclInformation.restype = wintypes.BOOL
+            advapi.GetLengthSid.argtypes = [ctypes.c_void_p]
+            advapi.GetLengthSid.restype = wintypes.DWORD
+
             owner = ctypes.c_void_p()
             group = ctypes.c_void_p()
             old_dacl = ctypes.c_void_p()
@@ -490,6 +622,26 @@ class _AppContainerAclLease:
             )
             if result != _ERROR_SUCCESS or not descriptor.value:
                 raise WindowsNativeProcessError("AppContainer ACL inspection failed")
+            acl_bytes = b""
+            sid_bytes = b""
+            if old_dacl.value:
+                acl_info = _AclSizeInformation()
+                if (
+                    not advapi.GetAclInformation(
+                        old_dacl,
+                        ctypes.byref(acl_info),
+                        ctypes.sizeof(acl_info),
+                        2,
+                    )
+                    or not acl_info.AclBytesInUse
+                ):
+                    kernel32.LocalFree(descriptor)
+                    raise WindowsNativeProcessError("AppContainer ACL baseline capture failed")
+                acl_bytes = ctypes.string_at(old_dacl, int(acl_info.AclBytesInUse))
+            if sid and int(sid) > 4096:
+                sid_length = int(advapi.GetLengthSid(ctypes.c_void_p(sid)))
+                if sid_length:
+                    sid_bytes = ctypes.string_at(sid, sid_length)
             trustee = _Trustee(
                 None,
                 0,
@@ -526,7 +678,16 @@ class _AppContainerAclLease:
             if result != _ERROR_SUCCESS:
                 kernel32.LocalFree(descriptor)
                 raise WindowsNativeProcessError("AppContainer ACL application failed")
-            return cls(path, int(descriptor.value), int(old_dacl.value or 0), advapi, kernel32)
+            return cls(
+                path,
+                int(descriptor.value),
+                int(old_dacl.value or 0),
+                acl_bytes,
+                sid_bytes,
+                advapi,
+                kernel32,
+                resource_kind,
+            )
         except WindowsNativeProcessError:
             raise
         except (AttributeError, OSError, TypeError, ValueError) as error:
@@ -548,8 +709,248 @@ class _AppContainerAclLease:
             )
             if result != _ERROR_SUCCESS:
                 raise WindowsNativeProcessError("AppContainer ACL restoration failed")
+            if self._old_dacl_bytes:
+                owner = ctypes.c_void_p()
+                group = ctypes.c_void_p()
+                restored_dacl = ctypes.c_void_p()
+                sacl = ctypes.c_void_p()
+                descriptor = ctypes.c_void_p()
+                result = self._advapi.GetNamedSecurityInfoW(
+                    self.path,
+                    self._SE_FILE_OBJECT,
+                    self._DACL_SECURITY_INFORMATION,
+                    ctypes.byref(owner),
+                    ctypes.byref(group),
+                    ctypes.byref(restored_dacl),
+                    ctypes.byref(sacl),
+                    ctypes.byref(descriptor),
+                )
+                try:
+                    if result != _ERROR_SUCCESS or not restored_dacl.value:
+                        raise WindowsNativeProcessError(
+                            "AppContainer ACL restoration verification failed"
+                        )
+
+                    # The baseline is an owned, machine-readable ACL snapshot.
+                    # Windows can materialize an inherited ACE while applying
+                    # a DACL, so compare the baseline ACE set and temporary SID
+                    # absence rather than requiring unstable byte identity.
+                    class _AclSizeInformation(ctypes.Structure):
+                        _fields_ = [
+                            ("AceCount", wintypes.DWORD),
+                            ("AclBytesInUse", wintypes.DWORD),
+                            ("AclBytesFree", wintypes.DWORD),
+                        ]
+
+                    acl_info = _AclSizeInformation()
+                    if not self._advapi.GetAclInformation(
+                        restored_dacl,
+                        ctypes.byref(acl_info),
+                        ctypes.sizeof(acl_info),
+                        2,
+                    ):
+                        raise WindowsNativeProcessError(
+                            "AppContainer ACL restoration verification failed "
+                            f"(baseline={len(self._old_dacl_bytes)}, "
+                            "restored ACL metadata unavailable)"
+                        )
+                    restored_bytes = ctypes.string_at(restored_dacl, int(acl_info.AclBytesInUse))
+                    baseline_aces = self._acl_entries(self._old_dacl_bytes)
+                    restored_aces = self._acl_entries(restored_bytes)
+                    # Windows may drop a materialized inherited ACE while the
+                    # parent is restored. Reject any new ACE, which proves no
+                    # access was broadened, while allowing that normalization.
+                    if any(ace not in baseline_aces for ace in restored_aces):
+                        raise WindowsNativeProcessError(
+                            "AppContainer ACL restoration verification failed "
+                            f"(baseline={len(self._old_dacl_bytes)}, "
+                            f"restored={len(restored_bytes)})"
+                        )
+                    if self._sid_bytes and self._sid_bytes in restored_bytes:
+                        raise WindowsNativeProcessError(
+                            "AppContainer temporary SID remained after restoration"
+                        )
+                finally:
+                    if descriptor.value:
+                        self._kernel32.LocalFree(descriptor)
         finally:
             self._kernel32.LocalFree(self._security_descriptor)
+
+    @property
+    def baseline_fingerprint(self) -> str:
+        """Fingerprint of the captured trusted DACL baseline."""
+
+        return hashlib.sha256(self._old_dacl_bytes).hexdigest()
+
+    @property
+    def baseline_bytes(self) -> bytes:
+        """Return the exact trusted DACL snapshot captured before the grant."""
+
+        return bytes(self._old_dacl_bytes)
+
+    @classmethod
+    def _read_dacl(cls, path: str, advapi: Any, kernel32: Any) -> bytes:
+        """Read one semantic DACL snapshot through the documented API."""
+
+        advapi.GetNamedSecurityInfoW.argtypes = [
+            wintypes.LPCWSTR,
+            wintypes.DWORD,
+            wintypes.DWORD,
+            ctypes.POINTER(ctypes.c_void_p),
+            ctypes.POINTER(ctypes.c_void_p),
+            ctypes.POINTER(ctypes.c_void_p),
+            ctypes.POINTER(ctypes.c_void_p),
+            ctypes.POINTER(ctypes.c_void_p),
+        ]
+        advapi.GetNamedSecurityInfoW.restype = wintypes.DWORD
+        advapi.GetAclInformation.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            wintypes.DWORD,
+            wintypes.DWORD,
+        ]
+        advapi.GetAclInformation.restype = wintypes.BOOL
+        kernel32.LocalFree.argtypes = [ctypes.c_void_p]
+        kernel32.LocalFree.restype = ctypes.c_void_p
+        owner = ctypes.c_void_p()
+        group = ctypes.c_void_p()
+        dacl = ctypes.c_void_p()
+        sacl = ctypes.c_void_p()
+        descriptor = ctypes.c_void_p()
+        result = advapi.GetNamedSecurityInfoW(
+            path,
+            cls._SE_FILE_OBJECT,
+            cls._DACL_SECURITY_INFORMATION,
+            ctypes.byref(owner),
+            ctypes.byref(group),
+            ctypes.byref(dacl),
+            ctypes.byref(sacl),
+            ctypes.byref(descriptor),
+        )
+        if result != _ERROR_SUCCESS or not descriptor.value:
+            raise WindowsNativeProcessError("AppContainer ACL inspection failed")
+        try:
+            if not dacl.value:
+                return b""
+
+            class _AclSizeInformation(ctypes.Structure):
+                _fields_ = [
+                    ("AceCount", wintypes.DWORD),
+                    ("AclBytesInUse", wintypes.DWORD),
+                    ("AclBytesFree", wintypes.DWORD),
+                ]
+
+            acl_info = _AclSizeInformation()
+            if not advapi.GetAclInformation(
+                dacl,
+                ctypes.byref(acl_info),
+                ctypes.sizeof(acl_info),
+                2,
+            ):
+                raise WindowsNativeProcessError("AppContainer ACL metadata inspection failed")
+            length = int(acl_info.AclBytesInUse)
+            if not 8 <= length <= 1_048_576:
+                raise WindowsNativeProcessError("AppContainer ACL size is invalid")
+            return ctypes.string_at(dacl, length)
+        finally:
+            kernel32.LocalFree(descriptor)
+
+    @classmethod
+    def observe(
+        cls,
+        path: str,
+        baseline_bytes: bytes,
+        temporary_sid_bytes: bytes,
+        *,
+        advapi: Any | None = None,
+        kernel32: Any | None = None,
+    ) -> dict[str, object]:
+        """Observe ACL semantics without changing the target."""
+
+        if sys.platform != "win32":
+            raise WindowsNativeProcessError("AppContainer ACLs are unavailable")
+        if not isinstance(baseline_bytes, bytes) or not 8 <= len(baseline_bytes) <= 1_048_576:
+            raise WindowsNativeProcessError("AppContainer ACL baseline is invalid")
+        if not isinstance(temporary_sid_bytes, bytes) or not temporary_sid_bytes:
+            raise WindowsNativeProcessError("AppContainer temporary SID is invalid")
+        try:
+            advapi = advapi or ctypes.WinDLL("advapi32.dll", use_last_error=True)
+            kernel32 = kernel32 or ctypes.WinDLL("kernel32.dll", use_last_error=True)
+            current = cls._read_dacl(path, advapi, kernel32)
+            baseline_entries = cls._acl_entries(baseline_bytes)
+            current_entries = cls._acl_entries(current)
+            valid_semantic = bool(baseline_entries) and all(
+                entry in baseline_entries for entry in current_entries
+            )
+            temporary_sid_present = temporary_sid_bytes in current
+            return {
+                "path": path,
+                "baseline_sha256": hashlib.sha256(baseline_bytes).hexdigest(),
+                "current_sha256": hashlib.sha256(current).hexdigest(),
+                "baseline_matches": valid_semantic and not temporary_sid_present,
+                "temporary_sid_present": temporary_sid_present,
+            }
+        except WindowsNativeProcessError:
+            raise
+        except (AttributeError, OSError, TypeError, ValueError) as error:
+            raise WindowsNativeProcessError("AppContainer ACL observation failed") from error
+
+    @classmethod
+    def restore(
+        cls,
+        path: str,
+        baseline_bytes: bytes,
+        *,
+        advapi: Any | None = None,
+        kernel32: Any | None = None,
+    ) -> None:
+        """Apply only the independently validated trusted DACL baseline."""
+
+        if sys.platform != "win32":
+            raise WindowsNativeProcessError("AppContainer ACLs are unavailable")
+        if not isinstance(baseline_bytes, bytes) or not 8 <= len(baseline_bytes) <= 1_048_576:
+            raise WindowsNativeProcessError("AppContainer ACL baseline is invalid")
+        try:
+            advapi = advapi or ctypes.WinDLL("advapi32.dll", use_last_error=True)
+            kernel32 = kernel32 or ctypes.WinDLL("kernel32.dll", use_last_error=True)
+            advapi.SetNamedSecurityInfoW.argtypes = [
+                wintypes.LPWSTR,
+                wintypes.DWORD,
+                wintypes.DWORD,
+                ctypes.c_void_p,
+                ctypes.c_void_p,
+                ctypes.c_void_p,
+                ctypes.c_void_p,
+            ]
+            advapi.SetNamedSecurityInfoW.restype = wintypes.DWORD
+            acl_buffer = ctypes.create_string_buffer(baseline_bytes)
+            result = advapi.SetNamedSecurityInfoW(
+                path,
+                cls._SE_FILE_OBJECT,
+                cls._DACL_SECURITY_INFORMATION,
+                None,
+                None,
+                ctypes.cast(acl_buffer, ctypes.c_void_p),
+                None,
+            )
+            if result != _ERROR_SUCCESS:
+                raise _last_error("AppContainer ACL restoration failed")
+        except WindowsNativeProcessError:
+            raise
+        except (AttributeError, OSError, TypeError, ValueError) as error:
+            raise WindowsNativeProcessError("AppContainer ACL restoration failed") from error
+
+    @staticmethod
+    def _acl_entries(acl_bytes: bytes) -> tuple[bytes, ...]:
+        entries: list[bytes] = []
+        offset = 8
+        while offset + 4 <= len(acl_bytes):
+            size = int.from_bytes(acl_bytes[offset + 2 : offset + 4], "little")
+            if size < 4 or offset + size > len(acl_bytes):
+                break
+            entries.append(acl_bytes[offset : offset + size])
+            offset += size
+        return tuple(entries)
 
 
 class WindowsNativeProcess:
@@ -562,6 +963,7 @@ class WindowsNativeProcess:
         process_id: int,
         kernel32: Any,
         cleanup: Any | None = None,
+        cleanup_evidence: dict[str, object] | None = None,
     ) -> None:
         self._process_handle = process_handle
         self._thread_handle = thread_handle
@@ -577,12 +979,58 @@ class WindowsNativeProcess:
         self._cleanup = cleanup
         self._cleanup_done = False
         self._cleanup_error: Exception | None = None
+        self._cleanup_state = (
+            NativeCleanupState.REQUESTED if cleanup is not None else NativeCleanupState.CONFIRMED
+        )
+        self._cleanup_lock = threading.Lock()
+        self._cleanup_thread: threading.Thread | None = None
+        self._cleanup_observer: Any | None = None
+        self._cleanup_operation_id = uuid4().hex
+        self._cleanup_phase = "not started"
+        self._cleanup_phase_ref: dict[str, str] | None = None
+        self._cleanup_evidence = cleanup_evidence if cleanup_evidence is not None else {}
 
     @property
     def cleanup_error(self) -> Exception | None:
         """Return a native profile/ACL cleanup error, if one occurred."""
 
         return self._cleanup_error
+
+    @property
+    def cleanup_state(self) -> NativeCleanupState:
+        """Return the current trusted cleanup observation state."""
+
+        with self._cleanup_lock:
+            return self._cleanup_state
+
+    @property
+    def cleanup_operation_id(self) -> str:
+        """Stable identifier for the cleanup transaction and its receipt."""
+
+        return self._cleanup_operation_id
+
+    def set_cleanup_observer(self, observer: Any) -> None:
+        """Install the parent-owned durable-receipt observer before cleanup.
+
+        The launcher never accepts this from generated content.  The observer
+        receives only native cleanup state and bounded evidence.
+        """
+
+        self._cleanup_observer = observer
+
+    def set_cleanup_owner(self, instance_id: str) -> None:
+        """Bind the durable receipt to this trusted parent generation."""
+
+        if not isinstance(instance_id, str) or not instance_id:
+            raise WindowsNativeProcessError("Cleanup owner generation is invalid")
+        self._cleanup_evidence["owner_instance_id"] = instance_id
+        self._cleanup_evidence["owner_pid"] = self.pid
+
+    @property
+    def cleanup_evidence(self) -> dict[str, object]:
+        """Return bounded native security cleanup observations."""
+
+        return dict(self._cleanup_evidence)
 
     @property
     def returncode(self) -> int | None:
@@ -664,7 +1112,10 @@ class WindowsNativeProcess:
         if not self._kernel32.GetExitCodeProcess(self._process_handle, ctypes.byref(code)):
             raise _last_error("GetExitCodeProcess failed")
         self._returncode = int(code.value)
-        self._close_native_handles()
+        # Closing OS handles is safe from the wait worker.  Security-profile
+        # restoration can enter Windows ACL APIs that block; defer that part
+        # to close(), where it is bounded and observable.
+        self._close_native_handles(run_cleanup=False)
 
     def close_streams(self) -> None:
         if self.stdin is not None:
@@ -679,23 +1130,80 @@ class WindowsNativeProcess:
         self._stderr_transport = None
         self._write_transport = None
 
-    def _close_native_handles(self) -> None:
+    def _notify_cleanup_observer(self) -> None:
+        observer = self._cleanup_observer
+        if callable(observer):
+            observer(self.cleanup_state, self.cleanup_evidence)
+
+    def _close_native_handles(
+        self,
+        *,
+        run_cleanup: bool = True,
+        cleanup_deadline_seconds: float | None = None,
+    ) -> None:
         for attribute in ("_thread_handle", "_process_handle"):
             handle = getattr(self, attribute)
             if handle:
                 self._kernel32.CloseHandle(handle)
                 setattr(self, attribute, 0)
-        if self._cleanup is not None and not self._cleanup_done:
+        if run_cleanup and self._cleanup is not None and not self._cleanup_done:
             self._cleanup_done = True
             cleanup, self._cleanup = self._cleanup, None
-            try:
-                cleanup()
-            except Exception as error:
-                self._cleanup_error = error
+            self._cleanup_evidence.setdefault("cleanup_begin", True)
+            errors: list[Exception] = []
 
-    def close(self) -> None:
+            def cleanup_worker() -> None:
+                try:
+                    cleanup()
+                except Exception as error:  # pragma: no cover - native API boundary
+                    errors.append(error)
+                finally:
+                    with self._cleanup_lock:
+                        if errors:
+                            self._cleanup_error = errors[0]
+                            self._cleanup_state = NativeCleanupState.FAILED_CONFIRMED
+                            self._cleanup_evidence["cleanup_terminal"] = False
+                        else:
+                            self._cleanup_state = NativeCleanupState.CONFIRMED
+                            self._cleanup_evidence["cleanup_terminal"] = True
+                        self._cleanup_evidence["cleanup_completed_monotonic_ns"] = (
+                            time.monotonic_ns()
+                        )
+                    self._notify_cleanup_observer()
+
+            with self._cleanup_lock:
+                self._cleanup_state = NativeCleanupState.RUNNING
+                self._cleanup_evidence["cleanup_operation_id"] = self._cleanup_operation_id
+                self._cleanup_evidence["cleanup_terminal"] = False
+            self._notify_cleanup_observer()
+            # A daemon is intentional: if the host exits while a native API is
+            # stuck, the durable receipt remains UNKNOWN rather than making
+            # shutdown hang.  The affected resources are never released by
+            # this thread or its caller until a terminal observation exists.
+            cleanup_thread = threading.Thread(
+                target=cleanup_worker, name="jarvis-sandbox-cleanup", daemon=True
+            )
+            self._cleanup_thread = cleanup_thread
+            cleanup_thread.start()
+        worker_to_join = self._cleanup_thread
+        if run_cleanup and worker_to_join is not None:
+            # ``None`` is retained for direct native callers that explicitly
+            # require authoritative blocking behavior.  SandboxProcess always
+            # supplies its operational foreground deadline.
+            if cleanup_deadline_seconds is None:
+                worker_to_join.join()
+            else:
+                worker_to_join.join(cleanup_deadline_seconds)
+            if bool(getattr(worker_to_join, "is_alive", lambda: False)()):
+                with self._cleanup_lock:
+                    self._cleanup_state = NativeCleanupState.OUTCOME_UNKNOWN
+                    self._cleanup_evidence["cleanup_deadline_exceeded"] = True
+                    self._cleanup_evidence["cleanup_terminal"] = False
+                self._notify_cleanup_observer()
+
+    def close(self, *, cleanup_deadline_seconds: float | None = None) -> None:
         self.close_streams()
-        self._close_native_handles()
+        self._close_native_handles(cleanup_deadline_seconds=cleanup_deadline_seconds)
 
 
 class WindowsJobProcessLauncher:
@@ -1077,6 +1585,8 @@ class WindowsRestrictedLauncher:
         kernel32: Any,
         handles: list[int],
         security_capabilities: Any | None = None,
+        *,
+        child_process_restricted: bool = False,
     ) -> tuple[Any, Any]:
         size = ctypes.c_size_t()
         kernel32.InitializeProcThreadAttributeList.argtypes = [
@@ -1098,7 +1608,11 @@ class WindowsRestrictedLauncher:
         kernel32.UpdateProcThreadAttribute.restype = wintypes.BOOL
         kernel32.DeleteProcThreadAttributeList.argtypes = [ctypes.c_void_p]
         kernel32.DeleteProcThreadAttributeList.restype = None
-        attribute_count = 1 + (1 if security_capabilities is not None else 0)
+        attribute_count = (
+            1
+            + (1 if security_capabilities is not None else 0)
+            + (1 if child_process_restricted else 0)
+        )
         kernel32.InitializeProcThreadAttributeList(None, attribute_count, 0, ctypes.byref(size))
         if size.value == 0 or ctypes.get_last_error() not in {0, _ERROR_INSUFFICIENT_BUFFER}:
             raise _last_error("InitializeProcThreadAttributeList sizing failed")
@@ -1131,6 +1645,18 @@ class WindowsRestrictedLauncher:
         ):
             kernel32.DeleteProcThreadAttributeList(attribute_list)
             raise _last_error("UpdateProcThreadAttribute security capabilities failed")
+        child_process_policy = wintypes.DWORD(_PROCESS_CREATION_CHILD_PROCESS_RESTRICTED)
+        if child_process_restricted and not kernel32.UpdateProcThreadAttribute(
+            attribute_list,
+            0,
+            _PROC_THREAD_ATTRIBUTE_CHILD_PROCESS_POLICY,
+            ctypes.byref(child_process_policy),
+            ctypes.sizeof(child_process_policy),
+            None,
+            None,
+        ):
+            kernel32.DeleteProcThreadAttributeList(attribute_list)
+            raise _last_error("UpdateProcThreadAttribute child process policy failed")
         startup = _StartupInfoEx()
         startup.StartupInfo.cb = ctypes.sizeof(_StartupInfoEx)
         startup.StartupInfo.dwFlags = _STARTF_USESTDHANDLES
@@ -1142,6 +1668,7 @@ class WindowsRestrictedLauncher:
         startup._attribute_buffer = buffer
         startup._handle_array = handle_array
         startup._security_capabilities = security_capabilities
+        startup._child_process_policy = child_process_policy
         return startup, buffer
 
     @staticmethod
@@ -1288,23 +1815,62 @@ class WindowsAppContainerLauncher:
         native: WindowsNativeProcess | None = None
         handles: list[Any] = []
         cleanup_registered = False
+        cleanup_phase = {"value": "not started"}
+        profile_sid = profile.sid_text()
+        cleanup_evidence: dict[str, object] = {
+            "profile": profile_name,
+            "profile_sid": profile_sid,
+            "profile_created": True,
+            "profile_deleted": False,
+            "acl_lease_count": 0,
+            "acl_restored": False,
+            "leases_released": False,
+            "cleanup_terminal": False,
+        }
 
         def cleanup_profile() -> None:
             cleanup_error: Exception | None = None
-            for lease in reversed(leases):
+            # Restore parents before children so Windows stops inheriting the
+            # temporary parent ACE before each child is verified. Path
+            # deduplication above ensures a shared parent has one lease.
+            ordered_leases = sorted(
+                leases,
+                key=lambda lease: (lease.path.count("\\"), len(lease.path)),
+            )
+            cleanup_evidence["acl_lease_count"] = len(ordered_leases)
+            cleanup_evidence["acl_resources"] = [
+                {
+                    "path": lease.path,
+                    "resource_kind": lease.resource_kind,
+                    "baseline_sha256": lease.baseline_fingerprint,
+                    "baseline_b64": base64.b64encode(lease.baseline_bytes).decode("ascii"),
+                    "temporary_sid": profile_sid,
+                }
+                for lease in ordered_leases
+            ]
+            released = 0
+            for index, lease in enumerate(ordered_leases, start=1):
+                cleanup_phase["value"] = (
+                    f"ACL restoration {index}/{len(ordered_leases)} ({lease.path})"
+                )
                 try:
                     lease.release()
+                    released += 1
                 except Exception as error:
                     if cleanup_error is None:
                         cleanup_error = error
+            cleanup_evidence["leases_released"] = released == len(ordered_leases)
+            cleanup_evidence["acl_restored"] = cleanup_evidence["leases_released"]
             try:
+                cleanup_phase["value"] = "AppContainer profile deletion"
                 profile.close()
+                cleanup_evidence["profile_deleted"] = True
             except Exception as error:
                 if cleanup_error is None:
                     cleanup_error = error
             if cleanup_error is not None:
                 raise WindowsNativeProcessError(
-                    "AppContainer security cleanup failed"
+                    f"AppContainer security cleanup failed: {cleanup_error}"
                 ) from cleanup_error
 
         try:
@@ -1312,6 +1878,25 @@ class WindowsAppContainerLauncher:
             writable = {
                 os.path.normcase(os.path.abspath(root)).rstrip("\\/") for root in writable_roots
             }
+            root_kinds: dict[str, str] = {}
+            for root in (runtime_root, *allowed_roots, *writable_roots):
+                normalized_root = os.path.normcase(os.path.abspath(root)).rstrip("\\/")
+                root_kinds.setdefault(
+                    normalized_root,
+                    (
+                        "runtime_root"
+                        if normalized_root
+                        == os.path.normcase(os.path.abspath(runtime_root)).rstrip("\\/")
+                        else "sandbox_root"
+                        if normalized_root
+                        in {
+                            os.path.normcase(os.path.abspath(item)).rstrip("\\/")
+                            for item in writable_roots
+                        }
+                        else "dependency_root"
+                    ),
+                )
+            acl_requests: dict[str, tuple[str, int, str]] = {}
             for root in roots:
                 if not isinstance(root, str) or not root:
                     raise WindowsNativeProcessError("AppContainer ACL root is invalid")
@@ -1327,31 +1912,63 @@ class WindowsAppContainerLauncher:
                     # Microsoft Store/package roots already carry the OS-owned
                     # AppContainer ACE and reject application ACL mutation.
                     continue
-                leases.append(
-                    _AppContainerAclLease.grant(
-                        root,
-                        profile.sid,
-                        access=(
-                            _AppContainerAclLease._FILE_GENERIC_ALL
-                            if normalized_root in writable
-                            else _AppContainerAclLease._FILE_GENERIC_READ
-                            | _AppContainerAclLease._FILE_GENERIC_EXECUTE
-                        ),
-                        advapi=advapi,
-                        kernel32=kernel32,
-                    )
+                access = (
+                    _AppContainerAclLease._FILE_GENERIC_ALL
+                    if normalized_root in writable
+                    else _AppContainerAclLease._FILE_GENERIC_READ
+                    | _AppContainerAclLease._FILE_GENERIC_EXECUTE
                 )
                 parent = os.path.dirname(root.rstrip("\\/"))
+                root_kind = root_kinds.get(normalized_root, "dependency_root")
+                requests: tuple[tuple[str, int, str], ...] = ((root, access, root_kind),)
                 if parent and parent != root:
-                    leases.append(
-                        _AppContainerAclLease.grant(
-                            parent,
-                            profile.sid,
-                            access=_AppContainerAclLease._FILE_TRAVERSE,
-                            advapi=advapi,
-                            kernel32=kernel32,
-                        )
+                    requests += (
+                        (parent, _AppContainerAclLease._FILE_TRAVERSE, "traversal_parent"),
                     )
+                for requested_path, requested_access, resource_kind in requests:
+                    normalized_path = os.path.normcase(os.path.abspath(requested_path)).rstrip(
+                        "\\/"
+                    )
+                    existing = acl_requests.get(normalized_path)
+                    if existing is None:
+                        acl_requests[normalized_path] = (
+                            requested_path,
+                            requested_access,
+                            resource_kind,
+                        )
+                    else:
+                        existing_path, existing_access, existing_kind = existing
+                        acl_requests[normalized_path] = (
+                            existing_path,
+                            (
+                                _AppContainerAclLease._FILE_GENERIC_ALL
+                                if _AppContainerAclLease._FILE_GENERIC_ALL
+                                in {existing_access, requested_access}
+                                else existing_access | requested_access
+                            ),
+                            existing_kind if existing_kind != "traversal_parent" else resource_kind,
+                        )
+            for requested_path, requested_access, resource_kind in acl_requests.values():
+                leases.append(
+                    _AppContainerAclLease.grant(
+                        requested_path,
+                        profile.sid,
+                        access=requested_access,
+                        advapi=advapi,
+                        kernel32=kernel32,
+                        resource_kind=resource_kind,
+                    )
+                )
+            cleanup_evidence["acl_resources"] = [
+                {
+                    "path": lease.path,
+                    "resource_kind": lease.resource_kind,
+                    "baseline_sha256": lease.baseline_fingerprint,
+                    "baseline_b64": base64.b64encode(lease.baseline_bytes).decode("ascii"),
+                    "temporary_sid": profile_sid,
+                }
+                for lease in leases
+            ]
 
             app_data_root = profile.folder_path()
             app_temp = os.path.join(app_data_root, "Temp")
@@ -1379,6 +1996,7 @@ class WindowsAppContainerLauncher:
                 kernel32,
                 [child_stdin, child_stdout, null_handle],
                 _SecurityCapabilities(profile.sid, None, 0, 0),
+                child_process_restricted=True,
             )
             command = ctypes.create_unicode_buffer(
                 subprocess.list2cmdline((executable, *arguments))
@@ -1430,7 +2048,11 @@ class WindowsAppContainerLauncher:
                 int(process_info.dwProcessId),
                 kernel32,
                 cleanup=cleanup_profile,
+                cleanup_evidence=cleanup_evidence,
             )
+            # The closure is intentionally shared so a timeout reports the
+            # exact phase currently blocked by the native API.
+            native._cleanup_phase_ref = cleanup_phase
             cleanup_registered = True
             job.assign_handle(native._process_handle, native.pid)
             native.resume()
@@ -1490,6 +2112,7 @@ class WindowsAppContainerLauncher:
 
 __all__ = [
     "SandboxSecurityStatus",
+    "NativeCleanupState",
     "WindowsContainmentMode",
     "WindowsJobProcessLauncher",
     "WindowsNativeProcess",

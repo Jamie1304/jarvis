@@ -1,8 +1,10 @@
 """Local text-to-speech abstractions with an explicit disabled mode."""
 
 import asyncio
+import threading
 from abc import ABC, abstractmethod
 from collections.abc import AsyncIterable, AsyncIterator
+from pathlib import Path
 from typing import Any
 
 from jarvis.core.errors import SpeechDisabledError, SpeechError
@@ -78,6 +80,74 @@ class Pyttsx3TtsProvider(TtsProvider):
     def _stop_sync(self) -> None:
         if self._engine is not None:
             self._engine.stop()
+
+
+class PiperTtsProvider(TtsProvider):
+    """Lazy local Piper adapter for separately installed private-use speech support."""
+
+    def __init__(
+        self,
+        *,
+        model_path: Path | None,
+        config_path: Path | None = None,
+        output_device: str | int | None = None,
+        use_cuda: bool = False,
+    ) -> None:
+        self._model_path = model_path
+        self._config_path = config_path
+        self._output_device = output_device
+        self._use_cuda = use_cuda
+        self._voice: Any | None = None
+        self._stream: Any | None = None
+        self._stop_requested = threading.Event()
+
+    async def speak(self, text: str) -> None:
+        if not text.strip():
+            return
+        self._stop_requested.clear()
+        await asyncio.to_thread(self._speak_sync, text)
+
+    async def stop(self) -> None:
+        self._stop_requested.set()
+        stream = self._stream
+        if stream is not None:
+            await asyncio.to_thread(stream.abort)
+
+    def _speak_sync(self, text: str) -> None:
+        if self._model_path is None or not self._model_path.is_file():
+            raise SpeechError("Piper voice model is unavailable; configure a local voice file")
+        try:
+            import sounddevice as sound_device
+            from piper import PiperVoice
+        except ImportError as error:
+            raise SpeechError(
+                "Piper dependencies are missing; install the optional speech extra"
+            ) from error
+        try:
+            if self._voice is None:
+                options: dict[str, Any] = {"use_cuda": self._use_cuda}
+                if self._config_path is not None:
+                    options["config_path"] = str(self._config_path)
+                self._voice = PiperVoice.load(str(self._model_path), **options)
+            for chunk in self._voice.synthesize(text):
+                if self._stop_requested.is_set():
+                    return
+                self._stream = sound_device.RawOutputStream(
+                    samplerate=chunk.sample_rate,
+                    channels=chunk.sample_channels,
+                    dtype="int16",
+                    device=self._output_device,
+                )
+                try:
+                    self._stream.start()
+                    self._stream.write(chunk.audio_int16_bytes)
+                finally:
+                    self._stream.close()
+                    self._stream = None
+        except SpeechError:
+            raise
+        except Exception as error:
+            raise SpeechError("Piper local text-to-speech playback failed") from error
 
 
 class TextToSpeechService:

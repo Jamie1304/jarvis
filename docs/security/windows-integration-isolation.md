@@ -44,9 +44,66 @@ The canonical Windows launch is composed as follows:
    sandbox directories. Cleanup failure is surfaced as sandbox failure; no
    weaker launch is attempted.
 
+### ACL lease restoration contract
+
+The ACL lease implementation treats parent and child roots as one normalized
+lease set. Overlapping roots are deduplicated and their requested access is
+combined before any ACE is added; this prevents duplicate AppContainer leases
+from making parent/child inheritance restoration order-dependent. Before the
+temporary grant, JARVIS captures the owned DACL baseline and the temporary
+SID. Restoration releases parent leases before child leases, then applies the
+captured DACL through the native security API. Windows ACL inheritance and ACE
+canonicalization can change byte layout, so verification uses semantic ACE
+equivalence and rejects any newly introduced ACE or remaining temporary SID;
+byte-identical ACL comparison is not a correctness criterion.
+
+Cleanup has two distinct bounds. The foreground lifecycle uses the configured
+native-cleanup foreground deadline only to bound how long JARVIS waits; it is
+not evidence that a Windows ACL or profile API failed or succeeded. Native
+cleanup moves from `CLEANUP_REQUESTED` to `CLEANUP_RUNNING`, then only a return
+from the trusted cleanup operation may produce `CLEANUP_CONFIRMED` or
+`CLEANUP_FAILED_CONFIRMED`. If the foreground deadline expires first,
+JARVIS reports `CLEANUP_OUTCOME_UNKNOWN`, closes the owned Job where possible,
+and remains responsive. It never claims restored ACLs, deleted profile, or
+reusable resources from that deadline.
+
+Before native cleanup starts, the trusted parent atomically writes a bounded
+schema-2 receipt under the owned sandbox root with an operation ID, process
+instance generation, exact profile/SID binding, resource classes, and the
+base64-encoded native DACL baselines needed for restoration. A fingerprint is
+retained for integrity checking, but is never treated as restoration material
+by itself. The receipt is updated only by the trusted parent/native cleanup
+path. A non-terminal or unreadable receipt quarantines the root and denies
+later sandbox allocation under that parent directory; the disposable
+directory is not deleted. On startup, one OS file lock per transaction admits
+the trusted reconciler. It validates the receipt and current resource
+ownership, observes ACL/profile/SID state first, restores only an independently
+validated baseline when required, re-observes the semantic postcondition, and
+then performs exact owned-child cleanup. A late cleanup return or a lost
+terminal receipt is therefore recovered by observation rather than blind
+replay. Crash, forced host exit, and reboot retain `CLEANUP_OUTCOME_UNKNOWN`
+or `RECOVERY_BLOCKED` until authoritative evidence exists.
+
+The cleanup thread is parent-owned and never receives generated input or
+authority. It is daemonized solely so an indefinitely stalled Windows API
+cannot prevent host shutdown; this does not release the profile, ACL lease,
+SID-derived access, or cleanup receipt. Generated packages cannot invoke,
+authorize, alter, or reconcile cleanup. A timeout, failed restore, failed
+profile deletion, or failed post-restore verification blocks certification and
+activation. This is distinct from the known
+`CURRENT_AGENT_WINDOWS_JOB_CONTAINMENT` test-host differential caused by
+nested Windows Job and venv-redirector process containment.
+
 The AppContainer profile is created per launch rather than being a long-lived
-authority. Its generated profile name is retained only as sanitized activation
-evidence; SID and native handles never cross IPC or enter ordinary data stores.
+authority. Its generated profile name and SID binding are retained only in the
+trusted recovery receipt; native handles never cross IPC. Receipt-supplied
+paths, profile names, SIDs, and baselines are data, not authority: generated
+packages cannot select a recovery target, create or edit a receipt, invoke
+reconciliation, or mark cleanup clean. Invalid or tampered metadata fails
+closed without a Windows mutation. Reconciliation has the same bounded
+foreground deadline semantics as cleanup; a stalled native call leaves the
+transaction blocked and the resource unavailable while its OS lock prevents a
+second reconciler from racing a late operation.
 
 ## Actual boundary
 
@@ -60,6 +117,14 @@ retain executable arguments, environment values, credentials, or unbounded
 child output. The canonical native launch continues to use the explicit
 stdio-handle list; no stderr handle is added to the production AppContainer
 contract merely to improve diagnostics.
+
+When trusted diagnostics are enabled, child stage evidence is multiplexed as
+bounded `trace` frames on the existing stdout JSON transport. These frames are
+optional, redacted, correlated to the request and lifecycle, and observational
+only; the parent still requires and validates the authoritative response.
+Tracing is limited to 32 frames and 8 KiB per exchange, with bounded metadata.
+The AppContainer null-handle stderr contract remains intentional: in-band
+tracing is the diagnostic path, not a new stderr handle or endpoint.
 
 The deterministic protocol/lifecycle tests use the explicit `JOB_OBJECT_ONLY`
 diagnostic mode on Windows. This mode exercises JSON IPC, environment

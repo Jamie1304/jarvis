@@ -34,6 +34,7 @@ camera = ["opencv-python==4.11.0.86"]
 speech = [
     "faster-whisper==1.1.0",
     "numpy==2.2.1",
+    "piper-tts==1.7.0",
     "pyttsx3==2.98",
     "requests==2.32.3",
     "sounddevice==0.5.1",
@@ -75,6 +76,7 @@ asyncio_mode = "auto"
 testpaths = ["tests"]
 markers = [
     "windows_integration: optional real Windows desktop or hardware integration check",
+    "real_qualification: explicit native-sensitive qualification execution, excluded from canonical quality",
 ]
 
 [tool.coverage.run]
@@ -104,6 +106,7 @@ module = [
     "PySide6.*",
     "numpy",
     "faster_whisper",
+    "piper",
     "pyttsx3",
     "sounddevice",
 ]

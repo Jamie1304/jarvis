@@ -31,6 +31,7 @@ from jarvis.capability_factory import (
     SolutionReport,
     WorkspaceContext,
 )
+from jarvis.capability_flight_recorder import CapabilityFlightRecorder
 from jarvis.discovery.models import (
     ArchitectureFit,
     CapabilityGap,
@@ -57,6 +58,7 @@ from jarvis.package_activation import (
     PackageActivationService,
 )
 from jarvis.package_certification import (
+    CertificationFailure,
     CertificationHooks,
     CertificationRecord,
     CertificationRequest,
@@ -402,6 +404,8 @@ class CapabilityAcquisitionCoordinator:
         trace: TraceService | None = None,
         review_surface: PackageReviewSurface = _DEFAULT_REVIEW_SURFACE,
         review_policy: PackageReviewPolicy = _DEFAULT_REVIEW_POLICY,
+        flight_recorder_factory: Callable[[UUID, str | None], CapabilityFlightRecorder]
+        | None = None,
     ) -> None:
         if not isinstance(services.registry, CapabilityRegistry):
             raise CapabilityAcquisitionError("Capability registry is malformed")
@@ -428,11 +432,21 @@ class CapabilityAcquisitionCoordinator:
         self._trace = trace
         self._review_surface = review_surface
         self._review_policy = review_policy
+        self._flight_recorder_factory = flight_recorder_factory or (
+            lambda run_id, capability_id: CapabilityFlightRecorder(
+                run_id, capability_id=capability_id
+            )
+        )
+        self._flight_recorder: CapabilityFlightRecorder | None = None
         self._last_run: AcquisitionRun | None = None
 
     @property
     def last_run(self) -> AcquisitionRun | None:
         return self._last_run
+
+    @property
+    def flight_recorder(self) -> CapabilityFlightRecorder | None:
+        return self._flight_recorder
 
     async def research(
         self,
@@ -477,6 +491,15 @@ class CapabilityAcquisitionCoordinator:
             request.environment,
             request.preferences,
         )
+        self._flight_recorder = self._flight_recorder_factory(result.run_id, result.capability_id)
+        self._flight_recorder.record(
+            component="capability_factory",
+            stage=result.lifecycle.value,
+            operation="acquire_completed",
+            resource_identity={"capability_id": result.capability_id},
+            result="observed",
+            detail=result.reason,
+        )
         self._last_run = AcquisitionRun(
             result.run_id,
             request.goal_id or UUID(int=0),
@@ -519,6 +542,15 @@ class CapabilityAcquisitionCoordinator:
             request.workspace,
             request.environment,
             request.preferences,
+        )
+        self._flight_recorder = self._flight_recorder_factory(result.run_id, result.capability_id)
+        self._flight_recorder.record(
+            component="capability_factory",
+            stage=result.lifecycle.value,
+            operation="acquire_completed",
+            resource_identity={"capability_id": result.capability_id},
+            result="observed",
+            detail=result.reason,
         )
         self._last_run = AcquisitionRun(
             result.run_id,
@@ -582,6 +614,35 @@ class CapabilityAcquisitionCoordinator:
                     sandbox_security_status=self._sandbox_security_status,
                 ),
                 self._certification_hooks.hooks(package),
+            )
+        except CertificationFailure as error:
+            if self._flight_recorder is not None:
+                self._flight_recorder.record(
+                    component="package_certification",
+                    stage=error.reason.gate.value,
+                    operation="certification_failed",
+                    resource_identity={
+                        "capability_id": result.capability_id,
+                        "package_id": package.package_id,
+                        "package_hash": package.package_hash,
+                    },
+                    result="failed",
+                    error=error,
+                    detail=f"{error.reason.code}: {error.reason.safe_detail}",
+                )
+            self._failed_report(
+                result,
+                f"package preparation certification failed: gate={error.reason.gate.value}; "
+                f"code={error.reason.code}; detail={error.reason.safe_detail}",
+            )
+            return CapabilityAcquisitionReport(
+                False,
+                package.package_id,
+                evidence=("package preparation certification failed",),
+                detail=self._last_run.reason
+                if self._last_run is not None
+                else "certification failed",
+                stage=AcquisitionStage.FAILED.value,
             )
         except Exception as error:
             return CapabilityAcquisitionReport(
@@ -678,6 +739,32 @@ class CapabilityAcquisitionCoordinator:
                 ),
                 self._certification_hooks.hooks(package),
             )
+        except CertificationFailure as error:
+            if self._flight_recorder is not None:
+                self._flight_recorder.record(
+                    component="package_certification",
+                    stage=error.reason.gate.value,
+                    operation="certification_failed",
+                    resource_identity={
+                        "capability_id": factory_result.capability_id,
+                        "package_id": package.package_id,
+                        "package_hash": package.package_hash,
+                    },
+                    result="failed",
+                    error=error,
+                    detail=f"{error.reason.code}: {error.reason.safe_detail}",
+                )
+            evidence = "; ".join(
+                f"{item.stage.value}={'PASS' if item.passed else 'FAIL'}:"
+                f"{' | '.join(item.evidence)}"
+                for item in error.evidence
+            )
+            return self._failed_report(
+                factory_result,
+                f"package certification failed: gate={error.reason.gate.value}; "
+                f"code={error.reason.code}; detail={error.reason.safe_detail}; "
+                f"evidence={evidence}",
+            )
         except Exception as error:
             return self._failed_report(
                 factory_result, f"package certification failed: {type(error).__name__}"
@@ -722,12 +809,14 @@ class CapabilityAcquisitionCoordinator:
                 package.package_id, package.version
             )
             if shadow.state is not ActivationState.SHADOW:
+                self._update(activation=shadow)
                 return self._failed_report(factory_result, "Shadow activation failed")
             self._update(stage=AcquisitionStage.CANARY, activation=shadow)
             canary = self._services.package_activation.run_canary(
                 package.package_id, package.version
             )
             if canary.state is not ActivationState.CANARY:
+                self._update(activation=canary)
                 return self._failed_report(factory_result, "Canary activation failed")
             self._update(stage=AcquisitionStage.CANARY, activation=canary)
             active = self._services.package_activation.promote(package.package_id, package.version)
@@ -835,7 +924,22 @@ class CapabilityAcquisitionCoordinator:
     def _failed_report(
         self, result: CapabilityFactoryResult, reason: str
     ) -> CapabilityAcquisitionReport:
+        if self._flight_recorder is not None:
+            self._flight_recorder.safe_snapshot(
+                "pre_cleanup_failure",
+                resources={
+                    "capability_id": result.capability_id,
+                    "package_id": (
+                        result.package.package.package_id if result.package is not None else None
+                    ),
+                },
+            )
         self._update(stage=AcquisitionStage.FAILED, reason=reason)
+        if self._flight_recorder is not None:
+            self._flight_recorder.safe_snapshot(
+                "post_cleanup_terminal",
+                resources={"capability_id": result.capability_id, "cleanup": "owner_completed"},
+            )
         return CapabilityAcquisitionReport(
             False, evidence=(reason,), detail=reason, stage=AcquisitionStage.FAILED.value
         )
@@ -869,29 +973,81 @@ class CapabilityAcquisitionCoordinator:
         if reason is not None:
             current = replace(current, reason=reason)
         self._last_run = replace(current, updated_at=datetime.now(UTC))
+        if self._flight_recorder is not None:
+            self._flight_recorder.record(
+                component="capability_acquisition",
+                stage=self._last_run.stage.value,
+                operation="stage_transition",
+                resource_identity={
+                    "capability_id": self._last_run.capability_id,
+                    "package_id": self._last_run.package_id,
+                },
+                state_before={"stage": current.stage.value},
+                state_after={"stage": self._last_run.stage.value},
+                result=(
+                    "failed" if self._last_run.stage is AcquisitionStage.FAILED else "observed"
+                ),
+                detail=self._last_run.reason,
+            )
         self._record_trace(self._last_run)
 
     def _record_trace(self, run: AcquisitionRun) -> None:
         if self._trace is None:
             return
-        self._trace.record(
-            TraceEventType.CAPABILITY_ACQUISITION,
-            "Capability acquisition stage recorded",
-            goal_id=run.goal_id,
-            correlation_id=run.goal_id,
-            integration_id=run.package_id or run.capability_id,
-            package_version=run.package_version,
-            package_hash=run.package_hash,
-            result={
-                "stage": run.stage.value,
-                "run_id": str(run.run_id),
-                "adoption_attestation_reference": run.adoption_attestation_reference,
-            },
-            evidence=(run.reason,) if run.reason else (),
-            effect_attestation_ids=(
-                run.activation.attestation_ids if run.activation is not None else ()
-            ),
+        # TraceEvent is deliberately strict.  Acquisition remains authoritative
+        # for the failure, so an observability projection must normalize its
+        # bounded fields and must never be allowed to replace that failure.
+        integration_id = _trace_text(run.package_id or run.capability_id, 256)
+        package_version = _trace_text(run.package_version, 128)
+        package_hash = (
+            run.package_hash
+            if isinstance(run.package_hash, str)
+            and len(run.package_hash) == 64
+            and all(character in "0123456789abcdef" for character in run.package_hash)
+            else None
         )
+        adoption_reference = _trace_text(run.adoption_attestation_reference, 512)
+        evidence = _trace_text(run.reason, 1_000)
+        attestation_ids = (
+            tuple(item for item in run.activation.attestation_ids if isinstance(item, UUID))
+            if run.activation is not None
+            else ()
+        )
+        try:
+            self._trace.record(
+                TraceEventType.CAPABILITY_ACQUISITION,
+                "Capability acquisition stage recorded",
+                goal_id=run.goal_id,
+                correlation_id=run.goal_id,
+                integration_id=integration_id,
+                package_version=package_version,
+                package_hash=package_hash,
+                result={
+                    "stage": run.stage.value,
+                    "run_id": str(run.run_id),
+                    "adoption_attestation_reference": adoption_reference,
+                },
+                evidence=(evidence,) if evidence else (),
+                effect_attestation_ids=attestation_ids,
+            )
+        except Exception as error:  # pragma: no cover - defensive evidence boundary
+            # CapabilityFlightRecorder is the existing bounded local receipt;
+            # it has no authority and does not recurse through TraceService.
+            if self._flight_recorder is not None:
+                self._flight_recorder.record(
+                    component="trace_projection",
+                    stage=run.stage.value,
+                    operation="trace_record_failed",
+                    resource_identity={
+                        "capability_id": run.capability_id,
+                        "package_id": run.package_id,
+                        "package_hash": package_hash,
+                    },
+                    state_after={"acquisition_stage": run.stage.value},
+                    result="projection_failed",
+                    error=error,
+                    detail="bounded acquisition trace projection failed; primary outcome preserved",
+                )
 
     @staticmethod
     def _factory_stage(result: CapabilityFactoryResult) -> AcquisitionStage:
@@ -908,6 +1064,18 @@ class CapabilityAcquisitionCoordinator:
 def _safe_id(value: str) -> str:
     compact = "".join(character if character.isalnum() else "_" for character in value.casefold())
     return compact.strip("_")[:96] or "capability"
+
+
+def _trace_text(value: object, limit: int) -> str | None:
+    if (
+        type(value) is str
+        and value.strip()
+        and len(value) <= limit
+        and "\x00" not in value
+        and all(character.isprintable() for character in value)
+    ):
+        return value
+    return None
 
 
 __all__ = [

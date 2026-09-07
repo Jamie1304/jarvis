@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ctypes
 import sys
+import threading
 from typing import Any, cast
 
 import jarvis.windows_sandbox as native
@@ -397,6 +398,122 @@ def test_appcontainer_profile_failures(monkeypatch: pytest.MonkeyPatch) -> None:
         profile.close()
 
 
+def test_appcontainer_profile_derivation_and_sid_snapshots(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    userenv: Any = FakeLibrary()
+    kernel32: Any = FakeLibrary()
+    advapi: Any = FakeLibrary()
+    sid_buffer = ctypes.create_unicode_buffer("S-1-15-2-123")
+
+    def derive(*args: object) -> int:
+        cast(Any, args[-1])._obj.value = 4322
+        return native._ERROR_SUCCESS
+
+    def sid_string(*args: object) -> bool:
+        cast(Any, args[-1])._obj.value = ctypes.addressof(sid_buffer)
+        return True
+
+    userenv.DeriveAppContainerSidFromAppContainerName = FakeFunction(derive)
+    advapi.ConvertSidToStringSidW = FakeFunction(sid_string)
+    advapi.GetLengthSid = FakeFunction(12)
+    kernel32.LocalFree = FakeFunction(0)
+
+    def load(name: str, **kwargs: object) -> Any:
+        del kwargs
+        return userenv if "userenv" in name else advapi if "advapi" in name else kernel32
+
+    monkeypatch.setattr(ctypes, "WinDLL", load)
+    monkeypatch.setattr(ctypes, "string_at", lambda address, length: b"s" * int(length))
+    profile = native._AppContainerProfile.derive("JARVIS-derived")
+    assert profile.sid == 4322
+    assert profile.sid_text() == "S-1-15-2-123"
+    assert profile.sid_bytes() == b"s" * 12
+    assert profile.close(delete=False) == "RETAINED"
+
+    userenv.DeriveAppContainerSidFromAppContainerName = FakeFunction(5)
+    with pytest.raises(native.WindowsNativeProcessError, match="derivation failed"):
+        native._AppContainerProfile.derive("JARVIS-failed")
+    with pytest.raises(native.WindowsNativeProcessError, match="profile name"):
+        native._AppContainerProfile.derive("")
+
+    empty = native._AppContainerProfile("JARVIS-empty", 0, userenv, kernel32)
+    with pytest.raises(native.WindowsNativeProcessError, match="SID is unavailable"):
+        empty.sid_text()
+    with pytest.raises(native.WindowsNativeProcessError, match="SID is unavailable"):
+        empty.sid_bytes()
+
+    profile = native._AppContainerProfile("JARVIS-sid-errors", 4322, userenv, kernel32)
+    advapi.ConvertSidToStringSidW = FakeFunction(False)
+    with pytest.raises(native.WindowsNativeProcessError, match="ConvertSid"):
+        profile.sid_text()
+    advapi.ConvertSidToStringSidW = FakeFunction(lambda *args: True)
+    with pytest.raises(native.WindowsNativeProcessError, match="SID text"):
+        profile.sid_text()
+    advapi.GetLengthSid = FakeFunction(0)
+    with pytest.raises(native.WindowsNativeProcessError, match="SID length"):
+        profile.sid_bytes()
+    monkeypatch.setattr(
+        ctypes,
+        "WinDLL",
+        lambda *args, **kwargs: (_ for _ in ()).throw(OSError("load failed")),
+    )
+    with pytest.raises(native.WindowsNativeProcessError, match="profile setup failed"):
+        native._AppContainerProfile.create("JARVIS-load-failure")
+
+
+def test_appcontainer_acl_observation_and_restore_contracts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    advapi: Any = FakeLibrary()
+    kernel32: Any = FakeLibrary()
+
+    def security_info(*args: object) -> int:
+        cast(Any, args[-1])._obj.value = 1
+        cast(Any, args[-3])._obj.value = 2
+        return native._ERROR_SUCCESS
+
+    def acl_info(*args: object) -> bool:
+        cast(Any, args[1])._obj.AclBytesInUse = 8
+        return True
+
+    advapi.GetNamedSecurityInfoW = FakeFunction(security_info)
+    advapi.GetAclInformation = FakeFunction(acl_info)
+    advapi.SetNamedSecurityInfoW = FakeFunction(native._ERROR_SUCCESS)
+    kernel32.LocalFree = FakeFunction(0)
+    monkeypatch.setattr(ctypes, "string_at", lambda address, length: b"a" * int(length))
+
+    with pytest.raises(native.WindowsNativeProcessError, match="baseline"):
+        native._AppContainerAclLease.observe(
+            "path", b"short", b"sid", advapi=advapi, kernel32=kernel32
+        )
+    with pytest.raises(native.WindowsNativeProcessError, match="temporary SID"):
+        native._AppContainerAclLease.observe(
+            "path", b"baseline-data", b"", advapi=advapi, kernel32=kernel32
+        )
+    observed = native._AppContainerAclLease.observe(
+        "path", b"baseline-data", b"sid", advapi=advapi, kernel32=kernel32
+    )
+    assert observed["path"] == "path"
+    assert observed["temporary_sid_present"] is False
+
+    with pytest.raises(native.WindowsNativeProcessError, match="baseline"):
+        native._AppContainerAclLease.restore("path", b"short", advapi=advapi, kernel32=kernel32)
+    native._AppContainerAclLease.restore("path", b"baseline-data", advapi=advapi, kernel32=kernel32)
+    advapi.SetNamedSecurityInfoW = FakeFunction(5)
+    with pytest.raises(native.WindowsNativeProcessError, match="restoration failed"):
+        native._AppContainerAclLease.restore(
+            "path", b"baseline-data", advapi=advapi, kernel32=kernel32
+        )
+
+    advapi.GetAclInformation = FakeFunction(False)
+    with pytest.raises(native.WindowsNativeProcessError, match="metadata"):
+        native._AppContainerAclLease._read_dacl("path", advapi, kernel32)
+    advapi.GetNamedSecurityInfoW = FakeFunction(lambda *args: 5)
+    with pytest.raises(native.WindowsNativeProcessError, match="inspection"):
+        native._AppContainerAclLease._read_dacl("path", advapi, kernel32)
+
+
 def test_platform_unavailable_paths(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(sys, "platform", "linux")
     with pytest.raises(native.WindowsNativeProcessError, match="Restricted Windows"):
@@ -421,6 +538,81 @@ def test_native_cleanup_failure_is_observable() -> None:
     process = native.WindowsNativeProcess(0, 0, 1, kernel32, cleanup=fail_cleanup)
     process.close()
     assert process.cleanup_error is not None
+
+
+def test_native_cleanup_waits_for_authoritative_worker_completion(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    kernel32: Any = FakeLibrary()
+    calls: list[tuple[object, ...]] = []
+
+    class JoinProbe:
+        def __init__(self, *, target: Any, **kwargs: object) -> None:
+            del kwargs
+            self._target = target
+
+        def start(self) -> None:
+            self._target()
+
+        def join(self, *args: object) -> None:
+            calls.append(args)
+
+    monkeypatch.setattr(threading, "Thread", JoinProbe)
+    process = native.WindowsNativeProcess(0, 0, 1, kernel32, cleanup=lambda: None)
+
+    process.close()
+
+    assert calls == [()]
+    assert process.cleanup_error is None
+    assert process.cleanup_evidence["cleanup_terminal"] is True
+
+
+def test_native_cleanup_deadline_retains_unknown_until_late_terminal_observation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A foreground deadline never turns an unfinished native call into success."""
+
+    kernel32: Any = FakeLibrary()
+    observed: list[native.NativeCleanupState] = []
+
+    class StalledThread:
+        instance: Any = None
+
+        def __init__(self, *, target: Any, **kwargs: object) -> None:
+            del kwargs
+            self._target = target
+            self._alive = False
+            StalledThread.instance = self
+
+        def start(self) -> None:
+            self._alive = True
+
+        def join(self, timeout: float | None = None) -> None:
+            assert timeout == 0.01
+
+        def is_alive(self) -> bool:
+            return self._alive
+
+        def complete(self) -> None:
+            self._alive = False
+            self._target()
+
+    monkeypatch.setattr(threading, "Thread", StalledThread)
+    process = native.WindowsNativeProcess(0, 0, 1, kernel32, cleanup=lambda: None)
+    process.set_cleanup_observer(lambda state, evidence: observed.append(state))
+
+    process.close(cleanup_deadline_seconds=0.01)
+
+    assert process.cleanup_state is native.NativeCleanupState.OUTCOME_UNKNOWN
+    assert process.cleanup_evidence["cleanup_terminal"] is False
+    assert native.NativeCleanupState.CONFIRMED not in observed
+
+    StalledThread.instance.complete()
+
+    late_cleanup_state: native.NativeCleanupState = process.cleanup_state
+    assert late_cleanup_state is native.NativeCleanupState.CONFIRMED
+    assert process.cleanup_evidence["cleanup_terminal"] is True
+    assert observed[-1] is native.NativeCleanupState.CONFIRMED
 
 
 @pytest.mark.asyncio

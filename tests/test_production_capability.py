@@ -11,6 +11,7 @@ from types import SimpleNamespace
 from typing import Any, TypeVar, cast
 from uuid import uuid4
 
+import jarvis.production_capability as production_module
 import pytest
 from jarvis.agent_runtime import (
     AgentLoop,
@@ -74,6 +75,7 @@ from jarvis.package_certification import (
     CertificationStageEvidence,
     PackageCertifier,
     package_fingerprints,
+    worker_compatibility_fingerprint,
 )
 from jarvis.package_reviewer import PackageSourceFile
 from jarvis.package_runtime import HotLoadError, PackageRuntimeHealth, PreparedPackageRuntime
@@ -84,10 +86,12 @@ from jarvis.production_capability import (
     CapabilityGenerationProvider,
     CapabilityLifecycleRestorer,
     CertificationFunctionalCase,
+    FunctionalTestEvidence,
     PackageCertificationPlan,
     ProductionActivationBoundary,
     ProductionCapabilityError,
     ProductionCertificationProvider,
+    ProductionHostOperationBridge,
     ProductionLocalCandidateProvider,
     ProductionLocalDiscoveryProvider,
     ProductionOpportunityPreparation,
@@ -99,6 +103,7 @@ from jarvis.production_capability import (
     ProductionSandboxRunner,
     ProductionSetupHandler,
     ProductionVerificationEvidence,
+    TrustedHostOperation,
     _action_spec_from_payload,
     _action_spec_payload,
     _AgentLoopGenerationProvider,
@@ -106,7 +111,6 @@ from jarvis.production_capability import (
     _certification_fixture,
     _effect_from_payload,
     _GenerationSpec,
-    _generic_worker_source,
     _manifest_for,
     _manifest_from_payload,
     _manifest_payload,
@@ -365,6 +369,24 @@ class _FakeSandboxRunner:
         return self.execute(package, kind, payload)
 
 
+class _DiagnosticFailureSandboxRunner(_FakeSandboxRunner):
+    def protocol_diagnostics(self) -> dict[str, object]:
+        return {
+            "phase": "RESPONSE_WAIT_BEGIN",
+            "classification": "STDOUT_EOF",
+            "pid": 1234,
+            "exit_code": 1,
+            "response_received": False,
+            "job": {"state": "CLOSED", "active_process_count": 0},
+        }
+
+    def execute(
+        self, package: IntegrationPackage, action_id: str, payload: Mapping[str, object]
+    ) -> tuple[SandboxSecurityStatus, dict[str, object]]:
+        del package, action_id, payload
+        raise RuntimeError("synthetic worker startup failure")
+
+
 class _WrongSemanticSandboxRunner(_FakeSandboxRunner):
     def execute(
         self, package: IntegrationPackage, action_id: str, payload: Mapping[str, object]
@@ -470,6 +492,7 @@ def _restore_certification(
         ("baseline:synthetic",),
         (stage,),
         now,
+        worker_compatibility=worker_compatibility_fingerprint(),
     )
 
 
@@ -547,7 +570,7 @@ async def test_lifecycle_restorer_quarantines_missing_package_or_isolation(
     store.manifest(package, _request(gap))
     certification = _restore_certification(package, store.source_files(package))
 
-    source_path = store.package_directory(package) / "code" / "entrypoint.py"
+    source_path = store.package_directory(package) / "code" / "payload.json"
     source_path.unlink()
     missing_lifecycle = _RestoreLifecycleStore(
         _stored_restore_record(package, certification, ActivationState.ACTIVE)
@@ -730,14 +753,46 @@ def test_generation_action_contract_round_trips_as_a_typed_package() -> None:
     package = _build_generic_package(_gap("random-semantic-capability"), spec)
     assert package.tools == ("inspect", "transform")
     assert package.action_specs[0].package_hash == package.package_hash
-    assert "ACTION_IDS" in _generic_worker_source(
-        package.package_id, spec.name, package.action_specs
-    )
+    assert package.entries[0].path == "code/payload.json"
+    assert package.entries[0].kind == "constrained_payload"
 
     restored = _package_from_payload(_package_payload(package))
     assert restored == package
     manifest = _manifest_for(package, _request(_gap("random-semantic-capability")))
     assert _manifest_from_payload(_manifest_payload(manifest)) == manifest
+
+
+def test_generation_rejects_legacy_complete_python_source() -> None:
+    with pytest.raises(ProductionCapabilityError, match="Legacy complete Python entrypoint"):
+        _parse_generation_spec(
+            json.dumps({"name": "unsafe", "description": "unsafe", "source": "print('x')"})
+        )
+
+
+@pytest.mark.asyncio
+async def test_legacy_schema_is_retained_but_quarantined_from_loading(tmp_path: Path) -> None:
+    store, generated, _ = await _generated(tmp_path)
+    package = generated.package
+    metadata = store.package_directory(package) / "package.json"
+    legacy = json.loads(metadata.read_text(encoding="utf-8"))
+    legacy["schema"] = 1
+    legacy.pop("format")
+    metadata.write_text(json.dumps(legacy), encoding="utf-8")
+
+    reopened = ProductionPackageStore(store.root)
+    with pytest.raises(ProductionCapabilityError, match="LEGACY_COMPLETE_ENTRYPOINT"):
+        reopened.load(package.package_id, str(package.version), package.package_hash)
+
+
+@pytest.mark.asyncio
+async def test_worker_compatibility_change_requires_recertification(tmp_path: Path) -> None:
+    store, generated, _ = await _generated(tmp_path)
+    package = generated.package
+    record = _restore_certification(package, store.source_files(package))
+    assert record.matches(package, store.source_files(package))
+    assert not replace(record, worker_compatibility="different-worker").matches(
+        package, store.source_files(package)
+    )
 
 
 @pytest.mark.parametrize(
@@ -987,9 +1042,9 @@ async def test_package_store_rejects_inconsistent_or_tampered_content(tmp_path: 
     store = ProductionPackageStore(tmp_path / "packages")
     gap = _gap()
     package = _build_generic_package(gap, _GenerationSpec("name", "description", None))
-    source = PackageSourceFile("code/entrypoint.py", "not the package source")
+    source = PackageSourceFile("code/payload.json", "not the package source")
     generated = GeneratedCapabilityPackage(package, True, True, True, "test", (source,))
-    with pytest.raises(ProductionCapabilityError, match="source hash"):
+    with pytest.raises(ProductionCapabilityError, match="source hash|constrained payload"):
         store.save_candidate(generated, gap=gap)
 
     valid_store, valid_generated, valid_gap = await _generated(tmp_path / "valid")
@@ -1001,7 +1056,7 @@ async def test_package_store_rejects_inconsistent_or_tampered_content(tmp_path: 
 
     # A second immutable package with the same identity/version is rejected.
     metadata.write_text(json.dumps(_package_payload(valid_package)), encoding="utf-8")
-    source_path = valid_store.package_directory(valid_package) / "code" / "entrypoint.py"
+    source_path = valid_store.package_directory(valid_package) / "code" / "payload.json"
     original_source = source_path.read_text(encoding="utf-8")
     source_path.write_text(original_source + "\n", encoding="utf-8")
     with pytest.raises(ProductionCapabilityError, match="source has changed"):
@@ -1088,6 +1143,119 @@ async def test_production_runtime_keeps_bounded_request_timeout_aligned_with_too
 
     assert _CapturingSandboxProcess.limits
     assert _CapturingSandboxProcess.limits[-1].timeout_seconds == 60.0
+
+
+def test_trusted_host_bridge_binds_package_action_and_permission_contracts(
+    tmp_path: Path,
+) -> None:
+    _, generated, _ = asyncio.run(_generated(tmp_path / "bridge"))
+    package = generated.package
+    spec = package.action_specs[0]
+
+    class _Proxy:
+        async def invoke_typed(self, request: object, *, kind: object, executor: object) -> object:
+            del kind
+            return await cast(Any, executor)(spec.action_id, cast(Any, request).payload)
+
+    bridge = ProductionHostOperationBridge(
+        lambda _manifest: cast(Any, _Proxy()),
+        {spec.operation: lambda arguments: {"echo": arguments["value"]}},
+    )
+    assert bridge(package, spec.action_id, spec.operation, {"value": "bounded"}) == {
+        "echo": "bounded"
+    }
+    assert len(bridge.request_history) == 1
+    with pytest.raises(ProductionCapabilityError, match="OPERATION_UNAVAILABLE"):
+        bridge(package, spec.action_id, "missing", {})
+    with pytest.raises(ProductionCapabilityError, match="PACKAGE_INVALID"):
+        bridge(cast(IntegrationPackage, object()), spec.action_id, spec.operation, {})
+    with pytest.raises(ProductionCapabilityError, match="SCHEMA_INVALID"):
+        original_schema = spec.input_schema
+        object.__setattr__(spec, "input_schema", {"properties": []})
+        try:
+            bridge(package, spec.action_id, spec.operation, {})
+        finally:
+            object.__setattr__(spec, "input_schema", original_schema)
+    with pytest.raises(ProductionCapabilityError, match="malformed result"):
+        malformed = ProductionHostOperationBridge(
+            lambda _manifest: cast(Any, _Proxy()),
+            {spec.operation: cast(Any, lambda _arguments: object())},
+        )
+        malformed(package, spec.action_id, spec.operation, {"value": "bounded"})
+    with pytest.raises(TypeError, match="handler"):
+        TrustedHostOperation(cast(Any, object()))
+    with pytest.raises(TypeError, match="scope"):
+        TrustedHostOperation(lambda _arguments: {}, permission_scope=cast(Any, object()))
+    with pytest.raises(ValueError, match="permissions"):
+        TrustedHostOperation(
+            lambda _arguments: {},
+            required_permissions=(Permission.FILESYSTEM_READ,) * 2,
+        )
+
+
+@pytest.mark.asyncio
+async def test_production_runtime_rejects_changed_contents_and_broker_contracts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store, generated, _ = await _generated(tmp_path)
+    package = generated.package
+    runtime = ProductionPackageRuntime(
+        package,
+        store,
+        tmp_path / "sandboxes",
+        ResourceGovernor(SystemResourceTelemetry()),
+        broker=lambda *_args: {"status": "observed"},
+    )
+    original = store.source_files
+    monkeypatch.setattr(
+        store,
+        "source_files",
+        lambda _package: (PackageSourceFile("code/payload.json", "changed"),),
+    )
+    assert not runtime.health_check().healthy
+    monkeypatch.setattr(
+        store,
+        "source_files",
+        lambda _package: (_ for _ in ()).throw(OSError("source unavailable")),
+    )
+    assert not runtime.health_check().healthy
+    monkeypatch.setattr(store, "source_files", original)
+
+    class _Process:
+        async def request(self, kind: str, payload: Mapping[str, object]) -> dict[str, object]:
+            return {"status": "observed", "kind": kind, "payload": dict(payload)}
+
+    spec = package.action_specs[0]
+    valid = await runtime._finish_broker_request(  # noqa: SLF001
+        cast(Any, _Process()),
+        package,
+        spec.action_id,
+        {
+            "operation": spec.operation,
+            "capability": package.package_id,
+            "arguments": {"value": "bounded"},
+        },
+    )
+    assert valid["status"] == "observed"
+    invalid = await runtime._finish_broker_request(  # noqa: SLF001
+        cast(Any, _Process()),
+        package,
+        spec.action_id,
+        {"operation": "wrong", "capability": package.package_id, "arguments": {}},
+    )
+    assert invalid == {"status": "action_failed", "failure": "BROKER_REQUEST_REJECTED"}
+    runtime._broker = lambda *_args: (_ for _ in ()).throw(RuntimeError("broker failure"))  # noqa: SLF001
+    failed = await runtime._finish_broker_request(  # noqa: SLF001
+        cast(Any, _Process()),
+        package,
+        spec.action_id,
+        {
+            "operation": spec.operation,
+            "capability": package.package_id,
+            "arguments": {"value": "bounded"},
+        },
+    )
+    assert failed == {"status": "action_failed", "failure": "BROKER_FAILED"}
 
 
 @pytest.mark.asyncio
@@ -1959,6 +2127,56 @@ def test_production_discovery_and_bounded_setup_contracts(
     assert _run_async(setup.first_start(step, context))
 
 
+def test_production_sandbox_selection_and_protocol_history_fail_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    production_private = cast(Any, production_module)
+    monkeypatch.setattr(production_private.sys, "platform", "linux")
+    assert _sandbox_python_executable() == Path(production_private.sys.executable).resolve()
+
+    monkeypatch.setattr(production_private.sys, "platform", "win32")
+    monkeypatch.setattr(production_private.sys, "base_prefix", str(tmp_path / "missing-python"))
+    with pytest.raises(ProductionCapabilityError, match="windowed AppContainer worker"):
+        _sandbox_python_executable()
+
+    store = ProductionPackageStore(tmp_path / "packages")
+    runner = ProductionSandboxRunner(
+        store, tmp_path / "sandboxes", ResourceGovernor(SystemResourceTelemetry())
+    )
+    runner._remember_protocol_diagnostics(None)  # noqa: SLF001
+    for index in range(260):
+        runner._remember_protocol_diagnostics({"index": index})  # noqa: SLF001
+    assert len(runner.protocol_diagnostic_history()) == 256
+    assert runner.protocol_diagnostics() == {"index": 259}
+    monkeypatch.setattr(production_private.sys, "platform", "linux")
+    assert runner.available_status() is None
+
+
+@pytest.mark.asyncio
+async def test_production_sandbox_request_boundaries_fail_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store, generated, _ = await _generated(tmp_path)
+    runner = ProductionSandboxRunner(
+        store,
+        tmp_path / "sandboxes",
+        ResourceGovernor(SystemResourceTelemetry()),
+    )
+    with pytest.raises(ProductionCapabilityError, match="request is malformed"):
+        runner.execute(cast(IntegrationPackage, object()), "health", {})
+    with pytest.raises(ProductionCapabilityError, match="undeclared"):
+        runner.execute(generated.package, "missing-action", {})
+
+    class _NoStatusProcess(_FakeSandboxProcess):
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            super().__init__(*args, **kwargs)
+            cast(Any, self).security_status = None
+
+    monkeypatch.setattr(production_module, "SandboxProcess", _NoStatusProcess)
+    with pytest.raises(ProductionCapabilityError, match="security status"):
+        runner.execute(generated.package, "health", {})
+
+
 def _run_async(coro: Coroutine[Any, Any, _Result]) -> _Result:
     return asyncio.run(coro)
 
@@ -2019,6 +2237,31 @@ async def test_production_certification_and_trusted_activation_hooks(tmp_path: P
 
 
 @pytest.mark.asyncio
+async def test_production_certification_retains_bounded_worker_startup_evidence(
+    tmp_path: Path,
+) -> None:
+    store, generated, _ = await _generated(tmp_path)
+    sandbox = _DiagnosticFailureSandboxRunner()
+    provider = ProductionCertificationProvider(
+        store, cast(ProductionSandboxRunner, sandbox), VerificationEngine()
+    )
+    hooks = provider.hooks(generated.package)
+
+    sandbox_failure = hooks.sandbox_integration_test(generated.package)
+    health_failure = hooks.healthcheck(generated.package)
+
+    assert not sandbox_failure.passed
+    assert not health_failure.passed
+    for evidence in (*sandbox_failure.evidence, *health_failure.evidence):
+        assert "STDOUT_EOF" in evidence
+        assert "protocol_phase=RESPONSE_WAIT_BEGIN" in evidence
+        assert "pid=1234" in evidence
+        assert "exit_code=1" in evidence
+        assert "job_state=CLOSED" in evidence
+        assert len(evidence) <= 512
+
+
+@pytest.mark.asyncio
 async def test_production_certification_executes_actions_and_rejects_wrong_semantics(
     tmp_path: Path,
 ) -> None:
@@ -2029,6 +2272,11 @@ async def test_production_certification_executes_actions_and_rejects_wrong_seman
     )
     hooks = provider.hooks(generated.package)
 
+    # A healthy package self-report and a valid worker protocol are only
+    # untrusted health evidence; the independent semantic oracle remains the
+    # certification gate.
+    assert hooks.sandbox_integration_test(generated.package).passed
+    assert hooks.healthcheck(generated.package).passed
     result = hooks.unit_tests(generated.package)
     assert not result.passed
     assert "independent semantic oracle mismatch" in result.evidence[0]
@@ -2045,6 +2293,51 @@ async def test_production_certification_executes_actions_and_rejects_wrong_seman
             hooks,
         )
     assert failure.value.stage is CertificationStage.UNIT_TESTS
+
+
+def test_certification_contracts_reject_malformed_typed_evidence() -> None:
+    with pytest.raises(ProductionCapabilityError):
+        CertificationFunctionalCase("", "action", {})
+    with pytest.raises(ProductionCapabilityError):
+        CertificationFunctionalCase("case", "", {})
+    with pytest.raises(ProductionCapabilityError):
+        CertificationFunctionalCase("case", "action", cast(Any, object()))
+
+    evidence_kwargs: dict[str, object] = {
+        "case_id": "case",
+        "action_id": "action",
+        "input_digest": "input",
+        "actual_result_digest": "actual",
+        "expected_result_digest": "expected",
+        "output_schema_valid": True,
+        "passed": True,
+        "recorded_at": datetime.now(UTC),
+    }
+    for field, value in (
+        ("case_id", ""),
+        ("action_id", ""),
+        ("input_digest", ""),
+        ("actual_result_digest", ""),
+        ("expected_result_digest", ""),
+        ("output_schema_valid", 1),
+        ("passed", 1),
+        ("failure", 1),
+        ("recorded_at", datetime.now()),
+    ):
+        with pytest.raises(ProductionCapabilityError):
+            cast(Any, FunctionalTestEvidence)(**(evidence_kwargs | {field: value}))
+
+    with pytest.raises(ProductionCapabilityError):
+        PackageCertificationPlan("pkg", "1.0.0", "a" * 63, (), None)
+    with pytest.raises(ProductionCapabilityError):
+        PackageCertificationPlan(
+            "pkg",
+            "1.0.0",
+            "a" * 64,
+            (CertificationFunctionalCase("case", "action", {}),) * 2,
+        )
+    with pytest.raises(ProductionCapabilityError):
+        PackageCertificationPlan("pkg", "1.0.0", "a" * 64, (), cast(Any, object()))
 
 
 def test_package_certification_plan_requires_application_oracle_for_custom_actions() -> None:
@@ -2070,6 +2363,55 @@ def test_package_certification_plan_requires_application_oracle_for_custom_actio
     with pytest.raises(ProductionCapabilityError, match="No application-owned semantic oracle"):
         assert built.semantic_oracle is not None
         built.semantic_oracle(spec, {"value": "x"})
+
+
+@pytest.mark.asyncio
+async def test_production_certification_rejects_malformed_runtime_results(
+    tmp_path: Path,
+) -> None:
+    store, generated, _ = await _generated(tmp_path)
+    package = generated.package
+
+    class _BadResponseSandbox(_FakeSandboxRunner):
+        def execute(
+            self,
+            package: IntegrationPackage,
+            action_id: str,
+            payload: Mapping[str, object],
+        ) -> tuple[SandboxSecurityStatus, dict[str, object]]:
+            del package, action_id, payload
+            return self._status, cast(Any, [])
+
+    bad_provider = ProductionCertificationProvider(
+        store,
+        cast(ProductionSandboxRunner, _BadResponseSandbox()),
+        VerificationEngine(),
+        semantic_oracle=lambda _action, _input: {"result": "expected"},
+    )
+    bad_result = bad_provider.hooks(package).unit_tests(package)
+    assert not bad_result.passed
+    assert "certification execution rejected" in bad_result.evidence[0]
+
+    empty_package = replace(package, action_specs=())
+    empty_provider = ProductionCertificationProvider(
+        store,
+        cast(ProductionSandboxRunner, _FakeSandboxRunner()),
+        VerificationEngine(),
+    )
+    empty_result = empty_provider.hooks(empty_package).unit_tests(empty_package)
+    assert not empty_result.passed
+    assert empty_result.evidence == ("No declared functional certification cases",)
+
+    with pytest.raises(ProductionCapabilityError, match="undeclared action"):
+        empty_provider._run_functional_tests(  # noqa: SLF001
+            package,
+            PackageCertificationPlan(
+                package.package_id,
+                str(package.version),
+                package.package_hash,
+                (CertificationFunctionalCase("missing", "missing-action", {}),),
+            ),
+        )
 
 
 @pytest.mark.asyncio
@@ -2253,8 +2595,8 @@ async def test_production_runtime_helpers_and_verification_fail_closed(
         "kind": "health",
         "payload": {"probe": "bounded"},
     }
-    entrypoint = store.package_directory(package) / "code" / "entrypoint.py"
-    entrypoint.unlink()
+    payload_path = store.package_directory(package) / "code" / "payload.json"
+    payload_path.unlink()
     assert not runtime.health_check().healthy
     with pytest.raises(HotLoadError):
         ProductionPackageRuntimeFactory(

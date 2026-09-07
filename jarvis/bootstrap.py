@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from jarvis.ai.models import ModelRole
 from jarvis.ai.providers.base import AIProvider
@@ -17,13 +17,16 @@ from jarvis.ai.providers.registry import (
 from jarvis.application import JarvisAssistantService
 from jarvis.conversation.service import ConversationService
 from jarvis.core.config import Settings
+from jarvis.core.environment_settings import EnvironmentSettingsService
 from jarvis.core.errors import ConfigurationError
 from jarvis.security import local_model_endpoint_is_safe
 from jarvis.speech.tts import DisabledTtsProvider, TextToSpeechService
 from jarvis.state import ApplicationStateMachine
 from jarvis.task_controller import TaskController
+from jarvis.voice.activation import LocalVoiceController
 
 if TYPE_CHECKING:
+    from jarvis.desktop_facade import DesktopApplicationFacade
     from jarvis.runtime import ApplicationRuntime
 
 
@@ -135,6 +138,9 @@ def create_assistant_from_runtime(runtime: ApplicationRuntime) -> JarvisAssistan
     container = runtime.container
     return JarvisAssistantService(
         container.conversation,
+        stt=container.stt,
+        tts=container.tts,
+        voice=cast(LocalVoiceController | None, container.voice),
         task_controller=container.task_controller,
         state_machine=container.state_machine,
         test_drive=container.test_drive,
@@ -142,4 +148,14 @@ def create_assistant_from_runtime(runtime: ApplicationRuntime) -> JarvisAssistan
         launch_profiles=container.launch_profiles,
         control_center=container.control_center,
         memory_control=container.memory_control,
+        ollama_runtime=container.ollama_runtime,
+        environment_settings=EnvironmentSettingsService(app_data_dir=container.paths.root),
     )
+
+
+def create_desktop_facade_from_runtime(runtime: ApplicationRuntime) -> DesktopApplicationFacade:
+    """Create the one bounded desktop facade, including Safe Mode support."""
+
+    from jarvis.desktop_facade import DesktopApplicationFacade
+
+    return DesktopApplicationFacade(runtime)

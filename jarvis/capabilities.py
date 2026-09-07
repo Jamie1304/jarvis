@@ -221,6 +221,7 @@ class CapabilityActionSpec:
     retryable: bool = False
     verification: tuple[str, ...] = ("adapter_output_schema",)
     compensation: str | None = None
+    operation: str = "default_output"
 
     def __post_init__(self) -> None:
         _bounded(self.capability_id, "Action capability ID", 128)
@@ -260,6 +261,13 @@ class CapabilityActionSpec:
         _labels(self.verification, "Action verification contract", 32)
         if self.compensation is not None:
             _bounded(self.compensation, "Action compensation", 1_000)
+        if (
+            type(self.operation) is not str
+            or not self.operation.strip()
+            or len(self.operation) > 128
+            or any(ord(character) < 33 for character in self.operation)
+        ):
+            raise CapabilityError("Action operation is not allowlisted")
 
 
 @dataclass(frozen=True, slots=True)

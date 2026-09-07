@@ -12,6 +12,7 @@ import socket
 import sys
 from collections.abc import Mapping
 from datetime import UTC, datetime
+from hashlib import sha256
 from pathlib import Path
 from typing import Any, cast
 from uuid import uuid4
@@ -295,7 +296,7 @@ async def test_appcontainer_boundary_is_explicit_and_observable(tmp_path: Path) 
     if not WindowsAppContainerLauncher.available():
         pytest.skip("AppContainer APIs are unavailable on this host")
     process = SandboxProcess(
-        Path(sys.base_prefix) / "python.exe",
+        Path(sys.base_prefix) / "pythonw.exe",
         ("-c", WORKER),
         integration_id="test.integration",
         parent_directory=tmp_path / "owned-sandboxes",
@@ -340,7 +341,20 @@ async def test_appcontainer_boundary_is_explicit_and_observable(tmp_path: Path) 
         assert network["connected"] is False
     finally:
         server.close()
+    job = process._job  # noqa: SLF001 - native containment observation
+    assert job is not None
+    result = await process.request("spawn", {})
+    assert result["spawned"] is False
+    snapshot = job.evidence_snapshot()
+    assert snapshot["active_process_count"] == 1
+    assert snapshot["maximum_active_process_count"] == 1
+    assigned_pids = snapshot["assigned_pids"]
+    assert isinstance(assigned_pids, list)
+    assert len(assigned_pids) == 1
+    child_marker = process.paths.work / "child-alive"
     await process.close()
+    await asyncio.sleep(0.5)
+    assert not child_marker.exists()
 
 
 @pytest.mark.asyncio
@@ -357,7 +371,7 @@ async def test_appcontainer_unavailable_fails_closed(
         raise SandboxIsolationUnavailable("synthetic AppContainer failure")
 
     process = SandboxProcess(
-        Path(sys.base_prefix) / "python.exe",
+        Path(sys.base_prefix) / "pythonw.exe",
         ("-c", WORKER),
         integration_id="test.integration",
         parent_directory=tmp_path / "owned-sandboxes",
@@ -619,7 +633,8 @@ async def test_sandbox_lifecycle_guards_and_path_cleanup_failures(
 
     paths = sandbox_module.SandboxPaths.create(tmp_path, "safe")
     fixed_id = uuid4()
-    collision = tmp_path / f"jarvis-sandbox-safe-{fixed_id.hex}"
+    directory_identity = sha256(b"safe").hexdigest()[:16]
+    collision = tmp_path / f"jarvis-sandbox-{directory_identity}-{fixed_id.hex}"
     collision.mkdir()
     with monkeypatch.context() as context:
         context.setattr(sandbox_module, "uuid4", lambda: fixed_id)

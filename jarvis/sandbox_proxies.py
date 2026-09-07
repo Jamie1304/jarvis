@@ -201,13 +201,35 @@ class ProxyCapability:
     capability_id: str
     kind: ProxyKind
     actions: tuple[str, ...]
-    permission: Permission
+    permission: Permission | None
     input_fields: tuple[str, ...] = ()
+    required_permissions: tuple[Permission, ...] = ()
+    binding_id: str = ""
+    permission_scope: PermissionScope | None = None
 
     def __post_init__(self) -> None:
         _identifier(self.capability_id, "Capability ID")
-        if not isinstance(self.kind, ProxyKind) or not isinstance(self.permission, Permission):
+        if not isinstance(self.kind, ProxyKind) or (
+            self.permission is not None and not isinstance(self.permission, Permission)
+        ):
             raise HostProxyError("Capability declaration is malformed")
+        permissions = self.required_permissions or (
+            (self.permission,) if self.permission is not None else ()
+        )
+        if (
+            type(self.required_permissions) is not tuple
+            or any(not isinstance(item, Permission) for item in permissions)
+            or tuple(sorted(set(permissions), key=lambda item: item.value)) != permissions
+            or (self.permission is not None and permissions != (self.permission,))
+            or (
+                self.permission_scope is not None
+                and not isinstance(self.permission_scope, PermissionScope)
+            )
+        ):
+            raise HostProxyError("Capability permissions are malformed")
+        object.__setattr__(self, "required_permissions", permissions)
+        if self.binding_id:
+            _identifier(self.binding_id, "Capability binding ID")
         if (
             not self.actions
             or len(set(self.actions)) != len(self.actions)
@@ -501,20 +523,26 @@ class HostProxy:
         self._owns_tool_bindings = tool_bindings is None
         self._tools: dict[str, tuple[str, object]] = {}
         for capability in manifest.capabilities:
-            binding_key = f"{capability.kind.value}.{capability.actions[0]}"
+            binding_key = (
+                capability.binding_id or f"{capability.kind.value}.{capability.actions[0]}"
+            )
             if tool_bindings is not None:
-                try:
-                    tool_id, identity = tool_bindings[binding_key]
-                except KeyError as error:
-                    raise HostProxyError(
-                        "Trusted runtime has no registered sandbox tool binding"
-                    ) from error
+                binding = tool_bindings.get(binding_key) or tool_bindings.get("*")
+                if binding is None:
+                    raise HostProxyError("Trusted runtime has no registered sandbox tool binding")
+                tool_id, identity = binding
                 if type(tool_id) is not str or identity is None:
                     raise HostProxyError("Sandbox tool binding is malformed")
             else:
                 tool_id = f"sandbox.{manifest.integration_id}.{capability.capability_id}"
                 identity = object()
-                self._broker.register_tool(tool_id, identity, frozenset({capability.permission}))
+                self._broker.register_tool(
+                    tool_id,
+                    identity,
+                    frozenset({capability.permission})
+                    if capability.permission is not None
+                    else frozenset(capability.required_permissions),
+                )
             self._tools[capability.capability_id] = (tool_id, identity)
 
     async def close(self) -> None:
@@ -711,13 +739,15 @@ class HostProxy:
         descriptor = self._descriptor(
             request.context,
             capability,
-            PermissionScope(applications=(capability.capability_id,)),
+            capability.permission_scope
+            if capability.permission_scope is not None
+            else PermissionScope(applications=(capability.capability_id,)),
             (SafeArgument("capability", capability.capability_id),),
         )
         _, receipt = await self._authorize(
             request.context,
             descriptor,
-            {"capability": capability.capability_id, "payload_keys": sorted(payload)},
+            {"capability": capability.capability_id, "payload": payload},
         )
         attempt = await self._begin_effect(
             request.context,
@@ -768,11 +798,14 @@ class HostProxy:
         scope: PermissionScope,
         summary: tuple[SafeArgument, ...],
     ) -> ActionDescriptor:
+        permissions = tuple(
+            PermissionRequest(permission, scope) for permission in capability.required_permissions
+        )
         return ActionDescriptor(
             f"sandbox.{capability.kind.value}.{request.action}",
             summary,
             Risk.MEDIUM,
-            (PermissionRequest(capability.permission, scope),),
+            permissions,
         )
 
     async def _authorize(
@@ -791,11 +824,17 @@ class HostProxy:
         )
         if capability is None:
             raise HostProxyDenied("Capability is not registered")
-        tool_id, identity = self._tools[capability.capability_id]
+        try:
+            tool_id, identity = self._tools[capability.capability_id]
+        except KeyError:
+            try:
+                tool_id, identity = self._tools["*"]
+            except KeyError as error:
+                raise HostProxyDenied("Capability has no trusted execution binding") from error
         result = await self._broker.authorize(
             tool_id=tool_id,
             tool_identity=identity,
-            declared_permissions=frozenset({capability.permission}),
+            declared_permissions=frozenset(capability.required_permissions),
             task_id=request.task_id,
             user_id=request.user_id,
             descriptor=descriptor,

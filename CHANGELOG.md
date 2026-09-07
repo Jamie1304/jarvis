@@ -9,6 +9,25 @@ development and release-candidate chronology.
 
 ### Hardening
 
+- Mutable Candidate-15 preparation adds a single-owner desktop backend runtime,
+  typed settings `.env` service, Safe Mode desktop boundary, local Ollama
+  lifecycle/model readiness projections, runtime-owned faster-whisper/Piper
+  speech composition, and stable recovery installation identity. This is not a
+  release candidate, tag, or publication.
+
+  - Desktop preparation now includes typed stable row identities for task and
+    memory actions, trusted memory correction/deletion/retention controls,
+    fingerprint-bound one-time desktop permission decisions, read-only tool
+    health checks, durable automation removal, and safe operational inspection.
+    Capability lifecycle mutation and tool execution remain behind their
+    existing certified and brokered application paths.
+
+  - The six sandbox failures observed under the Copilot/VS Code runner are a
+    verified nested-Windows-Job plus virtual-environment redirector limitation:
+    unchanged Candidate 14 and current sandbox sources fail identically there,
+    while the direct base-interpreter control passes 24/24. Sandbox limits and
+    containment policy were not weakened.
+
 - Preserve valid `EXECUTING -> THINKING -> WAITING/READY` projections when a
   deterministic planning failure is replanned, and keep generated capability
   requests within a finite 60-second native sandbox bound under host load.

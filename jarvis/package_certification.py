@@ -9,11 +9,13 @@ immutable record that is distinct from ACTIVE runtime registration.
 from __future__ import annotations
 
 import json
+import sys
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, fields, is_dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
 from hashlib import sha256
+from pathlib import Path
 
 from jarvis.integration_package import IntegrationPackage, PackageLifecycle
 from jarvis.package_reviewer import (
@@ -31,6 +33,24 @@ from jarvis.ui_simulation import (
     UISimulationAttestationStatus,
 )
 from jarvis.windows_sandbox import SandboxSecurityStatus
+
+
+def worker_compatibility_fingerprint() -> str:
+    """Fingerprint the immutable worker and its selected interpreter identity."""
+
+    from jarvis.sandbox_worker import WORKER_COMPATIBILITY
+
+    worker = Path(__file__).with_name("sandbox_worker.py")
+    worker_digest = sha256(worker.read_bytes()).hexdigest()
+    executable = (
+        (Path(sys.base_prefix) / "pythonw.exe").resolve()
+        if sys.platform == "win32"
+        else Path(sys.executable).resolve()
+    )
+    if not executable.is_file():
+        raise CertificationValidationError("Sandbox worker interpreter is unavailable")
+    executable_digest = sha256(executable.read_bytes()).hexdigest()
+    return f"{WORKER_COMPATIBILITY}:{worker_digest}:{executable_digest}"
 
 
 class CertificationError(RuntimeError):
@@ -91,6 +111,21 @@ class CertificationStageResult:
             _text(self.approval_ref, "Approval reference", 512)
         if type(self.shadow_eligible) is not bool or type(self.canary_eligible) is not bool:
             raise CertificationValidationError("Shadow/Canary eligibility is malformed")
+
+
+@dataclass(frozen=True, slots=True)
+class CertificationFailureReason:
+    """Secret-safe, typed evidence for the first failed certification gate."""
+
+    gate: CertificationStage
+    code: str
+    safe_detail: str
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.gate, CertificationStage):
+            raise CertificationValidationError("Certification failure gate is malformed")
+        _text(self.code, "Certification failure code", 128)
+        _text(self.safe_detail, "Certification failure detail", 512)
 
 
 _DEFAULT_REVIEW_SURFACE = PackageReviewSurface()
@@ -187,6 +222,7 @@ class CertificationRecord:
     certified_at: datetime
     ui_simulation_attestation_ref: str | None = None
     ui_simulation_attestation_digest: str | None = None
+    worker_compatibility: str = ""
 
     def __post_init__(self) -> None:
         _text(self.package_id, "Certification package ID", 128)
@@ -234,6 +270,8 @@ class CertificationRecord:
                 self.ui_simulation_attestation_digest,
                 "UI simulation attestation digest",
             )
+        if self.worker_compatibility:
+            _text(self.worker_compatibility, "Worker compatibility", 512)
 
     def matches(
         self,
@@ -256,6 +294,9 @@ class CertificationRecord:
             )
         except (CertificationValidationError, TypeError, ValueError):
             return False
+        constrained = any(entry.path == "code/payload.json" for entry in package.entries)
+        if constrained and self.worker_compatibility != worker_compatibility_fingerprint():
+            return False
         return (
             source_hash == self.source_hash
             and dependency_hash == self.dependency_hash
@@ -270,6 +311,18 @@ class CertificationFailure(CertificationError):
         super().__init__(f"Package certification failed at {stage.value}")
         self.stage = stage
         self.evidence = evidence
+        failed = next(
+            (item for item in reversed(evidence) if item.stage is stage and not item.passed),
+            None,
+        )
+        detail = " | ".join(failed.evidence if failed is not None else ())
+        self.reason = CertificationFailureReason(
+            stage,
+            f"CERTIFICATION_{stage.value}_FAILED",
+            _safe_failure_detail(detail),
+        )
+        self.code = self.reason.code
+        self.safe_detail = self.reason.safe_detail
 
 
 class PackageCertifier:
@@ -430,6 +483,7 @@ class PackageCertifier:
             expected_behavior_baseline=request.expected_behavior_baseline,
             stages=tuple(evidence),
             certified_at=self._clock(),
+            worker_compatibility=worker_compatibility_fingerprint(),
             ui_simulation_attestation_ref=(
                 ui_attestation.certification_reference() if ui_attestation is not None else None
             ),
@@ -588,6 +642,13 @@ def package_fingerprints(
     return source_hash, dependency_hash, _hash_value(normalized_package)
 
 
+def _safe_failure_detail(value: str) -> str:
+    """Keep trusted gate evidence bounded without retaining arbitrary text."""
+
+    normalized = " ".join(character if character.isprintable() else " " for character in value)
+    return normalized.strip()[:512] or "certification gate rejected the candidate"
+
+
 def _review_evidence(review: GeneratedPackageReview) -> tuple[str, ...]:
     details = [f"Static decision: {review.decision.value}"]
     details.extend(f"{finding.code}: {finding.message}" for finding in review.findings)
@@ -652,6 +713,7 @@ __all__ = [
     "BuiltPackage",
     "CertificationError",
     "CertificationFailure",
+    "CertificationFailureReason",
     "CertificationHooks",
     "CertificationRecord",
     "CertificationRequest",
@@ -661,4 +723,5 @@ __all__ = [
     "CertificationValidationError",
     "PackageCertifier",
     "package_fingerprints",
+    "worker_compatibility_fingerprint",
 ]
