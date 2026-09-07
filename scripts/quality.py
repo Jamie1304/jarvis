@@ -8,7 +8,7 @@ def main() -> int:
     commands = [
         [sys.executable, "-m", "ruff", "format", "--check", "."],
         [sys.executable, "-m", "ruff", "check", "."],
-        [sys.executable, "-m", "mypy", "jarvis", "tests"],
+        [sys.executable, "-m", "mypy", "--package", "jarvis", "--package", "tests"],
         [sys.executable, "-m", "coverage", "run", "-m", "pytest", "-m", "not real_qualification"],
         [sys.executable, "-m", "coverage", "report"],
     ]

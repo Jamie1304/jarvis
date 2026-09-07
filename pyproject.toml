@@ -64,10 +64,10 @@ plugins = ["pydantic.mypy"]
 exclude = [
     "build",
     "dist",
-    "jarvis/desktop.py",
-    "jarvis/frontend/desktop.py",
-    "jarvis/speech/stt.py",
-    "jarvis/speech/tts.py",
+    'jarvis[/\\]desktop[.]py$',
+    'jarvis[/\\]frontend[/\\]desktop[.]py$',
+    'jarvis[/\\]speech[/\\]stt[.]py$',
+    'jarvis[/\\]speech[/\\]tts[.]py$',
 ]
 
 [tool.pytest.ini_options]
@@ -111,3 +111,10 @@ module = [
     "sounddevice",
 ]
 ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = [
+    "jarvis.desktop",
+    "jarvis.frontend.desktop",
+]
+follow_imports = "skip"
