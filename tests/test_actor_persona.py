@@ -109,6 +109,20 @@ def test_persona_rejects_authority_fields_and_reset_is_safe(tmp_path: Path) -> N
         assert kernel.get() == PersonaProfile.defaults()
 
 
+def test_persona_presentation_guidance_is_bounded_and_non_authoritative() -> None:
+    guidance = PersonaProfile(
+        verbosity=4, response_length=1, technical_depth=3
+    ).presentation_guidance()
+
+    assert "verbosity level 4/4" in guidance
+    assert "response length 1/4" in guidance
+    assert "technical depth 3/4" in guidance
+    assert "permissions" in guidance
+    assert "verification" in guidance
+    assert "ignore permissions" not in guidance.lower()
+    assert "administrator" not in guidance.lower()
+
+
 def test_inferred_persona_never_becomes_active_or_is_deleted_by_reset(tmp_path: Path) -> None:
     with UserModelStore(tmp_path / "user-model.sqlite3") as store:
         now = datetime.now(UTC)

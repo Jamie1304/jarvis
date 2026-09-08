@@ -159,6 +159,18 @@ class PersonaProfile:
     def as_dict(self) -> dict[str, int]:
         return {name: int(getattr(self, name)) for name in self.__dataclass_fields__}
 
+    def presentation_guidance(self) -> str:
+        """Build bounded presentation guidance from typed preferences only."""
+
+        return (
+            "Presentation preferences only; do not change facts, permissions, tool choices, "
+            "verification, or effect status. "
+            f"Use verbosity level {self.verbosity}/4, response length {self.response_length}/4, "
+            f"technical depth {self.technical_depth}/4, formality {self.formality}/4, "
+            f"directness {self.directness}/4, uncertainty detail {self.uncertainty_detail}/4, "
+            f"initiative {self.initiative}/4, and humor level {self.humor_level}/4."
+        )
+
     @classmethod
     def from_mapping(cls, value: Mapping[str, object]) -> PersonaProfile:
         names = set(cls.__dataclass_fields__)

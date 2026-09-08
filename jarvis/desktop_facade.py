@@ -150,7 +150,10 @@ class DesktopApplicationFacade:
         return self._settings.reset_to_default(name)
 
     def create_conversation(self) -> UUID:
-        conversation_id = self._require_assistant().create_conversation()
+        profile = self._require_container().persona_kernel.get()
+        conversation_id = self._require_assistant().create_conversation(
+            profile.presentation_guidance()
+        )
         self._require_container().current_context.select_conversation(conversation_id)
         return conversation_id
 

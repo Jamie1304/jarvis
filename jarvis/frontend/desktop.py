@@ -7,6 +7,7 @@ from uuid import UUID
 from jarvis.application import AssistantEvent, AssistantEventKind
 from jarvis.core.config import Settings
 from jarvis.core.errors import ServiceUnavailableError
+from jarvis.current_context import CurrentContextSnapshot
 from jarvis.desktop_facade import DesktopRow
 from jarvis.desktop_shell import DesktopShellService, ShellSection
 from jarvis.frontend.desktop_backend import DesktopBackendHost
@@ -59,6 +60,7 @@ def run_desktop_app(
         assistant_event = Signal(object)
         failed = Signal(str)
         provider_status = Signal(str)
+        context_updated = Signal(object)
         text_finished = Signal(object)
         page_rows = Signal(str, object)
         recording_finished = Signal(str)
@@ -82,6 +84,7 @@ def run_desktop_app(
             self._signals.assistant_event.connect(self._render_event)
             self._signals.failed.connect(self._show_error)
             self._signals.provider_status.connect(self._render_provider_status)
+            self._signals.context_updated.connect(self._render_current_context)
             self._signals.text_finished.connect(self._text_finished)
             self._signals.page_rows.connect(self._render_page_rows)
             self._signals.recording_finished.connect(self._recording_finished)
@@ -130,7 +133,7 @@ def run_desktop_app(
             self._cancel_response.setEnabled(False)
             self._stop_speaking = QPushButton("Stop speaking")
             self._microphone = QPushButton("Start microphone")
-            self._provider_status = QLabel("Provider: checking…")
+            self._provider_status = QLabel("Provider health: checking…")
             self._stream_status = QLabel("Assistant: ready")
             self._speech_status = QLabel("STT: checking")
             self._tts_status = QLabel("TTS: checking")
@@ -139,6 +142,24 @@ def run_desktop_app(
                 "Mode: Safe Mode" if shell.state().safe_mode else "Mode: Normal"
             )
             self._mode_status.setObjectName("mode-status")
+            self._context_session = QLabel()
+            self._context_session.setObjectName("current-context-session")
+            self._context_activity = QLabel()
+            self._context_activity.setObjectName("current-context-activity")
+            self._context_model = QLabel()
+            self._context_model.setObjectName("current-context-model")
+            self._context_persona = QLabel()
+            self._context_persona.setObjectName("current-context-persona")
+            self._context_mode = QLabel()
+            self._context_mode.setObjectName("current-context-mode")
+            for context_label in (
+                self._context_session,
+                self._context_activity,
+                self._context_model,
+                self._context_persona,
+                self._context_mode,
+            ):
+                context_label.setWordWrap(True)
             self._error = QLabel()
             self._error.setObjectName("status-line")
             self._error.setWordWrap(True)
@@ -216,6 +237,10 @@ def run_desktop_app(
                     persona_heading = QLabel("<b>Persona (presentation only)</b>")
                     self._persona_verbosity = QComboBox()
                     self._persona_verbosity.addItems(["0", "1", "2", "3", "4"])
+                    self._persona_response_length = QComboBox()
+                    self._persona_response_length.addItems(["0", "1", "2", "3", "4"])
+                    self._persona_technical_depth = QComboBox()
+                    self._persona_technical_depth.addItems(["0", "1", "2", "3", "4"])
                     persona_save = QPushButton("Save Persona")
                     persona_save.clicked.connect(self._save_persona)
                     persona_reset = QPushButton("Reset Persona Defaults")
@@ -231,6 +256,10 @@ def run_desktop_app(
                     page_layout.addWidget(persona_heading)
                     page_layout.addWidget(QLabel("Verbosity (0-4)"))
                     page_layout.addWidget(self._persona_verbosity)
+                    page_layout.addWidget(QLabel("Response length (0-4)"))
+                    page_layout.addWidget(self._persona_response_length)
+                    page_layout.addWidget(QLabel("Technical depth (0-4)"))
+                    page_layout.addWidget(self._persona_technical_depth)
                     page_layout.addWidget(persona_save)
                     page_layout.addWidget(persona_reset)
                     page_layout.addWidget(self._actor_status)
@@ -383,6 +412,16 @@ def run_desktop_app(
             provider_layout.addWidget(self._speech_status, 0)
             provider_layout.addWidget(self._tts_status, 0)
             observe_layout.addWidget(provider_card)
+            context_card = QFrame()
+            context_card.setObjectName("card")
+            context_layout = QVBoxLayout(context_card)
+            context_layout.addWidget(label("CURRENT CONTEXT", "eyebrow"))
+            context_layout.addWidget(self._context_session)
+            context_layout.addWidget(self._context_activity)
+            context_layout.addWidget(self._context_model)
+            context_layout.addWidget(self._context_persona)
+            context_layout.addWidget(self._context_mode)
+            observe_layout.addWidget(context_card)
             activity_card = QFrame()
             activity_card.setObjectName("card")
             activity_layout = QVBoxLayout(activity_card)
@@ -427,6 +466,7 @@ def run_desktop_app(
                     widget.setEnabled(False)
             self._pages.setCurrentIndex(self._page_indexes[ShellSection.OVERVIEW])
             self._refresh_page("overview")
+            self._refresh_current_context()
             if not self._safe_mode:
                 self._refresh_provider_status()
 
@@ -481,6 +521,7 @@ def run_desktop_app(
             self._text_future = backend.stream_text(
                 self._conversation_id, text, on_event=self._signals.assistant_event.emit
             )
+            self._refresh_current_context()
             self._text_future.add_done_callback(self._signals.text_finished.emit)
 
         def _render_event(self, event: AssistantEvent) -> None:
@@ -490,6 +531,7 @@ def run_desktop_app(
                 cursor.insertText(event.content)
             elif event.kind is AssistantEventKind.STREAMING:
                 self._stream_status.setText(f"Assistant: {event.content}")
+                self._refresh_current_context()
             elif event.kind is AssistantEventKind.TTS:
                 self._tts_status.setText(f"TTS: {event.content}")
 
@@ -502,12 +544,14 @@ def run_desktop_app(
                 self._text_future = None
                 self._send.setEnabled(True)
                 self._cancel_response.setEnabled(False)
+                self._refresh_current_context()
 
         def _cancel_active_response(self) -> None:
             if self._conversation_id is None or self._text_future is None:
                 return
             backend.cancel(self._conversation_id)
             self._stream_status.setText("Assistant: cancelling response")
+            self._refresh_current_context()
 
         def _stop_active_speech(self) -> None:
             future = backend.submit_async(lambda service: service.stop_speaking())
@@ -539,7 +583,68 @@ def run_desktop_app(
                 self._signals.provider_status.emit(f"Unavailable: {error}")
 
         def _render_provider_status(self, status: str) -> None:
-            self._provider_status.setText(f"Provider: {status}")
+            self._provider_status.setText(f"Provider health: {status}")
+
+        def _refresh_current_context(self) -> None:
+            future = backend.submit(lambda service: service.current_context())
+            future.add_done_callback(self._signals.context_updated.emit)
+
+        def _render_current_context(self, future: Any) -> None:
+            try:
+                context = future.result()
+                if not isinstance(context, CurrentContextSnapshot):
+                    raise TypeError("Current context projection is malformed")
+                actor = context.actor
+                if actor is None:
+                    actor_text = "Session: unavailable in Safe Mode"
+                elif actor.active and actor.source == "local_desktop_session":
+                    actor_text = "Session: Local Desktop · active"
+                else:
+                    state = "active" if actor.active else "ended"
+                    actor_text = f"Session: {actor.source} · {state}"
+                conversation = (
+                    f"Conversation: {str(context.active_conversation_id)[:8]}"
+                    if context.active_conversation_id is not None
+                    else "Conversation: none"
+                )
+                task = (
+                    f"Task: {str(context.active_task_id)[:8]} · {context.active_task_status}"
+                    if context.active_task_id is not None
+                    else "Task: none"
+                )
+                presence = (
+                    context.presence.state.value.replace("_", " ").title()
+                    if context.presence is not None
+                    else "unavailable"
+                )
+                provider = context.provider
+                provider_name = provider.provider_id or "none"
+                model = provider.model_id or "none"
+                if provider.readiness is None:
+                    readiness = "unavailable"
+                elif provider.readiness.value == "not_probed":
+                    readiness = "Not checked yet"
+                else:
+                    readiness = provider.readiness.value
+                self._context_session.setText(actor_text)
+                self._context_activity.setText(f"{conversation}\n{task}\nPresence: {presence}")
+                self._context_model.setText(
+                    f"Configured model: {provider_name} / {model}\nReadiness: {readiness}"
+                )
+                self._context_persona.setText(
+                    "Persona: presentation profile "
+                    f"(verbosity {context.persona.verbosity}/4, "
+                    f"depth {context.persona.technical_depth}/4)"
+                )
+                self._context_mode.setText(
+                    "Mode: Safe Mode" if context.safe_mode else "Mode: Normal"
+                )
+            except (AttributeError, ServiceUnavailableError, TypeError, ValueError) as error:
+                self._context_session.setText("Current context unavailable")
+                self._context_activity.setText(str(error))
+                self._context_model.clear()
+                self._context_persona.clear()
+                self._context_mode.clear()
 
         def _refresh_page(self, page: str) -> None:
             if page == "overview":
@@ -631,6 +736,7 @@ def run_desktop_app(
             try:
                 future.result()
                 self._refresh_page(ShellSection.TASKS.value)
+                self._refresh_current_context()
             except Exception as error:
                 self._signals.failed.emit(str(error))
 
@@ -918,6 +1024,8 @@ def run_desktop_app(
             try:
                 view = backend.submit(lambda service: service.persona()).result()
                 self._persona_verbosity.setCurrentText(str(view.profile.verbosity))
+                self._persona_response_length.setCurrentText(str(view.profile.response_length))
+                self._persona_technical_depth.setCurrentText(str(view.profile.technical_depth))
                 actor = backend.submit(lambda service: service.actor_context()).result()
                 state = "active" if actor.active else "ended"
                 self._actor_status.setText(
@@ -931,7 +1039,11 @@ def run_desktop_app(
         def _save_persona(self) -> None:
             future = backend.submit(
                 lambda service: service.update_persona(
-                    {"verbosity": int(self._persona_verbosity.currentText())}
+                    {
+                        "verbosity": int(self._persona_verbosity.currentText()),
+                        "response_length": int(self._persona_response_length.currentText()),
+                        "technical_depth": int(self._persona_technical_depth.currentText()),
+                    }
                 )
             )
             future.add_done_callback(self._persona_saved)
@@ -945,6 +1057,7 @@ def run_desktop_app(
                 future.result()
                 self._refresh_persona()
                 self._stream_status.setText("Persona: saved; presentation preferences only")
+                self._refresh_current_context()
             except Exception as error:
                 self._signals.failed.emit(str(error))
 

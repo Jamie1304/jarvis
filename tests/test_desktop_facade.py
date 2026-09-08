@@ -163,3 +163,24 @@ async def test_desktop_facade_projects_persona_actor_and_preserves_authority(
     assert before.reason == after.reason
     assert facade.reset_persona().profile.verbosity == 2
     await facade.aclose()
+
+
+async def test_new_conversation_receives_typed_presentation_guidance(
+    tmp_path: Path,
+) -> None:
+    runtime = ApplicationRuntime.create(
+        Settings(app_data_dir=tmp_path / "data", ai_provider="ollama")
+    )
+    facade = DesktopApplicationFacade(runtime)
+    try:
+        facade.update_persona({"verbosity": 4, "response_length": 1})
+        conversation_id = facade.create_conversation()
+        assert runtime.container is not None
+        messages = runtime.container.conversation.history(conversation_id)
+        assert len(messages) == 1
+        assert messages[0].role.value == "system"
+        assert "verbosity level 4/4" in messages[0].content
+        assert "permissions" in messages[0].content
+    finally:
+        facade.reset_persona()
+        await facade.aclose()

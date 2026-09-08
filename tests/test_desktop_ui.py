@@ -211,7 +211,11 @@ def test_desktop_safe_mode_renders_settings_and_disables_normal_execution() -> N
             app.quit()
             return
         mode_status: QLabel | None = window.findChild(QLabel, "mode-status")
+        context_session: QLabel | None = window.findChild(QLabel, "current-context-session")
+        context_mode: QLabel | None = window.findChild(QLabel, "current-context-mode")
         observed["mode"] = mode_status is not None and mode_status.text() == "Mode: Safe Mode"
+        observed["context_session"] = context_session is not None
+        observed["context_mode"] = context_mode is not None
         buttons: dict[str, bool] = {}
         safe_mode_buttons: list[QPushButton] = list(window.findChildren(QPushButton))
         for button in safe_mode_buttons:
@@ -227,6 +231,8 @@ def test_desktop_safe_mode_renders_settings_and_disables_normal_execution() -> N
 
     assert "error" not in observed
     assert observed["mode"] is True
+    assert observed["context_session"] is True
+    assert observed["context_mode"] is True
     assert observed["send_enabled"] is False
     assert observed["task_create_enabled"] is False
     assert observed["settings_button"] is True
