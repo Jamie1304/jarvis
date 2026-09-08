@@ -1,5 +1,6 @@
 import asyncio
 import subprocess
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import uuid4
 
@@ -172,6 +173,31 @@ def test_host_bridge_is_scoped_deny_by_default_and_no_identity_impersonation() -
         )
     )
     assert not broad.allowed
+
+
+def test_host_bridge_expired_request_is_denied_before_permission_verifier() -> None:
+    calls: list[HostBridgeRequest] = []
+
+    def verifier(request: HostBridgeRequest) -> bool:
+        calls.append(request)
+        return True
+
+    bridge = HostBridge(permission_verifier=verifier)
+    expired = HostBridgeRequest(
+        uuid4(),
+        uuid4(),
+        uuid4(),
+        HostBridgeOperation.FILE_READ,
+        "document.txt",
+        "staging",
+        expires_at=datetime.now(UTC) - timedelta(minutes=1),
+    )
+
+    result = bridge.authorize(expired)
+
+    assert result.allowed is False
+    assert result.reason == "request expired"
+    assert calls == []
 
 
 def test_unavailable_provider_does_not_fabricate_readiness() -> None:
