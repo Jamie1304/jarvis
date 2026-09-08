@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
+from jarvis.actor_persona import PersonaProfile
 from jarvis.application import JarvisAssistantService
 from jarvis.control_center import ControlCenterSection
 from jarvis.core.environment_settings import (
@@ -16,9 +17,7 @@ from jarvis.core.errors import ServiceUnavailableError
 from jarvis.memory.control import MemoryControlReference, MemoryCorrection
 from jarvis.memory.models import RetentionPolicy
 from jarvis.permissions import (
-    ApprovalActorKind,
     ApprovalChoice,
-    ApprovalIdentity,
     DesktopApprovalHandoff,
     TrustedDesktopApprovalSurface,
 )
@@ -48,6 +47,21 @@ class DesktopRuntimeView:
     model: str | None
     stt: str
     tts: str
+
+
+@dataclass(frozen=True, slots=True)
+class DesktopActorView:
+    """Truthful session provenance; it never presents inferred identity."""
+
+    session_id: UUID
+    source: str
+    label: str | None
+    active: bool
+
+
+@dataclass(frozen=True, slots=True)
+class DesktopPersonaView:
+    profile: PersonaProfile
 
 
 class DesktopApplicationFacade:
@@ -105,6 +119,21 @@ class DesktopApplicationFacade:
             if self._assistant
             else self._settings.save(updates)
         )
+
+    def actor_context(self) -> DesktopActorView:
+        context = self._require_container().actor_context
+        return DesktopActorView(
+            context.session_id, context.source.value, context.display_label, context.is_active()
+        )
+
+    def persona(self) -> DesktopPersonaView:
+        return DesktopPersonaView(self._require_container().persona_kernel.get())
+
+    def update_persona(self, updates: dict[str, object]) -> DesktopPersonaView:
+        return DesktopPersonaView(self._require_container().persona_kernel.update(**updates))
+
+    def reset_persona(self) -> DesktopPersonaView:
+        return DesktopPersonaView(self._require_container().persona_kernel.reset())
 
     def reset_setting_to_default(self, name: str) -> tuple[EnvironmentSettingDescriptor, ...]:
         return self._settings.reset_to_default(name)
@@ -228,7 +257,7 @@ class DesktopApplicationFacade:
             request,
             choice=choice,
             authenticator=container.desktop_approval_authenticator,
-            identity=ApprovalIdentity("desktop-local-user", ApprovalActorKind.TRUSTED_USER),
+            identity=container.actor_context_service.approval_identity(container.actor_context),
             broker=container.permission_broker,
         )
         return result.accepted

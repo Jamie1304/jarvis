@@ -1,7 +1,9 @@
 # Local User Model
 
 `UserModelStore` is the sole authoritative owner of durable user facts and
-preferences. It is intentionally separate from process-local conversation
+preferences. The bounded `persona.profile` preference is stored here as
+presentation-only data, never as actor identity. It is intentionally separate
+from process-local conversation
 context, episodic and long-term memory, workspace/profile configuration, tasks,
 plans, permissions, credentials, artifacts, and audit records.
 

@@ -6,6 +6,7 @@ from uuid import UUID
 
 from jarvis.application import AssistantEvent, AssistantEventKind
 from jarvis.core.config import Settings
+from jarvis.core.errors import ServiceUnavailableError
 from jarvis.desktop_facade import DesktopRow
 from jarvis.desktop_shell import DesktopShellService, ShellSection
 from jarvis.frontend.desktop_backend import DesktopBackendHost
@@ -212,6 +213,14 @@ def run_desktop_app(
                     save_restart.clicked.connect(self._save_and_restart)
                     restart_now = QPushButton("Restart")
                     restart_now.clicked.connect(self._restart_desktop)
+                    persona_heading = QLabel("<b>Persona (presentation only)</b>")
+                    self._persona_verbosity = QComboBox()
+                    self._persona_verbosity.addItems(["0", "1", "2", "3", "4"])
+                    persona_save = QPushButton("Save Persona")
+                    persona_save.clicked.connect(self._save_persona)
+                    persona_reset = QPushButton("Reset Persona Defaults")
+                    persona_reset.clicked.connect(self._reset_persona)
+                    self._actor_status = QLabel()
                     page_layout.addWidget(scroll)
                     page_layout.addWidget(self._reset_setting_selector)
                     page_layout.addWidget(reset_unsaved)
@@ -219,7 +228,14 @@ def run_desktop_app(
                     page_layout.addWidget(save)
                     page_layout.addWidget(save_restart)
                     page_layout.addWidget(restart_now)
+                    page_layout.addWidget(persona_heading)
+                    page_layout.addWidget(QLabel("Verbosity (0-4)"))
+                    page_layout.addWidget(self._persona_verbosity)
+                    page_layout.addWidget(persona_save)
+                    page_layout.addWidget(persona_reset)
+                    page_layout.addWidget(self._actor_status)
                     self._refresh_settings()
+                    self._refresh_persona()
                 else:
                     rows = QListWidget()
                     rows.setMinimumHeight(180)
@@ -897,6 +913,40 @@ def run_desktop_app(
                     and descriptor.name not in {"version", "security_policy_version"}
                 ]
             )
+
+        def _refresh_persona(self) -> None:
+            try:
+                view = backend.submit(lambda service: service.persona()).result()
+                self._persona_verbosity.setCurrentText(str(view.profile.verbosity))
+                actor = backend.submit(lambda service: service.actor_context()).result()
+                state = "active" if actor.active else "ended"
+                self._actor_status.setText(
+                    f"Current session: {actor.label or 'Application session'}; "
+                    f"trusted source: {actor.source}; state: {state}"
+                )
+            except (AttributeError, ServiceUnavailableError):
+                # Compatibility service doubles may expose only legacy settings.
+                self._actor_status.setText("Persona/session provenance unavailable")
+
+        def _save_persona(self) -> None:
+            future = backend.submit(
+                lambda service: service.update_persona(
+                    {"verbosity": int(self._persona_verbosity.currentText())}
+                )
+            )
+            future.add_done_callback(self._persona_saved)
+
+        def _reset_persona(self) -> None:
+            future = backend.submit(lambda service: service.reset_persona())
+            future.add_done_callback(self._persona_saved)
+
+        def _persona_saved(self, future: Any) -> None:
+            try:
+                future.result()
+                self._refresh_persona()
+                self._stream_status.setText("Persona: saved; presentation preferences only")
+            except Exception as error:
+                self._signals.failed.emit(str(error))
 
         def _save_settings(self) -> None:
             self._restart_after_save = False

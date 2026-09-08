@@ -19,6 +19,12 @@ from uuid import UUID, uuid4
 
 import httpx
 
+from jarvis.actor_persona import (
+    ActorContext,
+    ActorContextService,
+    ActorContextSource,
+    PersonaKernel,
+)
 from jarvis.adoption import (
     AdoptionIdentityInspector,
     AdoptionPolicy,
@@ -634,6 +640,9 @@ class RuntimeContainer:
     task_controller: TaskController
     memory_store: SQLiteMemoryStore
     user_model_store: UserModelStore
+    actor_context_service: ActorContextService
+    actor_context: ActorContext
+    persona_kernel: PersonaKernel
     session_store: AgentSessionStore
     conversation_memory: ConversationContextService
     long_term_memory: LongTermMemoryService
@@ -1341,6 +1350,14 @@ class ApplicationRuntime:
             paths.validate_storage_layout()
             memory_store = SQLiteMemoryStore(paths.memory_database)
             user_model_store = UserModelStore(paths.user_model_database)
+            actor_context_service = ActorContextService()
+            actor_context = actor_context_service.create_trusted(
+                session_id=uuid4(),
+                principal_id="desktop-local-user",
+                source=ActorContextSource.LOCAL_DESKTOP_SESSION,
+                display_label="Local Desktop",
+            )
+            persona_kernel = PersonaKernel(user_model_store)
             knowledge_library = KnowledgeLibrary(paths.knowledge_library_database)
             assert knowledge_library is not None
             session_store = AgentSessionStore(paths.sessions_database)
@@ -2349,6 +2366,9 @@ class ApplicationRuntime:
                 task_controller=task_controller,
                 memory_store=memory_store,
                 user_model_store=user_model_store,
+                actor_context_service=actor_context_service,
+                actor_context=actor_context,
+                persona_kernel=persona_kernel,
                 session_store=session_store,
                 conversation_memory=conversation_memory,
                 long_term_memory=LongTermMemoryService(memory_store),

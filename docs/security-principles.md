@@ -15,6 +15,7 @@
 - Tools receive only explicit execution context, not the application container. Unexpected implementation exceptions are logged and mapped to structured failures.
 - Integrity classes are explicit: `TRUSTED_CORE`, `PRODUCTION_CORE`, `INTEGRATION`, `GENERATED`, `USER_CONFIG`, and `DATA`. Generated/unreviewed code remains inert data and is never imported or executed in the trusted process.
 - Permission descriptions come only from the trusted `TrustedActionNarrator` and are rendered from one immutable authority object by `ExactOperationRenderer`; model wording, voice text, events, and UI fields cannot create approval.
+- `ActorContext` is short-lived trusted interaction/session provenance created by application/session infrastructure. Model output, memory or relationship inference, voice, face, gesture, free-text names, and LLM guesses cannot create it. `PersonaProfile` is presentation preference only and cannot affect permissions, approval identity, credentials, verification, effects, certification, recovery, or security gates.
 
 Phase 3 retains the deny-by-default boundary: only registered, non-privileged capabilities are available, and calculator/local-time declare no permissions.
 
