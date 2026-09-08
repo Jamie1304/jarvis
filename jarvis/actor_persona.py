@@ -121,7 +121,9 @@ class ActorContextService:
         return current
 
     def approval_identity(self, context: ActorContext) -> ApprovalIdentity:
-        self.require_active(context)
+        current = self.require_active(context)
+        if current.source is ActorContextSource.SYSTEM_SERVICE:
+            raise PermissionError("System-service context cannot approve as a trusted user")
         return ApprovalIdentity(context.principal_id, ApprovalActorKind.TRUSTED_USER)
 
 
@@ -179,7 +181,18 @@ class PersonaKernel:
 
     def get(self) -> PersonaProfile:
         records = self._store.list(include_global=True, include_inferred=True)
-        record = next((item for item in records if item.key == self._KEY and item.active), None)
+        record = next(
+            (
+                item
+                for item in records
+                if item.key == self._KEY
+                and item.active
+                and item.kind is UserModelKind.PREFERENCE
+                and item.source is UserModelSource.USER
+                and item.origin is UserModelOrigin.EXPLICIT
+            ),
+            None,
+        )
         if record is None:
             return PersonaProfile.defaults()
         try:
@@ -193,7 +206,32 @@ class PersonaKernel:
         current = self.get()
         profile = PersonaProfile.from_mapping({**current.as_dict(), **updates})
         records = self._store.list(include_global=True, include_inferred=True)
-        record = next((item for item in records if item.key == self._KEY and item.active), None)
+        record = next(
+            (
+                item
+                for item in records
+                if item.key == self._KEY
+                and item.active
+                and item.kind is UserModelKind.PREFERENCE
+                and item.source is UserModelSource.USER
+                and item.origin is UserModelOrigin.EXPLICIT
+            ),
+            None,
+        )
+        if record is None:
+            # An inferred reserved-key record may exist in older data. An
+            # explicit user edit may convert that record, but get/reset never
+            # promote or expose it implicitly.
+            record = next(
+                (
+                    item
+                    for item in records
+                    if item.key == self._KEY
+                    and item.active
+                    and item.kind is UserModelKind.PREFERENCE
+                ),
+                None,
+            )
         now = self._clock().astimezone(UTC)
         if record is None:
             self._store.create(
@@ -223,7 +261,18 @@ class PersonaKernel:
 
     def reset(self) -> PersonaProfile:
         records = self._store.list(include_global=True, include_inferred=True)
-        record = next((item for item in records if item.key == self._KEY and item.active), None)
+        record = next(
+            (
+                item
+                for item in records
+                if item.key == self._KEY
+                and item.active
+                and item.kind is UserModelKind.PREFERENCE
+                and item.source is UserModelSource.USER
+                and item.origin is UserModelOrigin.EXPLICIT
+            ),
+            None,
+        )
         if record is not None:
             self._store.delete(record.record_id, reason="persona reset to safe defaults")
         return PersonaProfile.defaults()
