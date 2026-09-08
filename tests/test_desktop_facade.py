@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sqlite3
 from pathlib import Path
 from uuid import uuid4
 
@@ -22,6 +23,11 @@ def test_safe_mode_facade_exposes_settings_and_refuses_normal_actions(tmp_path: 
     assert facade.settings_descriptors()
     with pytest.raises(ServiceUnavailableError):
         facade.create_conversation()
+    context = facade.current_context()
+    assert context.safe_mode is True
+    assert context.runtime_state == RuntimeStatus.SAFE_MODE.value
+    assert context.actor is None
+    assert context.provider.provider_id is None
 
 
 @pytest.mark.asyncio
@@ -42,6 +48,78 @@ async def test_desktop_facade_projects_canonical_task_and_control_center_data(
     assert any(row.identifier == task.identifier for row in rows)
     assert any(row.identifier == "calculator" for row in tools)
     await facade.aclose()
+
+
+@pytest.mark.asyncio
+async def test_current_context_composes_canonical_references_and_restarts_truthfully(
+    tmp_path: Path,
+) -> None:
+    app_data = tmp_path / "data"
+    runtime = ApplicationRuntime.create(Settings(app_data_dir=app_data, ai_provider="ollama"))
+    assert runtime.container is not None
+    facade = DesktopApplicationFacade(runtime)
+    initial = facade.current_context()
+    assert initial.actor is not None and initial.actor.active is True
+    assert initial.actor.source == "local_desktop_session"
+    assert initial.persona.verbosity == 2
+    assert initial.active_conversation_id is None
+    assert initial.active_task_id is None
+    assert initial.provider.provider_id == "ollama"
+    assert initial.provider.model_id == "llama3.2:3b"
+    assert initial.provider.available is None
+    assert initial.provider.readiness is not None
+    assert initial.provider.readiness.value == "not_probed"
+
+    memory_db = runtime.container.paths.memory_database
+    with sqlite3.connect(memory_db) as connection:
+        memory_count_before = connection.execute("SELECT COUNT(*) FROM memories").fetchone()[0]
+
+    conversation_id = facade.create_conversation()
+    conversation = facade.current_context()
+    assert conversation.active_conversation_id == conversation_id
+    assert conversation.conversation_session_id == runtime.container.conversation.session_id(
+        conversation_id
+    )
+
+    task_row = await facade.create_task(conversation_id, "calculate 25% of 800")
+    task_context = facade.current_context()
+    assert task_context.active_task_id is not None
+    assert str(task_context.active_task_id) == task_row.identifier
+    assert task_context.active_task_status is runtime.container.task_controller.get_status(
+        task_context.active_task_id
+    )
+    assert task_context.actor is not None
+    assert type(task_context.actor).__name__ == "CurrentActorProjection"
+    assert type(task_context.persona).__name__ == "PersonaProfile"
+    assert not hasattr(task_context, "permission_level")
+    assert not hasattr(task_context.model_projection(), "credentials")
+    assert not hasattr(runtime.container.current_context, "approval_identity")
+    assert not hasattr(runtime.container.current_context, "permission_broker")
+
+    facade.update_persona({"verbosity": 4})
+    changed = facade.current_context()
+    assert changed.persona.verbosity == 4
+    assert changed.actor is not None
+    assert changed.model_projection().actor_source == changed.actor.source
+    with sqlite3.connect(memory_db) as connection:
+        assert (
+            connection.execute("SELECT COUNT(*) FROM memories").fetchone()[0] == memory_count_before
+        )
+
+    old_actor_session = task_context.actor.session_id if task_context.actor is not None else None
+    await facade.aclose()
+
+    restarted = ApplicationRuntime.create(Settings(app_data_dir=app_data, ai_provider="ollama"))
+    assert restarted.container is not None
+    restarted_facade = DesktopApplicationFacade(restarted)
+    after_restart = restarted_facade.current_context()
+    assert after_restart.actor is not None
+    assert after_restart.actor.session_id != old_actor_session
+    assert after_restart.active_conversation_id is None
+    assert after_restart.active_task_id is None
+    assert after_restart.persona.verbosity == 4
+    restarted_facade.reset_persona()
+    await restarted_facade.aclose()
 
 
 @pytest.mark.asyncio

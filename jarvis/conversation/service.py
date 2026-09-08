@@ -70,6 +70,11 @@ class ConversationService:
 
         return tuple(self._messages.get(conversation_id, []))
 
+    def has_conversation(self, conversation_id: UUID) -> bool:
+        """Return whether this process-local service owns the conversation reference."""
+
+        return conversation_id in self._messages
+
     def cancel(self, conversation_id: UUID) -> None:
         """Request cancellation from any thread, including the desktop UI thread."""
 

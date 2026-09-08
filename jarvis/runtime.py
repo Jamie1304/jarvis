@@ -107,6 +107,7 @@ from jarvis.credentials import (
     TestOnlyInMemorySecretBackend,
     WindowsCredentialManagerBackend,
 )
+from jarvis.current_context import CurrentContextService
 from jarvis.desktop_shell import (
     LaunchProfileRegistry,
     StartupWarmupRegistry,
@@ -643,6 +644,7 @@ class RuntimeContainer:
     actor_context_service: ActorContextService
     actor_context: ActorContext
     persona_kernel: PersonaKernel
+    current_context: CurrentContextService
     session_store: AgentSessionStore
     conversation_memory: ConversationContextService
     long_term_memory: LongTermMemoryService
@@ -1931,6 +1933,26 @@ class ApplicationRuntime:
                 presence_start_task = None
                 trace_start_task = None
 
+            conversation = ConversationService(
+                provider,
+                model=settings.ai_model,
+                context_limit=settings.ai_context_limit,
+                session_store=session_store,
+                provider_id=settings.ai_provider,
+            )
+            current_context = CurrentContextService(
+                actor_context_service=actor_context_service,
+                actor_context=actor_context,
+                persona_kernel=persona_kernel,
+                conversation=conversation,
+                task_controller=task_controller,
+                presence=presence_projection.snapshot,
+                runtime_state=RuntimeStatus.READY.value,
+                safe_mode=False,
+                provider_id=settings.ai_provider,
+                model_id=settings.ai_model,
+            )
+
             def tool_projection() -> tuple[ControlCenterItem, ...]:
                 items: list[ControlCenterItem] = []
                 for manifest in registry.manifests():
@@ -2343,13 +2365,7 @@ class ApplicationRuntime:
                 ollama_runtime=ollama_runtime,
                 stt=stt,
                 tts=tts,
-                conversation=ConversationService(
-                    provider,
-                    model=settings.ai_model,
-                    context_limit=settings.ai_context_limit,
-                    session_store=session_store,
-                    provider_id=settings.ai_provider,
-                ),
+                conversation=conversation,
                 event_bus=events,
                 state_store=state_store,
                 state_machine=state_machine,
@@ -2369,6 +2385,7 @@ class ApplicationRuntime:
                 actor_context_service=actor_context_service,
                 actor_context=actor_context,
                 persona_kernel=persona_kernel,
+                current_context=current_context,
                 session_store=session_store,
                 conversation_memory=conversation_memory,
                 long_term_memory=LongTermMemoryService(memory_store),

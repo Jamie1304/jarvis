@@ -240,6 +240,14 @@ its stores. UI adapters do not construct an orchestrator or select an execution
 engine. `AgentOrchestrator` remains compatibility-only and is not part of the
 production composition.
 
+`CurrentContextService` is a runtime-owned, rebuildable read projection of
+current canonical state. It composes actor provenance, explicit persona,
+conversation/session references, task status, presence, runtime/Safe Mode, and
+configured provider identity without becoming memory, semantic-event authority,
+or security authority. It stores only bounded active references; canonical
+conversation, session, task, actor, persona, presence, and provider owners remain
+the sources of truth.
+
 Approval will eventually use a separate trusted-local path:
 
 `authenticated local UI -> isolated TrustedApprovalAuthenticator -> exact single-use context -> TaskController -> PermissionBroker`

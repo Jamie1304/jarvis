@@ -14,6 +14,7 @@ from jarvis.core.environment_settings import (
     EnvironmentSettingsService,
 )
 from jarvis.core.errors import ServiceUnavailableError
+from jarvis.current_context import CurrentContextSnapshot
 from jarvis.memory.control import MemoryControlReference, MemoryCorrection
 from jarvis.memory.models import RetentionPolicy
 from jarvis.permissions import (
@@ -126,6 +127,16 @@ class DesktopApplicationFacade:
             context.session_id, context.source.value, context.display_label, context.is_active()
         )
 
+    def current_context(self) -> CurrentContextSnapshot:
+        """Return a bounded read-only projection of canonical current state."""
+
+        container = self._runtime.container
+        if container is None:
+            return CurrentContextSnapshot.safe_mode_snapshot(
+                self._runtime.status.value,
+            )
+        return container.current_context.snapshot()
+
     def persona(self) -> DesktopPersonaView:
         return DesktopPersonaView(self._require_container().persona_kernel.get())
 
@@ -139,12 +150,18 @@ class DesktopApplicationFacade:
         return self._settings.reset_to_default(name)
 
     def create_conversation(self) -> UUID:
-        return self._require_assistant().create_conversation()
+        conversation_id = self._require_assistant().create_conversation()
+        self._require_container().current_context.select_conversation(conversation_id)
+        return conversation_id
+
+    def select_conversation(self, conversation_id: UUID) -> None:
+        self._require_container().current_context.select_conversation(conversation_id)
 
     def cancel(self, conversation_id: UUID) -> None:
         self._require_assistant().cancel(conversation_id)
 
     async def stream_text(self, conversation_id: UUID, text: str) -> Any:
+        self._require_container().current_context.select_conversation(conversation_id)
         async for event in self._require_assistant().stream_text(conversation_id, text):
             yield event
 
@@ -205,6 +222,7 @@ class DesktopApplicationFacade:
         )
 
     async def run_task(self, task_id: UUID) -> DesktopRow:
+        self._require_container().current_context.select_task(task_id)
         task = await self._require_assistant().run_task(task_id)
         return DesktopRow(
             str(task.task_id), task.goal, task.status.value, "Task execution completed"
@@ -212,9 +230,11 @@ class DesktopApplicationFacade:
 
     async def create_task(self, conversation_id: UUID, goal: str) -> DesktopRow:
         task = await self._require_assistant().create_task(conversation_id, goal)
+        self._require_container().current_context.select_task(task.task_id)
         return DesktopRow(str(task.task_id), task.goal, task.status.value, "Task created")
 
     async def cancel_task(self, task_id: UUID) -> DesktopRow:
+        self._require_container().current_context.select_task(task_id)
         task = await self._require_assistant().cancel_task(task_id)
         return DesktopRow(str(task.task_id), task.goal, task.status.value, "Cancellation requested")
 
