@@ -47,6 +47,26 @@ This bounds process memory and accidental single-chain recursion; it is not a
 sandbox against a malicious in-process subscriber that continuously rotates fresh
 correlation IDs. Such code is not loaded as an untrusted integration in v1.
 
+## Deterministic semantic projection
+
+`SemanticEventService` is a runtime-owned, bounded in-process projection over
+the raw bus. Versioned pure rules map selected canonical events to minimal
+`SemanticEvent` observations with stable UUIDv5 identities and preserved raw,
+task, correlation, and sequence provenance. It does not call a model, write
+memory or Attention, change CurrentContext, grant permission, or certify an
+effect. A semantic permission-granted observation is only evidence that the
+canonical adapter emitted that observation; it is never an `ApprovalIdentity`
+or reusable authority. Effect observations preserve statuses such as
+`UNKNOWN_OUTCOME` and cannot become receipts.
+
+`SemanticPatternEngine` retains bounded recent patterns only. It detects
+repeated execution failures within one task/correlation scope and a scoped
+degraded-then-recovered sequence. Subscriber sequence gaps mark continuity
+broken, clear continuity-dependent windows, and never fabricate missing
+events. Trace remains the detailed observability projection, CurrentContext
+remains current state, EpisodicMemory remains the durable selected-history
+owner, and Attention remains the interruption-policy owner.
+
 ## Versioning and compatibility
 
 Schema version `1` is additive-only for the current release. Consumers must ignore unknown event types and tolerate unknown payload fields when decoding persisted/forwarded events. Producers must not reuse an existing event type with changed field meaning. A breaking payload or metadata change requires a new schema version (and, where needed, a new event type) plus a compatibility window. Event IDs and sequence numbers are process-local observability identifiers, not durable audit IDs.

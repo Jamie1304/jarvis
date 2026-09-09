@@ -34,6 +34,15 @@ from jarvis.events.models import (
     ToolStarted,
     VoiceStateChanged,
 )
+from jarvis.events.semantic import (
+    ContinuityState,
+    PatternKind,
+    SemanticEvent,
+    SemanticEventService,
+    SemanticKind,
+    SemanticPattern,
+    SemanticPatternEngine,
+)
 
 __all__ = [
     "ArtifactCreated",
@@ -70,4 +79,11 @@ __all__ = [
     "ToolFailed",
     "ToolStarted",
     "VoiceStateChanged",
+    "ContinuityState",
+    "PatternKind",
+    "SemanticEvent",
+    "SemanticEventService",
+    "SemanticKind",
+    "SemanticPattern",
+    "SemanticPatternEngine",
 ]

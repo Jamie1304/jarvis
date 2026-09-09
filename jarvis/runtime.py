@@ -139,7 +139,7 @@ from jarvis.environment_discovery import (
     EnvironmentDiscoveryProvider,
     EnvironmentDiscoveryService,
 )
-from jarvis.events import EventBus, InMemoryEventBus
+from jarvis.events import EventBus, InMemoryEventBus, SemanticEventService
 from jarvis.generated_capability import (
     GeneratedActionPlanPlanner,
     GeneratedCapabilityToolRegistrar,
@@ -658,6 +658,7 @@ class RuntimeContainer:
     automation_store: SQLiteAutomationStore
     trace_store: TraceStore
     trace_service: TraceService
+    semantic_events: SemanticEventService
     golden_workflow_store: GoldenWorkflowStore
     golden_workflows: GoldenWorkflowService
     workflow_procedure_store: SQLiteWorkflowProcedureStore
@@ -727,6 +728,7 @@ class RuntimeContainer:
     automation_start_task: asyncio.Task[None] | None = None
     presence_start_task: asyncio.Task[None] | None = None
     trace_start_task: asyncio.Task[None] | None = None
+    semantic_start_task: asyncio.Task[None] | None = None
     native_cleanup_recovery_state: str = "CLEAN"
     native_cleanup_recovery_reports: tuple[Mapping[str, object], ...] = ()
     _close_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False, repr=False)
@@ -884,7 +886,11 @@ class RuntimeContainer:
             if self.trace_start_task is not None:
                 self.trace_start_task.cancel()
                 await asyncio.gather(self.trace_start_task, return_exceptions=True)
+            if self.semantic_start_task is not None:
+                self.semantic_start_task.cancel()
+                await asyncio.gather(self.semantic_start_task, return_exceptions=True)
             resources = (
+                self.semantic_events,
                 self.trace_service,
                 self.automation_service,
                 self.component_doctor,
@@ -1922,16 +1928,21 @@ class ApplicationRuntime:
                 capability_lifecycle_restorer.bind_health(capability_health)
             component_doctor = ComponentDoctor(capability_health)
             presence_projection = PresenceProjection(events)
+            semantic_events = SemanticEventService(events)
             try:
                 presence_start_task = asyncio.get_running_loop().create_task(
                     presence_projection.start()
                 )
                 trace_start_task = asyncio.get_running_loop().create_task(trace_service.start())
+                semantic_start_task = asyncio.get_running_loop().create_task(
+                    semantic_events.start()
+                )
             except RuntimeError:
                 # Synchronous callers can start the projection through the
                 # application service once an event loop is available.
                 presence_start_task = None
                 trace_start_task = None
+                semantic_start_task = None
 
             conversation = ConversationService(
                 provider,
@@ -2401,6 +2412,7 @@ class ApplicationRuntime:
                 automation_store=automation_store,
                 trace_store=trace_store,
                 trace_service=trace_service,
+                semantic_events=semantic_events,
                 golden_workflow_store=golden_workflow_store,
                 golden_workflows=golden_workflows,
                 workflow_procedure_store=workflow_procedure_store,
@@ -2464,6 +2476,7 @@ class ApplicationRuntime:
                 credential_vault=credential_vault,
                 credential_broker=credential_broker,
                 automation_start_task=automation_start_task,
+                semantic_start_task=semantic_start_task,
                 presence_start_task=presence_start_task,
                 trace_start_task=trace_start_task,
                 native_cleanup_recovery_state=native_cleanup_recovery_state,
