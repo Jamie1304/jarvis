@@ -10,6 +10,16 @@ from jarvis.memory.control import (
     MemoryVerificationRequestView,
     MemoryVerificationViewStatus,
 )
+from jarvis.memory.episodes import (
+    EPISODE_COMPOSITION_RULE_VERSION,
+    EPISODE_SCHEMA_VERSION,
+    Episode,
+    EpisodeComposer,
+    EpisodeContinuity,
+    EpisodeOutcome,
+    EpisodeStore,
+    EpisodeVerification,
+)
 from jarvis.memory.models import (
     ConversationEntry,
     DurableMemoryHit,
@@ -52,6 +62,14 @@ from jarvis.memory.store import (
 
 __all__ = [
     "ContextSummarizer",
+    "EPISODE_COMPOSITION_RULE_VERSION",
+    "EPISODE_SCHEMA_VERSION",
+    "Episode",
+    "EpisodeComposer",
+    "EpisodeContinuity",
+    "EpisodeOutcome",
+    "EpisodeStore",
+    "EpisodeVerification",
     "ConversationContextService",
     "ConversationEntry",
     "DurableMemoryHit",

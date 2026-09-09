@@ -22,9 +22,18 @@ Only two categories enter this database:
   confident preference or fact. `LongTermRetentionPolicy` evaluates a candidate first
   and emits a machine-readable allow/deny reason. Casual conversation, tool/web data,
   low-confidence candidates, unconfirmed candidates, and untrusted sources are denied.
-- **Episodic memory** contains a compact completed task record: objective, bounded tool
-  actions, outcome, errors, and relevant evidence. It is not a copy of the permission
-  audit trail, raw transcripts, screenshots, or full tool output.
+- **Episodic memory** contains a compact evidence-bound task Episode: a redacted goal
+  category/fingerprint, bounded actions, authoritative terminal outcome, evidence
+  references, semantic/raw/pattern IDs, and continuity status. It is not a copy of
+  the permission audit trail, raw transcripts, screenshots, secrets, or full tool output.
+
+`EpisodeComposer` creates at most one deterministic Episode at an authoritative
+terminal task boundary. It reads the canonical task/plan/result services and the
+bounded semantic projection, then persists through the existing local
+`SQLiteMemoryStore`; it does not infer completion from semantic claims or write
+Attention. Missing semantic continuity is retained as `partial` or
+`broken_continuity`, never repaired with fabricated history. Episodes are scoped by
+actor and optional workspace and survive process restart.
 
 Retention is explicit: 30 days, one year, or until the user deletes it. Expiry is
 bound to the selected policy and enforced on retrieval and cleanup.

@@ -67,6 +67,13 @@ events. Trace remains the detailed observability projection, CurrentContext
 remains current state, EpisodicMemory remains the durable selected-history
 owner, and Attention remains the interruption-policy owner.
 
+`EpisodeComposer` is a separate runtime-owned consumer. At a terminal task state
+it reconciles the event with the authoritative `TaskController`, composes one
+typed Episode, and persists it through the existing local memory store. Semantic
+events and patterns contribute bounded provenance IDs only; they do not establish
+outcome or authority. The composer preserves `UNKNOWN_OUTCOME` and marks missing
+or broken semantic continuity rather than fabricating history.
+
 ## Versioning and compatibility
 
 Schema version `1` is additive-only for the current release. Consumers must ignore unknown event types and tolerate unknown payload fields when decoding persisted/forwarded events. Producers must not reuse an existing event type with changed field meaning. A breaking payload or metadata change requires a new schema version (and, where needed, a new event type) plus a compatibility window. Event IDs and sequence numbers are process-local observability identifiers, not durable audit IDs.

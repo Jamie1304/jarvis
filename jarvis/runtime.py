@@ -157,6 +157,7 @@ from jarvis.knowledge import KnowledgeLibrary, KnowledgeLibraryMigrationError
 from jarvis.knowledge.store import KnowledgeStore
 from jarvis.mcp.manager import MCPExtensionManager
 from jarvis.memory.control import MemoryControlService
+from jarvis.memory.episodes import EpisodeComposer
 from jarvis.memory.services import (
     ConversationContextService,
     EpisodicMemoryService,
@@ -659,6 +660,7 @@ class RuntimeContainer:
     trace_store: TraceStore
     trace_service: TraceService
     semantic_events: SemanticEventService
+    episode_composer: EpisodeComposer
     golden_workflow_store: GoldenWorkflowStore
     golden_workflows: GoldenWorkflowService
     workflow_procedure_store: SQLiteWorkflowProcedureStore
@@ -729,6 +731,7 @@ class RuntimeContainer:
     presence_start_task: asyncio.Task[None] | None = None
     trace_start_task: asyncio.Task[None] | None = None
     semantic_start_task: asyncio.Task[None] | None = None
+    episode_start_task: asyncio.Task[None] | None = None
     native_cleanup_recovery_state: str = "CLEAN"
     native_cleanup_recovery_reports: tuple[Mapping[str, object], ...] = ()
     _close_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False, repr=False)
@@ -889,7 +892,11 @@ class RuntimeContainer:
             if self.semantic_start_task is not None:
                 self.semantic_start_task.cancel()
                 await asyncio.gather(self.semantic_start_task, return_exceptions=True)
+            if self.episode_start_task is not None:
+                self.episode_start_task.cancel()
+                await asyncio.gather(self.episode_start_task, return_exceptions=True)
             resources = (
+                self.episode_composer,
                 self.semantic_events,
                 self.trace_service,
                 self.automation_service,
@@ -1455,6 +1462,7 @@ class ApplicationRuntime:
                 user_model_store,
                 consistency=memory_consistency,
             )
+            episodic_memory = EpisodicMemoryService(memory_store)
             control_center = ControlCenterService()
             task_controller = PlanningTaskController(engine, broker)
             capability_gap_detector = CapabilityGapDetector(frozenset({"calculator", "local_time"}))
@@ -1929,6 +1937,16 @@ class ApplicationRuntime:
             component_doctor = ComponentDoctor(capability_health)
             presence_projection = PresenceProjection(events)
             semantic_events = SemanticEventService(events)
+            episode_composer = EpisodeComposer(
+                events,
+                task_controller,
+                episodic_memory,
+                semantic_events,
+                actor_context_id=actor_context.context_id,
+                actor_principal_id=actor_context.principal_id,
+                provider_id=settings.ai_provider,
+                model_id=settings.ai_model,
+            )
             try:
                 presence_start_task = asyncio.get_running_loop().create_task(
                     presence_projection.start()
@@ -1937,12 +1955,16 @@ class ApplicationRuntime:
                 semantic_start_task = asyncio.get_running_loop().create_task(
                     semantic_events.start()
                 )
+                episode_start_task = asyncio.get_running_loop().create_task(
+                    episode_composer.start()
+                )
             except RuntimeError:
                 # Synchronous callers can start the projection through the
                 # application service once an event loop is available.
                 presence_start_task = None
                 trace_start_task = None
                 semantic_start_task = None
+                episode_start_task = None
 
             conversation = ConversationService(
                 provider,
@@ -2400,7 +2422,7 @@ class ApplicationRuntime:
                 session_store=session_store,
                 conversation_memory=conversation_memory,
                 long_term_memory=LongTermMemoryService(memory_store),
-                episodic_memory=EpisodicMemoryService(memory_store),
+                episodic_memory=episodic_memory,
                 memory_consistency=memory_consistency,
                 memory_control=memory_control,
                 memory_retrieval=MemoryRetrievalService(
@@ -2413,6 +2435,7 @@ class ApplicationRuntime:
                 trace_store=trace_store,
                 trace_service=trace_service,
                 semantic_events=semantic_events,
+                episode_composer=episode_composer,
                 golden_workflow_store=golden_workflow_store,
                 golden_workflows=golden_workflows,
                 workflow_procedure_store=workflow_procedure_store,
@@ -2477,6 +2500,7 @@ class ApplicationRuntime:
                 credential_broker=credential_broker,
                 automation_start_task=automation_start_task,
                 semantic_start_task=semantic_start_task,
+                episode_start_task=episode_start_task,
                 presence_start_task=presence_start_task,
                 trace_start_task=trace_start_task,
                 native_cleanup_recovery_state=native_cleanup_recovery_state,

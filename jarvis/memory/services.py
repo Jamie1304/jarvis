@@ -10,7 +10,11 @@ from collections.abc import Callable, Sequence
 from datetime import UTC, datetime, timedelta
 from itertools import combinations
 from pathlib import Path
+from typing import TYPE_CHECKING
 from uuid import UUID, uuid4
+
+if TYPE_CHECKING:
+    from jarvis.memory.episodes import Episode
 
 from jarvis.knowledge.store import KnowledgeStore
 from jarvis.memory.models import (
@@ -476,6 +480,39 @@ class EpisodicMemoryService:
     def __init__(self, store: SQLiteMemoryStore, *, clock: Callable[[], datetime] = _now) -> None:
         self._store = store
         self._clock = clock
+
+    def persist_episode(self, episode: Episode) -> Episode:
+        """Persist a typed Episode through the existing episodic memory owner."""
+
+        from jarvis.memory.episodes import EpisodeStore
+
+        return EpisodeStore(self._store, clock=self._clock).save(episode)
+
+    def get_episode(self, episode_id: UUID) -> Episode | None:
+        from jarvis.memory.episodes import EpisodeStore
+
+        return EpisodeStore(self._store, clock=self._clock).get(episode_id)
+
+    def get_episode_for_task(self, task_id: UUID) -> Episode | None:
+        from jarvis.memory.episodes import EpisodeStore
+
+        matches = EpisodeStore(self._store, clock=self._clock).list(task_id=task_id)
+        return matches[0] if matches else None
+
+    def list_episodes(
+        self,
+        *,
+        task_id: UUID | None = None,
+        actor_context_id: UUID | None = None,
+        workspace_id: str | None = None,
+    ) -> tuple[Episode, ...]:
+        from jarvis.memory.episodes import EpisodeStore
+
+        return EpisodeStore(self._store, clock=self._clock).list(
+            task_id=task_id,
+            actor_context_id=actor_context_id,
+            workspace_id=workspace_id,
+        )
 
     def record_completed_action(
         self,
