@@ -175,6 +175,11 @@ class AttentionItem:
     summary: str = ""
     interruption_class: InterruptionClass | None = None
     actor_context_id: UUID | None = None
+    related_task_id: UUID | None = None
+    related_correlation_id: UUID | None = None
+    source_semantic_event_id: UUID | None = None
+    source_pattern_id: UUID | None = None
+    interruption_reason_code: str | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.item_id, UUID):
@@ -200,6 +205,12 @@ class AttentionItem:
         _uuid(self.related_permission_id, "Attention permission reference")
         _uuid(self.related_opportunity_id, "Attention opportunity reference")
         _uuid(self.actor_context_id, "Attention actor context reference")
+        _uuid(self.related_task_id, "Attention task reference")
+        _uuid(self.related_correlation_id, "Attention correlation reference")
+        _uuid(self.source_semantic_event_id, "Attention semantic source reference")
+        _uuid(self.source_pattern_id, "Attention pattern source reference")
+        if self.interruption_reason_code is not None:
+            _text(self.interruption_reason_code, "Attention interruption reason", 128)
         _text(self.dedupe_key, "Attention dedupe key", 512)
         if not isinstance(self.delivery_state, AttentionDeliveryState):
             raise AttentionError("Attention delivery state is malformed")
@@ -252,6 +263,29 @@ class AttentionQueueEntry:
             if value is not None:
                 _timestamp(value, field)
         _uuid(self.digest_id, "Attention digest reference")
+
+
+@dataclass(frozen=True, slots=True)
+class AttentionReevaluation:
+    """One durable policy transition caused by an explicit context update."""
+
+    item_id: UUID
+    prior_decision: AttentionDecision
+    new_decision: AttentionDecision
+    prior_delivery_state: AttentionDeliveryState
+    new_delivery_state: AttentionDeliveryState
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.item_id, UUID):
+            raise AttentionError("Attention reevaluation item identity is malformed")
+        if not isinstance(self.prior_decision, AttentionDecision) or not isinstance(
+            self.new_decision, AttentionDecision
+        ):
+            raise AttentionError("Attention reevaluation decision is malformed")
+        if not isinstance(self.prior_delivery_state, AttentionDeliveryState) or not isinstance(
+            self.new_delivery_state, AttentionDeliveryState
+        ):
+            raise AttentionError("Attention reevaluation delivery state is malformed")
 
 
 @dataclass(frozen=True, slots=True)
@@ -769,10 +803,13 @@ class AttentionPolicy:
             raise AttentionError("Unknown attention digest")
         return digest
 
-    def reconcile(self, *, context: InterruptionContext | None = None) -> None:
+    def reconcile(
+        self, *, context: InterruptionContext | None = None
+    ) -> tuple[AttentionReevaluation, ...]:
         if context is not None:
             self._context = context
         self._release_queued = context is not None
+        transitions: list[AttentionReevaluation] = []
         try:
             now = self._now()
             for item in self._store.list_items():
@@ -787,9 +824,28 @@ class AttentionPolicy:
                     seconds=self._state.expiring_authority_window_seconds
                 )
                 if context is not None or due or (expiring and near_expiry):
-                    self._evaluate_and_save(item, now)
+                    prior_delivery_state = item.delivery_state
+                    prior_decision = entry.decision
+                    updated_entry = self._evaluate_and_save(item, now)
+                    updated_item = self._store.get_item(item.item_id)
+                    if updated_item is None:
+                        raise AttentionError("Attention reevaluation did not persist item")
+                    if (
+                        prior_decision != updated_entry.decision
+                        or prior_delivery_state != updated_item.delivery_state
+                    ):
+                        transitions.append(
+                            AttentionReevaluation(
+                                item.item_id,
+                                prior_decision,
+                                updated_entry.decision,
+                                prior_delivery_state,
+                                updated_item.delivery_state,
+                            )
+                        )
         finally:
             self._release_queued = False
+        return tuple(transitions)
 
     def resolve_dedupe(
         self, workspace: str, dedupe_key: str, actor_context_id: UUID | None = None
@@ -1016,6 +1072,15 @@ def _item_to_json(item: AttentionItem) -> dict[str, object]:
             item.interruption_class.value if item.interruption_class is not None else None
         ),
         "actor_context_id": str(item.actor_context_id) if item.actor_context_id else None,
+        "related_task_id": str(item.related_task_id) if item.related_task_id else None,
+        "related_correlation_id": (
+            str(item.related_correlation_id) if item.related_correlation_id else None
+        ),
+        "source_semantic_event_id": (
+            str(item.source_semantic_event_id) if item.source_semantic_event_id else None
+        ),
+        "source_pattern_id": str(item.source_pattern_id) if item.source_pattern_id else None,
+        "interruption_reason_code": item.interruption_reason_code,
     }
 
 
@@ -1044,6 +1109,13 @@ def _item_from_json(payload: Mapping[str, object]) -> AttentionItem:
             else None
         ),
         _optional_uuid(payload.get("actor_context_id")),
+        _optional_uuid(payload.get("related_task_id")),
+        _optional_uuid(payload.get("related_correlation_id")),
+        _optional_uuid(payload.get("source_semantic_event_id")),
+        _optional_uuid(payload.get("source_pattern_id")),
+        str(payload["interruption_reason_code"])
+        if payload.get("interruption_reason_code") is not None
+        else None,
     )
 
 

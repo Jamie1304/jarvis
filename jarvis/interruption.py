@@ -19,6 +19,7 @@ from jarvis.attention import (
     AttentionItem,
     AttentionPolicy,
     AttentionPriority,
+    AttentionReevaluation,
     InterruptionClass,
     InterruptionContext,
 )
@@ -235,10 +236,15 @@ class InterruptionIntelligence:
             self._seen.clear()
             self._seen_set.clear()
 
-    def reconcile(self, context: InterruptionContext) -> None:
+    def reconcile(self, context: InterruptionContext) -> tuple[AttentionReevaluation, ...]:
         """Reevaluate durable queued items at an explicit context transition."""
 
-        self._attention.reconcile(context=context)
+        transitions = self._attention.reconcile(context=context)
+        for transition in transitions:
+            item = self._attention.item_for(transition.item_id)
+            if item is not None:
+                self._trace_reevaluation(item, transition, context)
+        return transitions
 
     def process_semantic(
         self,
@@ -304,6 +310,11 @@ class InterruptionIntelligence:
                 summary=self._summary(interruption.reason_code),
                 interruption_class=interruption.interruption_class,
                 actor_context_id=self._actor_context_id,
+                related_task_id=semantic.task_id,
+                related_correlation_id=semantic.correlation_id,
+                source_semantic_event_id=semantic.semantic_event_id,
+                source_pattern_id=pattern.pattern_id if pattern is not None else None,
+                interruption_reason_code=interruption.reason_code.value,
             )
             entry = self._attention.enqueue(item, context=current)
             item_id = item.item_id
@@ -470,6 +481,71 @@ class InterruptionIntelligence:
             event_id=event_id,
             task_id=semantic.task_id,
             correlation_id=semantic.correlation_id,
+            result=result,
+        )
+        return event.event_id
+
+    def _trace_reevaluation(
+        self,
+        item: AttentionItem,
+        transition: AttentionReevaluation,
+        context: InterruptionContext,
+    ) -> UUID:
+        event_id = uuid5(
+            _TRACE_NAMESPACE,
+            "reevaluation:"
+            + ":".join(
+                (
+                    str(item.item_id),
+                    str(context.revision),
+                    transition.prior_decision.value,
+                    transition.new_decision.value,
+                    transition.prior_delivery_state.value,
+                    transition.new_delivery_state.value,
+                )
+            ),
+        )
+        result: dict[str, object] = {
+            "attention_item_id": str(item.item_id),
+            "interruption_class": (
+                item.interruption_class.value if item.interruption_class is not None else None
+            ),
+            "reason_code": item.interruption_reason_code,
+            "reevaluation_reason": InterruptionReason.CONTEXT_REEVALUATION.value,
+            "prior_attention_decision": transition.prior_decision.value,
+            "new_attention_decision": transition.new_decision.value,
+            "prior_delivery_state": transition.prior_delivery_state.value,
+            "new_delivery_state": transition.new_delivery_state.value,
+            "context_revision": context.revision,
+            "context": {
+                "dnd": context.dnd,
+                "fullscreen": context.fullscreen,
+                "presentation": context.presentation,
+                "active_voice": context.active_voice,
+                "user_typing": context.user_typing,
+                "active_conversation": context.active_conversation,
+                "active_task": context.active_task,
+                "safe_mode": context.safe_mode,
+            },
+            "delivery_acknowledged": False,
+            "authority_changed": False,
+        }
+        if item.source_semantic_event_id is not None:
+            result["source_semantic_event_id"] = str(item.source_semantic_event_id)
+        if item.source_pattern_id is not None:
+            result["source_pattern_id"] = str(item.source_pattern_id)
+        trace = self._trace.get(
+            task_id=item.related_task_id,
+            correlation_id=item.related_correlation_id,
+        )
+        if any(existing.event_id == event_id for existing in trace.events):
+            return event_id
+        event = self._trace.record(
+            TraceEventType.ATTENTION,
+            "Attention context reevaluation recorded",
+            event_id=event_id,
+            task_id=item.related_task_id,
+            correlation_id=item.related_correlation_id,
             result=result,
         )
         return event.event_id

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Mapping
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -162,6 +163,188 @@ def test_context_blocking_and_release_are_explicit_and_durable(tmp_path: Path) -
         assert released_entry.delivered_at is None
     finally:
         store.close()
+
+
+def test_context_reevaluation_traces_queue_release_and_is_idempotent(tmp_path: Path) -> None:
+    attention_path = tmp_path / "attention.sqlite3"
+    trace_path = tmp_path / "trace.sqlite3"
+    task_id = uuid4()
+    correlation_id = uuid4()
+    item_id = uuid4()
+    item = AttentionItem(
+        item_id,
+        "interruption.task_waiting_for_user",
+        "workspace-a",
+        AttentionPriority.LOW,
+        NOW,
+        dedupe_key="queue-reevaluation",
+        summary="Synthetic bounded attention fact",
+        interruption_class=InterruptionClass.QUEUE,
+        actor_context_id=uuid4(),
+        related_task_id=task_id,
+        related_correlation_id=correlation_id,
+        source_semantic_event_id=uuid4(),
+        interruption_reason_code=InterruptionReason.TASK_WAITING_FOR_USER.value,
+    )
+    attention = SQLiteAttentionStore(attention_path)
+    trace_store = TraceStore(trace_path)
+    semantic = SemanticEventService(InMemoryEventBus())
+    policy = AttentionPolicy(attention, clock=lambda: NOW)
+    trace = TraceService(trace_store, InMemoryEventBus())
+    intelligence = InterruptionIntelligence(semantic, policy, trace, lambda: _context())
+    try:
+        initial = policy.enqueue(item, context=_context())
+        assert initial.decision is AttentionDecision.DEFER
+        trace.record(
+            TraceEventType.ATTENTION,
+            "Attention decision recorded",
+            task_id=task_id,
+            correlation_id=correlation_id,
+            result={
+                "attention_item_id": str(item_id),
+                "attention_decision": initial.decision.value,
+            },
+        )
+        transitions = intelligence.reconcile(_context(revision=2))
+        assert len(transitions) == 1
+        assert transitions[0].prior_decision is AttentionDecision.DEFER
+        assert transitions[0].new_decision is AttentionDecision.DELIVER_NOW
+        stored_entry = policy.entry_for(item_id)
+        stored_item = policy.item_for(item_id)
+        assert stored_entry is not None and stored_entry.delivered_at is None
+        assert (
+            stored_item is not None and stored_item.delivery_state is AttentionDeliveryState.QUEUED
+        )
+        events = trace.get(task_id=task_id).events
+        reevaluations = tuple(
+            event
+            for event in events
+            if event.event_type is TraceEventType.ATTENTION
+            and isinstance(event.result, Mapping)
+            and event.result.get("reevaluation_reason") == "context_reevaluation"
+        )
+        assert len(reevaluations) == 1
+        result = reevaluations[0].result
+        assert isinstance(result, Mapping)
+        assert result["prior_attention_decision"] == "defer"
+        assert result["new_attention_decision"] == "deliver_now"
+        assert result["prior_delivery_state"] == "deferred"
+        assert result["new_delivery_state"] == "queued"
+        assert result["context_revision"] == 2
+        assert result["authority_changed"] is False
+        assert intelligence.reconcile(_context(revision=2)) == ()
+        assert (
+            len(
+                tuple(
+                    event
+                    for event in trace.get(task_id=task_id).events
+                    if event.event_type is TraceEventType.ATTENTION
+                    and isinstance(event.result, Mapping)
+                    and event.result.get("reevaluation_reason") == "context_reevaluation"
+                )
+            )
+            == 1
+        )
+    finally:
+        intelligence.close()
+        attention.close()
+        trace_store.close()
+
+
+def test_context_reevaluation_traces_normal_dnd_release_after_restart(tmp_path: Path) -> None:
+    attention_path = tmp_path / "attention.sqlite3"
+    trace_path = tmp_path / "trace.sqlite3"
+    task_id = uuid4()
+    correlation_id = uuid4()
+    actor_context_id = uuid4()
+    item = AttentionItem(
+        uuid4(),
+        "interruption.runtime_degraded",
+        "workspace-a",
+        AttentionPriority.NORMAL,
+        NOW,
+        dedupe_key="normal-reevaluation",
+        summary="Synthetic bounded attention fact",
+        interruption_class=InterruptionClass.NORMAL,
+        actor_context_id=actor_context_id,
+        related_task_id=task_id,
+        related_correlation_id=correlation_id,
+        source_semantic_event_id=uuid4(),
+        source_pattern_id=uuid4(),
+        interruption_reason_code=InterruptionReason.RUNTIME_DEGRADED.value,
+    )
+    attention = SQLiteAttentionStore(attention_path)
+    trace_store = TraceStore(trace_path)
+    semantic = SemanticEventService(InMemoryEventBus())
+    policy = AttentionPolicy(attention, clock=lambda: NOW)
+    trace = TraceService(trace_store, InMemoryEventBus())
+    intelligence = InterruptionIntelligence(
+        semantic,
+        policy,
+        trace,
+        context_provider=lambda: _context(),
+        actor_context_id=actor_context_id,
+    )
+    try:
+        initial = policy.enqueue(item, context=_context(dnd=True))
+        assert initial.decision is AttentionDecision.DEFER
+        trace.record(
+            TraceEventType.ATTENTION,
+            "Attention decision recorded",
+            task_id=task_id,
+            correlation_id=correlation_id,
+            result={"attention_item_id": str(item.item_id), "attention_decision": "defer"},
+        )
+    finally:
+        intelligence.close()
+        attention.close()
+        trace_store.close()
+
+    restarted_attention = SQLiteAttentionStore(attention_path)
+    restarted_trace_store = TraceStore(trace_path)
+    restarted_policy = AttentionPolicy(restarted_attention, clock=lambda: NOW)
+    restarted_trace = TraceService(restarted_trace_store, InMemoryEventBus())
+    restarted = InterruptionIntelligence(
+        SemanticEventService(InMemoryEventBus()),
+        restarted_policy,
+        restarted_trace,
+        context_provider=lambda: _context(),
+        actor_context_id=actor_context_id,
+    )
+    try:
+        transitions = restarted.reconcile(_context(revision=7, dnd=False))
+        assert len(transitions) == 1
+        assert transitions[0].new_decision is AttentionDecision.DELIVER_NOW
+        entry = restarted_policy.entry_for(item.item_id)
+        assert entry is not None and entry.delivered_at is None
+        assert len(restarted_attention.list_items()) == 1
+        events = restarted_trace.get(task_id=task_id).events
+        assert (
+            len(
+                tuple(
+                    event
+                    for event in events
+                    if event.event_type is TraceEventType.ATTENTION
+                    and isinstance(event.result, Mapping)
+                    and event.result.get("reevaluation_reason") == "context_reevaluation"
+                )
+            )
+            == 1
+        )
+        reevaluation = next(
+            event
+            for event in events
+            if event.event_type is TraceEventType.ATTENTION
+            and isinstance(event.result, Mapping)
+            and event.result.get("reevaluation_reason") == "context_reevaluation"
+        )
+        assert isinstance(reevaluation.result, Mapping)
+        assert reevaluation.result["source_pattern_id"] == str(item.source_pattern_id)
+        assert reevaluation.result["authority_changed"] is False
+    finally:
+        restarted.close()
+        restarted_attention.close()
+        restarted_trace_store.close()
 
 
 def test_policy_decision_is_not_delivery_acknowledgement() -> None:
