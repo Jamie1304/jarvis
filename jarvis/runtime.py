@@ -1163,7 +1163,11 @@ class ApplicationRuntime:
         opportunity_store: SQLiteOpportunityStore | None = None
         attention_store: SQLiteAttentionStore | None = None
         presence_projection: PresenceProjection | None = None
+        automation_start_task: asyncio.Task[None] | None = None
         presence_start_task: asyncio.Task[None] | None = None
+        trace_start_task: asyncio.Task[None] | None = None
+        semantic_start_task: asyncio.Task[None] | None = None
+        episode_start_task: asyncio.Task[None] | None = None
         application_hash: str | None = None
         native_cleanup_recovery_reports: tuple[Mapping[str, object], ...] = ()
         native_cleanup_recovery_state = "CLEAN"
@@ -1947,24 +1951,6 @@ class ApplicationRuntime:
                 provider_id=settings.ai_provider,
                 model_id=settings.ai_model,
             )
-            try:
-                presence_start_task = asyncio.get_running_loop().create_task(
-                    presence_projection.start()
-                )
-                trace_start_task = asyncio.get_running_loop().create_task(trace_service.start())
-                semantic_start_task = asyncio.get_running_loop().create_task(
-                    semantic_events.start()
-                )
-                episode_start_task = asyncio.get_running_loop().create_task(
-                    episode_composer.start()
-                )
-            except RuntimeError:
-                # Synchronous callers can start the projection through the
-                # application service once an event loop is available.
-                presence_start_task = None
-                trace_start_task = None
-                semantic_start_task = None
-                episode_start_task = None
 
             conversation = ConversationService(
                 provider,
@@ -2381,12 +2367,6 @@ class ApplicationRuntime:
             )
             startup_warmup = StartupWarmupRegistry(resource_governor)
             startup_warmup.register(WarmupComponent("default-model", warmup_provider))
-            try:
-                automation_start_task = asyncio.get_running_loop().create_task(
-                    automation_service.start()
-                )
-            except RuntimeError:
-                automation_start_task = None
             assert backup is not None
             container = RuntimeContainer(
                 settings=settings,
@@ -2535,6 +2515,25 @@ class ApplicationRuntime:
                 generated_package_state={"activation": "disabled"},
             )
             recovery.commit_start(transaction_id, snapshot.snapshot_id)
+            # Start background services only after the container is fully
+            # constructed and startup is durably committed. Before this point,
+            # a failed composition has no owner able to cancel these tasks
+            # before its stores are closed.
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                loop = None
+            if loop is not None:
+                presence_start_task = loop.create_task(presence_projection.start())
+                trace_start_task = loop.create_task(trace_service.start())
+                semantic_start_task = loop.create_task(semantic_events.start())
+                episode_start_task = loop.create_task(episode_composer.start())
+                automation_start_task = loop.create_task(automation_service.start())
+                object.__setattr__(container, "presence_start_task", presence_start_task)
+                object.__setattr__(container, "trace_start_task", trace_start_task)
+                object.__setattr__(container, "semantic_start_task", semantic_start_task)
+                object.__setattr__(container, "episode_start_task", episode_start_task)
+                object.__setattr__(container, "automation_start_task", automation_start_task)
         except (
             AuditStoreError,
             AutomationStoreError,

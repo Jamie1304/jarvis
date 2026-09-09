@@ -206,6 +206,22 @@ async def test_runtime_shutdown_is_idempotent(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_failed_runtime_composition_schedules_no_owned_start_tasks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def fail_commit(_store: RecoveryStore, _transaction_id: str, _snapshot_id: str) -> None:
+        raise RuntimeError("synthetic startup failure")
+
+    monkeypatch.setattr(RecoveryStore, "commit_start", fail_commit)
+    runtime = ApplicationRuntime.create(
+        Settings(app_data_dir=tmp_path / "jarvis-data", ai_provider="ollama")
+    )
+    await asyncio.sleep(0.05)
+    assert runtime.status is RuntimeStatus.ERROR
+    assert runtime.container is None
+
+
+@pytest.mark.asyncio
 async def test_runtime_owner_closes_event_consumers_after_assertion_failure(
     tmp_path: Path,
 ) -> None:
