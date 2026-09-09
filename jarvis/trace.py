@@ -84,6 +84,7 @@ class TraceEventType(StrEnum):
     REPLAN = "replan"
     COMPLETION = "completion"
     ERROR = "error"
+    ATTENTION = "attention"
     REPLAY = "replay"
 
 

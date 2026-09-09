@@ -40,6 +40,7 @@ from jarvis.events.semantic import (
     SemanticEvent,
     SemanticEventService,
     SemanticKind,
+    SemanticObserver,
     SemanticPattern,
     SemanticPatternEngine,
 )
@@ -86,4 +87,5 @@ __all__ = [
     "SemanticKind",
     "SemanticPattern",
     "SemanticPatternEngine",
+    "SemanticObserver",
 ]

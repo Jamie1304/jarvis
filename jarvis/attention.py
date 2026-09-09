@@ -33,6 +33,74 @@ class AttentionPriority(StrEnum):
     SECURITY_CRITICAL = "security_critical"
 
 
+class InterruptionClass(StrEnum):
+    """Canonical user-facing importance, separate from delivery transport."""
+
+    SILENT = "silent"
+    QUEUE = "queue"
+    NORMAL = "normal"
+    IMPORTANT = "important"
+    URGENT = "urgent"
+
+
+class InterruptionContextState(StrEnum):
+    ALLOWED = "allowed"
+    BLOCKED = "blocked"
+    UNKNOWN = "unknown"
+
+
+@dataclass(frozen=True, slots=True)
+class InterruptionContext:
+    """Trusted activity projection; unavailable physical signals remain unknown."""
+
+    revision: int = 0
+    dnd: bool | None = None
+    fullscreen: bool | None = None
+    presentation: bool | None = None
+    active_voice: bool | None = None
+    user_typing: bool | None = None
+    active_conversation: bool | None = None
+    active_task: bool | None = None
+    safe_mode: bool = False
+
+    def __post_init__(self) -> None:
+        if type(self.revision) is not int or self.revision < 0:
+            raise AttentionError("Interruption context revision is malformed")
+        for value, field in (
+            (self.dnd, "DND"),
+            (self.fullscreen, "fullscreen"),
+            (self.presentation, "presentation"),
+            (self.active_voice, "active voice"),
+            (self.user_typing, "user typing"),
+            (self.active_conversation, "active conversation"),
+            (self.active_task, "active task"),
+        ):
+            if value is not None and type(value) is not bool:
+                raise AttentionError(f"{field} context is malformed")
+        if type(self.safe_mode) is not bool:
+            raise AttentionError("Safe-mode context is malformed")
+
+    @property
+    def blocking_state(self) -> InterruptionContextState:
+        signals = (
+            self.dnd,
+            self.fullscreen,
+            self.presentation,
+            self.active_voice,
+            self.user_typing,
+            self.active_conversation,
+        )
+        if any(value is True for value in signals):
+            return InterruptionContextState.BLOCKED
+        if any(value is None for value in signals):
+            return InterruptionContextState.UNKNOWN
+        return InterruptionContextState.ALLOWED
+
+    @classmethod
+    def unknown(cls, *, revision: int = 0, safe_mode: bool = False) -> InterruptionContext:
+        return cls(revision=revision, safe_mode=safe_mode)
+
+
 class AttentionDecision(StrEnum):
     DELIVER_NOW = "deliver_now"
     DEFER = "defer"
@@ -105,6 +173,8 @@ class AttentionItem:
     resolved: bool = False
     resolved_at: datetime | None = None
     summary: str = ""
+    interruption_class: InterruptionClass | None = None
+    actor_context_id: UUID | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.item_id, UUID):
@@ -129,9 +199,14 @@ class AttentionItem:
         _uuid(self.related_goal_id, "Attention goal reference")
         _uuid(self.related_permission_id, "Attention permission reference")
         _uuid(self.related_opportunity_id, "Attention opportunity reference")
+        _uuid(self.actor_context_id, "Attention actor context reference")
         _text(self.dedupe_key, "Attention dedupe key", 512)
         if not isinstance(self.delivery_state, AttentionDeliveryState):
             raise AttentionError("Attention delivery state is malformed")
+        if self.interruption_class is not None and not isinstance(
+            self.interruption_class, InterruptionClass
+        ):
+            raise AttentionError("Attention interruption class is malformed")
         _text(self.summary, "Attention summary")
         if self.resolved and self.resolved_at is None:
             raise AttentionError("Resolved attention requires a resolution time")
@@ -141,6 +216,7 @@ class AttentionItem:
             AttentionDeliveryState.RESOLVED,
             AttentionDeliveryState.SUPPRESSED_DUPLICATE,
             AttentionDeliveryState.EXPIRED,
+            AttentionDeliveryState.SILENT,
         }:
             raise AttentionError("Resolved attention has an active delivery state")
         _secret_free(
@@ -245,7 +321,9 @@ class AttentionStore(Protocol):
 
     def list_items(self) -> tuple[AttentionItem, ...]: ...
 
-    def find_unresolved_dedupe(self, workspace: str, dedupe_key: str) -> AttentionItem | None: ...
+    def find_unresolved_dedupe(
+        self, workspace: str, dedupe_key: str, actor_context_id: UUID | None = None
+    ) -> AttentionItem | None: ...
 
     def get_entry(self, item_id: UUID) -> AttentionQueueEntry | None: ...
 
@@ -341,16 +419,22 @@ class SQLiteAttentionStore:
             ).fetchall()
         return tuple(_item_from_json(json.loads(str(row[0]))) for row in rows)
 
-    def find_unresolved_dedupe(self, workspace: str, dedupe_key: str) -> AttentionItem | None:
+    def find_unresolved_dedupe(
+        self, workspace: str, dedupe_key: str, actor_context_id: UUID | None = None
+    ) -> AttentionItem | None:
         _text(workspace, "Attention workspace", 256)
         _text(dedupe_key, "Attention dedupe key", 512)
         with self._lock:
-            row = self._connection.execute(
+            rows = self._connection.execute(
                 "SELECT payload_json FROM attention_items WHERE workspace=? AND dedupe_key=? "
-                "AND resolved=0 ORDER BY json_extract(payload_json, '$.created_at') DESC LIMIT 1",
+                "AND resolved=0 ORDER BY json_extract(payload_json, '$.created_at') DESC",
                 (workspace, dedupe_key),
-            ).fetchone()
-        return _item_from_json(json.loads(str(row[0]))) if row else None
+            ).fetchall()
+        for row in rows:
+            item = _item_from_json(json.loads(str(row[0])))
+            if item.actor_context_id == actor_context_id:
+                return item
+        return None
 
     def get_entry(self, item_id: UUID) -> AttentionQueueEntry | None:
         if not isinstance(item_id, UUID):
@@ -456,11 +540,16 @@ class InMemoryAttentionStore:
     def list_items(self) -> tuple[AttentionItem, ...]:
         return tuple(self._items.values())
 
-    def find_unresolved_dedupe(self, workspace: str, dedupe_key: str) -> AttentionItem | None:
+    def find_unresolved_dedupe(
+        self, workspace: str, dedupe_key: str, actor_context_id: UUID | None = None
+    ) -> AttentionItem | None:
         candidates = (
             item
             for item in self._items.values()
-            if item.workspace == workspace and item.dedupe_key == dedupe_key and not item.resolved
+            if item.workspace == workspace
+            and item.dedupe_key == dedupe_key
+            and item.actor_context_id == actor_context_id
+            and not item.resolved
         )
         return next(iter(candidates), None)
 
@@ -504,6 +593,8 @@ class AttentionPolicy:
         self._store = store
         self._clock = clock or (lambda: datetime.now(UTC))
         self._state = store.load_state()
+        self._context: InterruptionContext | None = None
+        self._release_queued = False
 
     @property
     def state(self) -> AttentionPolicyState:
@@ -556,12 +647,18 @@ class AttentionPolicy:
         self._state = updated
         return updated
 
-    def enqueue(self, item: AttentionItem) -> AttentionQueueEntry:
+    def enqueue(
+        self, item: AttentionItem, *, context: InterruptionContext | None = None
+    ) -> AttentionQueueEntry:
         _validate_item(item)
         if item.resolved:
             raise AttentionError("Resolved attention cannot be enqueued")
         now = self._now()
-        duplicate = self._store.find_unresolved_dedupe(item.workspace, item.dedupe_key)
+        if context is not None:
+            self._context = context
+        duplicate = self._store.find_unresolved_dedupe(
+            item.workspace, item.dedupe_key, item.actor_context_id
+        )
         if (
             duplicate is not None
             and duplicate.item_id != item.item_id
@@ -580,6 +677,28 @@ class AttentionPolicy:
             self._store.save_evaluation(suppressed, entry)
             return entry
         return self._evaluate_and_save(item, now)
+
+    def mark_delivered(self, item_id: UUID, delivered_at: datetime | None = None) -> AttentionItem:
+        """Record an acknowledgement from a real presentation transport."""
+
+        item = self._require(item_id)
+        entry = self._entry(item_id)
+        if entry is None:
+            raise AttentionError("Attention queue entry is missing")
+        acknowledged = (
+            self._now()
+            if delivered_at is None
+            else _timestamp(delivered_at, "Attention delivery acknowledgement time")
+        )
+        delivered = replace(item, delivery_state=AttentionDeliveryState.DELIVERED)
+        self._store.save_evaluation(delivered, replace(entry, delivered_at=acknowledged))
+        return delivered
+
+    def item_for(self, item_id: UUID) -> AttentionItem | None:
+        return self._store.get_item(item_id)
+
+    def entry_for(self, item_id: UUID) -> AttentionQueueEntry | None:
+        return self._store.get_entry(item_id)
 
     def resolve(self, item_id: UUID) -> AttentionItem:
         item = self._require(item_id)
@@ -650,21 +769,43 @@ class AttentionPolicy:
             raise AttentionError("Unknown attention digest")
         return digest
 
-    def reconcile(self) -> None:
-        now = self._now()
+    def reconcile(self, *, context: InterruptionContext | None = None) -> None:
+        if context is not None:
+            self._context = context
+        self._release_queued = context is not None
+        try:
+            now = self._now()
+            for item in self._store.list_items():
+                if item.resolved:
+                    continue
+                entry = self._entry(item.item_id)
+                if entry is None:
+                    raise AttentionError("Unresolved attention has no queue entry")
+                expiring = item.requires_user_action and item.expires_at is not None
+                due = entry.next_evaluation_at is None or entry.next_evaluation_at <= now
+                near_expiry = item.expires_at is not None and item.expires_at <= now + timedelta(
+                    seconds=self._state.expiring_authority_window_seconds
+                )
+                if context is not None or due or (expiring and near_expiry):
+                    self._evaluate_and_save(item, now)
+        finally:
+            self._release_queued = False
+
+    def resolve_dedupe(
+        self, workspace: str, dedupe_key: str, actor_context_id: UUID | None = None
+    ) -> tuple[AttentionItem, ...]:
+        """Resolve the existing logical issue without changing authority state."""
+
+        resolved: list[AttentionItem] = []
         for item in self._store.list_items():
-            if item.resolved:
-                continue
-            entry = self._entry(item.item_id)
-            if entry is None:
-                raise AttentionError("Unresolved attention has no queue entry")
-            expiring = item.requires_user_action and item.expires_at is not None
-            due = entry.next_evaluation_at is None or entry.next_evaluation_at <= now
-            near_expiry = item.expires_at is not None and item.expires_at <= now + timedelta(
-                seconds=self._state.expiring_authority_window_seconds
-            )
-            if due or (expiring and near_expiry):
-                self._evaluate_and_save(item, now)
+            if (
+                item.workspace == workspace
+                and item.dedupe_key == dedupe_key
+                and item.actor_context_id == actor_context_id
+                and not item.resolved
+            ):
+                resolved.append(self.resolve(item.item_id))
+        return tuple(resolved)
 
     def _evaluate_and_save(self, item: AttentionItem, now: datetime) -> AttentionQueueEntry:
         decision, state, defer_until, resolved = self._decide(item, now)
@@ -689,7 +830,7 @@ class AttentionPolicy:
             decision,
             prior_entry.queued_at if prior_entry is not None else now,
             defer_until,
-            now if decision is AttentionDecision.DELIVER_NOW else None,
+            None,
             digest_id,
         )
         self._store.save_evaluation(updated, entry, digest)
@@ -721,6 +862,38 @@ class AttentionPolicy:
                 item.cooldown_until,
                 False,
             )
+        interruption_class = item.interruption_class
+        if interruption_class is InterruptionClass.SILENT:
+            return AttentionDecision.SILENT_ACTIVITY, AttentionDeliveryState.SILENT, None, True
+        if interruption_class is InterruptionClass.QUEUE:
+            if (
+                self._release_queued
+                and self._context is not None
+                and self._context.blocking_state is InterruptionContextState.ALLOWED
+            ):
+                return AttentionDecision.DELIVER_NOW, AttentionDeliveryState.QUEUED, None, False
+            return (
+                AttentionDecision.DEFER,
+                AttentionDeliveryState.DEFERRED,
+                now + timedelta(days=1),
+                False,
+            )
+        if interruption_class is InterruptionClass.NORMAL and self._context is not None:
+            if self._context.blocking_state is not InterruptionContextState.ALLOWED:
+                return (
+                    AttentionDecision.DEFER,
+                    AttentionDeliveryState.DEFERRED,
+                    now + timedelta(days=1),
+                    False,
+                )
+        if interruption_class is InterruptionClass.IMPORTANT and self._context is not None:
+            if self._context.blocking_state is InterruptionContextState.BLOCKED:
+                return (
+                    AttentionDecision.DEFER,
+                    AttentionDeliveryState.DEFERRED,
+                    now + timedelta(hours=1),
+                    False,
+                )
         if item.priority in {
             AttentionPriority.SECURITY_CRITICAL,
             AttentionPriority.URGENT,
@@ -839,6 +1012,10 @@ def _item_to_json(item: AttentionItem) -> dict[str, object]:
         "resolved": item.resolved,
         "resolved_at": item.resolved_at.isoformat() if item.resolved_at else None,
         "summary": item.summary,
+        "interruption_class": (
+            item.interruption_class.value if item.interruption_class is not None else None
+        ),
+        "actor_context_id": str(item.actor_context_id) if item.actor_context_id else None,
     }
 
 
@@ -861,6 +1038,12 @@ def _item_from_json(payload: Mapping[str, object]) -> AttentionItem:
         _strict_bool(payload.get("resolved", False), "resolved"),
         _optional_time(payload.get("resolved_at")),
         str(payload["summary"]),
+        (
+            InterruptionClass(str(payload["interruption_class"]))
+            if payload.get("interruption_class") is not None
+            else None
+        ),
+        _optional_uuid(payload.get("actor_context_id")),
     )
 
 
@@ -981,5 +1164,8 @@ __all__ = [
     "AttentionStore",
     "DigestBucket",
     "InMemoryAttentionStore",
+    "InterruptionClass",
+    "InterruptionContext",
+    "InterruptionContextState",
     "SQLiteAttentionStore",
 ]

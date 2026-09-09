@@ -156,6 +156,25 @@ an explicitly replay-safe operation plus fresh current authorization. Recorded
 approvals are never inherited and `UNKNOWN_OUTCOME` blocks replay until trusted
 reconciliation. See `docs/execution-trace-and-replay.md`.
 
+Interruption intelligence is a bounded, language-neutral attention projection:
+
+`raw event -> SemanticEvent/Pattern -> InterruptionIntelligence -> AttentionPolicy -> durable attention state -> Trace observation -> later presentation/delivery`
+
+`SemanticEvent` and `SemanticPattern` are derived observations. The canonical
+interruption classes are `SILENT`, `QUEUE`, `NORMAL`, `IMPORTANT`, and `URGENT`;
+they describe attention importance, not authority. `AttentionPolicy` decides
+whether an item is silent, queued, deferred, bundled, or immediately eligible.
+`DELIVER_NOW` means eligible for a transport, not delivered. Only an explicit
+transport acknowledgement may set the durable delivery timestamp. `TraceService`
+records bounded factual provenance and never decides or authorizes an action.
+`PermissionBroker` remains the sole authority for permission and external effect.
+
+The policy uses only typed trusted context. DND, fullscreen, presentation, and
+typing signals remain `UNKNOWN` when no production owner provides them; a
+controlled test context is not a physical desktop observation. Interruption
+classes, reason codes, and trace decision fields are language-neutral, and later
+localization may change display wording but never priority or authority.
+
 Long-horizon goals use `GoalSupervisor` only as a bounded coordinator around
 the canonical `PlanningEngine`. `GoalSupervisorStore` persists immutable user
 intent and high-level recovery state; it does not own task, plan, permission,

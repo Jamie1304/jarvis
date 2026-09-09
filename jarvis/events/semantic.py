@@ -8,6 +8,7 @@ observational source.
 from __future__ import annotations
 
 from collections import OrderedDict, defaultdict, deque
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from enum import StrEnum
@@ -104,6 +105,9 @@ class SemanticPattern:
     window_end: datetime
     occurrence_count: int
     continuity: ContinuityState
+
+
+SemanticObserver = Callable[[SemanticEvent, tuple[SemanticPattern, ...]], None]
 
 
 @dataclass(frozen=True, slots=True)
@@ -367,6 +371,7 @@ class SemanticEventService:
         self._subscription_id: str | None = None
         self._last_sequence: int | None = None
         self._closed = False
+        self._observers: list[SemanticObserver] = []
 
     @property
     def subscription_id(self) -> str | None:
@@ -389,6 +394,21 @@ class SemanticEventService:
         self._seen_raw.clear()
         self._seen_raw_set.clear()
         self._pattern_engine.reset_continuity()
+        self._observers.clear()
+
+    def add_observer(self, observer: SemanticObserver) -> None:
+        """Register a bounded, non-authoritative projection observer."""
+
+        if not callable(observer):
+            raise TypeError("semantic observer must be callable")
+        if self._closed:
+            raise RuntimeError("semantic event service is closed")
+        if observer not in self._observers:
+            self._observers.append(observer)
+
+    def remove_observer(self, observer: SemanticObserver) -> None:
+        if observer in self._observers:
+            self._observers.remove(observer)
 
     async def _on_event(self, event: EventEnvelope[EventPayload]) -> None:
         self.process(event)
@@ -431,7 +451,14 @@ class SemanticEventService:
             mapped.metadata,
         )
         self._recent.append(semantic)
-        self._pattern_engine.observe(semantic)
+        patterns = self._pattern_engine.observe(semantic)
+        for observer in tuple(self._observers):
+            try:
+                observer(semantic, patterns)
+            except Exception:
+                # Observers are projections. Their failure must not corrupt the
+                # semantic observation or pattern continuity owned here.
+                continue
         return (semantic,)
 
     def recent_events(self) -> tuple[SemanticEvent, ...]:

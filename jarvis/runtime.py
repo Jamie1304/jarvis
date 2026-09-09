@@ -153,6 +153,7 @@ from jarvis.goal_supervisor import (
     RegistryGoalAnalyzer,
 )
 from jarvis.integration_package import IntegrationPackage
+from jarvis.interruption import InterruptionIntelligence, context_from_current_context
 from jarvis.knowledge import KnowledgeLibrary, KnowledgeLibraryMigrationError
 from jarvis.knowledge.store import KnowledgeStore
 from jarvis.mcp.manager import MCPExtensionManager
@@ -660,6 +661,7 @@ class RuntimeContainer:
     trace_store: TraceStore
     trace_service: TraceService
     semantic_events: SemanticEventService
+    interruption_intelligence: InterruptionIntelligence
     episode_composer: EpisodeComposer
     golden_workflow_store: GoldenWorkflowStore
     golden_workflows: GoldenWorkflowService
@@ -897,6 +899,7 @@ class RuntimeContainer:
                 await asyncio.gather(self.episode_start_task, return_exceptions=True)
             resources = (
                 self.episode_composer,
+                self.interruption_intelligence,
                 self.semantic_events,
                 self.trace_service,
                 self.automation_service,
@@ -1971,6 +1974,13 @@ class ApplicationRuntime:
                 provider_id=settings.ai_provider,
                 model_id=settings.ai_model,
             )
+            interruption_intelligence = InterruptionIntelligence(
+                semantic_events,
+                attention_policy,
+                trace_service,
+                lambda: context_from_current_context(current_context.snapshot()),
+                actor_context_id=actor_context.context_id,
+            )
 
             def tool_projection() -> tuple[ControlCenterItem, ...]:
                 items: list[ControlCenterItem] = []
@@ -2415,6 +2425,7 @@ class ApplicationRuntime:
                 trace_store=trace_store,
                 trace_service=trace_service,
                 semantic_events=semantic_events,
+                interruption_intelligence=interruption_intelligence,
                 episode_composer=episode_composer,
                 golden_workflow_store=golden_workflow_store,
                 golden_workflows=golden_workflows,
