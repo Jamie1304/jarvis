@@ -70,6 +70,7 @@ def run_desktop_app(
         memory_action_finished = Signal(object)
         permission_action_finished = Signal(object)
         operation_finished = Signal(str, object)
+        persona_finished = Signal(object)
 
     class MainWindow(QMainWindow):
         def __init__(self) -> None:
@@ -94,6 +95,7 @@ def run_desktop_app(
             self._signals.memory_action_finished.connect(self._memory_action_finished)
             self._signals.permission_action_finished.connect(self._permission_action_finished)
             self._signals.operation_finished.connect(self._operation_finished)
+            self._signals.persona_finished.connect(self._persona_saved)
             self._safe_mode = backend.submit(lambda service: service.safe_mode).result()
             self._conversation_id = (
                 backend.submit(lambda service: service.create_conversation()).result()
@@ -1046,11 +1048,11 @@ def run_desktop_app(
                     }
                 )
             )
-            future.add_done_callback(self._persona_saved)
+            future.add_done_callback(self._signals.persona_finished.emit)
 
         def _reset_persona(self) -> None:
             future = backend.submit(lambda service: service.reset_persona())
-            future.add_done_callback(self._persona_saved)
+            future.add_done_callback(self._signals.persona_finished.emit)
 
         def _persona_saved(self, future: Any) -> None:
             try:

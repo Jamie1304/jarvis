@@ -2,14 +2,22 @@ from __future__ import annotations
 
 import os
 from collections.abc import AsyncIterator
+from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 from uuid import UUID, uuid4
 
 import pytest
+from jarvis.actor_persona import PersonaProfile
 from jarvis.application import AssistantEvent, AssistantEventKind
 from jarvis.bootstrap import create_application_runtime, create_desktop_facade_from_runtime
 from jarvis.core.config import Settings
+from jarvis.current_context import (
+    CurrentActorProjection,
+    CurrentContextSnapshot,
+    CurrentProviderProjection,
+)
 from jarvis.desktop_facade import DesktopRuntimeView
 from jarvis.desktop_shell import DesktopShellService
 from jarvis.frontend.desktop import run_desktop_app
@@ -50,6 +58,10 @@ class _DesktopServiceDouble:
 
     def __init__(self) -> None:
         self.messages: list[str] = []
+        self.profile = PersonaProfile.defaults()
+        self.actor = SimpleNamespace(
+            session_id=uuid4(), source="local_desktop_session", label="Local Desktop", active=True
+        )
 
     def create_conversation(self) -> UUID:
         return uuid4()
@@ -61,6 +73,46 @@ class _DesktopServiceDouble:
 
     def settings_descriptors(self) -> tuple[object, ...]:
         return ()
+
+    def persona(self) -> SimpleNamespace:
+        return SimpleNamespace(profile=self.profile)
+
+    def actor_context(self) -> SimpleNamespace:
+        return self.actor
+
+    def update_persona(self, values: dict[str, int]) -> PersonaProfile:
+        self.profile = PersonaProfile(
+            verbosity=values["verbosity"],
+            response_length=values["response_length"],
+            technical_depth=values["technical_depth"],
+        )
+        return self.profile
+
+    def reset_persona(self) -> PersonaProfile:
+        self.profile = PersonaProfile.defaults()
+        return self.profile
+
+    def current_context(self) -> CurrentContextSnapshot:
+        return CurrentContextSnapshot(
+            revision=0,
+            captured_at=datetime.now(UTC),
+            actor=CurrentActorProjection(
+                context_id=uuid4(),
+                session_id=self.actor.session_id,
+                source=self.actor.source,
+                active=self.actor.active,
+            ),
+            persona=self.profile,
+            active_conversation_id=None,
+            conversation_session_id=None,
+            active_task_id=None,
+            active_task_status=None,
+            presence=None,
+            runtime_state="ready",
+            safe_mode=False,
+            provider=CurrentProviderProjection("ollama", "fake", True, None),
+            provenance=(),
+        )
 
     async def ollama_status(self, *, ensure_running: bool = False) -> object:
         del ensure_running
@@ -236,3 +288,75 @@ def test_desktop_safe_mode_renders_settings_and_disables_normal_execution() -> N
     assert observed["send_enabled"] is False
     assert observed["task_create_enabled"] is False
     assert observed["settings_button"] is True
+
+
+def test_persona_save_and_reset_completion_stays_on_qt_thread() -> None:
+    app = _application()
+    service_holder: list[_DesktopServiceDouble] = []
+
+    def create_service(_runtime: object) -> _DesktopServiceDouble:
+        service = _DesktopServiceDouble()
+        service_holder.append(service)
+        return service
+
+    backend = DesktopBackendHost(lambda: _RuntimeDouble(), create_service)
+    observed: dict[str, object] = {}
+
+    def finish() -> None:
+        window: Any = next(
+            widget
+            for widget in app.topLevelWidgets()
+            if isinstance(widget, QMainWindow) and widget.isVisible()
+        )
+        defaults = PersonaProfile.defaults()
+        observed["saved"] = service_holder[0].profile.verbosity == 4
+        context = window.findChild(QLabel, "current-context-persona")
+        assert context is not None
+        observed["saved_context"] = "verbosity 4/4" in context.text()
+        reset: QPushButton = next(
+            button
+            for button in window.findChildren(QPushButton)
+            if button.text() == "Reset Persona Defaults"
+        )
+        reset.click()
+
+        def verify_reset() -> None:
+            observed["reset"] = service_holder[0].profile == defaults
+            context = window.findChild(QLabel, "current-context-persona")
+            observed["reset_context"] = context is not None and "verbosity 2/4" in context.text()
+            observed["backend_responsive"] = (
+                backend.submit(lambda service: service.current_context()).result(timeout=1).persona
+                == defaults
+            )
+            window.close()
+            app.quit()
+
+        QTimer.singleShot(150, verify_reset)
+
+    def drive() -> None:
+        window: Any = next(
+            widget
+            for widget in app.topLevelWidgets()
+            if isinstance(widget, QMainWindow) and widget.isVisible()
+        )
+        settings: QPushButton = next(
+            button for button in window.findChildren(QPushButton) if button.text() == "Settings"
+        )
+        settings.click()
+        window._persona_verbosity.setCurrentText("4")
+        window._persona_response_length.setCurrentText("4")
+        save: QPushButton = next(
+            button for button in window.findChildren(QPushButton) if button.text() == "Save Persona"
+        )
+        save.click()
+        QTimer.singleShot(150, finish)
+
+    QTimer.singleShot(0, drive)
+    assert run_desktop_app(backend) == 0
+    assert observed == {
+        "saved": True,
+        "saved_context": True,
+        "reset": True,
+        "reset_context": True,
+        "backend_responsive": True,
+    }
