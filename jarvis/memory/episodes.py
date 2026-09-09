@@ -435,14 +435,9 @@ class EpisodeComposer:
             _EPISODE_NAMESPACE,
             f"episode:{EPISODE_COMPOSITION_RULE_VERSION}:{task_id}:{task.status.value}",
         )
-        goal = task.goal.casefold()
-        category = (
-            "calculation"
-            if "calculat" in goal or "%" in goal
-            else "weather"
-            if "weather" in goal
-            else "general_task"
-        )
+        # No typed task classifier exists in the authoritative planning model.
+        # Keep durable category state neutral until one is introduced there.
+        category = "general_task"
         actions = tuple(
             EpisodicAction(
                 step.tool_id,

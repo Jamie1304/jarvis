@@ -177,6 +177,30 @@ def test_episode_restart_and_actor_scope(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize(
+    "goal",
+    (
+        "calculate 25% of 800",
+        "bereken 25% van 800",
+        "berechne 25 % von 800",
+        "what is the weather?",
+        "wat is het weer?",
+    ),
+)
+def test_episode_category_is_language_neutral(tmp_path: Path, goal: str) -> None:
+    task = _task(PlanningTaskStatus.COMPLETED, goal=goal)
+    composer, _episodic, _semantic, memory, attention = _composer(tmp_path, task)
+    try:
+        episode = composer.compose_task(task.task_id)
+        assert episode is not None
+        assert episode.goal_category == "general_task"
+        stored = json.dumps(memory.list()[0].data_object, sort_keys=True)
+        assert goal not in stored
+    finally:
+        memory.close()
+        attention.close()
+
+
+@pytest.mark.parametrize(
     ("status", "error", "expected", "verification"),
     (
         (PlanningTaskStatus.FAILED, None, EpisodeOutcome.FAILED, EpisodeVerification.NOT_VERIFIED),
