@@ -23,7 +23,7 @@ def run_desktop_app(
     """Run the local desktop chat client, failing clearly if its optional UI extra is absent."""
 
     try:
-        from PySide6.QtCore import QObject, Qt, Signal
+        from PySide6.QtCore import QObject, Qt, QTimer, Signal
         from PySide6.QtGui import QFont
         from PySide6.QtWidgets import (
             QApplication,
@@ -269,10 +269,11 @@ def run_desktop_app(
                     self._refresh_persona()
                 else:
                     rows = QListWidget()
+                    rows.setObjectName(f"{section.value}-records")
                     rows.setMinimumHeight(180)
                     refresh = QPushButton("Refresh")
                     refresh.clicked.connect(
-                        lambda _checked=False, name=section.value: self._refresh_page(name)
+                        lambda _checked=False, name=section.value: self._refresh_section(name)
                     )
                     page_layout.addWidget(rows, 1)
                     if section is ShellSection.TASKS:
@@ -294,6 +295,14 @@ def run_desktop_app(
                             (self._task_goal, create_task, run_task, cancel_task)
                         )
                     if section is ShellSection.MEMORY:
+                        episode_heading = label("EPISODIC EXPERIENCES", "eyebrow")
+                        episode_rows = QListWidget()
+                        episode_rows.setObjectName("episodes-records")
+                        episode_rows.setMinimumHeight(140)
+                        episode_refresh = QPushButton("Refresh Episodes")
+                        episode_refresh.clicked.connect(
+                            lambda _checked=False: self._refresh_page("episodes")
+                        )
                         correct_memory = QPushButton("Correct Selected")
                         correct_memory.clicked.connect(self._correct_selected_memory)
                         delete_memory = QPushButton("Delete Selected")
@@ -329,6 +338,9 @@ def run_desktop_app(
                         page_layout.addLayout(memory_actions)
                         page_layout.addLayout(memory_policy)
                         page_layout.addWidget(self._memory_learning_paused)
+                        page_layout.addWidget(episode_heading)
+                        page_layout.addWidget(episode_rows, 1)
+                        page_layout.addWidget(episode_refresh)
                         self._normal_action_widgets.extend(
                             (
                                 correct_memory,
@@ -340,8 +352,10 @@ def run_desktop_app(
                                 self._memory_forget_category,
                                 forget_category,
                                 self._memory_learning_paused,
+                                episode_refresh,
                             )
                         )
+                        self._page_lists["episodes"] = episode_rows
                     if section is ShellSection.PERMISSIONS:
                         approve_permission = QPushButton("Approve Once")
                         approve_permission.clicked.connect(self._approve_selected_permission)
@@ -467,7 +481,7 @@ def run_desktop_app(
                 for widget in self._normal_action_widgets:
                     widget.setEnabled(False)
             self._pages.setCurrentIndex(self._page_indexes[ShellSection.OVERVIEW])
-            self._refresh_page("overview")
+            self._refresh_section("overview")
             self._refresh_current_context()
             if not self._safe_mode:
                 self._refresh_provider_status()
@@ -477,9 +491,9 @@ def run_desktop_app(
             self._section_status.setText(f"Section: {state.active_section.value.title()}")
             self._pages.setCurrentIndex(self._page_indexes[section])
             if section is ShellSection.OVERVIEW:
-                self._refresh_page(section.value)
+                self._refresh_section(section.value)
             elif not self._safe_mode and section not in {ShellSection.CHAT, ShellSection.SETTINGS}:
-                self._refresh_page(section.value)
+                self._refresh_section(section.value)
 
         @staticmethod
         def _page_description(section: ShellSection) -> str:
@@ -607,12 +621,12 @@ def run_desktop_app(
                 conversation = (
                     f"Conversation: {str(context.active_conversation_id)[:8]}"
                     if context.active_conversation_id is not None
-                    else "Conversation: none"
+                    else "Conversation: no active conversation"
                 )
                 task = (
                     f"Task: {str(context.active_task_id)[:8]} · {context.active_task_status}"
                     if context.active_task_id is not None
-                    else "Task: none"
+                    else "Task: no active task"
                 )
                 presence = (
                     context.presence.state.value.replace("_", " ").title()
@@ -620,8 +634,8 @@ def run_desktop_app(
                     else "unavailable"
                 )
                 provider = context.provider
-                provider_name = provider.provider_id or "none"
-                model = provider.model_id or "none"
+                provider_name = provider.provider_id or "not configured"
+                model = provider.model_id or "not configured"
                 if provider.readiness is None:
                     readiness = "unavailable"
                 elif provider.readiness.value == "not_probed":
@@ -648,23 +662,12 @@ def run_desktop_app(
                 self._context_persona.clear()
                 self._context_mode.clear()
 
+        def _refresh_section(self, page: str) -> None:
+            self._refresh_page(page)
+            if page == ShellSection.MEMORY.value:
+                self._refresh_page("episodes")
+
         def _refresh_page(self, page: str) -> None:
-            if page == "overview":
-                future = backend.submit(lambda service: service.runtime_view())
-                future.add_done_callback(
-                    lambda result: self._signals.page_rows.emit(
-                        page,
-                        (
-                            DesktopRow(
-                                "runtime",
-                                "Runtime",
-                                result.result().state,
-                                result.result().error or result.result().version,
-                            ),
-                        ),
-                    )
-                )
-                return
             future = backend.submit_async(lambda service: service.refresh_rows(page))
             future.add_done_callback(lambda result: self._page_rows_finished(page, result))
 
@@ -684,8 +687,20 @@ def run_desktop_app(
             page_rows: tuple[DesktopRow, ...] = rows
             self._page_rows[page] = page_rows
             target.clear()
+            target.setAccessibleName(f"{page.title()} records")
+            target.setWordWrap(True)
+            target.setUniformItemSizes(False)
+            target.setTextElideMode(Qt.TextElideMode.ElideNone)
+            target.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
             for row in page_rows:
                 item = QListWidgetItem(f"{row.title} [{row.status}]\n{row.detail}")
+                if any(
+                    marker in row.status.casefold()
+                    for marker in ("important", "urgent", "waiting", "unknown", "failed")
+                ):
+                    font = item.font()
+                    font.setBold(True)
+                    item.setFont(font)
                 item.setData(
                     Qt.ItemDataRole.UserRole,
                     (
@@ -739,6 +754,12 @@ def run_desktop_app(
                 future.result()
                 self._refresh_page(ShellSection.TASKS.value)
                 self._refresh_current_context()
+                # EventBus-owned Episode and Trace projections settle after the
+                # terminal task event; refresh once on the Qt thread so the
+                # product converges without a polling loop.
+                QTimer.singleShot(150, lambda: self._refresh_section("overview"))
+                QTimer.singleShot(150, lambda: self._refresh_page("episodes"))
+                QTimer.singleShot(150, lambda: self._refresh_page("activity"))
             except Exception as error:
                 self._signals.failed.emit(str(error))
 

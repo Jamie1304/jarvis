@@ -1008,6 +1008,23 @@ class ApplicationRuntime:
     def security_report(self) -> StartupSecurityReport | None:
         return self._security_report
 
+    def start_background_services(self, loop: asyncio.AbstractEventLoop) -> None:
+        """Start runtime-owned subscribers on the supplied owner event loop."""
+
+        container = self._container
+        if container is None or loop.is_closed():
+            return
+        services = (
+            ("presence_start_task", container.presence_projection.start),
+            ("trace_start_task", container.trace_service.start),
+            ("semantic_start_task", container.semantic_events.start),
+            ("episode_start_task", container.episode_composer.start),
+            ("automation_start_task", container.automation_service.start),
+        )
+        for attribute, start in services:
+            if getattr(container, attribute) is None:
+                object.__setattr__(container, attribute, loop.create_task(start()))
+
     @classmethod
     def create_from_environment(
         cls,
@@ -2535,16 +2552,13 @@ class ApplicationRuntime:
             except RuntimeError:
                 loop = None
             if loop is not None:
-                presence_start_task = loop.create_task(presence_projection.start())
-                trace_start_task = loop.create_task(trace_service.start())
-                semantic_start_task = loop.create_task(semantic_events.start())
-                episode_start_task = loop.create_task(episode_composer.start())
-                automation_start_task = loop.create_task(automation_service.start())
-                object.__setattr__(container, "presence_start_task", presence_start_task)
-                object.__setattr__(container, "trace_start_task", trace_start_task)
-                object.__setattr__(container, "semantic_start_task", semantic_start_task)
-                object.__setattr__(container, "episode_start_task", episode_start_task)
-                object.__setattr__(container, "automation_start_task", automation_start_task)
+                runtime = cls(
+                    container,
+                    status=RuntimeStatus.READY,
+                    security_report=security_report,
+                )
+                runtime.start_background_services(loop)
+                return runtime
         except (
             AuditStoreError,
             AutomationStoreError,

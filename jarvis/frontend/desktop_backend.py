@@ -136,6 +136,9 @@ class DesktopBackendHost:
         self._loop = loop
         try:
             self._runtime = self._runtime_factory()
+            start_services = getattr(self._runtime, "start_background_services", None)
+            if callable(start_services):
+                start_services(loop)
             self._assistant = self._assistant_factory(self._runtime)
             self._startup = DesktopBackendStartup(True)
         except Exception as error:

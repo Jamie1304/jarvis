@@ -1,13 +1,30 @@
 from __future__ import annotations
 
 import sqlite3
+from datetime import UTC, datetime
+from hashlib import sha256
 from pathlib import Path
 from uuid import uuid4
 
 import pytest
+from jarvis.attention import (
+    AttentionDeliveryState,
+    AttentionItem,
+    AttentionPriority,
+    InterruptionClass,
+)
 from jarvis.core.config import Settings
 from jarvis.core.errors import ServiceUnavailableError
 from jarvis.desktop_facade import DesktopApplicationFacade
+from jarvis.memory.episodes import (
+    EPISODE_COMPOSITION_RULE_VERSION,
+    EPISODE_SCHEMA_VERSION,
+    Episode,
+    EpisodeContinuity,
+    EpisodeOutcome,
+    EpisodeVerification,
+)
+from jarvis.memory.models import Sensitivity
 from jarvis.permissions.models import ActionDescriptor, Risk
 from jarvis.runtime import ApplicationRuntime, RuntimeStatus
 
@@ -163,6 +180,119 @@ async def test_desktop_facade_projects_persona_actor_and_preserves_authority(
     assert before.reason == after.reason
     assert facade.reset_persona().profile.verbosity == 2
     await facade.aclose()
+
+
+@pytest.mark.asyncio
+async def test_p2_projections_are_typed_read_only_and_keep_unknown_truthful(tmp_path: Path) -> None:
+    runtime = ApplicationRuntime.create(
+        Settings(app_data_dir=tmp_path / "data", ai_provider="ollama")
+    )
+    assert runtime.container is not None
+    facade = DesktopApplicationFacade(runtime)
+    container = runtime.container
+    now = datetime.now(UTC)
+    attention = AttentionItem(
+        uuid4(),
+        "capability.health",
+        "default",
+        AttentionPriority.NORMAL,
+        now,
+        dedupe_key="fixture:capability-health",
+        summary="Capability health requires review",
+    )
+    entry = container.attention_policy.enqueue(attention)
+    waiting_task_id = uuid4()
+    waiting = AttentionItem(
+        uuid4(),
+        "interruption.task_waiting_for_user",
+        "default",
+        AttentionPriority.HIGH,
+        now,
+        requires_user_action=True,
+        related_task_id=waiting_task_id,
+        dedupe_key="fixture:task-waiting-for-user",
+        summary="A task is waiting for your action",
+        interruption_class=InterruptionClass.IMPORTANT,
+        interruption_reason_code="task_waiting_for_user",
+    )
+    container.attention_policy.enqueue(waiting)
+    episode = Episode(
+        uuid4(),
+        EPISODE_SCHEMA_VERSION,
+        EPISODE_COMPOSITION_RULE_VERSION,
+        now,
+        None,
+        now,
+        uuid4(),
+        None,
+        container.actor_context.context_id,
+        container.actor_context.principal_id,
+        "default",
+        "general_task",
+        sha256(b"uncertain fixture").hexdigest(),
+        (("fixture", "controlled"),),
+        (),
+        EpisodeOutcome.UNKNOWN_OUTCOME,
+        EpisodeVerification.UNKNOWN,
+        ("task:controlled",),
+        (),
+        (),
+        (),
+        (),
+        None,
+        None,
+        ("unknown_effect_outcome",),
+        Sensitivity.PRIVATE,
+        EpisodeContinuity.PARTIAL,
+        ("test.fixture",),
+    )
+    container.episodic_memory.persist_episode(episode)
+
+    attention_view = facade.attention_view()
+    assert attention_view.state == "ready"
+    generic_view = next(item for item in attention_view.items if item.item_id == attention.item_id)
+    waiting_view = next(item for item in attention_view.items if item.item_id == waiting.item_id)
+    assert generic_view.interruption_class is None
+    assert generic_view.decision == entry.decision.value
+    assert generic_view.delivery_state == AttentionDeliveryState.QUEUED.value
+    assert waiting_view.interruption_class == InterruptionClass.IMPORTANT.value
+    assert waiting_view.related_task_id == waiting_task_id
+    attention_rows = await facade.refresh_rows("attention")
+    assert any(
+        "IMPORTANT" in row.status and str(waiting_task_id) in row.detail for row in attention_rows
+    )
+    stored_entry = container.attention_policy.entry_for(attention.item_id)
+    assert stored_entry is not None and stored_entry.delivered_at is None
+
+    episode_view = facade.episode_views()[0]
+    assert episode_view.outcome == EpisodeOutcome.UNKNOWN_OUTCOME.value
+    assert episode_view.verification == EpisodeVerification.UNKNOWN.value
+    episode_rows = await facade.refresh_rows("episodes")
+    assert "UNKNOWN_OUTCOME" in episode_rows[0].status
+    assert "VERIFIED" not in episode_rows[0].status
+
+    overview = facade.overview_view()
+    activity = facade.activity_view()
+    assert any(item.item_id == attention.item_id for item in overview.attention.items)
+    assert any(item.category == "attention" for item in activity.items)
+    assert any(item.category == "episode" for item in activity.items)
+    stored_entry = container.attention_policy.entry_for(attention.item_id)
+    assert stored_entry is not None and stored_entry.delivered_at is None
+    await facade.aclose()
+
+
+@pytest.mark.asyncio
+async def test_safe_mode_p2_projections_are_unavailable_not_empty(tmp_path: Path) -> None:
+    del tmp_path
+    facade = DesktopApplicationFacade(
+        ApplicationRuntime(None, status=RuntimeStatus.SAFE_MODE, error="configuration invalid")
+    )
+    assert facade.attention_view().state == "unavailable"
+    assert facade.activity_view().state == "unavailable"
+    assert (await facade.refresh_rows("episodes"))[0].status == "UNAVAILABLE"
+    overview = facade.overview_view()
+    assert overview.attention.state == "unavailable"
+    assert overview.runtime.safe_mode is True
 
 
 async def test_new_conversation_receives_typed_presentation_guidance(

@@ -18,7 +18,7 @@ from jarvis.current_context import (
     CurrentContextSnapshot,
     CurrentProviderProjection,
 )
-from jarvis.desktop_facade import DesktopRuntimeView
+from jarvis.desktop_facade import DesktopRow, DesktopRuntimeView
 from jarvis.desktop_shell import DesktopShellService
 from jarvis.frontend.desktop import run_desktop_app
 from jarvis.frontend.desktop_backend import DesktopBackendHost
@@ -31,6 +31,7 @@ from PySide6.QtWidgets import (  # noqa: E402
     QApplication,
     QLabel,
     QLineEdit,
+    QListWidget,
     QMainWindow,
     QPushButton,
     QStackedWidget,
@@ -142,6 +143,27 @@ class _DesktopServiceDouble:
     async def stop_recording(self) -> str:
         return ""
 
+    async def refresh_rows(self, page: str) -> tuple[DesktopRow, ...]:
+        if page == "overview":
+            return (
+                DesktopRow(
+                    "attention",
+                    "Attention",
+                    "EMPTY",
+                    "No unresolved Attention items are waiting for review.",
+                ),
+            )
+        if page == "episodes":
+            return (
+                DesktopRow(
+                    "episodes-empty",
+                    "No relevant episodes yet",
+                    "EMPTY",
+                    "JARVIS will record verified meaningful experiences as they occur.",
+                ),
+            )
+        return ()
+
 
 def test_desktop_constructs_all_navigation_pages_offscreen(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -239,6 +261,44 @@ def test_desktop_send_uses_typed_input_not_qt_clicked_boolean() -> None:
     assert run_desktop_app(backend) == 0
 
     assert service_holder[0].messages == ["typed message"]
+
+
+def test_desktop_renders_deliberate_p2_empty_states() -> None:
+    app = _application()
+    backend = DesktopBackendHost(lambda: _RuntimeDouble(), lambda _runtime: _DesktopServiceDouble())
+    observed: dict[str, object] = {}
+
+    def inspect_window() -> None:
+        window: QMainWindow = next(
+            widget
+            for widget in app.topLevelWidgets()
+            if isinstance(widget, QMainWindow) and widget.isVisible()
+        )
+
+        def inspect_overview() -> None:
+            overview = window.findChild(QListWidget, "overview-records")
+            assert overview is not None
+            observed["overview"] = overview.item(0).text() if overview.count() else ""
+            memory: QPushButton = next(
+                button for button in window.findChildren(QPushButton) if button.text() == "Memory"
+            )
+            memory.click()
+
+            def inspect_memory() -> None:
+                episodes = window.findChild(QListWidget, "episodes-records")
+                assert episodes is not None
+                observed["episodes"] = episodes.item(0).text() if episodes.count() else ""
+                window.close()
+                app.quit()
+
+            QTimer.singleShot(100, inspect_memory)
+
+        QTimer.singleShot(100, inspect_overview)
+
+    QTimer.singleShot(0, inspect_window)
+    assert run_desktop_app(backend) == 0
+    assert "No unresolved Attention" in str(observed["overview"])
+    assert "No relevant episodes yet" in str(observed["episodes"])
 
 
 def test_desktop_safe_mode_renders_settings_and_disables_normal_execution() -> None:

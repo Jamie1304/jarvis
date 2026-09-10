@@ -7,11 +7,8 @@ SQLite-backed services. Qt submits typed work and receives queued signals; it
 does not create per-request event loops or access runtime stores.
 
 `DesktopApplicationFacade` is the desktop boundary. It exposes bounded runtime,
-task, memory, control-center, provider, settings, and speech projections. Safe
-Mode has no normal runtime container and exposes only diagnostic state and
-configuration; chat and autonomous operations remain unavailable.
-`DesktopApplicationFacade` is the desktop boundary. It exposes bounded runtime,
 task, memory, control-center, provider, settings, speech, and trusted permission
+projections, plus read-only Overview, Attention, Episode, and factual Activity
 projections. Actionable rows retain canonical opaque identifiers: task IDs,
 typed memory references, automation IDs, tool IDs, and approval request IDs.
 Memory correction, deletion, retention, explicit confirmation, reverification,
@@ -19,6 +16,27 @@ and category forgetting call the application memory service. Tool health checks
 and automation removal call their owning services; tool execution, generated
 capability activation, certification, and lifecycle promotion remain outside
 the UI boundary.
+
+The P2 product dataflow is:
+
+`Raw Event -> SemanticEvent/SemanticPattern -> Episode and/or
+InterruptionIntelligence -> Attention + Trace -> DesktopApplicationFacade ->
+native Qt desktop`.
+
+Semantic events and patterns are bounded observations. An Episode is a durable,
+bounded experience assembled only at an authoritative terminal task boundary.
+Attention decides when and how a fact deserves presentation; it is not delivery,
+acknowledgement, or authority. Trace is factual observability and cannot complete
+tasks, grant permissions, or replay effects. The desktop is a projection and
+command surface. `PermissionBroker`, reached through the trusted desktop approval
+surface, remains the authority for permission and external effects. Qt does not
+open any runtime store directly, and Episode rows remain separate from editable
+fact/preference memory.
+
+Overview and Activity retain explicit EMPTY and UNAVAILABLE states. Attention
+items expose decision and delivery separately; refresh/list/render operations do
+not acknowledge delivery. Unknown Episode outcomes remain visibly UNKNOWN and
+are never presented as verified success.
 
 Desktop one-time permission choices are submitted through
 `TrustedDesktopApprovalSurface`. The facade reloads the canonical pending request
