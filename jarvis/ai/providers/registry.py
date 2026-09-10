@@ -24,12 +24,33 @@ class VoiceProviderKind(StrEnum):
     TTS = "tts"
 
 
+class ProviderLocality(StrEnum):
+    """Provider execution locality; only LOCAL is trusted as local."""
+
+    LOCAL = "local"
+    REMOTE = "remote"
+    UNKNOWN = "unknown"
+
+
 @dataclass(frozen=True, slots=True)
 class ProviderMetadata:
     provider_id: str
     display_name: str
     version: str
     local_only: bool = False
+    locality: ProviderLocality = ProviderLocality.UNKNOWN
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.locality, ProviderLocality):
+            raise ValueError("Provider locality is invalid")
+        if self.locality is ProviderLocality.REMOTE and self.local_only:
+            raise ValueError("A remote provider cannot be local-only")
+
+    @property
+    def explicitly_local(self) -> bool:
+        """Return true only for explicitly trusted local metadata."""
+
+        return self.local_only or self.locality is ProviderLocality.LOCAL
 
 
 @dataclass(frozen=True, slots=True)

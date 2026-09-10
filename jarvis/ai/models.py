@@ -14,6 +14,16 @@ class MessageRole(StrEnum):
     ASSISTANT = "assistant"
 
 
+class PrivacyClassification(StrEnum):
+    """Language-neutral classification at the text inference boundary."""
+
+    SAFE_PUBLIC = "safe_public"
+    SANITIZABLE = "sanitizable"
+    LOCAL_ONLY = "local_only"
+    SECRET = "secret"
+    UNKNOWN = "unknown"
+
+
 class ModelRole(StrEnum):
     GENERAL = "general"
     REASONING = "reasoning"
@@ -89,12 +99,37 @@ class ChatMessage:
 
 
 @dataclass(frozen=True, slots=True)
+class PrivacyContext:
+    """Descriptive privacy inputs owned by the local caller."""
+
+    classification: PrivacyClassification = PrivacyClassification.UNKNOWN
+    known_private_values: tuple[str, ...] = ()
+    allowed_message_ids: tuple[UUID, ...] = ()
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.classification, PrivacyClassification):
+            raise ValueError("Privacy classification is invalid")
+        if type(self.known_private_values) is not tuple or len(self.known_private_values) > 128:
+            raise ValueError("Known private values are invalid")
+        if any(
+            type(value) is not str or not value.strip() or len(value) > 2_000 or "\x00" in value
+            for value in self.known_private_values
+        ):
+            raise ValueError("Known private values are invalid")
+        if type(self.allowed_message_ids) is not tuple or len(self.allowed_message_ids) > 256:
+            raise ValueError("Privacy message selection is invalid")
+        if any(not isinstance(value, UUID) for value in self.allowed_message_ids):
+            raise ValueError("Privacy message selection is invalid")
+
+
+@dataclass(frozen=True, slots=True)
 class GenerationRequest:
     """A normalized request sent to an AI provider."""
 
     messages: tuple[ChatMessage, ...]
     model: str
     context_limit: int
+    privacy_context: PrivacyContext = PrivacyContext()
 
 
 @dataclass(frozen=True, slots=True)

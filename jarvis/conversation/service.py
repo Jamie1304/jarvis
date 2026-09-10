@@ -6,8 +6,17 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
-from jarvis.ai.models import ChatMessage, GenerationRequest, MessageRole, ProviderHealth
+from jarvis.ai.models import (
+    ChatMessage,
+    GenerationRequest,
+    MessageRole,
+    PrivacyClassification,
+    PrivacyContext,
+    ProviderHealth,
+)
+from jarvis.ai.privacy import PrivacyGuardedProvider
 from jarvis.ai.providers.base import AIProvider
+from jarvis.ai.providers.registry import ProviderMetadata
 from jarvis.ai.sessions import AgentSessionStore, AgentSessionType
 from jarvis.core.errors import ConversationCancelledError
 
@@ -34,8 +43,17 @@ class ConversationService:
         session_store: AgentSessionStore | None = None,
         session_type: AgentSessionType = AgentSessionType.INTERACTIVE,
         provider_id: str = "default",
+        provider_metadata: ProviderMetadata | None = None,
     ) -> None:
-        self._provider = provider
+        self._provider = (
+            provider
+            if isinstance(provider, PrivacyGuardedProvider)
+            else PrivacyGuardedProvider(
+                provider,
+                provider_metadata
+                or ProviderMetadata(provider_id, provider_id, "compatibility", True),
+            )
+        )
         self._model = model
         self._context_limit = context_limit
         self._messages: dict[UUID, list[ChatMessage]] = {}
@@ -124,6 +142,10 @@ class ConversationService:
             messages=self._within_context(messages),
             model=self._model,
             context_limit=self._context_limit,
+            privacy_context=PrivacyContext(
+                PrivacyClassification.SAFE_PUBLIC,
+                allowed_message_ids=(messages[-1].id,),
+            ),
         )
         try:
             async for chunk in self._provider.stream(request):

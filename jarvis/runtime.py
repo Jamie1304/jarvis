@@ -1503,6 +1503,9 @@ class ApplicationRuntime:
                 registry,
                 model=settings.ai_model,
                 context_limit=settings.ai_context_limit,
+                provider_metadata=configured_provider_registry.definition(
+                    settings.ai_provider
+                ).metadata,
             )
             conversation_memory = ConversationContextService()
             system_memory = ProjectSystemMemory(knowledge, root)
@@ -2007,6 +2010,9 @@ class ApplicationRuntime:
                 context_limit=settings.ai_context_limit,
                 session_store=session_store,
                 provider_id=settings.ai_provider,
+                provider_metadata=configured_provider_registry.definition(
+                    settings.ai_provider
+                ).metadata,
             )
             current_context = CurrentContextService(
                 actor_context_service=actor_context_service,

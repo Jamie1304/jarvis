@@ -18,8 +18,17 @@ from enum import StrEnum
 from typing import Any
 from uuid import UUID, uuid4
 
-from jarvis.ai.models import ChatMessage, GenerationRequest, MessageRole
+from jarvis.ai.models import (
+    ChatMessage,
+    GenerationRequest,
+    MessageRole,
+    PrivacyClassification,
+    PrivacyContext,
+)
+from jarvis.ai.privacy import PrivacyGuardedProvider
 from jarvis.ai.providers.base import AIProvider
+from jarvis.ai.providers.registry import ProviderMetadata
+from jarvis.core.errors import PrivacyBlockedError
 from jarvis.planning.models import (
     PlanningStep,
     PlanningTask,
@@ -65,6 +74,7 @@ class AgentTerminationReason(StrEnum):
     TOKEN_EXHAUSTED = "token_exhausted"
     PROVIDER_FAILURE = "provider_failure"
     LOOP_GUARD = "loop_guard"
+    PRIVACY_BLOCKED = "privacy_blocked"
 
 
 class AgentRetryClass(StrEnum):
@@ -210,6 +220,20 @@ class ContextManager:
             ),
             model=model,
             context_limit=context_limit,
+            privacy_context=PrivacyContext(
+                PrivacyClassification.SANITIZABLE,
+                known_private_values=tuple(
+                    dict.fromkeys(
+                        (
+                            *context.selected_memory,
+                            *context.required_knowledge,
+                            *context.evidence,
+                            *context.tool_outputs,
+                            *(value for pair in context.security_context for value in pair),
+                        )
+                    )
+                ),
+            ),
         )
 
     @staticmethod
@@ -369,10 +393,19 @@ class AgentLoop:
         context_limit: int,
         logger: logging.Logger | None = None,
         context_manager: ContextManager | None = None,
+        provider_metadata: ProviderMetadata | None = None,
     ) -> None:
         if context_limit <= 0:
             raise ValueError("Agent context limit must be positive")
-        self._provider = provider
+        self._provider = (
+            provider
+            if isinstance(provider, PrivacyGuardedProvider)
+            else PrivacyGuardedProvider(
+                provider,
+                provider_metadata
+                or ProviderMetadata("compatibility", "compatibility", "compatibility", True),
+            )
+        )
         self._registry = registry
         self._model = model
         self._context_limit = context_limit
@@ -431,6 +464,10 @@ class AgentLoop:
                     try:
                         raw = await _await_cancellable(
                             self._provider.generate(request), cancellation
+                        )
+                    except PrivacyBlockedError:
+                        return self._result(
+                            AgentTerminationReason.PRIVACY_BLOCKED, usage, turns, effects
                         )
                     except Exception as exc:
                         if not context_recovery_used and _is_context_error(exc):

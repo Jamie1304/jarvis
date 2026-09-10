@@ -239,7 +239,7 @@ class ProviderRouter:
                 model.model_id,
                 definition.metadata,
                 model,
-                definition.metadata.local_only,
+                definition.metadata.explicitly_local,
             )
             for provider_id, definition in self._registry.definitions()
             for model in definition.models
@@ -269,7 +269,7 @@ class ProviderRouter:
                 model.model_id,
                 definition.metadata,
                 model,
-                definition.metadata.local_only,
+                definition.metadata.explicitly_local,
                 kind,
             )
             for provider_id, definition in self._registry.voice_definitions(kind)

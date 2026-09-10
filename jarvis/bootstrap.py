@@ -108,6 +108,11 @@ def create_assistant_service(
         provider,
         model=settings.ai_model,
         context_limit=settings.ai_context_limit,
+        provider_metadata=create_provider_registry(
+            model_id=settings.ai_model, context_limit=settings.ai_context_limit
+        )
+        .definition(settings.ai_provider)
+        .metadata,
     )
     stt = None
     tts = TextToSpeechService(DisabledTtsProvider(), enabled=False)
