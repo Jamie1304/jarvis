@@ -6,7 +6,7 @@ import asyncio
 import sqlite3
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 from uuid import UUID, uuid4
 
 import pytest
@@ -71,6 +71,34 @@ def event(
         occurred_at=NOW,
         **kwargs,
     )
+
+
+def test_recent_trace_events_are_bounded_sequence_ordered_and_validated(tmp_path: Path) -> None:
+    store = TraceStore(tmp_path / "trace.sqlite3")
+    service = TraceService(store, InMemoryEventBus())
+    try:
+        recorded = tuple(
+            service.record(
+                TraceEventType.RESULT,
+                f"fact-{index}",
+                correlation_id=uuid4(),
+            )
+            for index in range(5)
+        )
+        recent = store.recent_events(3)
+        assert tuple(item.event_id for item in recent) == tuple(
+            item.event_id for item in recorded[-3:]
+        )
+        assert tuple(item.summary for item in service.recent_events(2)) == (
+            "fact-3",
+            "fact-4",
+        )
+        assert len(store.recent_events(256)) == 5
+        for malformed in (0, -1, 257, cast(int, True), cast(int, "3")):
+            with pytest.raises(TraceError):
+                store.recent_events(malformed)
+    finally:
+        store.close()
 
 
 @pytest.mark.asyncio

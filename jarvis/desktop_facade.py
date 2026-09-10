@@ -311,10 +311,8 @@ class DesktopApplicationFacade:
         if container is None:
             return DesktopActivityView("unavailable", ())
         items: list[DesktopActivityItemView] = []
-        for task in self._require_assistant().list_tasks()[:32]:
-            trace = container.trace_service.get(task_id=task.task_id)
-            for event in trace.events[-8:]:
-                items.append(self._trace_activity(event))
+        for event in container.trace_service.recent_events():
+            items.append(self._trace_activity(event))
         for item in container.attention_store.list_items():
             entry = container.attention_policy.entry_for(item.item_id)
             decision = entry.decision.value if entry is not None else "unknown"
@@ -716,7 +714,14 @@ class DesktopApplicationFacade:
         return tuple(
             DesktopRow(
                 item.identifier,
-                item.category.replace("_", " ").title(),
+                (
+                    "Trace · "
+                    if item.identifier.startswith("trace:")
+                    else "Current "
+                    if item.identifier.startswith("attention:")
+                    else ""
+                )
+                + item.category.replace("_", " ").title(),
                 item.status.upper(),
                 f"{item.occurred_at.isoformat()} · {item.summary}",
             )

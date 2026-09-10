@@ -16,6 +16,7 @@ from jarvis.events.models import PermissionRequested
 from jarvis.frontend.desktop_backend import DesktopBackendHost
 from jarvis.projections import ProjectionKind, ProjectionUpdate
 from jarvis.runtime import ApplicationRuntime
+from jarvis.trace import TraceEvent, TraceEventType
 
 from tests.fakes import FakeAIProvider
 
@@ -127,6 +128,11 @@ def test_desktop_backend_fast_episode_projection_emits_update(tmp_path: Path) ->
             len(tuple(update for update in updates if update.kind is ProjectionKind.EPISODE)) == 1
         )
         assert backend.submit(lambda facade: len(facade.episode_views())).result(timeout=10) == 1
+        activity = backend.submit(lambda facade: facade.activity_view()).result(timeout=10)
+        assert any(
+            item.identifier.startswith("trace:") and item.category == "completion"
+            for item in activity.items
+        )
     finally:
         backend.close()
 
@@ -209,7 +215,7 @@ def test_desktop_backend_real_p2c_event_emits_attention_trace_without_enqueue(
         ollama_autostart=False,
     )
     runtime_holder: list[ApplicationRuntime] = []
-    product_update = threading.Event()
+    attention_trace_ready = threading.Event()
     updates: list[ProjectionUpdate] = []
 
     def runtime_factory() -> ApplicationRuntime:
@@ -222,7 +228,12 @@ def test_desktop_backend_real_p2c_event_emits_attention_trace_without_enqueue(
     def collect(update: ProjectionUpdate) -> None:
         updates.append(update)
         if update.kind is ProjectionKind.TRACE:
-            product_update.set()
+            runtime = runtime_holder[0]
+            if runtime.container is not None and any(
+                event.event_id == update.record_id and event.event_type is TraceEventType.ATTENTION
+                for event in runtime.container.trace_service.recent_events()
+            ):
+                attention_trace_ready.set()
 
     backend.add_projection_listener(collect)
     try:
@@ -242,8 +253,14 @@ def test_desktop_backend_real_p2c_event_emits_attention_trace_without_enqueue(
             await asyncio.gather(*tasks)
 
         backend.submit_async(wait_for_services).result(timeout=10)
+        conversation_id = backend.submit(lambda facade: facade.create_conversation()).result(
+            timeout=10
+        )
+        task_row = backend.submit_async(
+            lambda facade: facade.create_task(conversation_id, "calculate 25% of 800")
+        ).result(timeout=10)
         correlation_id = UUID("11111111-1111-4111-8111-111111111111")
-        task_id = UUID("22222222-2222-4222-8222-222222222222")
+        task_id = UUID(task_row.identifier)
         request_id = UUID("33333333-3333-4333-8333-333333333333")
         event = EventEnvelope.create(
             EventType.PERMISSION_REQUESTED,
@@ -261,17 +278,39 @@ def test_desktop_backend_real_p2c_event_emits_attention_trace_without_enqueue(
             )
 
         assert backend.submit_async(publish).result(timeout=10)
-        assert product_update.wait(10)
+        assert attention_trace_ready.wait(10)
 
         attention = backend.submit(lambda facade: facade.attention_view()).result(timeout=10)
         activity = backend.submit(lambda facade: facade.activity_view()).result(timeout=10)
         important = next(item for item in attention.items if item.related_task_id == task_id)
         assert important.interruption_class == "important"
         assert important.related_task_id == task_id
-        assert important.delivery_state == "queued"
+        assert important.delivery_state == "deferred"
         assert any(
             item.category == "attention" and item.task_id == task_id for item in activity.items
         )
+
+        def read_attention_trace(_facade: object) -> TraceEvent:
+            runtime = runtime_holder[0]
+            assert runtime.container is not None
+            return next(
+                event
+                for event in runtime.container.trace_service.recent_events()
+                if event.event_type is TraceEventType.ATTENTION
+                and event.correlation_id == correlation_id
+            )
+
+        attention_trace = backend.submit(read_attention_trace).result(timeout=10)
+        factual = next(
+            item
+            for item in activity.items
+            if item.identifier == f"trace:{attention_trace.event_id}"
+        )
+        assert factual.category == TraceEventType.ATTENTION.value
+        assert "class=important" in factual.summary
+        assert "reason=task_waiting_for_user" in factual.summary
+        assert "decision=defer" in factual.summary
+        assert "delivery=deferred" in factual.summary
         assert any(update.kind is ProjectionKind.TRACE for update in updates)
         assert runtime_holder[0].container is not None
         stored = runtime_holder[0].container.attention_policy.entry_for(important.item_id)

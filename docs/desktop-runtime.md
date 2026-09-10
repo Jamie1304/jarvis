@@ -48,6 +48,14 @@ or Activity is ready. The observer chain is removed before runtime shutdown, and
 late updates are dropped when the desktop is closing. Rendering never calls
 `mark_delivered`.
 
+Factual Activity uses `TraceService.recent_events()` for one bounded, sequence-
+ordered read across task, goal, and correlation-only lineages. The
+runtime-owned `TraceStore` remains the sole durable owner and enforces the
+bounded limit; Activity keeps historical `trace:<event_id>` rows distinct from
+current `attention:<item_id>` snapshots. This preserves ATTENTION provenance
+after restart without making Qt open SQLite or turning Activity into an
+unbounded audit view.
+
 Desktop one-time permission choices are submitted through
 `TrustedDesktopApprovalSurface`. The facade reloads the canonical pending request
 and creates a fingerprint-bound handoff before the runtime-owned trusted UI

@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import asyncio
 import sqlite3
 from datetime import UTC, datetime
 from hashlib import sha256
 from pathlib import Path
+from typing import cast
 from uuid import uuid4
 
 import pytest
@@ -16,6 +18,7 @@ from jarvis.attention import (
 from jarvis.core.config import Settings
 from jarvis.core.errors import ServiceUnavailableError
 from jarvis.desktop_facade import DesktopApplicationFacade
+from jarvis.events import EventEnvelope, EventPayload, EventType, RuntimeStateChanged
 from jarvis.memory.episodes import (
     EPISODE_COMPOSITION_RULE_VERSION,
     EPISODE_SCHEMA_VERSION,
@@ -27,6 +30,7 @@ from jarvis.memory.episodes import (
 from jarvis.memory.models import Sensitivity
 from jarvis.permissions.models import ActionDescriptor, Risk
 from jarvis.runtime import ApplicationRuntime, RuntimeStatus
+from jarvis.trace import TraceEventType
 
 
 def test_safe_mode_facade_exposes_settings_and_refuses_normal_actions(tmp_path: Path) -> None:
@@ -65,6 +69,91 @@ async def test_desktop_facade_projects_canonical_task_and_control_center_data(
     assert any(row.identifier == task.identifier for row in rows)
     assert any(row.identifier == "calculator" for row in tools)
     await facade.aclose()
+
+
+@pytest.mark.asyncio
+async def test_activity_exposes_correlation_only_attention_trace_facts(
+    tmp_path: Path,
+) -> None:
+    runtime = ApplicationRuntime.create(
+        Settings(app_data_dir=tmp_path / "data", ai_provider="ollama")
+    )
+    assert runtime.container is not None
+    container = runtime.container
+    facade = DesktopApplicationFacade(runtime)
+    trace_persisted = asyncio.Event()
+    correlation_id = uuid4()
+
+    def observe(update: object) -> None:
+        if getattr(update, "correlation_id", None) != correlation_id:
+            return
+        events = container.trace_service.get(correlation_id=correlation_id).events
+        if any(event.event_type is TraceEventType.ATTENTION for event in events):
+            trace_persisted.set()
+
+    container.trace_service.add_observer(observe)
+    try:
+        await asyncio.gather(
+            *(
+                task
+                for task in (
+                    container.trace_start_task,
+                    container.semantic_start_task,
+                )
+                if task is not None
+            )
+        )
+        event = EventEnvelope.create(
+            EventType.RUNTIME_STATE_CHANGED,
+            RuntimeStateChanged("degraded"),
+            source="test.p2d.r2.gap",
+            correlation_id=correlation_id,
+        )
+        assert await container.event_bus.publish(cast(EventEnvelope[EventPayload], event))
+        await asyncio.wait_for(trace_persisted.wait(), timeout=10)
+
+        attention = next(
+            item
+            for item in container.attention_store.list_items()
+            if item.related_correlation_id == correlation_id
+        )
+        trace_event = next(
+            event
+            for event in container.trace_service.get(correlation_id=correlation_id).events
+            if event.event_type is TraceEventType.ATTENTION
+        )
+        activity = facade.activity_view()
+        assert any(item.identifier == f"attention:{attention.item_id}" for item in activity.items)
+        trace_item = next(
+            item for item in activity.items if item.identifier == f"trace:{trace_event.event_id}"
+        )
+        assert (
+            sum(item.identifier == f"trace:{trace_event.event_id}" for item in activity.items) == 1
+        )
+        assert trace_item.category == TraceEventType.ATTENTION.value
+        assert "class=important" in trace_item.summary
+        assert "reason=runtime_degraded" in trace_item.summary
+        assert "decision=deliver_now" in trace_item.summary
+        assert "delivery=queued" in trace_item.summary
+        stored_entry = container.attention_policy.entry_for(attention.item_id)
+        assert stored_entry is not None and stored_entry.delivered_at is None
+
+        await facade.aclose()
+        restarted = ApplicationRuntime.create(
+            Settings(app_data_dir=tmp_path / "data", ai_provider="ollama")
+        )
+        restarted_facade = DesktopApplicationFacade(restarted)
+        try:
+            restarted_trace = next(
+                item
+                for item in restarted_facade.activity_view().items
+                if item.identifier == f"trace:{trace_event.event_id}"
+            )
+            assert restarted_trace.category == TraceEventType.ATTENTION.value
+        finally:
+            await restarted_facade.aclose()
+    finally:
+        await facade.aclose()
 
 
 @pytest.mark.asyncio

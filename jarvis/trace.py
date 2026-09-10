@@ -103,6 +103,7 @@ class ReplayDisposition(StrEnum):
 _MAX_TEXT = 2_000
 _MAX_VALUE_BYTES = 16_000
 _MAX_ITEMS = 64
+_MAX_RECENT_EVENTS = 256
 _UNTRUSTED_SOURCES = frozenset({"model", "llm", "assistant", "model_output", "prompt"})
 _SECRET_KEYS = frozenset(
     {
@@ -697,6 +698,21 @@ class TraceStore:
             trace._events.append(TraceEvent.from_dict(json.loads(str(payload))))
         return trace
 
+    def recent_events(self, limit: int = 80) -> tuple[TraceEvent, ...]:
+        """Return a bounded, sequence-ordered view across all trace lineages."""
+
+        if type(limit) is not int or not 1 <= limit <= _MAX_RECENT_EVENTS:
+            raise TraceError(
+                f"recent trace limit must be an integer from 1 to {_MAX_RECENT_EVENTS}"
+            )
+        rows = self._connection.execute(
+            "SELECT event_json FROM execution_trace_events ORDER BY sequence DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+        return tuple(
+            TraceEvent.from_dict(json.loads(str(payload))) for (payload,) in reversed(rows)
+        )
+
     def contains_event_ids(self, event_ids: Sequence[str]) -> bool:
         """Return whether every supplied ID is an existing durable trace fact."""
 
@@ -881,6 +897,11 @@ class TraceService:
             trace = self._store.load(trace_id)
             self._traces[trace_id] = trace
         return trace
+
+    def recent_events(self, limit: int = 80) -> tuple[TraceEvent, ...]:
+        """Return bounded durable facts across task, goal, and correlation lineages."""
+
+        return self._store.recent_events(limit)
 
     def record(
         self,
