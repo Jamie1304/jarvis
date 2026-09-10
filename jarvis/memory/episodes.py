@@ -37,6 +37,7 @@ from jarvis.memory.models import (
 from jarvis.memory.services import EpisodicMemoryService
 from jarvis.memory.store import SQLiteMemoryStore
 from jarvis.planning.models import FailureKind, PlanningTask, PlanningTaskStatus
+from jarvis.projections import ProjectionKind, ProjectionObserver, ProjectionUpdate
 from jarvis.task_controller import TaskController
 
 
@@ -363,6 +364,21 @@ class EpisodeComposer:
         self._clock = clock or (lambda: datetime.now(UTC))
         self._subscription_id: str | None = None
         self._closed = False
+        self._observers: list[ProjectionObserver] = []
+
+    def add_observer(self, observer: ProjectionObserver) -> None:
+        """Register a non-authoritative observer notified after Episode persistence."""
+
+        if not callable(observer):
+            raise TypeError("episode observer must be callable")
+        if self._closed:
+            raise RuntimeError("episode composer is closed")
+        if observer not in self._observers:
+            self._observers.append(observer)
+
+    def remove_observer(self, observer: ProjectionObserver) -> None:
+        if observer in self._observers:
+            self._observers.remove(observer)
 
     async def start(self) -> None:
         if self._closed:
@@ -377,6 +393,7 @@ class EpisodeComposer:
         if self._subscription_id is not None:
             await self._event_bus.unsubscribe(self._subscription_id)
             self._subscription_id = None
+        self._observers.clear()
 
     async def _on_event(self, event: EventEnvelope[EventPayload]) -> None:
         if (
@@ -486,7 +503,20 @@ class EpisodeComposer:
             continuity,
             ("planning.task", "semantic.observation", "local.episodic.store"),
         )
-        return self._episodic_memory.persist_episode(episode)
+        persisted = self._episodic_memory.persist_episode(episode)
+        update = ProjectionUpdate(
+            ProjectionKind.EPISODE,
+            persisted.episode_id,
+            persisted.task_id,
+            None,
+        )
+        for observer in tuple(self._observers):
+            try:
+                observer(update)
+            except Exception:
+                # Projection observers cannot change authoritative task or memory state.
+                continue
+        return persisted
 
     @staticmethod
     def _digest_reference(value: str) -> str:

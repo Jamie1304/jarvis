@@ -226,6 +226,7 @@ from jarvis.production_capability import (
     ProductionVerificationEvidence,
     TrustedHostOperation,
 )
+from jarvis.projections import ProjectionObserver, ProjectionUpdate
 from jarvis.provisioning import (
     BrokerProvisioningAuthorizer,
     ProvisioningAuthorization,
@@ -991,6 +992,10 @@ class ApplicationRuntime:
         self._security_report = security_report
         self._close_lock = asyncio.Lock()
         self._closed = False
+        self._projection_observers: list[ProjectionObserver] = []
+        if container is not None:
+            container.episode_composer.add_observer(self._on_projection_update)
+            container.trace_service.add_observer(self._on_projection_update)
 
     @property
     def container(self) -> RuntimeContainer | None:
@@ -1007,6 +1012,30 @@ class ApplicationRuntime:
     @property
     def security_report(self) -> StartupSecurityReport | None:
         return self._security_report
+
+    def add_projection_observer(self, observer: ProjectionObserver) -> None:
+        """Register an application-owned listener for persisted product facts."""
+
+        if not callable(observer):
+            raise TypeError("projection observer must be callable")
+        if self._closed:
+            raise RuntimeError("application runtime is closed")
+        if self._container is not None and observer not in self._projection_observers:
+            self._projection_observers.append(observer)
+
+    def remove_projection_observer(self, observer: ProjectionObserver) -> None:
+        if observer in self._projection_observers:
+            self._projection_observers.remove(observer)
+
+    def _on_projection_update(self, update: ProjectionUpdate) -> None:
+        if self._closed:
+            return
+        for observer in tuple(self._projection_observers):
+            try:
+                observer(update)
+            except Exception:
+                # An optional desktop surface cannot affect runtime projections.
+                continue
 
     def start_background_services(self, loop: asyncio.AbstractEventLoop) -> None:
         """Start runtime-owned subscribers on the supplied owner event loop."""
@@ -2704,6 +2733,10 @@ class ApplicationRuntime:
                 return
             self._closed = True
             container = self._container
+            if container is not None:
+                container.episode_composer.remove_observer(self._on_projection_update)
+                container.trace_service.remove_observer(self._on_projection_update)
+            self._projection_observers.clear()
             self._container = None
             if container is not None:
                 await container.aclose()

@@ -38,6 +38,16 @@ items expose decision and delivery separately; refresh/list/render operations do
 not acknowledge delivery. Unknown Episode outcomes remain visibly UNKNOWN and
 are never presented as verified success.
 
+Projection convergence is event-driven. `EpisodeComposer` emits an application
+projection update only after the durable Episode is retrievable, and
+`TraceService` emits one only after the factual Trace record is appended.
+`ApplicationRuntime` owns those observers; `DesktopBackendHost` forwards the
+typed update to Qt, and the Qt signal performs the main-thread refresh. Task
+completion and elapsed time are not treated as evidence that Episode, Attention,
+or Activity is ready. The observer chain is removed before runtime shutdown, and
+late updates are dropped when the desktop is closing. Rendering never calls
+`mark_delivered`.
+
 Desktop one-time permission choices are submitted through
 `TrustedDesktopApprovalSurface`. The facade reloads the canonical pending request
 and creates a fingerprint-bound handoff before the runtime-owned trusted UI

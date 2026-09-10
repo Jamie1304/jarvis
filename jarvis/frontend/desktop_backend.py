@@ -11,6 +11,7 @@ from typing import Any
 from uuid import UUID
 
 from jarvis.application import AssistantEvent
+from jarvis.projections import ProjectionObserver, ProjectionUpdate
 from jarvis.runtime import ApplicationRuntime
 
 
@@ -40,6 +41,8 @@ class DesktopBackendHost:
         self._stopped = threading.Event()
         self._startup = DesktopBackendStartup(False, "Desktop backend has not started")
         self._lock = threading.Lock()
+        self._projection_listeners: list[ProjectionObserver] = []
+        self._closing = False
 
     @property
     def startup(self) -> DesktopBackendStartup:
@@ -65,6 +68,20 @@ class DesktopBackendHost:
             return operation(self._require_assistant())
 
         return self._submit(run())
+
+    def add_projection_listener(self, listener: ProjectionObserver) -> None:
+        """Forward persisted runtime projections to an application surface."""
+
+        if not callable(listener):
+            raise TypeError("projection listener must be callable")
+        with self._lock:
+            if not self._closing and listener not in self._projection_listeners:
+                self._projection_listeners.append(listener)
+
+    def remove_projection_listener(self, listener: ProjectionObserver) -> None:
+        with self._lock:
+            if listener in self._projection_listeners:
+                self._projection_listeners.remove(listener)
 
     def submit_async(self, operation: Callable[[Any], Any]) -> Future[Any]:
         """Execute an awaitable service operation on the owner event loop."""
@@ -96,6 +113,8 @@ class DesktopBackendHost:
     def close(self, *, timeout: float = 15.0) -> None:
         """Close runtime resources on their owning loop and join its thread."""
 
+        with self._lock:
+            self._closing = True
         loop = self._loop
         thread = self._thread
         if loop is None or thread is None or loop.is_closed():
@@ -114,6 +133,8 @@ class DesktopBackendHost:
             if not loop.is_closed():
                 raise
         finally:
+            with self._lock:
+                self._projection_listeners.clear()
             if not loop.is_closed():
                 loop.call_soon_threadsafe(loop.stop)
             if thread.is_alive():
@@ -136,6 +157,9 @@ class DesktopBackendHost:
         self._loop = loop
         try:
             self._runtime = self._runtime_factory()
+            add_observer = getattr(self._runtime, "add_projection_observer", None)
+            if callable(add_observer):
+                add_observer(self._forward_projection)
             start_services = getattr(self._runtime, "start_background_services", None)
             if callable(start_services):
                 start_services(loop)
@@ -149,3 +173,15 @@ class DesktopBackendHost:
             loop.run_forever()
         loop.close()
         self._stopped.set()
+
+    def _forward_projection(self, update: ProjectionUpdate) -> None:
+        with self._lock:
+            if self._closing:
+                return
+            listeners = tuple(self._projection_listeners)
+        for listener in listeners:
+            try:
+                listener(update)
+            except Exception:
+                # A closed or failed UI surface cannot affect runtime projections.
+                continue

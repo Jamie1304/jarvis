@@ -23,7 +23,7 @@ def run_desktop_app(
     """Run the local desktop chat client, failing clearly if its optional UI extra is absent."""
 
     try:
-        from PySide6.QtCore import QObject, Qt, QTimer, Signal
+        from PySide6.QtCore import QObject, Qt, Signal
         from PySide6.QtGui import QFont
         from PySide6.QtWidgets import (
             QApplication,
@@ -71,6 +71,7 @@ def run_desktop_app(
         permission_action_finished = Signal(object)
         operation_finished = Signal(str, object)
         persona_finished = Signal(object)
+        projection_updated = Signal(object)
 
     class MainWindow(QMainWindow):
         def __init__(self) -> None:
@@ -96,6 +97,8 @@ def run_desktop_app(
             self._signals.permission_action_finished.connect(self._permission_action_finished)
             self._signals.operation_finished.connect(self._operation_finished)
             self._signals.persona_finished.connect(self._persona_saved)
+            self._signals.projection_updated.connect(self._projection_updated)
+            backend.add_projection_listener(self._signals.projection_updated.emit)
             self._safe_mode = backend.submit(lambda service: service.safe_mode).result()
             self._conversation_id = (
                 backend.submit(lambda service: service.create_conversation()).result()
@@ -667,6 +670,13 @@ def run_desktop_app(
             if page == ShellSection.MEMORY.value:
                 self._refresh_page("episodes")
 
+        def _projection_updated(self, _update: object) -> None:
+            if self._safe_mode:
+                return
+            self._refresh_section(ShellSection.OVERVIEW.value)
+            self._refresh_page("episodes")
+            self._refresh_page(ShellSection.ACTIVITY.value)
+
         def _refresh_page(self, page: str) -> None:
             future = backend.submit_async(lambda service: service.refresh_rows(page))
             future.add_done_callback(lambda result: self._page_rows_finished(page, result))
@@ -754,12 +764,6 @@ def run_desktop_app(
                 future.result()
                 self._refresh_page(ShellSection.TASKS.value)
                 self._refresh_current_context()
-                # EventBus-owned Episode and Trace projections settle after the
-                # terminal task event; refresh once on the Qt thread so the
-                # product converges without a polling loop.
-                QTimer.singleShot(150, lambda: self._refresh_section("overview"))
-                QTimer.singleShot(150, lambda: self._refresh_page("episodes"))
-                QTimer.singleShot(150, lambda: self._refresh_page("activity"))
             except Exception as error:
                 self._signals.failed.emit(str(error))
 
@@ -1219,6 +1223,7 @@ def run_desktop_app(
         def closeEvent(self, event: Any) -> None:
             if self._text_future is not None and self._conversation_id is not None:
                 backend.cancel(self._conversation_id)
+            backend.remove_projection_listener(self._signals.projection_updated.emit)
             backend.close()
             event.accept()
 

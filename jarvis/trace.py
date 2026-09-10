@@ -53,6 +53,7 @@ from jarvis.events.models import (
     ToolStarted,
 )
 from jarvis.planning.models import EffectOutcome
+from jarvis.projections import ProjectionKind, ProjectionObserver, ProjectionUpdate
 
 
 class TraceError(ValueError):
@@ -813,6 +814,19 @@ class TraceService:
         self._event_bus = event_bus
         self._subscription_id: str | None = None
         self._traces: dict[UUID, ExecutionTrace] = {}
+        self._observers: list[ProjectionObserver] = []
+
+    def add_observer(self, observer: ProjectionObserver) -> None:
+        """Register a non-authoritative observer notified after trace persistence."""
+
+        if not callable(observer):
+            raise TypeError("trace observer must be callable")
+        if observer not in self._observers:
+            self._observers.append(observer)
+
+    def remove_observer(self, observer: ProjectionObserver) -> None:
+        if observer in self._observers:
+            self._observers.remove(observer)
 
     async def start(self) -> None:
         if self._subscription_id is None:
@@ -823,6 +837,7 @@ class TraceService:
             await self._event_bus.unsubscribe(self._subscription_id)
             self._subscription_id = None
         self._traces.clear()
+        self._observers.clear()
 
     def bind_goal_task(self, goal_id: UUID, task_id: UUID) -> None:
         if not isinstance(goal_id, UUID) or not isinstance(task_id, UUID):
@@ -889,6 +904,7 @@ class TraceService:
             **fields,
         )
         trace.append(event)
+        self._notify(event)
         return event
 
     async def _on_event(self, event: EventEnvelope[EventPayload]) -> None:
@@ -901,6 +917,21 @@ class TraceService:
             trace = self._store.load(trace_id)
             self._traces[trace_id] = trace
         trace.append(trace_event)
+        self._notify(trace_event)
+
+    def _notify(self, event: TraceEvent) -> None:
+        update = ProjectionUpdate(
+            ProjectionKind.TRACE,
+            event.event_id,
+            event.task_id,
+            event.correlation_id,
+        )
+        for observer in tuple(self._observers):
+            try:
+                observer(update)
+            except Exception:
+                # Projection observers cannot change the persisted trace fact.
+                continue
 
     def _translate(self, event: EventEnvelope[EventPayload]) -> TraceEvent | None:
         payload = event.payload
