@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Mapping
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import UUID, uuid4
 
@@ -345,6 +345,125 @@ def test_context_reevaluation_traces_normal_dnd_release_after_restart(tmp_path: 
         restarted.close()
         restarted_attention.close()
         restarted_trace_store.close()
+
+
+def test_generic_attention_without_lineage_reconciles_without_trace_requirement(
+    tmp_path: Path,
+) -> None:
+    now = [NOW]
+    store = SQLiteAttentionStore(tmp_path / "attention.sqlite3")
+    trace_store = TraceStore(tmp_path / "trace.sqlite3")
+    policy = AttentionPolicy(store, clock=lambda: now[0])
+    generic = AttentionItem(
+        uuid4(),
+        "capability.health",
+        "default",
+        AttentionPriority.NORMAL,
+        NOW,
+        cooldown_until=NOW + timedelta(hours=1),
+        dedupe_key="generic-health-transition",
+        summary="Bounded generic health fact",
+    )
+    intelligence = InterruptionIntelligence(
+        SemanticEventService(InMemoryEventBus()),
+        policy,
+        TraceService(trace_store, InMemoryEventBus()),
+        context_provider=lambda: InterruptionContext.unknown(),
+    )
+    try:
+        initial = policy.enqueue(generic)
+        assert initial.decision is AttentionDecision.DEFER
+        now[0] += timedelta(hours=2)
+        assert len(intelligence.reconcile(InterruptionContext.unknown(revision=2))) == 1
+        entry = policy.entry_for(generic.item_id)
+        stored = policy.item_for(generic.item_id)
+        assert entry is not None and entry.decision is AttentionDecision.DELIVER_NOW
+        assert stored is not None
+        assert stored.related_task_id is None
+        assert stored.related_correlation_id is None
+        assert stored.source_semantic_event_id is None
+        assert stored.interruption_reason_code is None
+        assert entry.delivered_at is None
+    finally:
+        intelligence.close()
+        store.close()
+        trace_store.close()
+
+
+def test_mixed_generic_and_p2c_attention_reconcile_independently(tmp_path: Path) -> None:
+    now = [NOW]
+    task_id, correlation_id = uuid4(), uuid4()
+    store = SQLiteAttentionStore(tmp_path / "attention.sqlite3")
+    trace_store = TraceStore(tmp_path / "trace.sqlite3")
+    policy = AttentionPolicy(store, clock=lambda: now[0])
+    generic = AttentionItem(
+        uuid4(),
+        "capability.health",
+        "default",
+        AttentionPriority.NORMAL,
+        NOW,
+        cooldown_until=NOW + timedelta(hours=1),
+        dedupe_key="mixed-generic-health",
+        summary="Bounded generic health fact",
+    )
+    p2c = AttentionItem(
+        uuid4(),
+        "interruption.task_waiting_for_user",
+        "default",
+        AttentionPriority.LOW,
+        NOW,
+        dedupe_key="mixed-p2c-queue",
+        summary="Bounded interruption fact",
+        interruption_class=InterruptionClass.QUEUE,
+        related_task_id=task_id,
+        related_correlation_id=correlation_id,
+        source_semantic_event_id=uuid4(),
+        interruption_reason_code=InterruptionReason.TASK_WAITING_FOR_USER.value,
+    )
+    trace = TraceService(trace_store, InMemoryEventBus())
+    intelligence = InterruptionIntelligence(
+        SemanticEventService(InMemoryEventBus()),
+        policy,
+        trace,
+        context_provider=lambda: _context(),
+    )
+    try:
+        assert policy.enqueue(generic).decision is AttentionDecision.DEFER
+        assert policy.enqueue(p2c, context=_context()).decision is AttentionDecision.DEFER
+        trace.record(
+            TraceEventType.ATTENTION,
+            "Attention decision recorded",
+            task_id=task_id,
+            correlation_id=correlation_id,
+            result={"attention_item_id": str(p2c.item_id), "attention_decision": "defer"},
+        )
+        now[0] += timedelta(hours=2)
+        transitions = intelligence.reconcile(_context(revision=2))
+        assert {transition.item_id for transition in transitions} == {
+            generic.item_id,
+            p2c.item_id,
+        }
+        generic_entry = policy.entry_for(generic.item_id)
+        p2c_entry = policy.entry_for(p2c.item_id)
+        assert generic_entry is not None and generic_entry.decision is AttentionDecision.DELIVER_NOW
+        assert p2c_entry is not None and p2c_entry.decision is AttentionDecision.DELIVER_NOW
+        assert generic_entry.delivered_at is None and p2c_entry.delivered_at is None
+        events = trace.get(task_id=task_id).events
+        reevaluations = tuple(
+            event
+            for event in events
+            if event.event_type is TraceEventType.ATTENTION
+            and isinstance(event.result, Mapping)
+            and event.result.get("reevaluation_reason") == "context_reevaluation"
+        )
+        assert len(reevaluations) == 1
+        result = reevaluations[0].result
+        assert isinstance(result, Mapping)
+        assert result["attention_item_id"] == str(p2c.item_id)
+    finally:
+        intelligence.close()
+        store.close()
+        trace_store.close()
 
 
 def test_policy_decision_is_not_delivery_acknowledgement() -> None:

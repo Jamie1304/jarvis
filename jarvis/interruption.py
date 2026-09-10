@@ -242,7 +242,7 @@ class InterruptionIntelligence:
         transitions = self._attention.reconcile(context=context)
         for transition in transitions:
             item = self._attention.item_for(transition.item_id)
-            if item is not None:
+            if item is not None and self._owns_interruption_item(item):
                 self._trace_reevaluation(item, transition, context)
         return transitions
 
@@ -490,7 +490,9 @@ class InterruptionIntelligence:
         item: AttentionItem,
         transition: AttentionReevaluation,
         context: InterruptionContext,
-    ) -> UUID:
+    ) -> UUID | None:
+        if item.related_task_id is None and item.related_correlation_id is None:
+            return None
         event_id = uuid5(
             _TRACE_NAMESPACE,
             "reevaluation:"
@@ -549,6 +551,16 @@ class InterruptionIntelligence:
             result=result,
         )
         return event.event_id
+
+    @staticmethod
+    def _owns_interruption_item(item: AttentionItem) -> bool:
+        """Recognize only durable items created by interruption intelligence."""
+
+        return (
+            item.interruption_class is not None
+            and item.interruption_reason_code is not None
+            and (item.source_semantic_event_id is not None or item.source_pattern_id is not None)
+        )
 
 
 __all__ = [
