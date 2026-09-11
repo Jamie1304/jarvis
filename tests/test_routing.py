@@ -96,6 +96,7 @@ def request(**values: Any) -> RouteRequest:
     defaults: dict[str, Any] = {
         "task": "answer",
         "profile": "default",
+        "classification": "safe_public",
         "resource_state": _hardware(tags=frozenset({"windows"})),
     }
     defaults.update(values)

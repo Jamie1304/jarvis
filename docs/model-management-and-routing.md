@@ -57,9 +57,12 @@ machine-measurement, and task-specific cookbook evidence, while
 privacy, health, stale, capability, context, structured/tool, cost/latency,
 concurrency, and resource filters run before deterministic ranking. Unknown
 health, capacity, cost, latency, or task evidence remains unknown; it is never
-treated as healthy, free, zero-latency, or verified. Reliability evidence is
-considered before policy efficiency and ties end in the full provider/model
-variant identity.
+treated as healthy, free, zero-latency, or verified. With an explicit reliability
+threshold, that threshold is applied before policy optimization: `LOWEST_COST`,
+`SPEED_FIRST`, and `BALANCED` optimize their documented efficiency factors only
+among qualifying candidates, while `QUALITY_FIRST` remains reliability-oriented.
+Without an explicit threshold, best-effort routing remains conservative and
+reliability-first. Ties end in the full provider/model variant identity.
 
 Policies are `LOCAL_ONLY`, `PREFER_LOCAL`, `QUALITY_FIRST`, `SPEED_FIRST`,
 `LOWEST_COST`, `BALANCED`, and `PRIVACY_STRICT`. Unknown capacity or an

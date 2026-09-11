@@ -230,8 +230,10 @@ class ContextManager:
         model: str,
         context_limit: int,
     ) -> GenerationRequest:
-        if context_limit != context.provider_context_limit:
+        if context_limit <= 0 or context_limit > context.provider_context_limit:
             raise ValueError("Agent context/provider limits disagree")
+        if context.reserved_output >= context_limit:
+            raise ValueError("Reserved output exceeds selected provider context")
         protected = {
             "request": context.request,
             "goal": context.goal,
@@ -523,7 +525,10 @@ class AgentLoop:
                         task_class=agent_context.task_class,
                         responsibility=agent_context.responsibility,
                         role=agent_context.required_role,
-                        context_tokens=agent_context.token_estimate,
+                        context_tokens=max(
+                            agent_context.token_estimate,
+                            sum(len(item.content) for item in messages) // 4,
+                        ),
                         requires_tools=bool(
                             messages
                             and any(

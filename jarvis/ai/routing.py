@@ -250,9 +250,7 @@ class RouteRequest:
         try:
             classification = PrivacyClassification(self.classification.casefold())
         except ValueError:
-            # Existing compatibility callers used ``internal`` for a local
-            # application descriptor. It is not a P3A classification.
-            classification = PrivacyClassification.SAFE_PUBLIC
+            classification = PrivacyClassification.UNKNOWN
         return PrivacyContext(classification)
 
 
@@ -740,6 +738,22 @@ class ProviderRouter:
             candidate.identity.quantization,
             candidate.identity.runtime,
         )
+        if request.minimum_expected_reliability is not None:
+            if request.policy is RoutingPolicy.LOWEST_COST:
+                return cost, latency, local, reliability, quality, identity
+            if request.policy is RoutingPolicy.SPEED_FIRST:
+                return latency, cost, local, reliability, quality, identity
+            if request.policy is RoutingPolicy.PREFER_LOCAL:
+                return local, cost, latency, reliability, quality, identity
+            if request.policy is RoutingPolicy.BALANCED:
+                return (
+                    local,
+                    cost,
+                    latency,
+                    ProviderRouter._resource_size(candidate),
+                    reliability,
+                    identity,
+                )
         if request.policy is RoutingPolicy.QUALITY_FIRST:
             return reliability_tier, reliability, preferred, quality, local, latency, identity
         if request.policy is RoutingPolicy.SPEED_FIRST:
@@ -868,6 +882,19 @@ class InferenceDispatcher:
             except asyncio.CancelledError:
                 raise
             except Exception as error:
+                failure = _failure_class(error)
+                if failure is RouteFailureClass.UNKNOWN_OUTCOME:
+                    unknown = RouteDecision(
+                        RouteStatus.UNKNOWN,
+                        None,
+                        current_decision.fallbacks,
+                        ("provider outcome is unknown; adaptive reroute is forbidden",),
+                        current_decision.resource_decision,
+                        (("failure_class", failure.value), *current_decision.evidence),
+                    )
+                    raise InferenceDispatchError(
+                        "Inference outcome is unknown; no fallback was attempted", unknown
+                    ) from error
                 if attempt + 1 >= self._max_attempts:
                     exhausted = RouteDecision(
                         RouteStatus.ATTEMPTS_EXHAUSTED,
@@ -882,7 +909,7 @@ class InferenceDispatcher:
                     ) from error
                 current_intent = replace(
                     current_intent,
-                    previous_failure=_failure_class(error),
+                    previous_failure=failure,
                     excluded_identities=(*current_intent.excluded_identities, candidate.identity),
                 )
             current_decision = self.route(current_intent)
@@ -934,6 +961,19 @@ class InferenceDispatcher:
             except asyncio.CancelledError:
                 raise
             except Exception as error:
+                failure = _failure_class(error)
+                if failure is RouteFailureClass.UNKNOWN_OUTCOME:
+                    unknown = RouteDecision(
+                        RouteStatus.UNKNOWN,
+                        None,
+                        current_decision.fallbacks,
+                        ("provider outcome is unknown; adaptive reroute is forbidden",),
+                        current_decision.resource_decision,
+                        (("failure_class", failure.value), *current_decision.evidence),
+                    )
+                    raise InferenceDispatchError(
+                        "Streaming outcome is unknown; no fallback was attempted", unknown
+                    ) from error
                 if yielded or attempt + 1 >= self._max_attempts:
                     exhausted = RouteDecision(
                         RouteStatus.ATTEMPTS_EXHAUSTED,
@@ -948,7 +988,7 @@ class InferenceDispatcher:
                     ) from error
                 current_intent = replace(
                     current_intent,
-                    previous_failure=_failure_class(error),
+                    previous_failure=failure,
                     excluded_identities=(*current_intent.excluded_identities, candidate.identity),
                 )
             current_decision = self.route(current_intent)

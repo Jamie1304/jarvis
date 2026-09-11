@@ -8,6 +8,7 @@ from uuid import UUID, uuid4
 
 from jarvis.ai.models import (
     ChatMessage,
+    GenerationChunk,
     GenerationRequest,
     MessageRole,
     PrivacyContext,
@@ -17,6 +18,7 @@ from jarvis.ai.privacy import PrivacyGuardedProvider
 from jarvis.ai.providers.base import AIProvider
 from jarvis.ai.providers.registry import ProviderMetadata
 from jarvis.ai.routing import (
+    DispatchChunk,
     InferenceDispatcher,
     RouteRequest,
     RoutingPolicy,
@@ -188,15 +190,33 @@ class ConversationService:
             ),
         )
         try:
+            stream: AsyncIterator[GenerationChunk | DispatchChunk]
             if self._dispatcher is None:
                 stream = self._provider.stream(request)
             else:
                 assert decision is not None
-                stream = (
-                    item.chunk
-                    async for item in self._dispatcher.stream(request, intent, decision=decision)
-                )
-            async for chunk in stream:
+                stream = self._dispatcher.stream(request, intent, decision=decision)
+            async for item in stream:
+                if isinstance(item, DispatchChunk):
+                    actual = item.decision.primary
+                    current_session = (
+                        self._session_store.get(session_id)
+                        if self._session_store is not None and session_id is not None
+                        else None
+                    )
+                    if actual is not None and (
+                        current_session is None
+                        or current_session.provider_id != actual.provider_id
+                        or current_session.model_id != actual.model_id
+                    ):
+                        session_id = self._ensure_session(
+                            conversation_id,
+                            provider_id=actual.provider_id,
+                            model=actual.model_id,
+                        )
+                    chunk = item.chunk
+                else:
+                    chunk = item
                 self._raise_if_cancelled(
                     cancellation, conversation_id, generation, self._generations
                 )
