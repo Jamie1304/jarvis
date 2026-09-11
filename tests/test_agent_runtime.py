@@ -34,6 +34,7 @@ from jarvis.ai.models import (
     ProviderHealth,
 )
 from jarvis.ai.providers.base import AIProvider
+from jarvis.ai.providers.registry import ProviderLocality, ProviderMetadata
 from jarvis.tools.base import Tool
 from jarvis.tools.calculator import CalculatorTool
 from jarvis.tools.local_time import LocalTimeTool
@@ -142,6 +143,9 @@ def _loop(provider: AIProvider) -> AgentLoop:
         ToolRegistry((CalculatorTool(), LocalTimeTool())),
         model="fake",
         context_limit=4096,
+        provider_metadata=ProviderMetadata(
+            "test-local", "Test local", "test", locality=ProviderLocality.LOCAL
+        ),
     )
 
 
@@ -324,6 +328,9 @@ async def test_safe_pre_effect_failure_retries_and_then_finalizes() -> None:
         ToolRegistry((SafeRetryTool(),)),
         model="fake",
         context_limit=4096,
+        provider_metadata=ProviderMetadata(
+            "test-local", "Test local", "test", locality=ProviderLocality.LOCAL
+        ),
     )
     result = await loop.run(uuid4(), "retry safely")
     assert result.termination_reason is AgentTerminationReason.COMPLETED

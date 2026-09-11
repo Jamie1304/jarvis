@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 from uuid import UUID
 
-from jarvis.ai.models import ProviderHealth
+from jarvis.ai.models import PrivacyContext, ProviderHealth
 from jarvis.ai.providers.ollama_runtime import OllamaRuntimeManager, OllamaRuntimeStatus
 from jarvis.control_center import (
     ControlCenterSection,
@@ -391,6 +391,7 @@ class JarvisAssistantService:
         text: str,
         *,
         medium: OutputMedium = OutputMedium.DESKTOP,
+        privacy_context: PrivacyContext | None = None,
     ) -> AsyncIterator[AssistantEvent]:
         """Stream text and begin TTS as soon as a safe sentence is available."""
 
@@ -416,7 +417,9 @@ class JarvisAssistantService:
 
             tts_task = self._tts.start_incremental(speakable_chunks())
         try:
-            async for update in self._conversation.stream_reply(conversation_id, normalized):
+            async for update in self._conversation.stream_reply(
+                conversation_id, normalized, privacy_context=privacy_context
+            ):
                 response += update.content
                 formatted_content = profile.format(update.content)
                 if tts_queue is not None:

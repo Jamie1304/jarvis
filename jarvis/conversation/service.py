@@ -10,7 +10,6 @@ from jarvis.ai.models import (
     ChatMessage,
     GenerationRequest,
     MessageRole,
-    PrivacyClassification,
     PrivacyContext,
     ProviderHealth,
 )
@@ -51,7 +50,7 @@ class ConversationService:
             else PrivacyGuardedProvider(
                 provider,
                 provider_metadata
-                or ProviderMetadata(provider_id, provider_id, "compatibility", True),
+                or ProviderMetadata(provider_id, provider_id, "untrusted-compatibility"),
             )
         )
         self._model = model
@@ -120,9 +119,18 @@ class ConversationService:
         await self._provider.aclose()
 
     async def stream_reply(
-        self, conversation_id: UUID, user_content: str
+        self,
+        conversation_id: UUID,
+        user_content: str,
+        *,
+        privacy_context: PrivacyContext | None = None,
     ) -> AsyncIterator[ConversationUpdate]:
-        """Store a user message then yield and retain one assistant response."""
+        """Store a user message then yield and retain one assistant response.
+
+        Remote disclosure classification is trusted application input. An
+        omitted classification remains UNKNOWN and is blocked by the privacy
+        boundary for non-local providers.
+        """
 
         messages = self._messages.setdefault(conversation_id, [])
         session_id = self._ensure_session(conversation_id)
@@ -138,12 +146,14 @@ class ConversationService:
         self._cancellations[conversation_id] = cancellation
         assistant_id = uuid4()
         content = ""
+        provided_privacy = privacy_context or PrivacyContext()
         request = GenerationRequest(
             messages=self._within_context(messages),
             model=self._model,
             context_limit=self._context_limit,
             privacy_context=PrivacyContext(
-                PrivacyClassification.SAFE_PUBLIC,
+                provided_privacy.classification,
+                provided_privacy.known_private_values,
                 allowed_message_ids=(messages[-1].id,),
             ),
         )

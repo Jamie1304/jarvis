@@ -22,7 +22,6 @@ from jarvis.ai.models import (
     ChatMessage,
     GenerationRequest,
     MessageRole,
-    PrivacyClassification,
     PrivacyContext,
 )
 from jarvis.ai.privacy import PrivacyGuardedProvider
@@ -120,6 +119,7 @@ class AgentContext:
     reserved_output: int = 1024
     priority: int = 0
     provenance: tuple[str, ...] = ()
+    privacy_context: PrivacyContext = PrivacyContext()
 
     def __post_init__(self) -> None:
         for name in ("request", "goal"):
@@ -132,6 +132,8 @@ class AgentContext:
             raise ValueError("Agent context accounting is invalid")
         if self.reserved_output >= self.provider_context_limit:
             raise ValueError("Reserved output must leave context capacity")
+        if not isinstance(self.privacy_context, PrivacyContext):
+            raise ValueError("Agent privacy context is invalid")
         for field_name in (
             "constraints",
             "selected_memory",
@@ -211,6 +213,19 @@ class ContextManager:
             json.dumps(protected, sort_keys=True, separators=(",", ":")),
         )
         bounded = self._compact(tuple(messages), context_limit, context.reserved_output)
+        privacy = context.privacy_context
+        known_private_values = tuple(
+            dict.fromkeys(
+                (
+                    *privacy.known_private_values,
+                    *context.selected_memory,
+                    *context.required_knowledge,
+                    *context.evidence,
+                    *context.tool_outputs,
+                    *(value for pair in context.security_context for value in pair),
+                )
+            )
+        )
         return GenerationRequest(
             messages=tuple(
                 ChatMessage(
@@ -221,18 +236,9 @@ class ContextManager:
             model=model,
             context_limit=context_limit,
             privacy_context=PrivacyContext(
-                PrivacyClassification.SANITIZABLE,
-                known_private_values=tuple(
-                    dict.fromkeys(
-                        (
-                            *context.selected_memory,
-                            *context.required_knowledge,
-                            *context.evidence,
-                            *context.tool_outputs,
-                            *(value for pair in context.security_context for value in pair),
-                        )
-                    )
-                ),
+                privacy.classification,
+                known_private_values=known_private_values,
+                allowed_message_ids=privacy.allowed_message_ids,
             ),
         )
 
@@ -403,7 +409,7 @@ class AgentLoop:
             else PrivacyGuardedProvider(
                 provider,
                 provider_metadata
-                or ProviderMetadata("compatibility", "compatibility", "compatibility", True),
+                or ProviderMetadata("compatibility", "compatibility", "untrusted-compatibility"),
             )
         )
         self._registry = registry

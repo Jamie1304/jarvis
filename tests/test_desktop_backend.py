@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import cast
 from uuid import UUID
 
+from jarvis.ai.providers.registry import ProviderLocality, ProviderMetadata
 from jarvis.ai.sessions import AgentSessionStore, AgentSessionType
 from jarvis.application import AssistantEvent, AssistantEventKind, JarvisAssistantService
 from jarvis.bootstrap import create_application_runtime, create_desktop_facade_from_runtime
@@ -47,6 +48,9 @@ def test_desktop_backend_owns_runtime_and_session_store_for_sequential_chat(
             session_store=store,
             session_type=AgentSessionType.VOICE,
             provider_id="fake",
+            provider_metadata=ProviderMetadata(
+                "fake", "Fake", "test", locality=ProviderLocality.LOCAL
+            ),
         )
         return JarvisAssistantService(conversation)
 

@@ -4,6 +4,10 @@ Every provider-neutral text inference request crosses `PrivacyGuardedProvider`.
 The application supplies trusted provider metadata; only metadata explicitly
 marked local may pass through without cloud sanitization. Provider names,
 endpoints, model names, prompts, and responses never establish locality.
+Missing provider metadata is treated as `UNKNOWN`, never as local. Conversation
+and agent callers must provide a typed `PrivacyContext` to authorize a remote
+`SAFE_PUBLIC` or `SANITIZABLE` request; omitted classification remains
+`UNKNOWN` and is blocked for non-local providers.
 
 The remote path is:
 
@@ -13,12 +17,13 @@ placeholder restoration -> ordinary untrusted result`
 
 `ConversationService` selects only the current user message for a remote
 conversation request, so process-local history is not automatically disclosed.
-`ContextManager` marks selected memory, knowledge, evidence, tool outputs, and
-security-context values as local known-private inputs. The boundary performs
-bounded deterministic substitution and validates the exact serialized request
+`ContextManager` carries the trusted agent `PrivacyContext` and includes
+selected memory, knowledge, evidence, tool outputs, and security-context
+values in the request-local known-private set. The boundary performs bounded
+deterministic substitution and validates the exact serialized request
 immediately before provider invocation. Unknown privacy classification,
 local-only required context, malformed envelopes, and detected secrets fail
-closed with `CLOUD_ROUTE_BLOCKED_PRIVACY`.
+closed with a privacy-specific reason code.
 
 Memory, UserModel retrieval, credentials, and tool authority remain local.
 Remote inference receives no retrieval API and no authority object. Credentials

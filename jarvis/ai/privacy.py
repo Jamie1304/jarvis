@@ -257,7 +257,12 @@ class PrivacyBoundary:
     ) -> str:
         if not isinstance(content, str) or len(content) > _MAX_REMOTE_OUTPUT:
             raise RemoteOutputRejectedError(PrivacyReason.REMOTE_OUTPUT_UNTRUSTED.value)
-        if any(item.value in content for item in placeholders) or _SECRET.search(content):
+        known_values = tuple(dict.fromkeys(request.privacy_context.known_private_values))
+        if (
+            any(value in content for value in known_values)
+            or any(item.value in content for item in placeholders)
+            or _SECRET.search(content)
+        ):
             raise RemoteOutputRejectedError(PrivacyReason.REMOTE_OUTPUT_UNTRUSTED.value)
         for item in placeholders:
             content = content.replace(item.token, item.value)

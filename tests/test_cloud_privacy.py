@@ -184,8 +184,21 @@ async def test_conversation_does_not_send_process_local_history() -> None:
         ),
     )
     conversation_id = service.create_conversation()
-    await anext(service.stream_reply(conversation_id, "private-user-771@example.test"))
-    [update async for update in service.stream_reply(conversation_id, "Rewrite this sentence.")]
+    await anext(
+        service.stream_reply(
+            conversation_id,
+            "private-user-771@example.test",
+            privacy_context=PrivacyContext(PrivacyClassification.SANITIZABLE),
+        )
+    )
+    [
+        update
+        async for update in service.stream_reply(
+            conversation_id,
+            "Rewrite this sentence.",
+            privacy_context=PrivacyContext(PrivacyClassification.SAFE_PUBLIC),
+        )
+    ]
 
     assert len(provider.requests) == 2
     assert all(
@@ -217,6 +230,7 @@ async def test_agent_context_and_tool_outputs_are_sanitized_before_remote_captur
             selected_memory=("BLUE-ORCHID-92814",),
             tool_outputs=("private-contact-284@example.test",),
             provider_context_limit=4096,
+            privacy_context=PrivacyContext(PrivacyClassification.SANITIZABLE),
         ),
     )
 
@@ -224,6 +238,217 @@ async def test_agent_context_and_tool_outputs_are_sanitized_before_remote_captur
     captured = "\n".join(message.content for message in provider.requests[0].messages)
     assert "BLUE-ORCHID-92814" not in captured
     assert "private-contact-284@example.test" not in captured
+
+
+@pytest.mark.asyncio
+async def test_missing_conversation_metadata_is_unknown_and_blocks_synthetic_private_text() -> None:
+    provider = CapturingProvider()
+    service = ConversationService(provider, model="remote-model", context_limit=4096)
+    conversation_id = service.create_conversation()
+
+    with pytest.raises(PrivacyBlockedError):
+        await anext(
+            service.stream_reply(
+                conversation_id,
+                "BLUE-ORCHID-92814",
+            )
+        )
+
+    assert provider.requests == []
+
+
+@pytest.mark.asyncio
+async def test_missing_agent_metadata_is_unknown_and_blocks_before_provider_invocation() -> None:
+    provider = CapturingProvider('{"kind":"response","content":"done"}')
+    loop = AgentLoop(provider, ToolRegistry(()), model="remote-model", context_limit=4096)
+
+    result = await loop.run(
+        uuid4(),
+        "BLUE-ORCHID-92814",
+        context=AgentContext(
+            request="BLUE-ORCHID-92814",
+            goal="GOAL-BLUE-ORCHID-92814",
+            provider_context_limit=4096,
+        ),
+    )
+
+    assert result.termination_reason is AgentTerminationReason.PRIVACY_BLOCKED
+    assert provider.requests == []
+
+
+@pytest.mark.asyncio
+async def test_remote_conversation_requires_explicit_privacy_classification() -> None:
+    provider = CapturingProvider()
+    service = ConversationService(
+        provider,
+        model="remote-model",
+        context_limit=4096,
+        provider_metadata=ProviderMetadata(
+            "remote", "Remote", "test", locality=ProviderLocality.REMOTE
+        ),
+    )
+    conversation_id = service.create_conversation()
+
+    with pytest.raises(PrivacyBlockedError):
+        await anext(service.stream_reply(conversation_id, "BLUE-ORCHID-92814"))
+
+    assert provider.requests == []
+
+
+@pytest.mark.asyncio
+async def test_explicit_remote_safe_public_conversation_remains_allowed() -> None:
+    provider = CapturingProvider()
+    service = ConversationService(
+        provider,
+        model="remote-model",
+        context_limit=4096,
+        provider_metadata=ProviderMetadata(
+            "remote", "Remote", "test", locality=ProviderLocality.REMOTE
+        ),
+    )
+    conversation_id = service.create_conversation()
+
+    [
+        update
+        async for update in service.stream_reply(
+            conversation_id,
+            "The public release is scheduled for Friday.",
+            privacy_context=PrivacyContext(PrivacyClassification.SAFE_PUBLIC),
+        )
+    ]
+
+    assert (
+        provider.requests[0].messages[-1].content == "The public release is scheduled for Friday."
+    )
+
+
+@pytest.mark.asyncio
+async def test_explicit_remote_sanitizable_conversation_protects_known_synthetic_value() -> None:
+    provider = CapturingProvider()
+    service = ConversationService(
+        provider,
+        model="remote-model",
+        context_limit=4096,
+        provider_metadata=ProviderMetadata(
+            "remote", "Remote", "test", locality=ProviderLocality.REMOTE
+        ),
+    )
+    conversation_id = service.create_conversation()
+
+    [
+        update
+        async for update in service.stream_reply(
+            conversation_id,
+            "Please summarize BLUE-ORCHID-92814.",
+            privacy_context=PrivacyContext(
+                PrivacyClassification.SANITIZABLE, ("BLUE-ORCHID-92814",)
+            ),
+        )
+    ]
+
+    captured = provider.requests[0].messages[-1].content
+    assert "BLUE-ORCHID-92814" not in captured
+    assert "<PRIVATE_1>" in captured
+
+
+@pytest.mark.asyncio
+async def test_explicit_remote_agent_sanitizes_request_goal_and_constraints() -> None:
+    provider = CapturingProvider('{"kind":"response","content":"done"}')
+    loop = AgentLoop(
+        provider,
+        ToolRegistry(()),
+        model="remote-model",
+        context_limit=4096,
+        provider_metadata=ProviderMetadata(
+            "remote", "Remote", "test", locality=ProviderLocality.REMOTE
+        ),
+    )
+    values = (
+        "BLUE-ORCHID-92814",
+        "GOAL-BLUE-ORCHID-92814",
+        "CONSTRAINT-BLUE-ORCHID-92814",
+    )
+    result = await loop.run(
+        uuid4(),
+        values[0],
+        context=AgentContext(
+            request=values[0],
+            goal=values[1],
+            constraints=(values[2],),
+            provider_context_limit=4096,
+            privacy_context=PrivacyContext(PrivacyClassification.SANITIZABLE, values),
+        ),
+    )
+
+    captured = "\n".join(message.content for message in provider.requests[0].messages)
+    assert result.termination_reason is AgentTerminationReason.COMPLETED
+    assert all(value not in captured for value in values)
+
+
+@pytest.mark.asyncio
+async def test_explicit_local_conversation_and_agent_allow_private_nonsecret_text() -> None:
+    metadata = ProviderMetadata("local", "Local", "test", locality=ProviderLocality.LOCAL)
+    conversation_provider = CapturingProvider()
+    service = ConversationService(
+        conversation_provider,
+        model="local-model",
+        context_limit=4096,
+        provider_metadata=metadata,
+    )
+    conversation_id = service.create_conversation()
+    [update async for update in service.stream_reply(conversation_id, "BLUE-ORCHID-92814")]
+    assert conversation_provider.requests[0].messages[-1].content == "BLUE-ORCHID-92814"
+
+    agent_provider = CapturingProvider('{"kind":"response","content":"done"}')
+    result = await AgentLoop(
+        agent_provider,
+        ToolRegistry(()),
+        model="local-model",
+        context_limit=4096,
+        provider_metadata=metadata,
+    ).run(uuid4(), "BLUE-ORCHID-92814")
+    assert result.termination_reason is AgentTerminationReason.COMPLETED
+    assert "BLUE-ORCHID-92814" in agent_provider.requests[0].messages[0].content
+
+
+@pytest.mark.asyncio
+async def test_known_private_value_is_checked_on_inbound_even_without_outbound_placeholder() -> (
+    None
+):
+    provider = CapturingProvider("BLUE-ORCHID-92814")
+    with pytest.raises(RemoteOutputRejectedError):
+        await _remote(provider).generate(
+            _request(
+                "A public sentence.",
+                PrivacyContext(PrivacyClassification.SANITIZABLE, ("BLUE-ORCHID-92814",)),
+            )
+        )
+
+
+@pytest.mark.asyncio
+async def test_secret_generic_model_context_remains_blocked_for_explicit_local_agent() -> None:
+    provider = CapturingProvider('{"kind":"response","content":"done"}')
+    loop = AgentLoop(
+        provider,
+        ToolRegistry(()),
+        model="local-model",
+        context_limit=4096,
+        provider_metadata=ProviderMetadata(
+            "local", "Local", "test", locality=ProviderLocality.LOCAL
+        ),
+    )
+    result = await loop.run(
+        uuid4(),
+        "safe task",
+        context=AgentContext(
+            request="safe task",
+            goal="safe task",
+            security_context=(("credential", "password=synthetic-secret"),),
+            provider_context_limit=4096,
+        ),
+    )
+    assert result.termination_reason is AgentTerminationReason.PRIVACY_BLOCKED
+    assert provider.requests == []
 
 
 @pytest.mark.asyncio

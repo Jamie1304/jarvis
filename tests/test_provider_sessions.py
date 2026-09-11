@@ -9,6 +9,7 @@ import pytest
 from jarvis.ai.providers.registry import (
     ModelMetadata,
     ProviderDefinition,
+    ProviderLocality,
     ProviderMetadata,
     ProviderRegistry,
 )
@@ -92,6 +93,7 @@ async def test_conversation_reuses_voice_session_and_rebuilds_after_cancellation
         session_store=store,
         session_type=AgentSessionType.VOICE,
         provider_id="fake",
+        provider_metadata=ProviderMetadata("fake", "Fake", "test", locality=ProviderLocality.LOCAL),
     )
     conversation_id = service.create_conversation()
     original = service.session_id(conversation_id)
@@ -123,6 +125,7 @@ async def test_new_utterance_invalidates_previous_stream(tmp_path: Path) -> None
         session_store=store,
         session_type=AgentSessionType.VOICE,
         provider_id="fake",
+        provider_metadata=ProviderMetadata("fake", "Fake", "test", locality=ProviderLocality.LOCAL),
     )
     conversation_id = service.create_conversation()
     old_stream = service.stream_reply(conversation_id, "old")

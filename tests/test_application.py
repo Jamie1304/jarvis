@@ -4,6 +4,7 @@ from typing import Any, cast
 from uuid import uuid4
 
 import pytest
+from jarvis.ai.providers.registry import ProviderLocality, ProviderMetadata
 from jarvis.application import AssistantEventKind, JarvisAssistantService
 from jarvis.control_center import (
     ControlCenterSection,
@@ -40,6 +41,10 @@ from jarvis.speech.tts import TextToSpeechService
 from jarvis.voice.activation import AudioFrame
 
 from tests.fakes import FakeAIProvider, FakeTtsProvider
+
+_LOCAL_METADATA = ProviderMetadata(
+    "test-local", "Test local", "test", locality=ProviderLocality.LOCAL
+)
 
 
 class _State:
@@ -152,7 +157,12 @@ async def test_ui_facing_service_normalizes_streams_and_speaks() -> None:
     provider = FakeAIProvider(("25% van 800 is ", "200."))
     tts_provider = FakeTtsProvider()
     service = JarvisAssistantService(
-        ConversationService(provider, model="fake-model", context_limit=1024),
+        ConversationService(
+            provider,
+            model="fake-model",
+            context_limit=1024,
+            provider_metadata=_LOCAL_METADATA,
+        ),
         tts=TextToSpeechService(tts_provider, enabled=True),
     )
     conversation_id = service.create_conversation()
@@ -353,7 +363,12 @@ async def test_configured_application_services_keep_ui_on_typed_boundaries() -> 
 async def test_stream_failure_stops_tts_and_barge_in_rebuilds_response_session() -> None:
     tts_provider = FakeTtsProvider()
     service = JarvisAssistantService(
-        ConversationService(_FailingProvider(), model="fake-model", context_limit=1024),
+        ConversationService(
+            _FailingProvider(),
+            model="fake-model",
+            context_limit=1024,
+            provider_metadata=_LOCAL_METADATA,
+        ),
         tts=TextToSpeechService(tts_provider, enabled=True),
     )
     with pytest.raises(RuntimeError, match="provider stream failed"):
