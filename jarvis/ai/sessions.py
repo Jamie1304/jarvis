@@ -191,13 +191,25 @@ class AgentSessionStore:
         )
 
     def change_model(self, session_id: UUID, model_id: str) -> AgentSession:
+        return self.change_route(session_id, None, model_id)
+
+    def change_route(
+        self, session_id: UUID, provider_id: str | None, model_id: str
+    ) -> AgentSession:
+        """Archive a route-bound session while preserving its context lineage."""
+        if provider_id is not None and (
+            type(provider_id) is not str or not provider_id.strip() or len(provider_id) > 256
+        ):
+            raise ValueError("Session provider is invalid")
+        if type(model_id) is not str or not model_id.strip() or len(model_id) > 256:
+            raise ValueError("Session model is invalid")
         current = self.get(session_id)
         if current is None:
             raise KeyError(session_id)
         self.archive(session_id)
         return self.create(
             current.session_type,
-            current.provider_id,
+            provider_id if provider_id is not None else current.provider_id,
             model_id,
             context_metadata=current.context_metadata,
             parent_session_id=current.parent_session_id,

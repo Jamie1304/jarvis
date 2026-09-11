@@ -16,6 +16,11 @@ from jarvis.ai.models import (
 from jarvis.ai.privacy import PrivacyGuardedProvider
 from jarvis.ai.providers.base import AIProvider
 from jarvis.ai.providers.registry import ProviderMetadata
+from jarvis.ai.routing import (
+    InferenceDispatcher,
+    RouteRequest,
+    RoutingPolicy,
+)
 from jarvis.ai.sessions import AgentSessionStore, AgentSessionType
 from jarvis.core.errors import ConversationCancelledError
 
@@ -43,6 +48,8 @@ class ConversationService:
         session_type: AgentSessionType = AgentSessionType.INTERACTIVE,
         provider_id: str = "default",
         provider_metadata: ProviderMetadata | None = None,
+        dispatcher: InferenceDispatcher | None = None,
+        routing_policy: RoutingPolicy = RoutingPolicy.BALANCED,
     ) -> None:
         self._provider = (
             provider
@@ -62,6 +69,8 @@ class ConversationService:
         self._session_type = session_type
         self._provider_id = provider_id
         self._sessions: dict[UUID, UUID] = {}
+        self._dispatcher = dispatcher
+        self._routing_policy = routing_policy
 
     def create_conversation(self, system_prompt: str | None = None) -> UUID:
         """Create a conversation, optionally seeded with a system instruction."""
@@ -133,7 +142,7 @@ class ConversationService:
         """
 
         messages = self._messages.setdefault(conversation_id, [])
-        session_id = self._ensure_session(conversation_id)
+        session_id = self._sessions.get(conversation_id)
         self._generations[conversation_id] = self._generations.get(conversation_id, 0) + 1
         generation = self._generations[conversation_id]
         previous = self._cancellations.get(conversation_id)
@@ -147,6 +156,27 @@ class ConversationService:
         assistant_id = uuid4()
         content = ""
         provided_privacy = privacy_context or PrivacyContext()
+        decision = None
+        if self._dispatcher is not None:
+            intent = RouteRequest(
+                task=user_content,
+                profile="conversation",
+                task_class="conversation",
+                responsibility="conversation",
+                context_tokens=sum(len(item.content) for item in messages) // 4,
+                policy=self._routing_policy,
+                privacy_context=provided_privacy,
+            )
+            decision = self._dispatcher.route(intent)
+            if decision.primary is None:
+                raise RuntimeError("No eligible conversation inference model")
+            session_id = self._ensure_session(
+                conversation_id,
+                provider_id=decision.primary.provider_id,
+                model=decision.primary.model_id,
+            )
+        else:
+            session_id = self._ensure_session(conversation_id)
         request = GenerationRequest(
             messages=self._within_context(messages),
             model=self._model,
@@ -158,7 +188,15 @@ class ConversationService:
             ),
         )
         try:
-            async for chunk in self._provider.stream(request):
+            if self._dispatcher is None:
+                stream = self._provider.stream(request)
+            else:
+                assert decision is not None
+                stream = (
+                    item.chunk
+                    async for item in self._dispatcher.stream(request, intent, decision=decision)
+                )
+            async for chunk in stream:
                 self._raise_if_cancelled(
                     cancellation, conversation_id, generation, self._generations
                 )
@@ -187,25 +225,39 @@ class ConversationService:
                 )
             )
 
-    def _ensure_session(self, conversation_id: UUID) -> UUID | None:
+    def _ensure_session(
+        self,
+        conversation_id: UUID,
+        *,
+        provider_id: str | None = None,
+        model: str | None = None,
+    ) -> UUID | None:
         if self._session_store is None:
             return None
+        provider_id = provider_id or self._provider_id
+        model = model or self._model
         session_id = self._sessions.get(conversation_id)
         if session_id is None:
             session = self._session_store.create(
                 self._session_type,
-                self._provider_id,
-                self._model,
+                provider_id,
+                model,
                 context_metadata=(("conversation_id", str(conversation_id)),),
             )
             self._sessions[conversation_id] = session.session_id
             return session.session_id
         current = self._session_store.get(session_id)
+        if current is not None and (
+            current.provider_id != provider_id or current.model_id != model
+        ):
+            replacement = self._session_store.change_route(session_id, provider_id, model)
+            self._sessions[conversation_id] = replacement.session_id
+            return replacement.session_id
         if current is None or current.archived or not current.synchronized:
             replacement = (
                 self._session_store.rebuild(session_id)
                 if current
-                else self._session_store.create(self._session_type, self._provider_id, self._model)
+                else self._session_store.create(self._session_type, provider_id, model)
             )
             self._sessions[conversation_id] = replacement.session_id
             return replacement.session_id

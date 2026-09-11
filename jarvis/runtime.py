@@ -38,7 +38,7 @@ from jarvis.ai.model_manager import LocalModelManager
 from jarvis.ai.providers.base import AIProvider
 from jarvis.ai.providers.ollama_runtime import OllamaRuntimeManager
 from jarvis.ai.providers.registry import ProviderRegistry
-from jarvis.ai.routing import ProviderRouter
+from jarvis.ai.routing import InferenceDispatcher, ProviderRouter, RoutingFeedbackRecorder
 from jarvis.ai.sessions import AgentSessionStore
 from jarvis.artifacts import ArtifactStore
 from jarvis.attention import AttentionItem, AttentionPolicy, AttentionPriority, SQLiteAttentionStore
@@ -627,6 +627,8 @@ class RuntimeContainer:
     ai_provider: AIProvider
     resource_governor: ResourceGovernor
     provider_router: ProviderRouter
+    inference_dispatcher: InferenceDispatcher
+    routing_feedback: RoutingFeedbackRecorder
     model_manager: LocalModelManager
     model_knowledge: ModelKnowledgeService
     ollama_runtime: OllamaRuntimeManager
@@ -915,6 +917,7 @@ class RuntimeContainer:
                 self.event_bus,
                 self.startup_warmup,
                 self.control_center,
+                self.inference_dispatcher,
                 self.conversation,
                 self.model_manager,
                 self.model_knowledge,
@@ -1467,12 +1470,28 @@ class ApplicationRuntime:
                     f"Unsupported AI provider: {settings.ai_provider}"
                 ) from error
             resource_governor = ResourceGovernor(SystemResourceTelemetry())
-            provider_router = ProviderRouter(configured_provider_registry, resource_governor)
+            provider_router = ProviderRouter(
+                configured_provider_registry, resource_governor, model_knowledge
+            )
             model_knowledge.refresh_registry(
                 configured_provider_registry,
                 observed_at=datetime.now(UTC),
                 source="configured_provider_registry",
             )
+            inference_dispatcher = InferenceDispatcher(
+                provider_router,
+                configured_provider_registry,
+                configurations={
+                    settings.ai_provider: {
+                        "model": settings.ai_model,
+                        "endpoint": settings.ai_endpoint,
+                        "timeout_seconds": settings.ai_timeout_seconds,
+                        "context_limit": settings.ai_context_limit,
+                    }
+                },
+                providers={settings.ai_provider: provider},
+            )
+            routing_feedback = RoutingFeedbackRecorder(model_knowledge)
             model_manager = LocalModelManager(
                 paths.models,
                 knowledge=model_knowledge,
@@ -1525,6 +1544,7 @@ class ApplicationRuntime:
                 provider_metadata=configured_provider_registry.definition(
                     settings.ai_provider
                 ).metadata,
+                dispatcher=inference_dispatcher,
             )
             conversation_memory = ConversationContextService()
             system_memory = ProjectSystemMemory(knowledge, root)
@@ -2032,6 +2052,7 @@ class ApplicationRuntime:
                 provider_metadata=configured_provider_registry.definition(
                     settings.ai_provider
                 ).metadata,
+                dispatcher=inference_dispatcher,
             )
             current_context = CurrentContextService(
                 actor_context_service=actor_context_service,
@@ -2442,7 +2463,14 @@ class ApplicationRuntime:
                 return TestDriveStepResult(TestDriveStatus.PASS, "authoritative stores responded")
 
             async def warmup_provider() -> None:
-                await provider.health_check()
+                health = await provider.health_check()
+                model_knowledge.observe_provider_health(
+                    configured_provider_registry.definition(settings.ai_provider).metadata,
+                    health.available,
+                    observed_at=datetime.now(UTC),
+                    source="startup_warmup_health_check",
+                    detail=health.detail,
+                )
 
             test_drive = TestDriveRegistry()
             test_drive.register(
@@ -2462,6 +2490,8 @@ class ApplicationRuntime:
                 ai_provider=provider,
                 resource_governor=resource_governor,
                 provider_router=provider_router,
+                inference_dispatcher=inference_dispatcher,
+                routing_feedback=routing_feedback,
                 model_manager=model_manager,
                 model_knowledge=model_knowledge,
                 ollama_runtime=ollama_runtime,

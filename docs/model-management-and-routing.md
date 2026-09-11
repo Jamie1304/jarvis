@@ -50,10 +50,31 @@ not make routing or fallback decisions.
 - model and hardware RAM/VRAM/disk/concurrency limits; and
 - local/privacy policy and API/token cost metadata.
 
+P3C makes this an availability-aware per-step decision. The
+`ModelKnowledgeService` supplies descriptive catalog, provider-health,
+machine-measurement, and task-specific cookbook evidence, while
+`ProviderRegistry` remains the only factory and execution authority. Typed
+privacy, health, stale, capability, context, structured/tool, cost/latency,
+concurrency, and resource filters run before deterministic ranking. Unknown
+health, capacity, cost, latency, or task evidence remains unknown; it is never
+treated as healthy, free, zero-latency, or verified. Reliability evidence is
+considered before policy efficiency and ties end in the full provider/model
+variant identity.
+
 Policies are `LOCAL_ONLY`, `PREFER_LOCAL`, `QUALITY_FIRST`, `SPEED_FIRST`,
 `LOWEST_COST`, `BALANCED`, and `PRIVACY_STRICT`. Unknown capacity or an
 unknown required latency benchmark is not treated as compatible. Routing does
 not download, load, activate, authorize, or change a permission policy.
+
+`InferenceDispatcher` is the single execution seam after selection. It binds
+the selected identity to a registry-created provider and re-enters the router
+only for a bounded pre-output failure. Cancellation and unknown outcomes do
+not trigger fallback, and a stream that has yielded output is never stitched
+with another provider. A P3A privacy block can only re-evaluate as a
+local-only route. Conversation and agent segments route independently; a
+provider/model transition archives the old execution session while preserving
+its context lineage. Safe factual outcomes may be recorded through the P3B
+cookbook feedback seam, but model text is not verification evidence.
 
 The explicit `NO_LLM` result is available when the request allows it. For voice,
 the same router selects provider-neutral STT/TTS definitions. It can construct

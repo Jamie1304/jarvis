@@ -22,11 +22,20 @@ from jarvis.ai.models import (
     ChatMessage,
     GenerationRequest,
     MessageRole,
+    ModelRole,
     PrivacyContext,
+    ProviderHealth,
 )
 from jarvis.ai.privacy import PrivacyGuardedProvider
 from jarvis.ai.providers.base import AIProvider
 from jarvis.ai.providers.registry import ProviderMetadata
+from jarvis.ai.routing import (
+    InferenceDispatcher,
+    ProviderHealthSnapshot,
+    RouteFailureClass,
+    RouteRequest,
+    RoutingPolicy,
+)
 from jarvis.core.errors import PrivacyBlockedError
 from jarvis.planning.models import (
     PlanningStep,
@@ -34,6 +43,7 @@ from jarvis.planning.models import (
     StepExecutionResult,
     StepExecutionStatus,
 )
+from jarvis.resources import ResourcePriority
 from jarvis.skills import (
     PrimedSkillContext,
     SkillClassification,
@@ -120,6 +130,13 @@ class AgentContext:
     priority: int = 0
     provenance: tuple[str, ...] = ()
     privacy_context: PrivacyContext = PrivacyContext()
+    task_class: str = "agent"
+    responsibility: str = "worker"
+    routing_policy: RoutingPolicy = RoutingPolicy.BALANCED
+    required_role: ModelRole = ModelRole.GENERAL
+    required_capabilities: frozenset[str] = frozenset()
+    requires_structured_output: bool = False
+    minimum_expected_reliability: float | None = None
 
     def __post_init__(self) -> None:
         for name in ("request", "goal"):
@@ -134,6 +151,26 @@ class AgentContext:
             raise ValueError("Reserved output must leave context capacity")
         if not isinstance(self.privacy_context, PrivacyContext):
             raise ValueError("Agent privacy context is invalid")
+        for name in ("task_class", "responsibility"):
+            value = getattr(self, name)
+            if not isinstance(value, str) or not value.strip() or len(value) > 128:
+                raise ValueError(f"Agent context {name} is malformed")
+        if not isinstance(self.routing_policy, RoutingPolicy):
+            raise ValueError("Agent routing policy is invalid")
+        if not isinstance(self.required_role, ModelRole):
+            raise ValueError("Agent required model role is invalid")
+        if type(self.required_capabilities) is not frozenset or any(
+            not isinstance(value, str) or not value.strip() or len(value) > 128
+            for value in self.required_capabilities
+        ):
+            raise ValueError("Agent required capabilities are malformed")
+        if type(self.requires_structured_output) is not bool:
+            raise ValueError("Agent structured-output requirement is invalid")
+        if (
+            self.minimum_expected_reliability is not None
+            and not 0.0 <= self.minimum_expected_reliability <= 1.0
+        ):
+            raise ValueError("Agent reliability requirement is invalid")
         for field_name in (
             "constraints",
             "selected_memory",
@@ -400,6 +437,7 @@ class AgentLoop:
         logger: logging.Logger | None = None,
         context_manager: ContextManager | None = None,
         provider_metadata: ProviderMetadata | None = None,
+        dispatcher: InferenceDispatcher | None = None,
     ) -> None:
         if context_limit <= 0:
             raise ValueError("Agent context limit must be positive")
@@ -417,12 +455,21 @@ class AgentLoop:
         self._context_limit = context_limit
         self._logger = logger or logging.getLogger("jarvis.agent_runtime")
         self._context_manager = context_manager or ContextManager()
+        self._dispatcher = dispatcher
+        self._provider_metadata = provider_metadata or ProviderMetadata(
+            "compatibility", "compatibility", "untrusted-compatibility"
+        )
 
     @property
     def context_limit(self) -> int:
         """Return the trusted provider context limit used by this loop."""
 
         return self._context_limit
+
+    async def provider_health(self) -> ProviderHealth:
+        """Expose the configured provider's live health for trusted callers."""
+
+        return await self._provider.health_check()
 
     async def run(
         self,
@@ -454,23 +501,77 @@ class AgentLoop:
         usage = AgentUsage()
         context_recovery_used = False
         loop_guard = LoopGuard()
+        previous_failure: RouteFailureClass | None = None
         try:
             async with asyncio.timeout(budget.max_wall_time_seconds):
                 for turn_number in range(1, budget.max_turns + 1):
                     if cancellation.is_set():
                         return self._result(AgentTerminationReason.CANCELLED, usage, turns, effects)
+                    provider_health: tuple[ProviderHealthSnapshot, ...] = ()
+                    if self._dispatcher is not None:
+                        live_health = await self._provider.health_check()
+                        provider_health = (
+                            ProviderHealthSnapshot(
+                                self._provider_metadata.provider_id,
+                                live_health.available,
+                                live_health.detail,
+                            ),
+                        )
+                    intent = RouteRequest(
+                        task=agent_context.request,
+                        profile="agent",
+                        task_class=agent_context.task_class,
+                        responsibility=agent_context.responsibility,
+                        role=agent_context.required_role,
+                        context_tokens=agent_context.token_estimate,
+                        requires_tools=bool(
+                            messages
+                            and any(
+                                item.role is MessageRole.ASSISTANT and "tool_id" in item.content
+                                for item in messages
+                            )
+                        ),
+                        policy=agent_context.routing_policy,
+                        priority=_resource_priority(agent_context.priority),
+                        privacy_context=agent_context.privacy_context,
+                        required_capabilities=agent_context.required_capabilities,
+                        requires_structured_output=agent_context.requires_structured_output,
+                        minimum_expected_reliability=agent_context.minimum_expected_reliability,
+                        previous_failure=previous_failure,
+                        provider_health=provider_health,
+                    )
+                    decision = self._dispatcher.route(intent) if self._dispatcher else None
+                    selected_model = (
+                        decision.primary.model_id
+                        if decision is not None and decision.primary is not None
+                        else self._model
+                    )
+                    selected_limit = (
+                        decision.primary.model.context_limit
+                        if decision is not None and decision.primary is not None
+                        else self._context_limit
+                    )
                     request = self._context_manager.prepare(
                         agent_context,
                         messages,
                         conversation_id=task_id,
-                        model=self._model,
-                        context_limit=self._context_limit,
+                        model=selected_model,
+                        context_limit=min(self._context_limit, selected_limit),
                     )
                     operations = [AgentOperation.CONTEXT_PREPARATION, AgentOperation.INFERENCE]
                     try:
-                        raw = await _await_cancellable(
-                            self._provider.generate(request), cancellation
-                        )
+                        if self._dispatcher is None:
+                            raw = await _await_cancellable(
+                                self._provider.generate(request), cancellation
+                            )
+                        else:
+                            if decision is None:
+                                raise RuntimeError("Adaptive route was not selected")
+                            dispatched = await _await_cancellable(
+                                self._dispatcher.generate(request, intent, decision=decision),
+                                cancellation,
+                            )
+                            raw = dispatched.result
                     except PrivacyBlockedError:
                         return self._result(
                             AgentTerminationReason.PRIVACY_BLOCKED, usage, turns, effects
@@ -509,10 +610,27 @@ class AgentLoop:
                             proposed_result=parsed[1],
                         )
                     if parsed[0] == "malformed":
+                        if self._dispatcher is not None and usage.retries < budget.max_retries:
+                            previous_failure = RouteFailureClass.MALFORMED_STRUCTURED_OUTPUT
+                            usage = AgentUsage(
+                                turns=usage.turns,
+                                tool_calls=usage.tool_calls,
+                                tokens=usage.tokens,
+                                expensive_actions=usage.expensive_actions,
+                                retries=usage.retries + 1,
+                            )
+                            messages.append(
+                                AgentMessage(
+                                    MessageRole.USER,
+                                    "[structured response was malformed; retry with valid output]",
+                                )
+                            )
+                            continue
                         return self._result(
                             AgentTerminationReason.MALFORMED_OUTPUT, usage, turns, effects
                         )
                     calls = parsed[1]
+                    previous_failure = None
                     if loop_guard.observe_progress(raw.content):
                         return self._result(
                             AgentTerminationReason.LOOP_GUARD, usage, turns, effects
@@ -717,6 +835,16 @@ class AgentLoop:
         proposed_result: str | None = None,
     ) -> AgentLoopResult:
         return AgentLoopResult(reason, usage, tuple(turns), proposed_result, tuple(effects))
+
+
+def _resource_priority(priority: int) -> ResourcePriority:
+    """Map the existing bounded integer hint to the trusted governor vocabulary."""
+
+    if priority >= 2:
+        return ResourcePriority.BACKGROUND
+    if priority == 1:
+        return ResourcePriority.INTERACTIVE
+    return ResourcePriority.USER_REQUESTED
 
 
 class AgenticPlanningStepExecutor:

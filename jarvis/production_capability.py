@@ -28,7 +28,13 @@ from typing import TYPE_CHECKING, Protocol, TypeVar, cast
 from uuid import UUID, uuid4
 
 from jarvis.agent_runtime import AgentContext, AgentLoop, AgentLoopBudget, AgentTerminationReason
-from jarvis.ai.routing import ProviderRouter, RouteRequest, RouteStatus, RoutingPolicy
+from jarvis.ai.routing import (
+    ProviderHealthSnapshot,
+    ProviderRouter,
+    RouteRequest,
+    RouteStatus,
+    RoutingPolicy,
+)
 from jarvis.capabilities import (
     CapabilityActionSpec,
     CapabilityError,
@@ -398,6 +404,7 @@ class AgentRuntimeCapabilityGenerator:
         provider_id: str | None = None,
         model_id: str | None = None,
     ) -> None:
+        self._agent_loop = agent_loop
         self._provider = provider or _AgentLoopGenerationProvider(agent_loop)
         self._store = package_store
         self._router = router
@@ -415,6 +422,8 @@ class AgentRuntimeCapabilityGenerator:
     ) -> GeneratedCapabilityPackage:
         del preferences
         if self._router is not None:
+            health_check = getattr(self._agent_loop, "provider_health", None)
+            health = await health_check() if callable(health_check) else None
             route = self._router.route(
                 RouteRequest(
                     gap.current_task,
@@ -424,6 +433,15 @@ class AgentRuntimeCapabilityGenerator:
                     policy=RoutingPolicy.LOCAL_ONLY,
                     preferred_provider_id=self._provider_id,
                     context_tokens=min(1_024, 4_000),
+                    provider_health=(
+                        (
+                            ProviderHealthSnapshot(
+                                self._provider_id, health.available, health.detail
+                            ),
+                        )
+                        if self._provider_id is not None and health is not None
+                        else ()
+                    ),
                 )
             )
             if route.status is not RouteStatus.SELECTED or route.primary is None:

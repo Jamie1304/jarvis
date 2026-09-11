@@ -19,6 +19,13 @@ capacity produces an unknown route, never an optimistic fit. It also selects
 provider-neutral STT/TTS chains and can return explicit `NO_LLM`. See
 `docs/hardware-and-models.md` and `docs/model-management-and-routing.md`.
 
+The adaptive P3C path composes `ModelKnowledgeService -> ProviderRouter ->
+InferenceDispatcher -> ProviderRegistry` for every conversation or agent
+inference segment. Knowledge is descriptive and empirical; registry factories
+alone authorize execution. The dispatcher applies the P3A boundary immediately
+before invocation, permits only bounded pre-output rerouting, and preserves
+full provider/model variant identity in route evidence.
+
 `AgentSessionStore` is the authoritative store for execution-session identity
 and lifecycle metadata only. It is not a task/goal store, user-model store, or
 conversation-memory store. A session records its type, provider/model,
@@ -32,6 +39,11 @@ utterance archives/rebuilds the session before requesting new provider output;
 chunks from the cancelled generation cannot be emitted or appended to history.
 This is conservative for providers whose cancellation synchronization cannot be
 proven. Model changes likewise archive the old session and create a new one.
+
+Adaptive provider or model changes use the same archive-and-create rule and
+retain context metadata and parent lineage. A partial stream is never joined
+to fallback output, and cancellation or an unknown outcome does not silently
+reroute.
 
 Session records are durable SQLite metadata with busy timeout and foreign-key
 configuration. Session state is execution context, not authority: permissions,
