@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any, cast
 
 import pytest
+from jarvis.ai.knowledge import ModelKnowledgeService, ModelKnowledgeStore, identity_for
 from jarvis.ai.model_manager import (
     LocalModelManager,
     LocalModelSpec,
@@ -15,6 +16,7 @@ from jarvis.ai.model_manager import (
     ModelLifecycleState,
 )
 from jarvis.ai.models import ModelRole
+from jarvis.ai.providers.registry import ProviderLocality, ProviderMetadata
 from jarvis.hardware import FitStatus, ModelMeasurement
 
 from tests.test_hardware import _hardware, _model
@@ -73,11 +75,16 @@ class Runtime:
 async def test_local_model_lifecycle_is_typed_and_restart_safe(tmp_path: Path) -> None:
     downloader = Downloader()
     runtime = Runtime()
+    knowledge = ModelKnowledgeService(ModelKnowledgeStore(tmp_path / "knowledge.sqlite3"))
+    knowledge.store.register_provider(
+        ProviderMetadata("local-runtime", "Fixture Runtime", "1", locality=ProviderLocality.LOCAL)
+    )
     manager = LocalModelManager(
         tmp_path / "models",
         catalog=Catalog(),
         downloader=downloader,
         runtime=runtime,
+        knowledge=knowledge,
     )
 
     discovered = await manager.discover()
@@ -93,9 +100,18 @@ async def test_local_model_lifecycle_is_typed_and_restart_safe(tmp_path: Path) -
     loaded = await manager.load("fixture-model")
     assert loaded.state is ModelLifecycleState.LOADED
     assert (await manager.health("fixture-model")).available
-    assert (await manager.benchmark("fixture-model")).throughput == 12.5
+    measurement = await manager.benchmark("fixture-model")
+    assert measurement.throughput == 12.5
+    latest = knowledge.latest_measurement(
+        identity_for("local-runtime", manager.inventory.inspect("fixture-model"))
+    )
+    assert latest is not None
+    assert latest.source == "fixture benchmark"
+    assert latest.throughput == 12.5
+    assert latest.machine_scope == "this_machine"
     await manager.unload("fixture-model")
     await manager.aclose()
+    knowledge.close()
     assert runtime.loaded == ["fixture-model"]
     assert runtime.unloaded == ["fixture-model"]
 

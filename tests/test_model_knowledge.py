@@ -1,5 +1,6 @@
 """Focused durable model-knowledge and empirical cookbook coverage."""
 
+import json
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
@@ -49,6 +50,10 @@ def metadata(
     version: str = "1",
     roles: frozenset[ModelRole] = frozenset({ModelRole.GENERAL}),
     capabilities: frozenset[str] = frozenset({"chat"}),
+    storage_bytes: int | None = None,
+    ram_bytes: int | None = None,
+    vram_bytes: int | None = None,
+    max_concurrency: int | None = None,
 ) -> ModelMetadata:
     return ModelMetadata(
         model_id,
@@ -61,6 +66,10 @@ def metadata(
         runtime="fixture-runtime",
         source="fixture-catalog",
         modalities=frozenset({"text"}),
+        storage_bytes=storage_bytes,
+        ram_bytes=ram_bytes,
+        vram_bytes=vram_bytes,
+        max_concurrency=max_concurrency,
     )
 
 
@@ -218,7 +227,211 @@ def test_refresh_discovers_future_models_and_preserves_stale_history(tmp_path: P
     assert stale_beta.availability is KnowledgeAvailability.STALE
     assert stale_beta.first_seen == NOW + timedelta(hours=1)
     assert stale_beta.evidence_count == 1
+
+
+@pytest.mark.parametrize(
+    ("verified", "agreement"),
+    [
+        (False, VerifierAgreement.MODEL_SELF_CLAIM),
+        (None, VerifierAgreement.UNKNOWN),
+        (True, VerifierAgreement.MODEL_SELF_CLAIM),
+        (True, VerifierAgreement.MODEL_REVIEW),
+        (True, VerifierAgreement.UNKNOWN),
+    ],
+)
+def test_verified_success_requires_trusted_consistency(
+    tmp_path: Path, verified: bool | None, agreement: VerifierAgreement
+) -> None:
+    store = ModelKnowledgeStore(tmp_path / "knowledge.sqlite3")
+    model = metadata("self-certifying")
+    store.refresh(snapshot(model))
+    identity = identity_for("fixture", model)
+
+    with pytest.raises(ModelKnowledgeError):
+        store.record_cookbook(
+            CookbookObservation(
+                identity,
+                "chat",
+                CookbookOutcome.VERIFIED_SUCCESS,
+                NOW,
+                verified=verified,
+                verifier_agreement=agreement,
+                observation_id="ineligible-verification",
+            )
+        )
     store.close()
+
+
+@pytest.mark.parametrize(
+    "agreement",
+    [
+        VerifierAgreement.DETERMINISTIC_VERIFICATION,
+        VerifierAgreement.INDEPENDENT_MODEL_REVIEW,
+        VerifierAgreement.USER_CONFIRMED,
+    ],
+)
+def test_eligible_verified_success_is_counted(tmp_path: Path, agreement: VerifierAgreement) -> None:
+    store = ModelKnowledgeStore(tmp_path / "knowledge.sqlite3")
+    model = metadata("eligible-verification")
+    store.refresh(snapshot(model))
+    identity = identity_for("fixture", model)
+    observation = CookbookObservation(
+        identity,
+        "chat",
+        CookbookOutcome.VERIFIED_SUCCESS,
+        NOW,
+        verified=True,
+        verifier_agreement=agreement,
+        observation_id=agreement.value,
+    )
+    assert store.record_cookbook(observation)
+    assert not store.record_cookbook(observation)
+    assert store.cookbook_summary(identity, task_class="chat").verified_success_count == 1
+    store.close()
+
+
+def test_legacy_invalid_cookbook_row_cannot_inflate_summary(tmp_path: Path) -> None:
+    store = ModelKnowledgeStore(tmp_path / "knowledge.sqlite3")
+    model = metadata("legacy-cookbook")
+    store.refresh(snapshot(model))
+    identity = identity_for("fixture", model)
+    valid = CookbookObservation(
+        identity,
+        "chat",
+        CookbookOutcome.VERIFIED_SUCCESS,
+        NOW,
+        verified=True,
+        verifier_agreement=VerifierAgreement.DETERMINISTIC_VERIFICATION,
+        observation_id="legacy-row",
+    )
+    assert store.record_cookbook(valid)
+    row = store._connection.execute(
+        "SELECT observation_json FROM cookbook_observations WHERE observation_id=?",
+        ("legacy-row",),
+    ).fetchone()
+    assert row is not None
+    payload = json.loads(str(row[0]))
+    payload["verified"] = False
+    payload["verifier_agreement"] = VerifierAgreement.MODEL_SELF_CLAIM.value
+    store._connection.execute(
+        "UPDATE cookbook_observations SET observation_json=? WHERE observation_id=?",
+        (json.dumps(payload), "legacy-row"),
+    )
+    store._connection.commit()
+    summary = store.cookbook_summary(identity, task_class="chat")
+    assert summary.sample_count == 0
+    assert summary.verified_success_count == 0
+    store.close()
+
+
+def test_measurements_remain_separate_latest_bounded_and_restart_safe(
+    tmp_path: Path,
+) -> None:
+    store = ModelKnowledgeStore(tmp_path / "knowledge.sqlite3")
+    model_a = metadata(
+        "measurement-projection",
+        storage_bytes=10,
+        ram_bytes=10,
+        vram_bytes=11,
+        max_concurrency=1,
+    )
+    store.refresh(snapshot(model_a, observed_at=NOW))
+    identity = identity_for("fixture", model_a)
+    measurement = ModelMeasurement(
+        model_a.model_id,
+        NOW + timedelta(minutes=1),
+        "trusted-runtime",
+        storage_bytes=20,
+        peak_ram_bytes=20,
+        peak_vram_bytes=21,
+        concurrency=2,
+    )
+    store.record_measurement(identity, measurement, machine_scope="this_machine")
+
+    model_c = metadata(
+        "measurement-projection",
+        storage_bytes=30,
+        ram_bytes=30,
+        vram_bytes=31,
+        max_concurrency=3,
+    )
+    store.refresh(snapshot(model_c, observed_at=NOW + timedelta(minutes=2)))
+    view = store.inspect_model(identity)
+
+    assert view.metadata.storage_bytes == 30
+    assert view.metadata.ram_bytes == 30
+    assert view.metadata.vram_bytes == 31
+    assert view.metadata.max_concurrency == 3
+    assert view.source == "fixture-catalog"
+    assert view.measurement_count == 1
+    latest = store.latest_measurement(identity)
+    assert latest is not None
+    assert latest.identity == identity
+    assert latest.measured_at == measurement.measured_at
+    assert latest.source == "trusted-runtime"
+    assert latest.machine_scope == "this_machine"
+    assert latest.evidence_kind is EvidenceKind.MEASURED_ON_THIS_MACHINE
+    assert latest.storage_bytes == 20
+    assert latest.peak_ram_bytes == 20
+    assert latest.peak_vram_bytes == 21
+    assert latest.concurrency == 2
+    assert latest.load_seconds is None
+    assert latest.throughput is None
+    assert any(
+        item.kind is EvidenceKind.MEASURED_ON_THIS_MACHINE for item in store.evidence(identity)
+    )
+    unmeasured = metadata("unmeasured")
+    store.refresh(snapshot(model_c, unmeasured, observed_at=NOW + timedelta(minutes=2)))
+    assert store.latest_measurement(identity_for("fixture", unmeasured)) is None
+
+    newer = ModelMeasurement(
+        model_a.model_id,
+        NOW + timedelta(minutes=3),
+        "trusted-runtime-newer",
+        peak_ram_bytes=40,
+        throughput=12.5,
+    )
+    store.record_measurement(identity, newer, machine_scope="this_machine")
+    store.record_measurement(identity, newer, machine_scope="this_machine")
+    latest = store.latest_measurement(identity)
+    assert latest is not None
+    assert latest.measured_at == newer.measured_at
+    assert latest.source == newer.source
+    assert latest.peak_ram_bytes == 40
+    assert latest.throughput == 12.5
+    assert store.inspect_model(identity).measurement_count == 2
+    tie_time = NOW + timedelta(minutes=4)
+    store.record_measurement(
+        identity,
+        ModelMeasurement(model_a.model_id, tie_time, "z-runtime", throughput=1.0),
+        machine_scope="this_machine",
+    )
+    store.record_measurement(
+        identity,
+        ModelMeasurement(model_a.model_id, tie_time, "a-runtime", throughput=2.0),
+        machine_scope="this_machine",
+    )
+    tied = store.measurements(identity, limit=2)
+    assert [item.source for item in tied] == ["a-runtime", "z-runtime"]
+    tied_latest = store.latest_measurement(identity)
+    assert tied_latest is not None
+    assert tied_latest.source == "a-runtime"
+    assert len(store.measurements(identity, limit=1)) == 1
+    with pytest.raises(ModelKnowledgeError):
+        store.measurements(identity, limit=0)
+    with pytest.raises(ModelKnowledgeError):
+        store.measurements(identity, machine_scope="other-machine")
+    store.close()
+
+    restarted = ModelKnowledgeStore(tmp_path / "knowledge.sqlite3")
+    restarted_latest = restarted.latest_measurement(identity)
+    assert restarted_latest is not None
+    assert restarted_latest.measured_at == tie_time
+    assert restarted_latest.source == "a-runtime"
+    assert len(restarted.measurements(identity, limit=32)) == 4
+    with pytest.raises(ModelKnowledgeError):
+        restarted.record_measurement(identity, newer, machine_scope="machine-serial")
+    restarted.close()
 
 
 def test_dynamic_registry_update_and_provider_availability_are_observable(
@@ -285,17 +498,6 @@ def test_provenance_precedence_freshness_and_machine_scope(tmp_path: Path) -> No
     model = metadata("measured")
     store.refresh(snapshot(model))
     identity = identity_for(provider().provider_id, model)
-    store.record_model_observation(
-        observation(model, source="community", evidence_kind=EvidenceKind.COMMUNITY)
-    )
-    store.record_model_observation(
-        observation(
-            model,
-            source="local-benchmark",
-            evidence_kind=EvidenceKind.MEASURED_ON_THIS_MACHINE,
-            machine_scope="this_machine",
-        )
-    )
     measurement = ModelMeasurement(
         model.model_id,
         NOW + timedelta(minutes=1),
@@ -307,10 +509,14 @@ def test_provenance_precedence_freshness_and_machine_scope(tmp_path: Path) -> No
     )
     store.record_measurement(identity, measurement, machine_scope="this_machine")
     view = store.inspect_model(identity)
-    assert view.source == "local-benchmark"
-    assert view.metadata.storage_bytes == 123
-    assert view.metadata.vram_bytes == 789
+    assert view.source == "fixture-catalog"
+    assert view.metadata.storage_bytes is None
+    assert view.metadata.vram_bytes is None
     assert view.measurement_count == 1
+    latest = store.latest_measurement(identity)
+    assert latest is not None
+    assert latest.storage_bytes == 123
+    assert latest.peak_vram_bytes == 789
     assert any(
         item.kind is EvidenceKind.MEASURED_ON_THIS_MACHINE for item in store.evidence(identity)
     )
@@ -319,9 +525,6 @@ def test_provenance_precedence_freshness_and_machine_scope(tmp_path: Path) -> No
     assert old.freshness is EvidenceFreshness.STALE
     with pytest.raises(ModelKnowledgeError):
         store.record_measurement(identity, measurement, machine_scope="machine-serial")
-    store.record_model_observation(
-        observation(model, observed_at=NOW - timedelta(hours=1), source="older")
-    )
     store.close()
 
 
@@ -457,6 +660,8 @@ def test_cookbook_outcomes_summary_duplicate_restart_and_no_prompt_field(tmp_pat
             "structured_tool",
             CookbookOutcome.VERIFIED_SUCCESS,
             NOW,
+            verified=True,
+            verifier_agreement=VerifierAgreement.DETERMINISTIC_VERIFICATION,
             observation_id="observation-0",
         )
     )

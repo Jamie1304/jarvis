@@ -35,6 +35,20 @@ benchmark and appends local measured evidence. It updates only values supplied
 by that benchmark; it never fills a missing result with a default or a model
 claim.
 
+The durable knowledge plane keeps provider/catalog metadata separate from
+machine measurements. A measurement is queryable through the typed
+`ModelMeasurementView`/`latest_measurement()` projection with its exact source,
+timestamp, `MEASURED_ON_THIS_MACHINE` provenance, `this_machine` scope, and only
+the metrics actually measured. Provider refreshes may change descriptive
+metadata but cannot replace that measurement history. `None` remains unknown;
+missing VRAM or another metric is never represented as zero.
+
+For empirical cookbook results, `VERIFIED_SUCCESS` requires `verified=True` and
+one of `DETERMINISTIC_VERIFICATION`, `INDEPENDENT_MODEL_REVIEW`, or
+`USER_CONFIRMED`. `MODEL_SELF_CLAIM`, `MODEL_REVIEW`, and `UNKNOWN` never
+certify success. Later routing may decide how to weight eligible evidence; this
+knowledge slice does not route or activate models.
+
 ## Resource-aware combinations
 
 `ModelPlanner` maps required roles to registered models and evaluates bounded

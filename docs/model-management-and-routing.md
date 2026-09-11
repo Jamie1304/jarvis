@@ -28,6 +28,17 @@ unloaded before repair or removal. A benchmark is accepted only from the
 trusted runtime adapter and is recorded as `MEASURED_ON_THIS_MACHINE`; missing
 measurements remain unknown.
 
+The durable model-knowledge store exposes benchmark facts through typed,
+bounded measurement queries. Provider metadata remains descriptive, while each
+measurement retains its source, timestamp, exact `this_machine` scope, and only
+the values supplied by the trusted runtime. A provider refresh therefore cannot
+overwrite the latest machine measurement projection. Cookbook
+`VERIFIED_SUCCESS` is counted only when `verified=True` and the agreement is
+`DETERMINISTIC_VERIFICATION`, `INDEPENDENT_MODEL_REVIEW`, or `USER_CONFIRMED`;
+model self-claims, non-independent model review, and unknown agreement do not
+certify it. P3C may later choose evidence weighting; this knowledge plane does
+not make routing or fallback decisions.
+
 ## Routing
 
 `ProviderRouter` evaluates provider/model candidates against:

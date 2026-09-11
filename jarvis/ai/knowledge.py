@@ -11,7 +11,7 @@ import hashlib
 import json
 import sqlite3
 import threading
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from pathlib import Path
@@ -63,6 +63,28 @@ class VerifierAgreement(StrEnum):
 class EvidenceSufficiency(StrEnum):
     INSUFFICIENT = "insufficient_evidence"
     SUFFICIENT = "sufficient_evidence"
+
+
+_VERIFIED_SUCCESS_VERIFIERS = frozenset(
+    {
+        VerifierAgreement.INDEPENDENT_MODEL_REVIEW,
+        VerifierAgreement.DETERMINISTIC_VERIFICATION,
+        VerifierAgreement.USER_CONFIRMED,
+    }
+)
+
+
+def _is_verified_success(
+    outcome: CookbookOutcome,
+    verified: bool | None,
+    verifier_agreement: VerifierAgreement,
+) -> bool:
+    """Return whether one cookbook result has an eligible trusted verification."""
+    return (
+        outcome is CookbookOutcome.VERIFIED_SUCCESS
+        and verified is True
+        and verifier_agreement in _VERIFIED_SUCCESS_VERIFIERS
+    )
 
 
 def _bounded_text(value: object, name: str, limit: int, *, allow_empty: bool = False) -> str:
@@ -220,6 +242,51 @@ class ModelKnowledgeView:
 
 
 @dataclass(frozen=True, slots=True)
+class ModelMeasurementView:
+    """Typed read-only projection of one trusted machine measurement."""
+
+    identity: ModelIdentity
+    measured_at: datetime
+    source: str
+    machine_scope: str
+    storage_bytes: int | None = None
+    peak_ram_bytes: int | None = None
+    peak_vram_bytes: int | None = None
+    load_seconds: float | None = None
+    throughput: float | None = None
+    concurrency: int | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.identity, ModelIdentity):
+            raise ModelKnowledgeError("Measurement identity is malformed")
+        measured = _timestamp(self.measured_at, "Measurement timestamp")
+        if measured != self.measured_at:
+            object.__setattr__(self, "measured_at", measured)
+        _bounded_text(self.source, "Measurement source", 256)
+        _bounded_text(self.machine_scope, "Machine scope", 256)
+        if self.machine_scope != "this_machine":
+            raise ModelKnowledgeError("Machine measurements must use this_machine scope")
+        try:
+            ModelMeasurement(
+                self.identity.model_id,
+                self.measured_at,
+                self.source,
+                self.storage_bytes,
+                self.peak_ram_bytes,
+                self.peak_vram_bytes,
+                self.load_seconds,
+                self.throughput,
+                self.concurrency,
+            )
+        except (TypeError, ValueError) as error:
+            raise ModelKnowledgeError("Measurement metrics are malformed") from error
+
+    @property
+    def evidence_kind(self) -> EvidenceKind:
+        return EvidenceKind.MEASURED_ON_THIS_MACHINE
+
+
+@dataclass(frozen=True, slots=True)
 class CookbookObservation:
     identity: ModelIdentity
     task_class: str
@@ -284,6 +351,14 @@ class CookbookObservation:
                 raise ModelKnowledgeError(f"Cookbook {name} is invalid")
         if not isinstance(self.verifier_agreement, VerifierAgreement):
             raise ModelKnowledgeError("Cookbook verifier agreement is invalid")
+        if (
+            not _is_verified_success(self.outcome, self.verified, self.verifier_agreement)
+            and self.outcome is CookbookOutcome.VERIFIED_SUCCESS
+        ):
+            raise ModelKnowledgeError(
+                "Verified success requires verified=True and an independent, deterministic, "
+                "or user confirmation"
+            )
         if (
             type(self.evidence_refs) is not tuple
             or len(self.evidence_refs) > 32
@@ -787,49 +862,44 @@ class ModelKnowledgeStore:
                     json.dumps(_evidence_json(evidence), sort_keys=True),
                 ),
             )
-            current_metadata = self._connection.execute(
-                "SELECT metadata_json FROM models WHERE provider_id=? AND model_id=? "
-                "AND model_version=? AND quantization=? AND runtime=?",
+
+    def measurements(
+        self,
+        identity: ModelIdentity,
+        *,
+        machine_scope: str = "this_machine",
+        limit: int = 32,
+    ) -> tuple[ModelMeasurementView, ...]:
+        if not isinstance(identity, ModelIdentity):
+            raise ModelKnowledgeError("Model identity is malformed")
+        _bounded_text(machine_scope, "Machine scope", 256)
+        if machine_scope != "this_machine":
+            raise ModelKnowledgeError("Machine measurements must use this_machine scope")
+        if type(limit) is not int or not 1 <= limit <= 1_024:
+            raise ModelKnowledgeError("Measurement query limit is invalid")
+        with self._lock:
+            rows = self._connection.execute(
+                "SELECT measured_at, source, machine_scope, metrics_json "
+                "FROM model_measurements WHERE provider_id=? AND model_id=? "
+                "AND model_version=? AND quantization=? AND runtime=? AND machine_scope=? "
+                "ORDER BY measured_at DESC, source ASC, rowid DESC LIMIT ?",
                 (
                     identity.provider_id,
                     identity.model_id,
                     identity.version,
                     identity.quantization,
                     identity.runtime,
+                    machine_scope,
+                    limit,
                 ),
-            ).fetchone()
-            if current_metadata is not None:
-                metadata = _metadata_from_json(json.loads(str(current_metadata[0])))
-                if measurement.storage_bytes is not None:
-                    metadata = replace(metadata, storage_bytes=measurement.storage_bytes)
-                if measurement.peak_ram_bytes is not None:
-                    metadata = replace(metadata, ram_bytes=measurement.peak_ram_bytes)
-                if measurement.peak_vram_bytes is not None:
-                    metadata = replace(metadata, vram_bytes=measurement.peak_vram_bytes)
-                if measurement.concurrency and measurement.concurrency > 0:
-                    metadata = replace(metadata, max_concurrency=measurement.concurrency)
-                if any(
-                    value is not None
-                    for value in (
-                        measurement.storage_bytes,
-                        measurement.peak_ram_bytes,
-                        measurement.peak_vram_bytes,
-                        measurement.concurrency,
-                    )
-                ):
-                    self._connection.execute(
-                        "UPDATE models SET metadata_json=? WHERE provider_id=? "
-                        "AND model_id=? AND model_version=? AND quantization=? "
-                        "AND runtime=?",
-                        (
-                            json.dumps(_metadata_json(metadata), sort_keys=True),
-                            identity.provider_id,
-                            identity.model_id,
-                            identity.version,
-                            identity.quantization,
-                            identity.runtime,
-                        ),
-                    )
+            ).fetchall()
+        return tuple(_measurement_view_from_row(identity, row) for row in rows)
+
+    def latest_measurement(
+        self, identity: ModelIdentity, *, machine_scope: str = "this_machine"
+    ) -> ModelMeasurementView | None:
+        measurements = self.measurements(identity, machine_scope=machine_scope, limit=1)
+        return measurements[0] if measurements else None
 
     def providers(self, *, as_of: datetime | None = None) -> tuple[ProviderKnowledgeView, ...]:
         cutoff = _timestamp(as_of, "Query timestamp") if as_of else datetime.now(UTC)
@@ -1020,7 +1090,13 @@ class ModelKnowledgeStore:
         query += " ORDER BY observation_id"
         with self._lock:
             rows = self._connection.execute(query, args).fetchall()
-        observations = [_cookbook_from_json(json.loads(str(row[0]))) for row in rows]
+        observations: list[CookbookObservation] = []
+        for row in rows:
+            try:
+                observations.append(_cookbook_from_json(json.loads(str(row[0]))))
+            except (KeyError, TypeError, ValueError):
+                # A legacy/corrupt row must never become verified evidence.
+                continue
         task = task_class or (observations[0].task_class if observations else "")
         if any(item.task_class != task for item in observations):
             raise ModelKnowledgeError("A summary requires one task class")
@@ -1031,7 +1107,10 @@ class ModelKnowledgeStore:
             identity,
             task,
             len(observations),
-            sum(item.outcome is CookbookOutcome.VERIFIED_SUCCESS for item in observations),
+            sum(
+                _is_verified_success(item.outcome, item.verified, item.verifier_agreement)
+                for item in observations
+            ),
             sum(item.outcome is CookbookOutcome.FAILURE for item in observations),
             sum(
                 item.outcome is CookbookOutcome.ESCALATION or item.escalation_required
@@ -1124,6 +1203,20 @@ class ModelKnowledgeService:
     ) -> None:
         self._store.record_measurement(identity, measurement, machine_scope=machine_scope)
 
+    def measurements(
+        self,
+        identity: ModelIdentity,
+        *,
+        machine_scope: str = "this_machine",
+        limit: int = 32,
+    ) -> tuple[ModelMeasurementView, ...]:
+        return self._store.measurements(identity, machine_scope=machine_scope, limit=limit)
+
+    def latest_measurement(
+        self, identity: ModelIdentity, *, machine_scope: str = "this_machine"
+    ) -> ModelMeasurementView | None:
+        return self._store.latest_measurement(identity, machine_scope=machine_scope)
+
     def record_model_observation(self, observation: ModelObservation) -> None:
         self._store.record_model_observation(observation)
 
@@ -1203,6 +1296,31 @@ def _freshness(value: datetime | None, as_of: datetime) -> EvidenceFreshness:
     return (
         EvidenceFreshness.FRESH if as_of - value <= timedelta(hours=24) else EvidenceFreshness.STALE
     )
+
+
+def _measurement_view_from_row(
+    identity: ModelIdentity, row: tuple[object, ...]
+) -> ModelMeasurementView:
+    try:
+        metrics = json.loads(str(row[3]))
+        if not isinstance(metrics, dict):
+            raise ModelKnowledgeError("Measurement metrics are malformed")
+        return ModelMeasurementView(
+            identity,
+            datetime.fromisoformat(str(row[0])),
+            str(row[1]),
+            str(row[2]),
+            metrics.get("storage_bytes"),
+            metrics.get("peak_ram_bytes"),
+            metrics.get("peak_vram_bytes"),
+            metrics.get("load_seconds"),
+            metrics.get("throughput"),
+            metrics.get("concurrency"),
+        )
+    except ModelKnowledgeError:
+        raise
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
+        raise ModelKnowledgeError("Durable measurement is malformed") from error
 
 
 def _provider_json(metadata: ProviderMetadata) -> dict[str, object]:
@@ -1350,18 +1468,16 @@ def _cookbook_from_json(value: dict[str, Any]) -> CookbookObservation:
         ProviderLocality(str(value["locality"])),
         str(value["machine_scope"]) if value["machine_scope"] else None,
         str(value["input_size_bucket"]),
-        value["verified"] if value["verified"] is None else bool(value["verified"]),
+        value["verified"] if value["verified"] is None else value["verified"],
         value["latency_ms"] if value["latency_ms"] is None else float(value["latency_ms"]),
         value["token_usage"] if value["token_usage"] is None else int(value["token_usage"]),
         value["monetary_cost"] if value["monetary_cost"] is None else float(value["monetary_cost"]),
         value["structured_output_valid"]
         if value["structured_output_valid"] is None
-        else bool(value["structured_output_valid"]),
-        value["tool_call_valid"]
-        if value["tool_call_valid"] is None
-        else bool(value["tool_call_valid"]),
+        else value["structured_output_valid"],
+        value["tool_call_valid"] if value["tool_call_valid"] is None else value["tool_call_valid"],
         int(value["retry_count"]),
-        bool(value["escalation_required"]),
+        value["escalation_required"],
         str(value["failure_class"]),
         VerifierAgreement(str(value["verifier_agreement"])),
         tuple(str(item) for item in value["evidence_refs"]),
