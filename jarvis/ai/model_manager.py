@@ -14,6 +14,11 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Protocol, cast
 
+from jarvis.ai.knowledge import (
+    ModelKnowledgeService,
+    ModelObservation,
+    identity_for,
+)
 from jarvis.ai.providers.registry import ModelMetadata
 from jarvis.hardware import (
     FitStatus,
@@ -137,6 +142,8 @@ class LocalModelManager:
         runtime: LocalModelRuntime | None = None,
         inventory: ModelInventory | None = None,
         clock: Callable[[], datetime] | None = None,
+        knowledge: ModelKnowledgeService | None = None,
+        provider_id: str = "local-runtime",
     ) -> None:
         candidate_root = root.expanduser()
         if candidate_root.is_symlink() or candidate_root.is_junction():
@@ -152,6 +159,8 @@ class LocalModelManager:
         self._runtime = runtime
         self._inventory = inventory or ModelInventory()
         self._clock = clock or (lambda: datetime.now(UTC))
+        self._knowledge = knowledge
+        self._provider_id = provider_id
         self._records: dict[str, LocalModelRecord] = {}
         self._handles: dict[str, object] = {}
 
@@ -178,6 +187,17 @@ class LocalModelManager:
             self._inventory.register(spec.metadata)
         record = LocalModelRecord(spec, ModelLifecycleState.DISCOVERED)
         self._records[spec.model_id] = record
+        if self._knowledge is not None:
+            observed_at = self._clock()
+            self._knowledge.record_model_observation(
+                ModelObservation(
+                    identity_for(self._provider_id, spec.metadata),
+                    spec.metadata,
+                    observed_at,
+                    "local_model_manager",
+                    evidence_detail="Local model manager registration; not a machine measurement",
+                )
+            )
         return record
 
     async def discover(self) -> tuple[LocalModelRecord, ...]:
@@ -301,6 +321,10 @@ class LocalModelManager:
         if not isinstance(measurement, ModelMeasurement) or measurement.model_id != model_id:
             raise ModelLifecycleError("Model runtime returned malformed benchmark")
         self._inventory.record_measurement(measurement)
+        if self._knowledge is not None:
+            self._knowledge.record_measurement(
+                identity_for(self._provider_id, self._inventory.inspect(model_id)), measurement
+            )
         return measurement
 
     async def repair(self, model_id: str) -> LocalModelRecord:

@@ -41,6 +41,7 @@ class EvidenceKind(StrEnum):
     PUBLISHED = "published"
     COMMUNITY = "community"
     MEASURED_ON_THIS_MACHINE = "measured_on_this_machine"
+    PROVIDER_REPORTED = "provider_reported"
 
 
 @dataclass(frozen=True, slots=True)

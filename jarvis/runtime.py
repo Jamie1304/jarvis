@@ -33,6 +33,7 @@ from jarvis.adoption import (
     WindowsSignerVerifier,
 )
 from jarvis.agent_runtime import AgentLoop
+from jarvis.ai.knowledge import ModelKnowledgeService, ModelKnowledgeStore
 from jarvis.ai.model_manager import LocalModelManager
 from jarvis.ai.providers.base import AIProvider
 from jarvis.ai.providers.ollama_runtime import OllamaRuntimeManager
@@ -372,6 +373,7 @@ class RuntimePaths:
     memory_database: Path
     user_model_database: Path
     knowledge_library_database: Path
+    model_knowledge_database: Path
     automation_database: Path
     trace_database: Path
     golden_workflow_database: Path
@@ -408,6 +410,7 @@ class RuntimePaths:
             base / "memory.sqlite3",
             base / "user-model.sqlite3",
             base / "knowledge-library.sqlite3",
+            base / "model-knowledge.sqlite3",
             base / "automations.sqlite3",
             base / "trace.sqlite3",
             base / "golden-workflows.sqlite3",
@@ -477,6 +480,7 @@ class RuntimePaths:
             self.memory_database,
             self.user_model_database,
             self.knowledge_library_database,
+            self.model_knowledge_database,
             self.automation_database,
             self.trace_database,
             self.golden_workflow_database,
@@ -624,6 +628,7 @@ class RuntimeContainer:
     resource_governor: ResourceGovernor
     provider_router: ProviderRouter
     model_manager: LocalModelManager
+    model_knowledge: ModelKnowledgeService
     ollama_runtime: OllamaRuntimeManager
     stt: SpeechToTextService | None
     tts: TextToSpeechService | None
@@ -912,6 +917,7 @@ class RuntimeContainer:
                 self.control_center,
                 self.conversation,
                 self.model_manager,
+                self.model_knowledge,
                 self.ollama_runtime,
                 self.stt,
                 self.tts,
@@ -1194,6 +1200,7 @@ class ApplicationRuntime:
         memory_store: SQLiteMemoryStore | None = None
         user_model_store: UserModelStore | None = None
         knowledge_library: KnowledgeLibrary | None = None
+        model_knowledge: ModelKnowledgeService | None = None
         automation_store: SQLiteAutomationStore | None = None
         trace_store: TraceStore | None = None
         golden_workflow_store: GoldenWorkflowStore | None = None
@@ -1428,6 +1435,9 @@ class ApplicationRuntime:
             persona_kernel = PersonaKernel(user_model_store)
             knowledge_library = KnowledgeLibrary(paths.knowledge_library_database)
             assert knowledge_library is not None
+            model_knowledge = ModelKnowledgeService(
+                ModelKnowledgeStore(paths.model_knowledge_database)
+            )
             session_store = AgentSessionStore(paths.sessions_database)
             paths.validate_storage_layout()
             artifact_store = ArtifactStore(paths.artifacts, event_bus=events)
@@ -1458,7 +1468,16 @@ class ApplicationRuntime:
                 ) from error
             resource_governor = ResourceGovernor(SystemResourceTelemetry())
             provider_router = ProviderRouter(configured_provider_registry, resource_governor)
-            model_manager = LocalModelManager(paths.models)
+            model_knowledge.refresh_registry(
+                configured_provider_registry,
+                observed_at=datetime.now(UTC),
+                source="configured_provider_registry",
+            )
+            model_manager = LocalModelManager(
+                paths.models,
+                knowledge=model_knowledge,
+                provider_id=settings.ai_provider,
+            )
             ollama_runtime = OllamaRuntimeManager(
                 endpoint=settings.ai_endpoint,
                 model=settings.ai_model,
@@ -2406,6 +2425,13 @@ class ApplicationRuntime:
 
             async def test_provider() -> TestDriveStepResult:
                 health = await provider.health_check()
+                model_knowledge.observe_provider_health(
+                    configured_provider_registry.definition(settings.ai_provider).metadata,
+                    health.available,
+                    observed_at=datetime.now(UTC),
+                    source="provider_health_check",
+                    detail=health.detail,
+                )
                 return TestDriveStepResult(
                     TestDriveStatus.PASS if health.available else TestDriveStatus.FAIL,
                     health.detail,
@@ -2437,6 +2463,7 @@ class ApplicationRuntime:
                 resource_governor=resource_governor,
                 provider_router=provider_router,
                 model_manager=model_manager,
+                model_knowledge=model_knowledge,
                 ollama_runtime=ollama_runtime,
                 stt=stt,
                 tts=tts,
@@ -2564,6 +2591,7 @@ class ApplicationRuntime:
                     "memory": "validated",
                     "user_model": "validated",
                     "knowledge_library": "validated",
+                    "model_knowledge": "validated",
                     "automations": "validated",
                     "trace": "validated",
                     "golden_workflows": "validated",
@@ -2641,6 +2669,7 @@ class ApplicationRuntime:
                 memory_store,
                 user_model_store,
                 knowledge_library,
+                model_knowledge,
                 planning_store,
                 audit,
                 state_store,
@@ -2685,6 +2714,7 @@ class ApplicationRuntime:
                 memory_store,
                 user_model_store,
                 knowledge_library,
+                model_knowledge,
                 planning_store,
                 audit,
                 state_store,

@@ -207,6 +207,32 @@ class ProviderRegistry:
 
         return tuple(sorted(self._definitions.items()))
 
+    def replace_models(
+        self, provider_id: str, models: tuple[ModelMetadata, ...]
+    ) -> ProviderDefinition:
+        """Replace one provider's descriptive model advertisement.
+
+        Discovery updates the knowledge plane through this generic seam; it
+        never introduces provider- or model-specific Core branches.
+        """
+
+        if (
+            type(models) is not tuple
+            or len(models) > 1_024
+            or any(not isinstance(model, ModelMetadata) for model in models)
+        ):
+            raise ValueError("Provider model advertisement is malformed")
+        if len(
+            {(model.model_id, model.version, model.quantization, model.runtime) for model in models}
+        ) != len(models):
+            raise ValueError("Provider model advertisement contains duplicates")
+        current = self.definition(provider_id)
+        updated = ProviderDefinition(current.metadata, current.factory, models)
+        self._definitions[provider_id.casefold()] = updated
+        return updated
+
+    update_models = replace_models
+
     def create(self, provider_id: str, configuration: Mapping[str, Any]) -> Provider:
         return self.definition(provider_id).factory(configuration)
 
