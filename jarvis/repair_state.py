@@ -320,8 +320,11 @@ class SQLiteRepairStore:
                 if existing.status in _ACTIVE:
                     return existing, False
                 if existing.status is RepairCaseStatus.QUARANTINED:
-                    if existing.failure_observation_id == failure_observation_id:
-                        return existing, False
+                    # An ambiguous external effect is a hard terminal.  A
+                    # later observation cannot establish that the effect did
+                    # not happen; only explicit trusted reconciliation may do
+                    # so, and no such reopen path is implicit here.
+                    return existing, False
                 elif (
                     existing.failure_observation_id == failure_observation_id
                     or failure_observation_id is None

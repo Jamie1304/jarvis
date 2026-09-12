@@ -1070,7 +1070,6 @@ class ProcedureEvidenceAuthority:
             raise WorkflowTemplateError("Repair evidence attempt is not the durable latest attempt")
         if case.status in {
             RepairCaseStatus.VERIFIED_REPAIRED,
-            RepairCaseStatus.DEGRADED_FALLBACK,
         }:
             if case.effect_outcome != EffectOutcome.EFFECT_CONFIRMED.value:
                 raise WorkflowTemplateError("Successful repair lacks a confirmed durable effect")
@@ -1081,10 +1080,7 @@ class ProcedureEvidenceAuthority:
                 and not case.verification_reference
             ):
                 raise WorkflowTemplateError("Verified repair lacks durable verification reference")
-            if latest.outcome != EffectOutcome.EFFECT_CONFIRMED.value or latest.state not in {
-                "verified",
-                "degraded",
-            }:
+            if latest.outcome != EffectOutcome.EFFECT_CONFIRMED.value or latest.state != "verified":
                 raise WorkflowTemplateError("Successful repair lacks a terminal verified attempt")
             outcome = EffectOutcome.EFFECT_CONFIRMED
         elif case.status is RepairCaseStatus.QUARANTINED:

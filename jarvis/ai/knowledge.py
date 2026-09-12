@@ -1009,8 +1009,15 @@ class ModelKnowledgeStore:
                     break
         return tuple(result)
 
-    def inspect_model(self, identity: ModelIdentity) -> ModelKnowledgeView:
-        matches = self.models(provider_id=identity.provider_id, include_stale=True, limit=1_024)
+    def inspect_model(
+        self, identity: ModelIdentity, *, as_of: datetime | None = None
+    ) -> ModelKnowledgeView:
+        matches = self.models(
+            provider_id=identity.provider_id,
+            include_stale=True,
+            limit=1_024,
+            as_of=as_of,
+        )
         for item in matches:
             if item.identity == identity:
                 return item
@@ -1247,8 +1254,10 @@ class ModelKnowledgeService:
             as_of=as_of,
         )
 
-    def inspect_model(self, identity: ModelIdentity) -> ModelKnowledgeView:
-        return self._store.inspect_model(identity)
+    def inspect_model(
+        self, identity: ModelIdentity, *, as_of: datetime | None = None
+    ) -> ModelKnowledgeView:
+        return self._store.inspect_model(identity, as_of=as_of)
 
     def evidence(self, identity: ModelIdentity) -> tuple[EvidenceRecord, ...]:
         return self._store.evidence(identity)

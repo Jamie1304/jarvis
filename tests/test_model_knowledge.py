@@ -508,7 +508,7 @@ def test_provenance_precedence_freshness_and_machine_scope(tmp_path: Path) -> No
         concurrency=2,
     )
     store.record_measurement(identity, measurement, machine_scope="this_machine")
-    view = store.inspect_model(identity)
+    view = store.inspect_model(identity, as_of=NOW + timedelta(minutes=2))
     assert view.source == "fixture-catalog"
     assert view.metadata.storage_bytes is None
     assert view.metadata.vram_bytes is None

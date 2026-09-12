@@ -624,7 +624,11 @@ async def test_doctor_isolates_probe_callback_and_malformed_repair_results() -> 
     assert result.status is DoctorStatus.QUARANTINED
     assert result.probes[0].passed is False
 
-    fallback_error = ComponentDoctor(CapabilityHealthService(clock=lambda: NOW), clock=lambda: NOW)
+    fallback_error = ComponentDoctor(
+        CapabilityHealthService(clock=lambda: NOW),
+        authorize=lambda _problem, _action: True,
+        clock=lambda: NOW,
+    )
     fallback_error.register_playbook(playbook(fallbacks=("text",)))
     fallback_error.register_fallback(
         "fixture.component",

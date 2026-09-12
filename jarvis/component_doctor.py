@@ -9,9 +9,10 @@ research as certification.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import inspect
 import json
-from collections.abc import Awaitable, Callable, Iterable
+from collections.abc import Awaitable, Callable, Iterable, Mapping
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from enum import StrEnum
@@ -225,6 +226,7 @@ class FallbackOption:
     preserves_privacy: bool = True
     preserves_security: bool = True
     requires_approval: bool = False
+    required_permissions: tuple[Permission, ...] = ()
 
     def __post_init__(self) -> None:
         _text(self.option_id, "Fallback option ID", 128)
@@ -234,6 +236,13 @@ class FallbackOption:
             for value in (self.preserves_privacy, self.preserves_security, self.requires_approval)
         ):
             raise ComponentDoctorError("Fallback option flags are malformed")
+        if (
+            type(self.required_permissions) is not tuple
+            or any(not isinstance(item, Permission) for item in self.required_permissions)
+            or len(set(self.required_permissions)) != len(self.required_permissions)
+            or Permission.REPAIR_EXECUTE in self.required_permissions
+        ):
+            raise ComponentDoctorError("Fallback permissions are malformed")
         if not self.preserves_privacy or not self.preserves_security:
             raise ComponentDoctorSecurityError("Fallback cannot weaken privacy or security")
 
@@ -485,13 +494,121 @@ class BrokeredRepairAuthorizer:
         self._user_id = user_id
         self._identity = object()
         self._declared = frozenset({Permission.REPAIR_EXECUTE})
+        self._bindings: dict[
+            tuple[str, str],
+            tuple[str, object, frozenset[Permission], Mapping[Permission, PermissionScope]],
+        ] = {}
+        self._invalid_bindings: set[tuple[str, str]] = set()
         broker.register_tool("repair.authority", self._identity, self._declared)
 
+    def bind_action(
+        self,
+        component_id: str,
+        action: RepairAction,
+        *,
+        permission_scopes: Mapping[Permission, PermissionScope] | None = None,
+    ) -> bool:
+        """Bind one trusted effect identity to one exact permission set.
+
+        Package metadata supplies permission types only.  Scope values enter
+        here from the trusted application composition root, immediately before
+        the callback is registered.  Invalid or unavailable bindings remain
+        fail-closed rather than becoming broker authority.
+        """
+
+        if type(component_id) is not str or not isinstance(action, RepairAction):
+            return False
+        key = (component_id, action.action_id)
+        scopes: dict[Permission, PermissionScope] = {}
+        try:
+            if isinstance(permission_scopes, Mapping):
+                scopes = dict(permission_scopes)
+        except (TypeError, ValueError):
+            scopes = {}
+        required = action.required_permissions
+        valid = (
+            type(component_id) is str
+            and (permission_scopes is None or isinstance(permission_scopes, Mapping))
+            and len(set(required)) == len(required)
+            and Permission.REPAIR_EXECUTE not in required
+            and set(scopes) == set(required)
+            and len(scopes) == len(required)
+            and all(
+                isinstance(permission, Permission)
+                and isinstance(scope, PermissionScope)
+                and scope.task_id is None
+                and scope.tool_id is None
+                for permission, scope in scopes.items()
+            )
+        )
+        if not valid:
+            self._invalid_bindings.add(key)
+            self._bindings.pop(key, None)
+            return False
+        if not required:
+            self._invalid_bindings.discard(key)
+            self._bindings.pop(key, None)
+            return True
+        digest = hashlib.sha256(
+            (
+                f"{component_id}\x00{action.action_id}\x00"
+                f"{','.join(item.value for item in required)}"
+            ).encode()
+        ).hexdigest()[:24]
+        tool_id = f"repair.authority.{digest}"
+        identity = object()
+        declared = frozenset((Permission.REPAIR_EXECUTE, *required))
+        try:
+            self._register_tool(tool_id, identity, declared)
+        except Exception:
+            self._invalid_bindings.add(key)
+            self._bindings.pop(key, None)
+            return False
+        self._invalid_bindings.discard(key)
+        self._bindings[key] = (tool_id, identity, declared, dict(scopes))
+        return True
+
+    def _register_tool(
+        self, tool_id: str, identity: object, declared: frozenset[Permission]
+    ) -> None:
+        try:
+            self._broker.register_tool(tool_id, identity, declared)
+        except RuntimeError:
+            # Trusted application repair bindings may be installed after the
+            # ordinary startup registry is sealed, using the same narrow
+            # application-only capability as certified generated adapters.
+            self._broker._register_tool_for_trusted_application(  # noqa: SLF001
+                self._broker._trusted_registration_authority,  # noqa: SLF001
+                tool_id,
+                identity,
+                declared,
+            )
+
     async def __call__(
-        self, problem: ComponentProblem, action: RepairAction, case_id: UUID
+        self,
+        problem: ComponentProblem,
+        action: RepairAction,
+        case_id: UUID,
+        attempt_number: int | None = None,
     ) -> bool:
         if not isinstance(problem, ComponentProblem) or not isinstance(action, RepairAction):
             return False
+        key = (problem.component_id, action.action_id)
+        if key in self._invalid_bindings:
+            return False
+        binding = self._bindings.get(key)
+        if action.required_permissions and binding is None:
+            return False
+        scopes: Mapping[Permission, PermissionScope]
+        if binding is None:
+            tool_id, identity, declared, scopes = (
+                "repair.authority",
+                self._identity,
+                self._declared,
+                {},
+            )
+        else:
+            tool_id, identity, declared, scopes = binding
         arguments = {
             "case_id": str(case_id),
             "component_id": problem.component_id,
@@ -500,6 +617,8 @@ class BrokeredRepairAuthorizer:
             "action_id": action.action_id,
             "required_permissions": ",".join(item.value for item in action.required_permissions),
         }
+        if attempt_number is not None:
+            arguments["attempt_number"] = str(attempt_number)
         descriptor = ActionDescriptor(
             "repair.execute",
             tuple(
@@ -508,12 +627,28 @@ class BrokeredRepairAuthorizer:
                 for name, value in sorted(arguments.items())
             ),
             Risk.HIGH,
-            (PermissionRequest(Permission.REPAIR_EXECUTE, PermissionScope(task_id=case_id)),),
+            (
+                PermissionRequest(Permission.REPAIR_EXECUTE, PermissionScope(task_id=case_id)),
+                *tuple(
+                    PermissionRequest(
+                        permission,
+                        PermissionScope(
+                            paths=scope.paths,
+                            applications=scope.applications,
+                            hosts=scope.hosts,
+                            command_families=scope.command_families,
+                            task_id=case_id,
+                            duration_seconds=scope.duration_seconds,
+                        ),
+                    )
+                    for permission, scope in sorted(scopes.items(), key=lambda item: item[0].value)
+                ),
+            ),
         )
         result = await self._broker.authorize(
-            tool_id="repair.authority",
-            tool_identity=self._identity,
-            declared_permissions=self._declared,
+            tool_id=tool_id,
+            tool_identity=identity,
+            declared_permissions=declared,
             task_id=case_id,
             user_id=self._user_id,
             descriptor=descriptor,
@@ -625,6 +760,7 @@ class ComponentDoctor:
         callback: RepairCallback,
         *,
         owner: DiagnosticOwner | None = None,
+        permission_scopes: Mapping[Permission, PermissionScope] | None = None,
     ) -> None:
         playbook = self._playbook(component_id)
         action = self._declared_action(playbook, action_id)
@@ -638,6 +774,12 @@ class ComponentDoctor:
         key = (playbook.component_id, action_id)
         if key in self._actions:
             raise ComponentDoctorError("Repair action is already bound")
+        if isinstance(self._repair_authorizer, BrokeredRepairAuthorizer):
+            self._repair_authorizer.bind_action(
+                playbook.component_id,
+                action,
+                permission_scopes=permission_scopes,
+            )
         self._actions[key] = callback
 
     bind_repair_action = register_action
@@ -649,6 +791,7 @@ class ComponentDoctor:
         callback: FallbackCallback,
         *,
         owner: DiagnosticOwner | None = None,
+        permission_scopes: Mapping[Permission, PermissionScope] | None = None,
     ) -> None:
         playbook = self._playbook(component_id)
         if not isinstance(option, FallbackOption) or not callable(callback):
@@ -660,6 +803,12 @@ class ComponentDoctor:
         key = (component_id, option.option_id)
         if key in self._fallbacks:
             raise ComponentDoctorError("Fallback is already bound")
+        if isinstance(self._repair_authorizer, BrokeredRepairAuthorizer):
+            self._repair_authorizer.bind_action(
+                component_id,
+                RepairAction(option.option_id, option.description, option.required_permissions),
+                permission_scopes=permission_scopes,
+            )
         self._fallbacks[key] = (option, callback)
 
     def owner_for(self, component_id: str) -> DiagnosticOwner:
@@ -772,50 +921,56 @@ class ComponentDoctor:
                 candidate,
                 case=case,
             )
-        if action.requires_approval and not await self._authorized(problem, action, case):
-            if case is not None:
-                case = self._case_update(
-                    case,
-                    status=RepairCaseStatus.PERMISSION_REQUIRED,
-                    selected_action=action.action_id,
-                    terminal_reason="Fresh exact approval is required",
-                )
-            attempt = self._attempt(
-                problem,
-                action,
-                1,
-                RepairAttemptState.PERMISSION_REQUIRED,
-                None,
-                "Fresh trusted approval is required before repair",
-            )
-            attempts.append(attempt)
-            if case is not None:
-                assert self._repair_store is not None
-                self._repair_store.save_attempt(
-                    RepairAttemptRecord(
-                        case.case_id,
-                        max(1, case.attempt_count),
-                        RepairAttemptState.PERMISSION_REQUIRED.value,
-                        None,
-                        attempt.detail,
-                        attempt.started_at,
-                        self._now(),
+        next_attempt = (
+            1
+            if case is None or case.status is not RepairCaseStatus.PERMISSION_REQUIRED
+            else max(1, case.attempt_count + 1)
+        )
+        for number in range(next_attempt, self._max_attempts + 1):
+            # This is deliberately immediately before the effect boundary.
+            # A consumed APPROVE_ONCE receipt must not authorize a retry.
+            if not await self._authorized(problem, action, case, number):
+                if case is not None:
+                    case = self._case_update(
+                        case,
+                        status=RepairCaseStatus.PERMISSION_REQUIRED,
+                        selected_action=action.action_id,
+                        terminal_reason="Fresh exact approval is required",
                     )
+                attempt = self._attempt(
+                    problem,
+                    action,
+                    number,
+                    RepairAttemptState.PERMISSION_REQUIRED,
+                    None,
+                    "Fresh trusted approval is required before repair",
                 )
-            return self._result(
-                problem,
-                DoctorStatus.PERMISSION_REQUIRED,
-                playbook.owner,
-                signature,
-                probe_results,
-                attempts,
-                None,
-                candidate,
-                "Repair remains paused pending exact permission approval",
-                case_id=None if case is None else case.case_id,
-            )
-
-        for number in range(1, self._max_attempts + 1):
+                attempts.append(attempt)
+                if case is not None:
+                    assert self._repair_store is not None
+                    self._repair_store.save_attempt(
+                        RepairAttemptRecord(
+                            case.case_id,
+                            number,
+                            RepairAttemptState.PERMISSION_REQUIRED.value,
+                            None,
+                            attempt.detail,
+                            attempt.started_at,
+                            self._now(),
+                        )
+                    )
+                return self._result(
+                    problem,
+                    DoctorStatus.PERMISSION_REQUIRED,
+                    playbook.owner,
+                    signature,
+                    probe_results,
+                    attempts,
+                    None,
+                    candidate,
+                    "Repair remains paused pending exact permission approval",
+                    case_id=None if case is None else case.case_id,
+                )
             if case is not None:
                 case = self._case_update(
                     case,
@@ -1268,9 +1423,7 @@ class ComponentDoctor:
             if binding is None:
                 continue
             option, callback = binding
-            if option.requires_approval and not await self._authorized_fallback(
-                problem, option, case
-            ):
+            if not await self._authorized_fallback(problem, option, case):
                 if case is not None:
                     case = self._case_update(
                         case,
@@ -1330,7 +1483,11 @@ class ComponentDoctor:
             )
             fallback_attempt = self._attempt(
                 problem,
-                RepairAction(option.option_id, option.description),
+                RepairAction(
+                    option.option_id,
+                    option.description,
+                    option.required_permissions,
+                ),
                 number,
                 state,
                 execution.outcome,
@@ -1430,13 +1587,28 @@ class ComponentDoctor:
         )
 
     async def _authorized(
-        self, problem: ComponentProblem, action: RepairAction, case: RepairCase | None = None
+        self,
+        problem: ComponentProblem,
+        action: RepairAction,
+        case: RepairCase | None = None,
+        attempt_number: int | None = None,
     ) -> bool:
         if self._repair_authorizer is not None:
             if case is None:
                 return False
             try:
-                result = await self._invoke(self._repair_authorizer, problem, action, case.case_id)
+                if isinstance(self._repair_authorizer, BrokeredRepairAuthorizer):
+                    result = await self._invoke(
+                        self._repair_authorizer,
+                        problem,
+                        action,
+                        case.case_id,
+                        attempt_number,
+                    )
+                else:
+                    result = await self._invoke(
+                        self._repair_authorizer, problem, action, case.case_id
+                    )
             except Exception:
                 return False
             return type(result) is bool and result
@@ -1453,7 +1625,11 @@ class ComponentDoctor:
     ) -> bool:
         if self._authorize is None and self._repair_authorizer is None:
             return False
-        synthetic = RepairAction(option.option_id, option.description)
+        synthetic = RepairAction(
+            option.option_id,
+            option.description,
+            option.required_permissions,
+        )
         return await self._authorized(problem, synthetic, case)
 
     async def _observe_terminal(self, case: RepairCase) -> RepairCase:

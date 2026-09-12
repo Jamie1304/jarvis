@@ -1371,7 +1371,14 @@ class ApplicationRuntime:
                     Decision.REQUIRE_APPROVAL,
                     ScopeConstraint(tools=frozenset({"repair.authority"})),
                     frozenset({"repair.execute"}),
-                )
+                ),
+                PolicyRule(
+                    "jarvis.repair.bound.authority",
+                    Permission.REPAIR_EXECUTE,
+                    Decision.REQUIRE_APPROVAL,
+                    ScopeConstraint(),
+                    frozenset({"repair.execute"}),
+                ),
             )
             desktop_approval_authenticator = TrustedApprovalAuthenticator(ApprovalSource.TRUSTED_UI)
             broker = PermissionBroker(
