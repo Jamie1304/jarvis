@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import hashlib
 import shutil
+import sqlite3
 import subprocess
+import sys
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -54,8 +56,14 @@ from jarvis.self_development import (
     ActivationRecord,
     ActivationStateStore,
     ActivationStatus,
+    CandidateStartEvidence,
+    DurableProposalStore,
     GateEvidence,
+    GoldenWorkflowOwner,
+    RuntimeVerificationEvidence,
     TrustedSelfDevelopmentActivator,
+    UnavailableSelfDevelopmentGateVerifier,
+    UnavailableSelfDevelopmentRuntimeVerifier,
     _activation_uuid,
     _aware,
     _candidate_hash,
@@ -71,11 +79,190 @@ from jarvis.self_development import (
     approval_binding_fingerprint,
     approval_request_id,
 )
+from jarvis.testing.golden import (
+    ExpectedResult,
+    Fixture,
+    GoldenChangeKind,
+    GoldenWorkflow,
+    GoldenWorkflowClass,
+    GoldenWorkflowService,
+    GoldenWorkflowStore,
+    Version,
+)
 from jarvis.update_preview import UpdateGateName, UpdateGateResult, UpdateGateStatus
+from jarvis.verification import EvidenceRecord, EvidenceType, VerificationLevel
 
 NOW = datetime(2026, 9, 12, 14, 0, tzinfo=UTC)
 REVISION = "a" * 40
 TASK_ID = UUID("00000000-0000-0000-0000-000000000011")
+
+
+class _TestRuntimeVerifier:
+    def __init__(self, *, health: bool = True, security: bool = True, lkg: bool = True) -> None:
+        self.health = health
+        self.security = security
+        self.lkg = lkg
+        self.calls: list[str] = []
+
+    def start_candidate(
+        self, *, installation_root: Path, expected_revision: str, expected_hash: str
+    ) -> CandidateStartEvidence:
+        del installation_root
+        self.calls.append("start")
+        return CandidateStartEvidence(
+            True, expected_revision, expected_hash, hashlib.sha256(b"start").hexdigest()
+        )
+
+    def observe_candidate_health(
+        self, *, installation_root: Path, expected_hash: str
+    ) -> RuntimeVerificationEvidence:
+        del installation_root, expected_hash
+        self.calls.append("health")
+        return RuntimeVerificationEvidence(
+            self.health, hashlib.sha256(b"health").hexdigest(), "test health observation"
+        )
+
+    def observe_candidate_security(
+        self, *, installation_root: Path, expected_hash: str
+    ) -> RuntimeVerificationEvidence:
+        del installation_root, expected_hash
+        self.calls.append("security")
+        return RuntimeVerificationEvidence(
+            self.security, hashlib.sha256(b"security").hexdigest(), "test security observation"
+        )
+
+    def observe_lkg_health(self, *, installation_root: Path) -> RuntimeVerificationEvidence:
+        del installation_root
+        self.calls.append("lkg")
+        return RuntimeVerificationEvidence(
+            self.lkg, hashlib.sha256(b"lkg").hexdigest(), "test LKG observation"
+        )
+
+
+class _MissingHealthVerifier:
+    def __init__(self) -> None:
+        self._delegate = _TestRuntimeVerifier()
+
+    def __getattr__(self, name: str) -> object:
+        if name == "observe_candidate_health":
+            raise AttributeError(name)
+        return getattr(self._delegate, name)
+
+
+class _ProcessRuntimeVerifier(_TestRuntimeVerifier):
+    """Disposable Windows process boundary used by the composition test."""
+
+    def start_candidate(
+        self, *, installation_root: Path, expected_revision: str, expected_hash: str
+    ) -> CandidateStartEvidence:
+        subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                "from pathlib import Path; assert Path('jarvis/example.py').is_file()",
+            ],
+            cwd=installation_root,
+            check=True,
+        )
+        self.calls.append("start")
+        return CandidateStartEvidence(
+            True,
+            expected_revision,
+            expected_hash,
+            hashlib.sha256(b"process-start").hexdigest(),
+        )
+
+    def observe_candidate_health(
+        self, *, installation_root: Path, expected_hash: str
+    ) -> RuntimeVerificationEvidence:
+        del expected_hash
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                "from pathlib import Path; "
+                "assert 'VALUE = 2' in Path('jarvis/example.py').read_text()",
+            ],
+            cwd=installation_root,
+            check=False,
+        )
+        self.calls.append("health")
+        return RuntimeVerificationEvidence(
+            result.returncode == 0,
+            hashlib.sha256(b"process-health").hexdigest(),
+            "disposable candidate process health",
+        )
+
+    def observe_candidate_security(
+        self, *, installation_root: Path, expected_hash: str
+    ) -> RuntimeVerificationEvidence:
+        candidate_file = installation_root / "jarvis/example.py"
+        self.calls.append("security")
+        return RuntimeVerificationEvidence(
+            candidate_file.is_file()
+            and not candidate_file.is_symlink()
+            and len(expected_hash) == 64,
+            hashlib.sha256(b"process-security").hexdigest(),
+            "disposable candidate identity and regular-file check",
+        )
+
+    def observe_lkg_health(self, *, installation_root: Path) -> RuntimeVerificationEvidence:
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                "from pathlib import Path; "
+                "assert 'VALUE = 1' in Path('jarvis/example.py').read_text()",
+            ],
+            cwd=installation_root,
+            check=False,
+        )
+        self.calls.append("lkg")
+        return RuntimeVerificationEvidence(
+            result.returncode == 0,
+            hashlib.sha256(b"process-lkg-health").hexdigest(),
+            "disposable LKG process health",
+        )
+
+
+def _golden_owner(path: Path, *, passed: bool = True) -> GoldenWorkflowOwner:
+    store = GoldenWorkflowStore(path)
+    store.register(
+        GoldenWorkflow(
+            "self-development-test",
+            "Self-development test workflow",
+            Version(1, 0, 0),
+            GoldenWorkflowClass.DETERMINISTIC,
+            (
+                Fixture(
+                    "fixture-1",
+                    "Synthetic self-development fixture",
+                    {"case": "self-development"},
+                    ExpectedResult("Verify activation", ("activation_observed",)),
+                ),
+            ),
+            frozenset({GoldenChangeKind.SELF_IMPROVEMENT}),
+            provenance=("test:trusted-golden-owner",),
+        )
+    )
+    service = GoldenWorkflowService(store, clock=lambda: NOW)
+
+    def execute(_workflow: object, _fixture: object) -> tuple[EvidenceRecord, ...]:
+        observed = "activation_observed" if passed else "activation_failed"
+        return (
+            EvidenceRecord(
+                EvidenceType.CUSTOM,
+                "trusted.test-golden-observer",
+                NOW,
+                timedelta(minutes=5),
+                1.0,
+                "activation_observed",
+                observed,
+                level=VerificationLevel.AUTOMATED_TESTED,
+            ),
+        )
+
+    return GoldenWorkflowOwner(service, execute)
 
 
 def _git(root: Path, *args: str) -> str:
@@ -247,7 +434,10 @@ def _recovery(
 
 
 def _activator(
-    tmp_path: Path, *, protected: bool = False
+    tmp_path: Path,
+    *,
+    protected: bool = False,
+    runtime_verifier: _TestRuntimeVerifier | None = None,
 ) -> tuple[
     TrustedSelfDevelopmentActivator,
     MergeDeploymentProposal,
@@ -302,7 +492,8 @@ def _activator(
         if proposal_id == proposal.proposal_id
         else None,
         gate_verifier=lambda _proposal, _classification: evidence,
-        golden_runner=lambda: True,
+        golden_runner=_golden_owner(tmp_path / "golden.sqlite3"),
+        runtime_verifier=runtime_verifier or _TestRuntimeVerifier(),
         clock=lambda: NOW,
     )
     return service, proposal, installation, approval, broker
@@ -340,8 +531,121 @@ async def test_exact_activation_promotes_only_after_recovery_verification(tmp_pa
     )
     final = await service.activate(record.activation_id, permission_contexts=permission_contexts)
     assert final.status is ActivationStatus.COMMITTED
+    assert cast(_TestRuntimeVerifier, service._runtime_verifier).calls == [
+        "start",
+        "health",
+        "security",
+    ]
     assert (installation / "jarvis/example.py").read_text(encoding="utf-8") == "VALUE = 2\n"
     assert service.store.get(record.activation_id) == final
+
+
+@pytest.mark.asyncio
+async def test_disposable_windows_candidate_process_is_verified_before_commit(
+    tmp_path: Path,
+) -> None:
+    verifier = _ProcessRuntimeVerifier()
+    service, proposal, installation, approval, _broker = _activator(
+        tmp_path, runtime_verifier=verifier
+    )
+    record = service.prepare(
+        proposal,
+        current_version="1",
+        candidate_version="2",
+        changed_subsystems=("jarvis",),
+        preview_gates=_preview_gates(),
+    )
+    context = approval.issue_context(
+        request_id=approval_request_id(record),
+        choice=ApprovalChoice.APPROVE_ONCE,
+        identity=ApprovalIdentity("trusted-user", ApprovalActorKind.TRUSTED_USER),
+    )
+    record = await service.approve(record.activation_id, context)
+    pending = await service._authorize_effect(record)
+    permission_contexts = tuple(
+        approval.issue_context(
+            request_id=request.request_id,
+            choice=ApprovalChoice.APPROVE_ONCE,
+            identity=ApprovalIdentity("trusted-user", ApprovalActorKind.TRUSTED_USER),
+        )
+        for request in pending.approval_requests
+    )
+
+    final = await service.activate(record.activation_id, permission_contexts=permission_contexts)
+
+    assert final.status is ActivationStatus.COMMITTED
+    assert verifier.calls == ["start", "health", "security"]
+    assert installation.joinpath("jarvis/example.py").read_text(encoding="utf-8") == "VALUE = 2\n"
+
+
+@pytest.mark.asyncio
+async def test_unavailable_runtime_verifier_fails_closed_to_safe_mode(tmp_path: Path) -> None:
+    verifier = UnavailableSelfDevelopmentRuntimeVerifier()
+    service, proposal, _installation, approval, _broker = _activator(
+        tmp_path, runtime_verifier=cast(Any, verifier)
+    )
+    record = service.prepare(
+        proposal,
+        current_version="1",
+        candidate_version="2",
+        changed_subsystems=("jarvis",),
+        preview_gates=_preview_gates(),
+    )
+    context = approval.issue_context(
+        request_id=approval_request_id(record),
+        choice=ApprovalChoice.APPROVE_ONCE,
+        identity=ApprovalIdentity("trusted-user", ApprovalActorKind.TRUSTED_USER),
+    )
+    record = await service.approve(record.activation_id, context)
+    pending = await service._authorize_effect(record)
+    permission_contexts = tuple(
+        approval.issue_context(
+            request_id=request.request_id,
+            choice=ApprovalChoice.APPROVE_ONCE,
+            identity=ApprovalIdentity("trusted-user", ApprovalActorKind.TRUSTED_USER),
+        )
+        for request in pending.approval_requests
+    )
+
+    final = await service.activate(record.activation_id, permission_contexts=permission_contexts)
+
+    assert final.status is ActivationStatus.SAFE_MODE_REQUIRED
+
+
+@pytest.mark.asyncio
+async def test_missing_health_observer_cannot_commit(tmp_path: Path) -> None:
+    service, proposal, _installation, approval, _broker = _activator(
+        tmp_path, runtime_verifier=cast(Any, _MissingHealthVerifier())
+    )
+    record = service.prepare(
+        proposal,
+        current_version="1",
+        candidate_version="2",
+        changed_subsystems=("jarvis",),
+        preview_gates=_preview_gates(),
+    )
+    context = approval.issue_context(
+        request_id=approval_request_id(record),
+        choice=ApprovalChoice.APPROVE_ONCE,
+        identity=ApprovalIdentity("trusted-user", ApprovalActorKind.TRUSTED_USER),
+    )
+    record = await service.approve(record.activation_id, context)
+    pending = await service._authorize_effect(record)
+    contexts = tuple(
+        approval.issue_context(
+            request_id=request.request_id,
+            choice=ApprovalChoice.APPROVE_ONCE,
+            identity=ApprovalIdentity("trusted-user", ApprovalActorKind.TRUSTED_USER),
+        )
+        for request in pending.approval_requests
+    )
+
+    final = await service.activate(record.activation_id, permission_contexts=contexts)
+
+    assert final.status is ActivationStatus.ROLLED_BACK
+    assert (service.installation_root / "jarvis/example.py").read_text(
+        encoding="utf-8"
+    ) == "VALUE = 1\n"
 
 
 @pytest.mark.asyncio
@@ -391,6 +695,43 @@ def test_durable_activation_state_reconstructs_after_store_restart(tmp_path: Pat
     first.put(record)
     restarted = ActivationStateStore(tmp_path / "state.sqlite3")
     assert restarted.get(record.activation_id) == record
+
+
+def test_durable_proposal_owner_reconstructs_typed_proposal(tmp_path: Path) -> None:
+    proposal, _production, _candidate, _installation = _make_proposal(tmp_path)
+    first = DurableProposalStore(tmp_path / "self-development.sqlite3")
+    first.put(proposal)
+    restarted = DurableProposalStore(tmp_path / "self-development.sqlite3")
+    assert restarted.get(proposal.proposal_id) == proposal
+
+
+def test_durable_proposal_owner_rejects_missing_and_tampered_rows(tmp_path: Path) -> None:
+    proposal, _production, _candidate, _installation = _make_proposal(tmp_path)
+    store = DurableProposalStore(tmp_path / "self-development.sqlite3")
+    assert store.get("missing-proposal") is None
+    store.put(proposal)
+    with sqlite3.connect(store.path) as connection:
+        connection.execute(
+            "UPDATE self_development_proposals SET fingerprint=? WHERE proposal_id=?",
+            ("0" * 64, proposal.proposal_id),
+        )
+    with pytest.raises(ActivationError, match="fingerprint mismatch"):
+        store.get(proposal.proposal_id)
+
+
+def test_trusted_runtime_evidence_types_and_unavailable_gate_fail_closed() -> None:
+    digest = hashlib.sha256(b"evidence").hexdigest()
+    with pytest.raises(ValueError, match="Candidate start"):
+        CandidateStartEvidence(cast(Any, "yes"), REVISION, digest, digest)
+    with pytest.raises(ValueError, match="Candidate start"):
+        CandidateStartEvidence(False, REVISION, "bad", digest)
+    with pytest.raises(ValueError, match="Candidate start"):
+        CandidateStartEvidence(False, REVISION, digest, "bad")
+    with pytest.raises(ValueError, match="Runtime verification"):
+        RuntimeVerificationEvidence(cast(Any, 1), digest)
+    with pytest.raises(ValueError, match="Runtime verification"):
+        RuntimeVerificationEvidence(True, "bad")
+    assert UnavailableSelfDevelopmentGateVerifier()(cast(Any, object()), cast(Any, object())) == {}
 
 
 def test_level_four_candidate_is_rejected_before_preview_or_activation(tmp_path: Path) -> None:
@@ -494,6 +835,7 @@ def test_prepare_and_constructor_reject_tree_or_target_identity_drift(tmp_path: 
             proposal_loader=service._proposal_loader,
             gate_verifier=service._gate_verifier,
             golden_runner=service._golden_runner,
+            runtime_verifier=service._runtime_verifier,
         )
 
 
@@ -571,7 +913,10 @@ async def test_activation_missing_proposal_and_permission_policy_fail_closed(
 
 @pytest.mark.asyncio
 async def test_health_failure_rolls_back_without_known_good_promotion(tmp_path: Path) -> None:
-    service, proposal, installation, approval, _broker = _activator(tmp_path)
+    verifier = _TestRuntimeVerifier(health=False)
+    service, proposal, installation, approval, _broker = _activator(
+        tmp_path, runtime_verifier=verifier
+    )
     record = service.prepare(
         proposal,
         current_version="1",
@@ -597,11 +942,81 @@ async def test_health_failure_rolls_back_without_known_good_promotion(tmp_path: 
     failed = await service.activate(
         record.activation_id,
         permission_contexts=permission_contexts,
-        health_check=lambda: False,
-        lkg_health_check=lambda: True,
     )
     assert failed.status is ActivationStatus.ROLLED_BACK
+    assert verifier.calls == ["start", "health", "lkg"]
     assert (installation / "jarvis/example.py").read_text(encoding="utf-8") == "VALUE = 1\n"
+
+
+@pytest.mark.asyncio
+async def test_security_failure_rolls_back_and_lkg_is_verified(tmp_path: Path) -> None:
+    verifier = _TestRuntimeVerifier(security=False)
+    service, proposal, installation, approval, _broker = _activator(
+        tmp_path, runtime_verifier=verifier
+    )
+    record = service.prepare(
+        proposal,
+        current_version="1",
+        candidate_version="2",
+        changed_subsystems=("jarvis",),
+        preview_gates=_preview_gates(),
+    )
+    context = approval.issue_context(
+        request_id=approval_request_id(record),
+        choice=ApprovalChoice.APPROVE_ONCE,
+        identity=ApprovalIdentity("trusted-user", ApprovalActorKind.TRUSTED_USER),
+    )
+    record = await service.approve(record.activation_id, context)
+    pending = await service._authorize_effect(record)
+    permission_contexts = tuple(
+        approval.issue_context(
+            request_id=request.request_id,
+            choice=ApprovalChoice.APPROVE_ONCE,
+            identity=ApprovalIdentity("trusted-user", ApprovalActorKind.TRUSTED_USER),
+        )
+        for request in pending.approval_requests
+    )
+
+    final = await service.activate(record.activation_id, permission_contexts=permission_contexts)
+
+    assert final.status is ActivationStatus.ROLLED_BACK
+    assert verifier.calls == ["start", "health", "security", "lkg"]
+    assert (installation / "jarvis/example.py").read_text(encoding="utf-8") == "VALUE = 1\n"
+
+
+@pytest.mark.asyncio
+async def test_lkg_verification_failure_requires_safe_mode(tmp_path: Path) -> None:
+    verifier = _TestRuntimeVerifier(health=False, lkg=False)
+    service, proposal, _installation, approval, _broker = _activator(
+        tmp_path, runtime_verifier=verifier
+    )
+    record = service.prepare(
+        proposal,
+        current_version="1",
+        candidate_version="2",
+        changed_subsystems=("jarvis",),
+        preview_gates=_preview_gates(),
+    )
+    context = approval.issue_context(
+        request_id=approval_request_id(record),
+        choice=ApprovalChoice.APPROVE_ONCE,
+        identity=ApprovalIdentity("trusted-user", ApprovalActorKind.TRUSTED_USER),
+    )
+    record = await service.approve(record.activation_id, context)
+    pending = await service._authorize_effect(record)
+    permission_contexts = tuple(
+        approval.issue_context(
+            request_id=request.request_id,
+            choice=ApprovalChoice.APPROVE_ONCE,
+            identity=ApprovalIdentity("trusted-user", ApprovalActorKind.TRUSTED_USER),
+        )
+        for request in pending.approval_requests
+    )
+
+    final = await service.activate(record.activation_id, permission_contexts=permission_contexts)
+
+    assert final.status is ActivationStatus.SAFE_MODE_REQUIRED
+    assert verifier.calls == ["start", "health", "lkg"]
 
 
 @pytest.mark.asyncio
@@ -679,7 +1094,7 @@ async def test_stale_gates_golden_and_permission_authority_fail_closed(tmp_path:
         identity=ApprovalIdentity("trusted-user", ApprovalActorKind.TRUSTED_USER),
     )
     await service2.approve(record2.activation_id, context2)
-    service2._golden_runner = lambda: False
+    service2._golden_runner = _golden_owner(tmp_path / "golden-fail.sqlite3", passed=False)
     golden_failed = await service2.activate(record2.activation_id)
     assert golden_failed.status is ActivationStatus.FAILED
 

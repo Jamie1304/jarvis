@@ -28,6 +28,7 @@ from jarvis.presence import PresenceProjection
 from jarvis.presentation import PresentationSurface
 from jarvis.recovery import RecoveryEvidence, RecoveryPhase, RecoveryStore
 from jarvis.runtime import ApplicationRuntime, RuntimePaths, RuntimeStatus
+from jarvis.self_development import TrustedSelfDevelopmentActivator
 from jarvis.task_controller import PlanningTaskController
 from jarvis.update_preview import ControlledSelfUpdate
 
@@ -100,6 +101,19 @@ async def test_canonical_runtime_calculates_and_recovers_persisted_task(tmp_path
     )
     assert runtime.container.golden_workflow_store.database_path == (
         runtime.container.paths.golden_workflow_database
+    )
+    assert runtime.container.self_development_activator is not None
+    assert runtime.container.self_development_proposals is not None
+    assert (
+        runtime.container.self_development_activator.broker is runtime.container.permission_broker
+    )
+    assert runtime.container.self_development_activator.recovery.store is runtime.container.recovery
+    assert isinstance(runtime.container.self_development_activator, TrustedSelfDevelopmentActivator)
+    assert runtime.container.paths.self_development_database.is_file()
+    assert runtime.container.paths.self_development_installation.is_dir()
+    assert all(
+        record.manifest.tool_id != TrustedSelfDevelopmentActivator.TOOL_ID
+        for record in runtime.container.tool_registry.list_available()
     )
     assert {step.step_id for step in runtime.container.test_drive.steps()} == {
         "system-health",
@@ -176,6 +190,20 @@ async def test_canonical_runtime_calculates_and_recovers_persisted_task(tmp_path
         for attention in restarted.container.attention_policy.pending()
     )
     await restarted.aclose()
+
+
+def test_damaged_self_development_store_does_not_remove_recovery_safety(tmp_path: Path) -> None:
+    app_data = tmp_path / "jarvis-data"
+    paths = RuntimePaths.from_root(app_data)
+    app_data.mkdir()
+    paths.self_development_database.write_text("not sqlite", encoding="utf-8")
+
+    runtime = ApplicationRuntime.create(Settings(app_data_dir=app_data, ai_provider="ollama"))
+
+    assert runtime.status is RuntimeStatus.READY
+    assert runtime.container is not None
+    assert runtime.container.self_development_activator is None
+    assert runtime.container.recovery is not None
 
 
 @pytest.mark.asyncio

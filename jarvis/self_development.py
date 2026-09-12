@@ -17,17 +17,36 @@ import sqlite3
 import subprocess
 import tempfile
 from collections.abc import Awaitable, Callable, Mapping, Sequence
-from dataclasses import asdict, dataclass, replace
+from dataclasses import asdict, dataclass, fields, replace
 from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Protocol, cast
 from uuid import UUID, uuid4, uuid5
 
 from jarvis.improvement.integrity import compute_proposal_fingerprint
 from jarvis.improvement.models import (
+    ChangeSpecification,
+    DependencyAssessment,
+    DependencyChange,
+    DependencyRecord,
+    EvaluationDirection,
+    EvaluationResult,
+    EvaluationScenario,
+    EvaluationStatus,
+    GateKind,
+    GateResult,
+    GateStatus,
+    ImprovementCandidate,
+    ImprovementEvidence,
+    ImprovementSource,
+    IsolatedWorkspace,
     MergeDeploymentProposal,
+    ModificationResult,
     ProposalStatus,
+    Reversibility,
+    RollbackMetadata,
+    ScenarioResult,
 )
 from jarvis.permissions.approval import ApprovalContextVerifier, TrustedApprovalContext
 from jarvis.permissions.broker import PermissionBroker
@@ -47,6 +66,12 @@ from jarvis.security.modification_policy import (
     ModificationTrustClassification,
     ModificationTrustClassifier,
     ModificationTrustLevel,
+)
+from jarvis.testing.golden import (
+    GoldenChangeKind,
+    GoldenExecutor,
+    GoldenGateError,
+    GoldenWorkflowService,
 )
 from jarvis.update_preview import (
     ControlledSelfUpdate,
@@ -176,6 +201,49 @@ class ActivationStateStore:
         return None if row is None else _record_from_json(json.loads(str(row[0])))
 
 
+class DurableProposalStore:
+    """Trusted JSON-backed owner for proposals that outlive one service object."""
+
+    def __init__(self, path: Path) -> None:
+        self.path = path.expanduser().resolve()
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        with sqlite3.connect(self.path) as connection:
+            connection.execute(
+                "CREATE TABLE IF NOT EXISTS self_development_proposals "
+                "(proposal_id TEXT PRIMARY KEY, fingerprint TEXT NOT NULL, payload TEXT NOT NULL)"
+            )
+
+    def put(self, proposal: MergeDeploymentProposal) -> None:
+        _assert_proposal_fingerprint(proposal)
+        payload = json.dumps(_proposal_to_json(proposal), sort_keys=True, separators=(",", ":"))
+        with sqlite3.connect(self.path) as connection:
+            connection.execute(
+                "INSERT INTO self_development_proposals(proposal_id,fingerprint,payload) "
+                "VALUES(?,?,?) ON CONFLICT(proposal_id) DO UPDATE SET "
+                "fingerprint=excluded.fingerprint,payload=excluded.payload",
+                (proposal.proposal_id, proposal.proposal_fingerprint, payload),
+            )
+
+    add = put
+
+    def get(self, proposal_id: str) -> MergeDeploymentProposal | None:
+        with sqlite3.connect(self.path) as connection:
+            row = connection.execute(
+                "SELECT fingerprint,payload FROM self_development_proposals WHERE proposal_id=?",
+                (proposal_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        proposal = _proposal_from_json(json.loads(str(row[1])))
+        if proposal.proposal_fingerprint != str(row[0]):
+            raise ActivationError("durable proposal fingerprint mismatch")
+        _assert_proposal_fingerprint(proposal)
+        return proposal
+
+    def __call__(self, proposal_id: str) -> MergeDeploymentProposal | None:
+        return self.get(proposal_id)
+
+
 class ProposalLoader(Protocol):
     def __call__(self, proposal_id: str) -> MergeDeploymentProposal | None: ...
 
@@ -184,10 +252,118 @@ GateVerifier = Callable[
     [MergeDeploymentProposal, ModificationTrustClassification],
     Mapping[str, GateEvidence] | Awaitable[Mapping[str, GateEvidence]],
 ]
+
+
+class UnavailableSelfDevelopmentGateVerifier:
+    """Trusted fail-closed gate owner for runtimes without a gate provider."""
+
+    def __call__(
+        self, proposal: MergeDeploymentProposal, classification: ModificationTrustClassification
+    ) -> Mapping[str, GateEvidence]:
+        del proposal, classification
+        return {}
+
+
+class GoldenWorkflowOwner:
+    """Bind self-improvement activation to the canonical GoldenWorkflow owner."""
+
+    def __init__(self, service: GoldenWorkflowService, executor: GoldenExecutor) -> None:
+        self._service = service
+        self._executor = executor
+
+    async def __call__(self) -> bool:
+        result = await self._service.require_before(
+            GoldenChangeKind.SELF_IMPROVEMENT,
+            self._executor,
+        )
+        return result.passed
+
+
 GoldenRunner = Callable[[], object | Awaitable[object]]
-HealthCheck = Callable[[], bool]
 
 _APPROVAL_BINDING_NAMESPACE = UUID("7b6eb5c1-5fd3-5ae6-a1ab-15b4e5a98eaf")
+
+
+@dataclass(frozen=True, slots=True)
+class CandidateStartEvidence:
+    """Trusted observation that the exact installed candidate was started."""
+
+    started: bool
+    observed_revision: str
+    observed_hash: str
+    evidence_digest: str
+
+    def __post_init__(self) -> None:
+        if type(self.started) is not bool or len(self.observed_hash) != 64:
+            raise ValueError("Candidate start evidence is malformed")
+        int(self.observed_hash, 16)
+        if len(self.evidence_digest) != 64:
+            raise ValueError("Candidate start evidence digest is malformed")
+        int(self.evidence_digest, 16)
+
+
+@dataclass(frozen=True, slots=True)
+class RuntimeVerificationEvidence:
+    """One independently observed trusted runtime verification fact."""
+
+    passed: bool
+    evidence_digest: str
+    detail: str = ""
+
+    def __post_init__(self) -> None:
+        if type(self.passed) is not bool or len(self.evidence_digest) != 64:
+            raise ValueError("Runtime verification evidence is malformed")
+        int(self.evidence_digest, 16)
+
+
+class SelfDevelopmentRuntimeVerifier(Protocol):
+    """Application-owned observer for candidate and LKG lifecycle facts."""
+
+    def start_candidate(
+        self, *, installation_root: Path, expected_revision: str, expected_hash: str
+    ) -> CandidateStartEvidence: ...
+
+    def observe_candidate_health(
+        self, *, installation_root: Path, expected_hash: str
+    ) -> RuntimeVerificationEvidence: ...
+
+    def observe_candidate_security(
+        self, *, installation_root: Path, expected_hash: str
+    ) -> RuntimeVerificationEvidence: ...
+
+    def observe_lkg_health(self, *, installation_root: Path) -> RuntimeVerificationEvidence: ...
+
+
+class UnavailableSelfDevelopmentRuntimeVerifier:
+    """Fail-closed runtime seam used when no trusted candidate host is configured."""
+
+    _DIGEST = hashlib.sha256(b"trusted-self-development-runtime-unavailable").hexdigest()
+
+    def start_candidate(
+        self, *, installation_root: Path, expected_revision: str, expected_hash: str
+    ) -> CandidateStartEvidence:
+        del installation_root, expected_revision
+        return CandidateStartEvidence(False, "unavailable", expected_hash, self._DIGEST)
+
+    def observe_candidate_health(
+        self, *, installation_root: Path, expected_hash: str
+    ) -> RuntimeVerificationEvidence:
+        del installation_root, expected_hash
+        return RuntimeVerificationEvidence(
+            False, self._DIGEST, "candidate runtime observer unavailable"
+        )
+
+    def observe_candidate_security(
+        self, *, installation_root: Path, expected_hash: str
+    ) -> RuntimeVerificationEvidence:
+        del installation_root, expected_hash
+        return RuntimeVerificationEvidence(
+            False, self._DIGEST, "candidate security observer unavailable"
+        )
+
+    def observe_lkg_health(self, *, installation_root: Path) -> RuntimeVerificationEvidence:
+        del installation_root
+        return RuntimeVerificationEvidence(False, self._DIGEST, "LKG observer unavailable")
 
 
 class TrustedSelfDevelopmentActivator:
@@ -207,6 +383,7 @@ class TrustedSelfDevelopmentActivator:
         proposal_loader: ProposalLoader,
         gate_verifier: GateVerifier,
         golden_runner: GoldenRunner,
+        runtime_verifier: SelfDevelopmentRuntimeVerifier,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
         self.production_root = _directory(production_root, "production root")
@@ -220,6 +397,7 @@ class TrustedSelfDevelopmentActivator:
         self._proposal_loader = proposal_loader
         self._gate_verifier = gate_verifier
         self._golden_runner = golden_runner
+        self._runtime_verifier = runtime_verifier
         self._clock = clock or (lambda: datetime.now(UTC))
         self._preview: dict[str, UpdatePreview] = {}
         self._identity = object()
@@ -334,10 +512,6 @@ class TrustedSelfDevelopmentActivator:
         self,
         activation_id: str,
         *,
-        start_candidate: Callable[[], None] | None = None,
-        health_check: HealthCheck | None = None,
-        security_check: HealthCheck | None = None,
-        lkg_health_check: HealthCheck | None = None,
         permission_context: TrustedApprovalContext | None = None,
         permission_contexts: tuple[TrustedApprovalContext, ...] = (),
     ) -> ActivationRecord:
@@ -426,14 +600,47 @@ class TrustedSelfDevelopmentActivator:
                 candidate_snapshot_id=candidate_snapshot,
             )
             coordinator = self.recovery
+
+            start_evidence: CandidateStartEvidence | None = None
+
+            def start() -> None:
+                nonlocal start_evidence
+                start_evidence = self._runtime_verifier.start_candidate(
+                    installation_root=self.installation_root,
+                    expected_revision=record.candidate_revision,
+                    expected_hash=record.candidate_hash,
+                )
+                if (
+                    not start_evidence.started
+                    or start_evidence.observed_revision != record.candidate_revision
+                    or start_evidence.observed_hash != record.candidate_hash
+                ):
+                    raise ActivationError("trusted candidate start did not observe exact candidate")
+
+            def verify_candidate() -> bool:
+                health = self._runtime_verifier.observe_candidate_health(
+                    installation_root=self.installation_root,
+                    expected_hash=record.candidate_hash,
+                )
+                if not health.passed:
+                    return False
+                security = self._runtime_verifier.observe_candidate_security(
+                    installation_root=self.installation_root,
+                    expected_hash=record.candidate_hash,
+                )
+                return security.passed
+
+            def verify_lkg() -> bool:
+                return self._runtime_verifier.observe_lkg_health(
+                    installation_root=self.installation_root
+                ).passed
+
             result = coordinator.boot_candidate(
                 record.recovery_transaction_id or transaction_id,
                 candidate_snapshot,
-                start=start_candidate or (lambda: None),
-                health_check=lambda: bool(
-                    (health_check or (lambda: True))() and (security_check or (lambda: True))()
-                ),
-                lkg_health_check=lkg_health_check or (lambda: True),
+                start=start,
+                health_check=verify_candidate,
+                lkg_health_check=verify_lkg,
                 destinations={
                     path: self.installation_root / Path(path) for path in record.changed_paths
                 },
@@ -447,7 +654,7 @@ class TrustedSelfDevelopmentActivator:
                     "rollback could not establish known-good",
                 )
             return self._fail(record, ActivationStatus.ROLLED_BACK, "candidate verification failed")
-        except (ActivationError, RecoveryError) as error:
+        except (ActivationError, GoldenGateError, RecoveryError) as error:
             detail = str(error)
             terminal = _activation_failure_status(detail)
             return self._fail(record, terminal, detail)
@@ -461,11 +668,6 @@ class TrustedSelfDevelopmentActivator:
     async def resume(
         self,
         activation_id: str,
-        *,
-        start_candidate: Callable[[], None] | None = None,
-        health_check: HealthCheck | None = None,
-        security_check: HealthCheck | None = None,
-        lkg_health_check: HealthCheck | None = None,
     ) -> ActivationRecord:
         """Reconstruct durable state and reconcile an interrupted effect.
 
@@ -508,14 +710,44 @@ class TrustedSelfDevelopmentActivator:
             candidate_snapshot_id = record.candidate_snapshot_id
             if candidate_snapshot_id is None:
                 raise ActivationError("candidate snapshot is unavailable during recovery")
+
+            def start() -> None:
+                evidence = self._runtime_verifier.start_candidate(
+                    installation_root=self.installation_root,
+                    expected_revision=record.candidate_revision,
+                    expected_hash=record.candidate_hash,
+                )
+                if (
+                    not evidence.started
+                    or evidence.observed_revision != record.candidate_revision
+                    or evidence.observed_hash != record.candidate_hash
+                ):
+                    raise ActivationError("trusted candidate start did not observe exact candidate")
+
+            def verify_candidate() -> bool:
+                health = self._runtime_verifier.observe_candidate_health(
+                    installation_root=self.installation_root,
+                    expected_hash=record.candidate_hash,
+                )
+                if not health.passed:
+                    return False
+                security = self._runtime_verifier.observe_candidate_security(
+                    installation_root=self.installation_root,
+                    expected_hash=record.candidate_hash,
+                )
+                return security.passed
+
+            def verify_lkg() -> bool:
+                return self._runtime_verifier.observe_lkg_health(
+                    installation_root=self.installation_root
+                ).passed
+
             result = self.recovery.boot_candidate(
                 record.recovery_transaction_id or str(uuid4()),
                 candidate_snapshot_id,
-                start=start_candidate or (lambda: None),
-                health_check=lambda: bool(
-                    (health_check or (lambda: True))() and (security_check or (lambda: True))()
-                ),
-                lkg_health_check=lkg_health_check or (lambda: True),
+                start=start,
+                health_check=verify_candidate,
+                lkg_health_check=verify_lkg,
                 destinations={
                     path: self.installation_root / Path(path) for path in record.changed_paths
                 },
@@ -749,6 +981,213 @@ class TrustedSelfDevelopmentActivator:
         return self._transition(record, status, failure_reason=reason)
 
 
+def _assert_proposal_fingerprint(proposal: MergeDeploymentProposal) -> None:
+    expected = compute_proposal_fingerprint(
+        proposal_id=proposal.proposal_id,
+        task_id=proposal.task_id,
+        candidate=proposal.candidate,
+        specification=proposal.specification,
+        workspace=proposal.workspace,
+        modification=proposal.modification,
+        dependency_assessment=proposal.dependency_assessment,
+        gates=proposal.gates,
+        evaluation=proposal.evaluation,
+        rollback=proposal.rollback,
+        created_at=proposal.created_at,
+        expires_at=proposal.expires_at,
+        status=proposal.status,
+    )
+    if expected != proposal.proposal_fingerprint:
+        raise ActivationError("proposal fingerprint is not trusted")
+
+
+def _proposal_to_json(proposal: MergeDeploymentProposal) -> dict[str, object]:
+    return cast(dict[str, object], _json_value(proposal))
+
+
+def _json_value(value: object) -> object:
+    if hasattr(value, "__dataclass_fields__"):
+        return {
+            item.name: _json_value(getattr(value, item.name))
+            for item in fields(value)  # type: ignore[arg-type]
+        }
+    if isinstance(value, StrEnum):
+        return value.value
+    if isinstance(value, UUID | Path):
+        return str(value)
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if isinstance(value, tuple):
+        return [_json_value(item) for item in value]
+    if isinstance(value, list):
+        return [_json_value(item) for item in value]
+    if isinstance(value, dict):
+        return {str(key): _json_value(item) for key, item in value.items()}
+    return value
+
+
+def _proposal_from_json(value: Mapping[str, object]) -> MergeDeploymentProposal:
+    candidate_value = _mapping(value, "candidate")
+    candidate = ImprovementCandidate(
+        str(candidate_value["candidate_id"]),
+        ImprovementSource(str(candidate_value["source"])),
+        tuple(
+            ImprovementEvidence(
+                str(item["source_reference"]),
+                str(item["summary"]),
+                int(cast(Any, item.get("occurrence_count", 1))),
+                str(item["content_digest"]) if item.get("content_digest") else None,
+                bool(item.get("external_untrusted", False)),
+            )
+            for item in _mappings(candidate_value, "evidence")
+        ),
+        str(candidate_value["proposed_objective"]),
+        str(candidate_value["expected_benefit"]),
+        tuple(str(item) for item in _sequence(candidate_value, "affected_components")),
+        Risk(str(candidate_value["risk"])),
+        Reversibility(str(candidate_value["reversibility"])),
+        tuple(
+            EvaluationScenario(
+                str(item["scenario_id"]),
+                str(item["description"]),
+                str(item["metric"]),
+                EvaluationDirection(str(item["direction"])),
+                float(cast(Any, item["baseline_value"])),
+                float(cast(Any, item["required_delta"])),
+            )
+            for item in _mappings(candidate_value, "evaluation_plan")
+        ),
+        int(cast(Any, candidate_value["impact"])),
+        int(cast(Any, candidate_value["frequency"])),
+        int(cast(Any, candidate_value["confidence"])),
+        int(cast(Any, candidate_value["implementation_cost"])),
+        int(cast(Any, candidate_value["user_relevance"])),
+    )
+    specification_value = _mapping(value, "specification")
+    specification = ChangeSpecification(
+        str(specification_value["specification_id"]),
+        str(specification_value["candidate_id"]),
+        str(specification_value["problem"]),
+        str(specification_value["intended_behavior"]),
+        tuple(str(item) for item in _sequence(specification_value, "boundaries")),
+        tuple(str(item) for item in _sequence(specification_value, "likely_affected_paths")),
+        tuple(str(item) for item in _sequence(specification_value, "required_tests")),
+        str(specification_value["rollback_plan"]),
+    )
+    workspace_value = _mapping(value, "workspace")
+    workspace = IsolatedWorkspace(
+        str(workspace_value["workspace_id"]),
+        Path(str(workspace_value["root"])),
+        str(workspace_value["branch"]),
+        str(workspace_value["base_revision"]),
+        datetime.fromisoformat(str(workspace_value["created_at"])),
+    )
+    modification_value = _mapping(value, "modification")
+    modification = ModificationResult(
+        str(modification_value["workspace_id"]),
+        tuple(str(item) for item in _sequence(modification_value, "changed_paths")),
+        str(modification_value["diff_digest"]),
+        str(modification_value["tree_digest"]),
+        str(modification_value["candidate_revision"])
+        if modification_value.get("candidate_revision") is not None
+        else None,
+    )
+    gates = tuple(
+        GateResult(
+            GateKind(str(item["kind"])),
+            GateStatus(str(item["status"])),
+            str(item["summary"]),
+            str(item["evidence_digest"]),
+        )
+        for item in _mappings(value, "gates")
+    )
+    evaluation_value = _mapping(value, "evaluation")
+    evaluation = EvaluationResult(
+        EvaluationStatus(str(evaluation_value["status"])),
+        tuple(
+            ScenarioResult(
+                str(item["scenario_id"]),
+                float(cast(Any, item["baseline_value"])),
+                float(cast(Any, item["candidate_value"])),
+                float(cast(Any, item["observed_delta"])),
+                bool(item["passed"]),
+            )
+            for item in _mappings(evaluation_value, "scenarios")
+        ),
+        str(evaluation_value["reason_code"]),
+    )
+    dependency_value = _mapping(value, "dependency_assessment")
+    dependency = DependencyAssessment(
+        bool(dependency_value["allowed"]),
+        str(dependency_value["reason_code"]),
+        tuple(
+            DependencyChange(
+                str(item["name"]),
+                _dependency_record(item.get("previous")),
+                _dependency_record(item.get("proposed")),
+                str(item["risk_analysis"]) if item.get("risk_analysis") is not None else None,
+            )
+            for item in _mappings(dependency_value, "changes")
+        ),
+    )
+    rollback_value = _mapping(value, "rollback")
+    rollback = RollbackMetadata(
+        str(rollback_value["previous_known_good_revision"]),
+        str(rollback_value["candidate_revision"])
+        if rollback_value.get("candidate_revision") is not None
+        else None,
+        tuple(str(item) for item in _sequence(rollback_value, "changed_paths")),
+        tuple(str(item) for item in _sequence(rollback_value, "restoration_steps")),
+    )
+    return MergeDeploymentProposal(
+        str(value["proposal_id"]),
+        UUID(str(value["task_id"])),
+        candidate,
+        specification,
+        workspace,
+        modification,
+        gates,
+        evaluation,
+        dependency,
+        rollback,
+        str(value["proposal_fingerprint"]),
+        datetime.fromisoformat(str(value["created_at"])),
+        datetime.fromisoformat(str(value["expires_at"])),
+    )
+
+
+def _mapping(value: Mapping[str, object], key: str) -> Mapping[str, object]:
+    item = value.get(key)
+    if not isinstance(item, Mapping):
+        raise ActivationError(f"durable proposal field is malformed: {key}")
+    return item
+
+
+def _mappings(value: Mapping[str, object], key: str) -> tuple[Mapping[str, object], ...]:
+    return tuple(_mapping_item(item, key) for item in _sequence(value, key))
+
+
+def _mapping_item(value: object, key: str) -> Mapping[str, object]:
+    if not isinstance(value, Mapping):
+        raise ActivationError(f"durable proposal collection is malformed: {key}")
+    return value
+
+
+def _sequence(value: Mapping[str, object], key: str) -> tuple[object, ...]:
+    item = value.get(key)
+    if not isinstance(item, list):
+        raise ActivationError(f"durable proposal collection is malformed: {key}")
+    return tuple(item)
+
+
+def _dependency_record(value: object) -> DependencyRecord | None:
+    if value is None:
+        return None
+    if not isinstance(value, Mapping):
+        raise ActivationError("durable dependency record is malformed")
+    return DependencyRecord(str(value["name"]), str(value["version"]), str(value["source"]))
+
+
 def record_revision(proposal: MergeDeploymentProposal) -> str:
     return proposal.modification.candidate_revision or proposal.workspace.base_revision
 
@@ -960,8 +1399,15 @@ __all__ = [
     "ActivationRecord",
     "ActivationStateStore",
     "ActivationStatus",
+    "CandidateStartEvidence",
+    "DurableProposalStore",
     "GateEvidence",
+    "GoldenWorkflowOwner",
+    "RuntimeVerificationEvidence",
+    "SelfDevelopmentRuntimeVerifier",
     "TrustedSelfDevelopmentActivator",
+    "UnavailableSelfDevelopmentGateVerifier",
+    "UnavailableSelfDevelopmentRuntimeVerifier",
     "approval_binding_fingerprint",
     "approval_request_id",
 ]

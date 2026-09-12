@@ -266,6 +266,16 @@ from jarvis.security import (
     StartupSecurityReport,
     StartupSecurityValidator,
 )
+from jarvis.self_development import (
+    ActivationStateStore,
+    DurableProposalStore,
+    GateVerifier,
+    GoldenWorkflowOwner,
+    SelfDevelopmentRuntimeVerifier,
+    TrustedSelfDevelopmentActivator,
+    UnavailableSelfDevelopmentGateVerifier,
+    UnavailableSelfDevelopmentRuntimeVerifier,
+)
 from jarvis.setup_conductor import (
     DecisionCollector,
     SetupConductor,
@@ -278,7 +288,13 @@ from jarvis.speech.stt import FasterWhisperSttProvider, SoundDeviceRecorder, Spe
 from jarvis.speech.tts import PiperTtsProvider, Pyttsx3TtsProvider, TextToSpeechService
 from jarvis.state import ApplicationStateMachine, SQLiteStateStore, StateStoreError
 from jarvis.task_controller import PlanningTaskController, TaskController
-from jarvis.testing.golden import GoldenWorkflowError, GoldenWorkflowService, GoldenWorkflowStore
+from jarvis.testing.golden import (
+    GoldenExecutor,
+    GoldenUnavailable,
+    GoldenWorkflowError,
+    GoldenWorkflowService,
+    GoldenWorkflowStore,
+)
 from jarvis.tools.base import Tool
 from jarvis.tools.calculator import CalculatorTool
 from jarvis.tools.local_time import LocalTimeTool
@@ -298,6 +314,14 @@ from jarvis.workflows import (
     WorkflowProcedureStoreError,
     WorkflowTemplateRegistry,
 )
+
+
+class _UnavailableSelfDevelopmentGoldenExecutor:
+    """Trusted composition marker when no candidate runtime executor is configured."""
+
+    def __call__(self, workflow: Any, fixture: Any) -> Sequence[EvidenceRecord]:
+        del workflow, fixture
+        raise GoldenUnavailable("self-development GoldenWorkflow executor is unavailable")
 
 
 class _OpportunityResearchPreparation:
@@ -386,6 +410,8 @@ class RuntimePaths:
     automation_database: Path
     trace_database: Path
     golden_workflow_database: Path
+    self_development_database: Path
+    self_development_installation: Path
     workflow_procedure_database: Path
     sessions_database: Path
     goal_supervisor_database: Path
@@ -423,6 +449,8 @@ class RuntimePaths:
             base / "automations.sqlite3",
             base / "trace.sqlite3",
             base / "golden-workflows.sqlite3",
+            base / "self-development.sqlite3",
+            base / "self-development-installation",
             base / "workflow-procedures.sqlite3",
             base / "sessions.sqlite3",
             base / "goals.sqlite3",
@@ -460,6 +488,7 @@ class RuntimePaths:
             self.backups,
             self.packages,
             self.sandboxes,
+            self.self_development_installation,
             self.artifacts,
         ):
             path.mkdir(parents=True, exist_ok=True)
@@ -482,6 +511,7 @@ class RuntimePaths:
             self.backups,
             self.packages,
             self.sandboxes,
+            self.self_development_installation,
         )
         databases = (
             self.state_database,
@@ -493,6 +523,7 @@ class RuntimePaths:
             self.automation_database,
             self.trace_database,
             self.golden_workflow_database,
+            self.self_development_database,
             self.workflow_procedure_database,
             self.sessions_database,
             self.goal_supervisor_database,
@@ -620,6 +651,9 @@ class RuntimeTestFixture:
     additional_tools: tuple[Tool[Any, Any], ...] = ()
     compensation_observation_provider: CompensationObservationProvider | None = None
     compensation_state_provider: CompensationStateProvider | None = None
+    self_development_runtime_verifier: SelfDevelopmentRuntimeVerifier | None = None
+    self_development_gate_verifier: GateVerifier | None = None
+    self_development_golden_executor: GoldenExecutor | None = None
 
 
 # This backend is reachable only from the test environment or pytest process.
@@ -682,6 +716,8 @@ class RuntimeContainer:
     episode_composer: EpisodeComposer
     golden_workflow_store: GoldenWorkflowStore
     golden_workflows: GoldenWorkflowService
+    self_development_proposals: DurableProposalStore | None
+    self_development_activator: TrustedSelfDevelopmentActivator | None
     workflow_procedure_store: SQLiteWorkflowProcedureStore
     procedure_evidence_authority: ProcedureEvidenceAuthority
     procedure_bank: ProcedureBank
@@ -1218,6 +1254,8 @@ class ApplicationRuntime:
         automation_store: SQLiteAutomationStore | None = None
         trace_store: TraceStore | None = None
         golden_workflow_store: GoldenWorkflowStore | None = None
+        self_development_proposals: DurableProposalStore | None = None
+        self_development_activator: TrustedSelfDevelopmentActivator | None = None
         workflow_procedure_store: SQLiteWorkflowProcedureStore | None = None
         repair_store: SQLiteRepairStore | None = None
         backup: BackupService | None = None
@@ -1673,6 +1711,52 @@ class ApplicationRuntime:
                 else BrokerProvisioningAuthorizer(broker),
                 store=provisioning_store,
             )
+            verification_engine = VerificationEngine()
+            paths.validate_storage_layout()
+            golden_workflow_store = GoldenWorkflowStore(paths.golden_workflow_database)
+            golden_workflows = GoldenWorkflowService(
+                golden_workflow_store, verifier=verification_engine
+            )
+            try:
+                assert recovery_coordinator is not None
+                assert resolved_project_root is not None
+                self_development_proposals = DurableProposalStore(paths.self_development_database)
+                activation_store = ActivationStateStore(paths.self_development_database)
+                self_development_activator = TrustedSelfDevelopmentActivator(
+                    production_root=resolved_project_root,
+                    installation_root=paths.self_development_installation,
+                    recovery=recovery_coordinator,
+                    activation_store=activation_store,
+                    permission_broker=broker,
+                    approval_verifier=desktop_approval_authenticator.verifier(),
+                    proposal_loader=self_development_proposals,
+                    gate_verifier=(
+                        test_fixture.self_development_gate_verifier
+                        if test_fixture is not None
+                        and test_fixture.self_development_gate_verifier is not None
+                        else UnavailableSelfDevelopmentGateVerifier()
+                    ),
+                    golden_runner=GoldenWorkflowOwner(
+                        golden_workflows,
+                        (
+                            test_fixture.self_development_golden_executor
+                            if test_fixture is not None
+                            and test_fixture.self_development_golden_executor is not None
+                            else _UnavailableSelfDevelopmentGoldenExecutor()
+                        ),
+                    ),
+                    runtime_verifier=(
+                        test_fixture.self_development_runtime_verifier
+                        if test_fixture is not None
+                        and test_fixture.self_development_runtime_verifier is not None
+                        else UnavailableSelfDevelopmentRuntimeVerifier()
+                    ),
+                )
+            except (OSError, RuntimeError, ValueError, sqlite3.DatabaseError):
+                # Self-development state is auxiliary. Recovery and Safe Mode
+                # remain owned by their independently initialized authorities.
+                self_development_proposals = None
+                self_development_activator = None
             # Seal the tool/permission registration boundary only after every
             # trusted built-in broker identity has been registered.
             registry.seal()
@@ -1742,8 +1826,6 @@ class ApplicationRuntime:
             paths.validate_storage_layout()
             trace_store = TraceStore(paths.trace_database)
             trace_service = TraceService(trace_store, events)
-            verification_engine = VerificationEngine()
-
             if test_fixture is not None:
                 activation_hooks = test_fixture.activation_hooks(effect_attestation_store)
             else:
@@ -1988,8 +2070,6 @@ class ApplicationRuntime:
             workflow_templates = WorkflowTemplateRegistry(store=workflow_procedure_store)
             paths.validate_storage_layout()
             automation_store = SQLiteAutomationStore(paths.automation_database)
-            golden_workflow_store = GoldenWorkflowStore(paths.golden_workflow_database)
-            golden_workflows = GoldenWorkflowService(golden_workflow_store)
             automation_service = AutomationService(
                 automation_store,
                 events,
@@ -2624,6 +2704,8 @@ class ApplicationRuntime:
                 episode_composer=episode_composer,
                 golden_workflow_store=golden_workflow_store,
                 golden_workflows=golden_workflows,
+                self_development_proposals=self_development_proposals,
+                self_development_activator=self_development_activator,
                 workflow_procedure_store=workflow_procedure_store,
                 procedure_evidence_authority=procedure_evidence_authority,
                 procedure_bank=procedure_bank,
