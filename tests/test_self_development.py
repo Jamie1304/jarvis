@@ -68,6 +68,8 @@ from jarvis.self_development import (
     _known_good_candidate_hash,
     _maybe,
     _tree_digest,
+    approval_binding_fingerprint,
+    approval_request_id,
 )
 from jarvis.update_preview import UpdateGateName, UpdateGateResult, UpdateGateStatus
 
@@ -322,7 +324,7 @@ async def test_exact_activation_promotes_only_after_recovery_verification(tmp_pa
         preview_gates=_preview_gates(),
     )
     context = approval.issue_context(
-        request_id=UUID(record.activation_id),
+        request_id=approval_request_id(record),
         choice=ApprovalChoice.APPROVE_ONCE,
         identity=ApprovalIdentity("trusted-user", ApprovalActorKind.TRUSTED_USER),
     )
@@ -353,7 +355,7 @@ async def test_changed_candidate_becomes_stale_without_effect(tmp_path: Path) ->
         preview_gates=_preview_gates(),
     )
     context = approval.issue_context(
-        request_id=UUID(record.activation_id),
+        request_id=approval_request_id(record),
         choice=ApprovalChoice.APPROVE_ONCE,
         identity=ApprovalIdentity("trusted-user", ApprovalActorKind.TRUSTED_USER),
     )
@@ -506,7 +508,7 @@ async def test_approval_state_and_activation_expiry_are_terminal(tmp_path: Path)
         preview_gates=_preview_gates(),
     )
     context = approval.issue_context(
-        request_id=UUID(record.activation_id),
+        request_id=approval_request_id(record),
         choice=ApprovalChoice.APPROVE_ONCE,
         identity=ApprovalIdentity("trusted-user", ApprovalActorKind.TRUSTED_USER),
     )
@@ -522,14 +524,15 @@ async def test_approval_state_and_activation_expiry_are_terminal(tmp_path: Path)
         changed_subsystems=("jarvis",),
         preview_gates=_preview_gates(),
     )
-    service2.store.put(replace(record2, expires_at=NOW + timedelta(seconds=1)))
     context2 = approval2.issue_context(
-        request_id=UUID(record2.activation_id),
+        request_id=approval_request_id(record2),
         choice=ApprovalChoice.APPROVE_ONCE,
         identity=ApprovalIdentity("trusted-user", ApprovalActorKind.TRUSTED_USER),
     )
-    with pytest.raises(ActivationError, match="expiry"):
-        await service2.approve(record2.activation_id, context2)
+    service2.store.put(replace(record2, expires_at=NOW + timedelta(seconds=1)))
+    service2._clock = lambda: NOW + timedelta(seconds=2)
+    expired = await service2.approve(record2.activation_id, context2)
+    assert expired.status is ActivationStatus.EXPIRED
 
 
 @pytest.mark.asyncio
@@ -557,7 +560,7 @@ async def test_activation_missing_proposal_and_permission_policy_fail_closed(
         preview_gates=_preview_gates(),
     )
     context2 = approval2.issue_context(
-        request_id=UUID(record2.activation_id),
+        request_id=approval_request_id(record2),
         choice=ApprovalChoice.APPROVE_ONCE,
         identity=ApprovalIdentity("trusted-user", ApprovalActorKind.TRUSTED_USER),
     )
@@ -577,7 +580,7 @@ async def test_health_failure_rolls_back_without_known_good_promotion(tmp_path: 
         preview_gates=_preview_gates(),
     )
     context = approval.issue_context(
-        request_id=UUID(record.activation_id),
+        request_id=approval_request_id(record),
         choice=ApprovalChoice.APPROVE_ONCE,
         identity=ApprovalIdentity("trusted-user", ApprovalActorKind.TRUSTED_USER),
     )
@@ -653,7 +656,7 @@ async def test_stale_gates_golden_and_permission_authority_fail_closed(tmp_path:
         preview_gates=_preview_gates(),
     )
     approval_context = approval.issue_context(
-        request_id=UUID(record.activation_id),
+        request_id=approval_request_id(record),
         choice=ApprovalChoice.APPROVE_ONCE,
         identity=ApprovalIdentity("trusted-user", ApprovalActorKind.TRUSTED_USER),
     )
@@ -671,7 +674,7 @@ async def test_stale_gates_golden_and_permission_authority_fail_closed(tmp_path:
         preview_gates=_preview_gates(),
     )
     context2 = approval2.issue_context(
-        request_id=UUID(record2.activation_id),
+        request_id=approval_request_id(record2),
         choice=ApprovalChoice.APPROVE_ONCE,
         identity=ApprovalIdentity("trusted-user", ApprovalActorKind.TRUSTED_USER),
     )
@@ -696,7 +699,7 @@ async def test_approval_binding_and_proposal_integrity_reject_tampering(tmp_path
         choice=ApprovalChoice.APPROVE_ONCE,
         identity=ApprovalIdentity("trusted-user", ApprovalActorKind.TRUSTED_USER),
     )
-    with pytest.raises(ActivationError, match="different activation"):
+    with pytest.raises(ActivationError, match="different exact candidate"):
         await service.approve(record.activation_id, wrong)
     bad_modification = replace(proposal.modification, tree_digest="b" * 64)
     bad_fingerprint = compute_proposal_fingerprint(
@@ -773,7 +776,7 @@ async def test_edge_authority_rejections_and_async_evidence_are_covered(tmp_path
         ApprovalSource.TRUSTED_LOCAL_API, clock=lambda: NOW
     )
     forged = forged_authenticator.issue_context(
-        request_id=UUID(record.activation_id),
+        request_id=approval_request_id(record),
         choice=ApprovalChoice.APPROVE_ONCE,
         identity=ApprovalIdentity("trusted-user", ApprovalActorKind.TRUSTED_USER),
     )
@@ -889,3 +892,184 @@ async def test_resume_noop_and_known_good_hash_are_durable(tmp_path: Path) -> No
     assert await service.resume(record.activation_id) == record
     known_good = _known_good_candidate_hash(service.recovery, proposal)
     assert known_good is not None and len(known_good) == 64
+
+
+@pytest.mark.asyncio
+async def test_r1_deny_context_is_persisted_as_denial(
+    tmp_path: Path,
+) -> None:
+    """A real signed denial never becomes self-development authority."""
+
+    service, proposal, _installation, approval, _broker = _activator(tmp_path)
+    record = service.prepare(
+        proposal,
+        current_version="1",
+        candidate_version="2",
+        changed_subsystems=("jarvis",),
+        preview_gates=_preview_gates(),
+    )
+    denial = approval.issue_context(
+        request_id=approval_request_id(record),
+        choice=ApprovalChoice.DENY_ONCE,
+        identity=ApprovalIdentity("trusted-user", ApprovalActorKind.TRUSTED_USER),
+    )
+
+    result = await service.approve(record.activation_id, denial)
+
+    assert result.status is ActivationStatus.DENIED
+    assert await service.activate(record.activation_id) == result
+
+
+@pytest.mark.asyncio
+async def test_r1_preview_binding_can_be_changed_after_context_mint(
+    tmp_path: Path,
+) -> None:
+    """Changing preview facts rejects the old context."""
+
+    service, proposal, _installation, approval, _broker = _activator(tmp_path)
+    record = service.prepare(
+        proposal,
+        current_version="1",
+        candidate_version="2",
+        changed_subsystems=("jarvis",),
+        preview_gates=_preview_gates(),
+    )
+    context = approval.issue_context(
+        request_id=approval_request_id(record),
+        choice=ApprovalChoice.APPROVE_ONCE,
+        identity=ApprovalIdentity("trusted-user", ApprovalActorKind.TRUSTED_USER),
+    )
+    service.store.put(replace(record, preview_fingerprint="b" * 64))
+
+    with pytest.raises(ActivationError, match="different exact candidate"):
+        await service.approve(record.activation_id, context)
+
+
+@pytest.mark.asyncio
+async def test_r1_limited_context_is_not_self_development_authority(tmp_path: Path) -> None:
+    service, proposal, _installation, approval, _broker = _activator(tmp_path)
+    record = service.prepare(
+        proposal,
+        current_version="1",
+        candidate_version="2",
+        changed_subsystems=("jarvis",),
+        preview_gates=_preview_gates(),
+    )
+    limited = approval.issue_context(
+        request_id=approval_request_id(record),
+        choice=ApprovalChoice.APPROVE_LIMITED,
+        remember_for_seconds=30,
+        identity=ApprovalIdentity("trusted-user", ApprovalActorKind.TRUSTED_USER),
+    )
+
+    result = await service.approve(record.activation_id, limited)
+
+    assert result.status is ActivationStatus.DENIED
+
+
+def test_r1_binding_fingerprint_is_canonical_and_fact_bound(tmp_path: Path) -> None:
+    service, proposal, _installation, _approval, _broker = _activator(tmp_path)
+    record = service.prepare(
+        proposal,
+        current_version="1",
+        candidate_version="2",
+        changed_subsystems=("jarvis",),
+        preview_gates=_preview_gates(),
+    )
+    original = approval_binding_fingerprint(record)
+
+    assert len(original) == 64
+    assert approval_request_id(record) == approval_request_id(record)
+    assert approval_binding_fingerprint(replace(record, candidate_hash="b" * 64)) != original
+    assert (
+        approval_binding_fingerprint(
+            replace(record, task_id=UUID("00000000-0000-0000-0000-000000000012"))
+        )
+        != original
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "field", ("candidate_hash", "candidate_tree_digest", "candidate_diff_digest")
+)
+async def test_r1_candidate_fact_change_rejects_old_context(tmp_path: Path, field: str) -> None:
+    service, proposal, _installation, approval, _broker = _activator(tmp_path)
+    record = service.prepare(
+        proposal,
+        current_version="1",
+        candidate_version="2",
+        changed_subsystems=("jarvis",),
+        preview_gates=_preview_gates(),
+    )
+    context = approval.issue_context(
+        request_id=approval_request_id(record),
+        choice=ApprovalChoice.APPROVE_ONCE,
+        identity=ApprovalIdentity("trusted-user", ApprovalActorKind.TRUSTED_USER),
+    )
+    if field == "candidate_hash":
+        changed = replace(record, candidate_hash="b" * 64)
+    elif field == "candidate_tree_digest":
+        changed = replace(record, candidate_tree_digest="b" * 64)
+    else:
+        changed = replace(record, candidate_diff_digest="b" * 64)
+    service.store.put(changed)
+
+    stale = await service.approve(record.activation_id, context)
+    assert stale.status is ActivationStatus.STALE
+    stored = service.store.get(record.activation_id)
+    assert stored is not None and stored.status is ActivationStatus.STALE
+
+
+@pytest.mark.asyncio
+async def test_r1_production_base_drift_rejects_old_context(tmp_path: Path) -> None:
+    service, proposal, _installation, approval, _broker = _activator(tmp_path)
+    record = service.prepare(
+        proposal,
+        current_version="1",
+        candidate_version="2",
+        changed_subsystems=("jarvis",),
+        preview_gates=_preview_gates(),
+    )
+    context = approval.issue_context(
+        request_id=approval_request_id(record),
+        choice=ApprovalChoice.APPROVE_ONCE,
+        identity=ApprovalIdentity("trusted-user", ApprovalActorKind.TRUSTED_USER),
+    )
+    (service.production_root / "jarvis/example.py").write_text("BASE = 2\n", encoding="utf-8")
+    _git(service.production_root, "add", ".")
+    _git(service.production_root, "commit", "-qm", "drift")
+
+    stale = await service.approve(record.activation_id, context)
+
+    assert stale.status is ActivationStatus.STALE
+    stored = service.store.get(record.activation_id)
+    assert stored is not None and stored.status is ActivationStatus.STALE
+
+
+@pytest.mark.asyncio
+async def test_r1_expired_trusted_context_is_rejected(tmp_path: Path) -> None:
+    service, proposal, _installation, _approval, _broker = _activator(tmp_path)
+    record = service.prepare(
+        proposal,
+        current_version="1",
+        candidate_version="2",
+        changed_subsystems=("jarvis",),
+        preview_gates=_preview_gates(),
+    )
+    now = [NOW]
+    expiring = TrustedApprovalAuthenticator(
+        ApprovalSource.TRUSTED_LOCAL_API,
+        context_ttl_seconds=1,
+        clock=lambda: now[0],
+    )
+    service._approval_verifier = expiring.verifier()
+    context = expiring.issue_context(
+        request_id=approval_request_id(record),
+        choice=ApprovalChoice.APPROVE_ONCE,
+        identity=ApprovalIdentity("trusted-user", ApprovalActorKind.TRUSTED_USER),
+    )
+    now[0] = NOW + timedelta(seconds=2)
+
+    with pytest.raises(ActivationError, match="approval_expired"):
+        await service.approve(record.activation_id, context)

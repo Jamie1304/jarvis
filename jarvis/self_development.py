@@ -22,7 +22,7 @@ from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
 from typing import Any, Protocol
-from uuid import UUID, uuid4
+from uuid import UUID, uuid4, uuid5
 
 from jarvis.improvement.integrity import compute_proposal_fingerprint
 from jarvis.improvement.models import (
@@ -33,6 +33,7 @@ from jarvis.permissions.approval import ApprovalContextVerifier, TrustedApproval
 from jarvis.permissions.broker import PermissionBroker
 from jarvis.permissions.models import (
     ActionDescriptor,
+    ApprovalChoice,
     AuthorizationResult,
     Permission,
     PermissionRequest,
@@ -186,6 +187,8 @@ GateVerifier = Callable[
 GoldenRunner = Callable[[], object | Awaitable[object]]
 HealthCheck = Callable[[], bool]
 
+_APPROVAL_BINDING_NAMESPACE = UUID("7b6eb5c1-5fd3-5ae6-a1ab-15b4e5a98eaf")
+
 
 class TrustedSelfDevelopmentActivator:
     """Application-owned composition root for exact local candidate activation."""
@@ -294,13 +297,28 @@ class TrustedSelfDevelopmentActivator:
 
         record = self._require(activation_id)
         if record.status is not ActivationStatus.AWAITING_APPROVAL:
+            if record.status is ActivationStatus.DENIED:
+                return record
             raise ActivationError("activation is not awaiting approval")
-        if context.request_id != _activation_uuid(record.activation_id):
-            raise ActivationError("approval is bound to a different activation")
+        proposal = self._proposal_loader(record.proposal_id)
+        if proposal is None:
+            return self._fail(record, ActivationStatus.STALE, "proposal unavailable")
+        try:
+            self._revalidate(record, proposal)
+        except ActivationError as error:
+            return self._fail(record, _activation_failure_status(str(error)), str(error))
+        if context.request_id != approval_request_id(record):
+            raise ActivationError("approval is bound to a different exact candidate")
         verification = self._approval_verifier.verify_and_consume(context)
         if not verification.accepted or verification.context is None:
             raise ActivationError(f"trusted approval rejected: {verification.reason.value}")
         verified = verification.context
+        if verified.choice is not ApprovalChoice.APPROVE_ONCE:
+            return self._fail(
+                record,
+                ActivationStatus.DENIED,
+                f"trusted approval choice is not approve_once: {verified.choice.value}",
+            )
         if verified.expires_at > record.expires_at:
             raise ActivationError("approval exceeds proposal expiry")
         updated = replace(
@@ -326,6 +344,8 @@ class TrustedSelfDevelopmentActivator:
         """Revalidate, authorize, apply once, verify, and promote or recover."""
 
         record = self._require(activation_id)
+        if record.status is ActivationStatus.DENIED:
+            return record
         proposal = self._proposal_loader(record.proposal_id)
         if proposal is None:
             return self._fail(record, ActivationStatus.STALE, "proposal unavailable")
@@ -429,16 +449,7 @@ class TrustedSelfDevelopmentActivator:
             return self._fail(record, ActivationStatus.ROLLED_BACK, "candidate verification failed")
         except (ActivationError, RecoveryError) as error:
             detail = str(error)
-            terminal = (
-                ActivationStatus.EXPIRED
-                if "expired" in detail
-                else ActivationStatus.STALE
-                if any(
-                    marker in detail
-                    for marker in ("stale", "changed", "drift", "fingerprint", "classification")
-                )
-                else ActivationStatus.FAILED
-            )
+            terminal = _activation_failure_status(detail)
             return self._fail(record, terminal, detail)
         except Exception as error:
             return self._fail(
@@ -463,6 +474,8 @@ class TrustedSelfDevelopmentActivator:
         """
 
         record = self._require(activation_id)
+        if record.status is ActivationStatus.DENIED:
+            return record
         proposal = self._proposal_loader(record.proposal_id)
         if proposal is None:
             return self._fail(
@@ -574,6 +587,11 @@ class TrustedSelfDevelopmentActivator:
             or classification.required_gates != record.required_gates
         ):
             raise ActivationError("trusted classification changed")
+        expected_revision = proposal.modification.candidate_revision or _candidate_hash(proposal)
+        if expected_revision != record.candidate_revision:
+            raise ActivationError("candidate revision changed")
+        if proposal.expires_at != record.expires_at:
+            raise ActivationError("proposal expiry changed")
         if tuple(proposal.modification.changed_paths) != record.changed_paths:
             raise ActivationError("changed paths are stale")
         workspace = _candidate_workspace(proposal)
@@ -733,6 +751,49 @@ class TrustedSelfDevelopmentActivator:
 
 def record_revision(proposal: MergeDeploymentProposal) -> str:
     return proposal.modification.candidate_revision or proposal.workspace.base_revision
+
+
+def approval_binding_fingerprint(record: ActivationRecord) -> str:
+    """Return the canonical digest of the exact candidate approval facts."""
+
+    payload = {
+        "activation_id": record.activation_id,
+        "task_id": str(record.task_id),
+        "proposal_id": record.proposal_id,
+        "proposal_fingerprint": record.proposal_fingerprint,
+        "base_revision": record.base_revision,
+        "candidate_revision": record.candidate_revision,
+        "candidate_hash": record.candidate_hash,
+        "candidate_tree_digest": record.candidate_tree_digest,
+        "candidate_diff_digest": record.candidate_diff_digest,
+        "changed_paths": list(record.changed_paths),
+        "trust_level": record.trust_level,
+        "required_gates": list(record.required_gates),
+        "preview_fingerprint": record.preview_fingerprint,
+        "activation_expires_at": record.expires_at.astimezone(UTC).isoformat(),
+        "proposal_expires_at": record.expires_at.astimezone(UTC).isoformat(),
+    }
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def approval_request_id(record: ActivationRecord) -> UUID:
+    """Derive the opaque trusted approval request from exact typed state."""
+
+    return uuid5(_APPROVAL_BINDING_NAMESPACE, approval_binding_fingerprint(record))
+
+
+def _activation_failure_status(detail: str) -> ActivationStatus:
+    return (
+        ActivationStatus.EXPIRED
+        if "expired" in detail
+        else ActivationStatus.STALE
+        if any(
+            marker in detail
+            for marker in ("stale", "changed", "drift", "fingerprint", "classification")
+        )
+        else ActivationStatus.FAILED
+    )
 
 
 def _directory(path: Path, label: str) -> Path:
@@ -901,4 +962,6 @@ __all__ = [
     "ActivationStatus",
     "GateEvidence",
     "TrustedSelfDevelopmentActivator",
+    "approval_binding_fingerprint",
+    "approval_request_id",
 ]
