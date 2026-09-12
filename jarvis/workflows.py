@@ -409,6 +409,84 @@ class ProcedureCandidateStatus(StrEnum):
     RETIRED = "retired"
 
 
+class ProcedureReliabilityStatus(StrEnum):
+    CURRENT = "current"
+    DEGRADED = "degraded"
+    REVALIDATION_REQUIRED = "revalidation_required"
+    UNKNOWN = "unknown"
+
+
+@dataclass(frozen=True, slots=True)
+class ProcedureReliability:
+    """Sanitized factual reliability projection for one learned method."""
+
+    method_key: str
+    verified_successes: int = 0
+    verified_failures: int = 0
+    unknown_outcomes: int = 0
+    last_verified_success: datetime | None = None
+    last_verified_failure: datetime | None = None
+    compatibility_key: str | None = None
+    sample_sufficient: bool = False
+    status: ProcedureReliabilityStatus = ProcedureReliabilityStatus.UNKNOWN
+    evidence_ids: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        _bounded(self.method_key, "Procedure reliability method", 256)
+        for value, name in (
+            (self.verified_successes, "success count"),
+            (self.verified_failures, "failure count"),
+            (self.unknown_outcomes, "unknown count"),
+        ):
+            if type(value) is not int or not 0 <= value <= 1_000_000:
+                raise WorkflowTemplateError(f"Procedure reliability {name} is malformed")
+        if self.compatibility_key is not None:
+            _bounded(self.compatibility_key, "Procedure compatibility", 256)
+        if not isinstance(self.status, ProcedureReliabilityStatus):
+            raise WorkflowTemplateError("Procedure reliability status is malformed")
+        if type(self.sample_sufficient) is not bool:
+            raise WorkflowTemplateError("Procedure sample flag is malformed")
+        if (
+            len(self.evidence_ids) > 256
+            or any(
+                type(item) is not str or not item.strip() or len(item) > 128
+                for item in self.evidence_ids
+            )
+            or len(set(self.evidence_ids)) != len(self.evidence_ids)
+        ):
+            raise WorkflowTemplateError("Procedure reliability evidence IDs are malformed")
+        for timestamp_value, name in (
+            (self.last_verified_success, "last verified success"),
+            (self.last_verified_failure, "last verified failure"),
+        ):
+            if timestamp_value is not None and timestamp_value.tzinfo is None:
+                raise WorkflowTemplateError(f"{name} must be timezone-aware")
+
+
+@dataclass(frozen=True, slots=True)
+class TrustedProcedureReliability:
+    """Signed, non-content evidence for a procedure reliability fact."""
+
+    verification_id: str
+    method_key: str
+    outcome: EffectOutcome
+    verified_at: datetime
+    compatibility_key: str | None = None
+    _proof: bytes = field(repr=False, default=b"")
+
+    def __post_init__(self) -> None:
+        _bounded(self.verification_id, "Reliability verification ID", 128)
+        _bounded(self.method_key, "Reliability method", 256)
+        if not isinstance(self.outcome, EffectOutcome):
+            raise WorkflowTemplateError("Reliability outcome is malformed")
+        if self.verified_at.tzinfo is None:
+            raise WorkflowTemplateError("Reliability timestamp must be timezone-aware")
+        if self.compatibility_key is not None:
+            _bounded(self.compatibility_key, "Reliability compatibility", 256)
+        if len(self._proof) != hashlib.sha256().digest_size:
+            raise WorkflowTemplateError("Reliability proof is malformed")
+
+
 class ProcedureEvidenceValidator(Protocol):
     def validate(self, evidence: TrustedProcedureEvidence) -> bool: ...
 
@@ -529,7 +607,7 @@ class WorkflowProcedureStoreError(RuntimeError):
 class SQLiteWorkflowProcedureStore:
     """Single durable owner for templates and learned-method lifecycle state."""
 
-    _SCHEMA_VERSION = 1
+    _SCHEMA_VERSION = 2
     _MIGRATION_NAME = "create_workflow_procedure_state"
 
     def __init__(self, database_path: str | Path) -> None:
@@ -610,10 +688,25 @@ class SQLiteWorkflowProcedureStore:
                 )
                 self._connection.execute(
                     "INSERT INTO workflow_procedure_schema(version, name) VALUES (?, ?)",
-                    (self._SCHEMA_VERSION, self._MIGRATION_NAME),
+                    (1, self._MIGRATION_NAME),
                 )
-            elif versions.get(1) != self._MIGRATION_NAME:
+                versions[1] = self._MIGRATION_NAME
+            if versions.get(1) != self._MIGRATION_NAME:
                 raise WorkflowProcedureStoreError("Workflow/procedure migration identity mismatch")
+            if 2 not in versions:
+                self._connection.executescript(
+                    """
+                    CREATE TABLE IF NOT EXISTS procedure_reliability (
+                        method_key TEXT PRIMARY KEY,
+                        reliability_json TEXT NOT NULL,
+                        updated_at TEXT NOT NULL
+                    );
+                    """
+                )
+                self._connection.execute(
+                    "INSERT INTO workflow_procedure_schema(version, name) VALUES (?, ?)",
+                    (2, "procedure-reliability-projection"),
+                )
 
     def _integrity_check(self) -> None:
         row = self._connection.execute("PRAGMA integrity_check").fetchone()
@@ -827,6 +920,33 @@ class SQLiteWorkflowProcedureStore:
         except (KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
             raise WorkflowProcedureStoreError("Stored procedure candidate is malformed") from error
 
+    def save_reliability(self, reliability: ProcedureReliability) -> None:
+        if not isinstance(reliability, ProcedureReliability):
+            raise WorkflowProcedureStoreError("Procedure reliability is malformed")
+        payload = json.dumps(_reliability_dict(reliability), sort_keys=True, separators=(",", ":"))
+        with self._lock:
+            self._connection.execute(
+                "INSERT INTO procedure_reliability(method_key, reliability_json, updated_at) "
+                "VALUES (?, ?, ?) ON CONFLICT(method_key) DO UPDATE SET "
+                "reliability_json=excluded.reliability_json, updated_at=excluded.updated_at",
+                (reliability.method_key, payload, _iso(_utc_now())),
+            )
+            self._connection.commit()
+
+    def list_reliability(self) -> tuple[ProcedureReliability, ...]:
+        with self._lock:
+            rows = self._connection.execute(
+                "SELECT reliability_json FROM procedure_reliability ORDER BY method_key"
+            ).fetchall()
+        try:
+            return tuple(
+                _reliability_from_dict(_json_object(row["reliability_json"])) for row in rows
+            )
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
+            raise WorkflowProcedureStoreError(
+                "Stored procedure reliability is malformed"
+            ) from error
+
     def close(self) -> None:
         with self._lock:
             self._connection.close()
@@ -901,6 +1021,66 @@ class ProcedureEvidenceAuthority:
         except (TypeError, ValueError):
             return False
 
+    def issue_reliability(
+        self,
+        method_key: str,
+        verification_id: str,
+        outcome: EffectOutcome,
+        *,
+        compatibility_key: str | None = None,
+        verification: VerificationResult | None = None,
+    ) -> TrustedProcedureReliability:
+        """Issue a process-local token from trusted application facts.
+
+        The token is intentionally not a cross-restart authority.  The bank
+        stores only the sanitized reliability projection; a new process must
+        obtain fresh trusted evidence before adding another fact.
+        """
+
+        if not isinstance(outcome, EffectOutcome):
+            raise WorkflowTemplateError("Reliability outcome is malformed")
+        if outcome is EffectOutcome.EFFECT_CONFIRMED and (
+            verification is None
+            or not verification.passed
+            or verification.contradictions
+            or verification.stale_evidence
+            or verification.rejected_model_claims
+        ):
+            raise WorkflowTemplateError("Successful reliability needs independent verification")
+        _bounded(method_key, "Reliability method", 256)
+        _bounded(verification_id, "Reliability verification ID", 128)
+        issued = TrustedProcedureReliability(
+            verification_id,
+            method_key,
+            outcome,
+            _utc_now(),
+            compatibility_key,
+            b"0" * hashlib.sha256().digest_size,
+        )
+        return replace(issued, _proof=self._reliability_proof(issued))
+
+    def validate_reliability(self, evidence: TrustedProcedureReliability) -> bool:
+        if not isinstance(evidence, TrustedProcedureReliability):
+            return False
+        try:
+            return hmac.compare_digest(evidence._proof, self._reliability_proof(evidence))
+        except (TypeError, ValueError):
+            return False
+
+    def _reliability_proof(self, evidence: TrustedProcedureReliability) -> bytes:
+        material = json.dumps(
+            {
+                "verification_id": evidence.verification_id,
+                "method_key": evidence.method_key,
+                "outcome": evidence.outcome.value,
+                "verified_at": _iso(evidence.verified_at),
+                "compatibility_key": evidence.compatibility_key,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+        return hmac.new(self._signing_key, material, hashlib.sha256).digest()
+
     def _proof(self, evidence: TrustedProcedureEvidence) -> bytes:
         material = json.dumps(
             {
@@ -936,6 +1116,8 @@ class ProcedureBank:
         self._evidence_authority = evidence_authority
         self._observations: dict[str, list[RoutineCandidate]] = {}
         self._evidence_ids: set[str] = set()
+        self._reliability_evidence_ids: set[str] = set()
+        self._reliability: dict[str, ProcedureReliability] = {}
         self._candidates: dict[tuple[str, str, str, CandidateForm], ProcedureCandidate] = {}
         if store is not None:
             for routine in store.list_routines():
@@ -956,6 +1138,9 @@ class ProcedureBank:
                         candidate.form,
                     )
                 ] = candidate
+            for reliability in store.list_reliability():
+                self._reliability[reliability.method_key] = reliability
+                self._reliability_evidence_ids.update(reliability.evidence_ids)
 
     def observe(self, observation: ProcedureObservation) -> RoutineCandidate | None:
         # Legacy boolean flags remain accepted as inert input for compatibility.
@@ -1057,6 +1242,88 @@ class ProcedureBank:
             self._store.save_candidate(candidate)
         return candidate
 
+    def record_reliability(
+        self, evidence: TrustedProcedureReliability
+    ) -> ProcedureReliability | None:
+        """Project one trusted verified outcome without retaining payload data."""
+
+        authority = self._evidence_authority
+        validator = (
+            getattr(authority, "validate_reliability", None) if authority is not None else None
+        )
+        if not callable(validator) or not validator(evidence):
+            return None
+        if evidence.verification_id in self._reliability_evidence_ids:
+            return self._reliability.get(evidence.method_key)
+        current = self._reliability.get(
+            evidence.method_key, ProcedureReliability(evidence.method_key)
+        )
+        success = current.verified_successes + (
+            1 if evidence.outcome is EffectOutcome.EFFECT_CONFIRMED else 0
+        )
+        failure = current.verified_failures + (
+            1
+            if evidence.outcome in {EffectOutcome.PRE_EFFECT_FAILURE, EffectOutcome.SAFE_TO_RETRY}
+            else 0
+        )
+        unknown = current.unknown_outcomes + (
+            1 if evidence.outcome is EffectOutcome.UNKNOWN_OUTCOME else 0
+        )
+        status = ProcedureReliabilityStatus.CURRENT
+        if unknown:
+            status = ProcedureReliabilityStatus.UNKNOWN
+        elif evidence.compatibility_key is not None and current.compatibility_key not in {
+            None,
+            evidence.compatibility_key,
+        }:
+            status = ProcedureReliabilityStatus.REVALIDATION_REQUIRED
+        elif failure >= 2 and failure >= success:
+            status = ProcedureReliabilityStatus.DEGRADED
+        projection = ProcedureReliability(
+            evidence.method_key,
+            success,
+            failure,
+            unknown,
+            evidence.verified_at
+            if evidence.outcome is EffectOutcome.EFFECT_CONFIRMED
+            else current.last_verified_success,
+            evidence.verified_at
+            if evidence.outcome in {EffectOutcome.PRE_EFFECT_FAILURE, EffectOutcome.SAFE_TO_RETRY}
+            else current.last_verified_failure,
+            evidence.compatibility_key or current.compatibility_key,
+            success >= self._minimum,
+            status,
+            (*current.evidence_ids, evidence.verification_id),
+        )
+        self._reliability_evidence_ids.add(evidence.verification_id)
+        self._reliability[evidence.method_key] = projection
+        if self._store is not None:
+            self._store.save_reliability(projection)
+        return projection
+
+    def reliability(self, method_key: str) -> ProcedureReliability | None:
+        _bounded(method_key, "Procedure method key", 256)
+        return self._reliability.get(method_key)
+
+    def mark_dependency_drift(
+        self, method_key: str, compatibility_key: str
+    ) -> ProcedureReliability:
+        _bounded(method_key, "Procedure method key", 256)
+        _bounded(compatibility_key, "Procedure compatibility", 256)
+        current = self._reliability.get(method_key, ProcedureReliability(method_key))
+        updated = replace(
+            current,
+            status=(
+                ProcedureReliabilityStatus.REVALIDATION_REQUIRED
+                if current.compatibility_key not in {None, compatibility_key}
+                else current.status
+            ),
+        )
+        self._reliability[method_key] = updated
+        if self._store is not None:
+            self._store.save_reliability(updated)
+        return updated
+
     def validate(
         self,
         candidate: ProcedureCandidate,
@@ -1114,6 +1381,37 @@ class ProcedureBank:
         ] = candidate
         if self._store is not None:
             self._store.save_candidate(candidate)
+
+
+class ProcedureLearningService:
+    """Application-owned observer for eligible completed execution facts.
+
+    Callers provide typed observations, not a writable bank.  The service is
+    intentionally small: normal task evidence still comes from
+    ``ProcedureEvidenceAuthority`` and accepted procedures still become plans
+    for ``PlanValidator``/``PlanningEngine`` rather than direct execution.
+    """
+
+    def __init__(self, bank: ProcedureBank) -> None:
+        if not isinstance(bank, ProcedureBank):
+            raise WorkflowTemplateError("Procedure bank is malformed")
+        self._bank = bank
+
+    @property
+    def bank(self) -> ProcedureBank:
+        return self._bank
+
+    def observe_completed_work(self, observation: ProcedureObservation) -> RoutineCandidate | None:
+        if not isinstance(observation, ProcedureObservation):
+            raise WorkflowTemplateError("Procedure observation is malformed")
+        return self._bank.observe(observation)
+
+    def observe_reliability(
+        self, evidence: TrustedProcedureReliability
+    ) -> ProcedureReliability | None:
+        if not isinstance(evidence, TrustedProcedureReliability):
+            raise WorkflowTemplateError("Procedure reliability evidence is malformed")
+        return self._bank.record_reliability(evidence)
 
 
 _PROCEDURE_NAMESPACE = UUID("3f8cc5da-e92f-4f66-9f03-c13d48fdbf5a")
@@ -1357,6 +1655,51 @@ def _candidate_from_dict(value: dict[str, object]) -> ProcedureCandidate:
         str(value.get("workspace_id", "default")),
         str(value.get("profile_id", "default")),
         _context_from_dict(_json_object(value.get("context_requirements", {}))),
+    )
+
+
+def _reliability_dict(value: ProcedureReliability) -> dict[str, object]:
+    return {
+        "method_key": value.method_key,
+        "verified_successes": value.verified_successes,
+        "verified_failures": value.verified_failures,
+        "unknown_outcomes": value.unknown_outcomes,
+        "last_verified_success": _iso(value.last_verified_success)
+        if value.last_verified_success is not None
+        else None,
+        "last_verified_failure": _iso(value.last_verified_failure)
+        if value.last_verified_failure is not None
+        else None,
+        "compatibility_key": value.compatibility_key,
+        "sample_sufficient": value.sample_sufficient,
+        "status": value.status.value,
+        "evidence_ids": list(value.evidence_ids),
+    }
+
+
+def _reliability_from_dict(value: dict[str, object]) -> ProcedureReliability:
+    def timestamp(name: str) -> datetime | None:
+        raw = value.get(name)
+        if raw is None:
+            return None
+        if type(raw) is not str:
+            raise WorkflowProcedureStoreError(f"Stored reliability {name} is malformed")
+        return _parse_datetime(raw)
+
+    return ProcedureReliability(
+        str(value["method_key"]),
+        _as_int(value["verified_successes"], "Stored reliability successes"),
+        _as_int(value["verified_failures"], "Stored reliability failures"),
+        _as_int(value["unknown_outcomes"], "Stored reliability unknowns"),
+        timestamp("last_verified_success"),
+        timestamp("last_verified_failure"),
+        str(value["compatibility_key"]) if value.get("compatibility_key") is not None else None,
+        bool(value["sample_sufficient"]),
+        ProcedureReliabilityStatus(str(value["status"])),
+        tuple(
+            str(item)
+            for item in _list(value.get("evidence_ids", []), "Stored reliability evidence IDs")
+        ),
     )
 
 

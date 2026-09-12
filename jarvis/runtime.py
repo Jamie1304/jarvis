@@ -87,7 +87,7 @@ from jarvis.capability_opportunities import (
     OpportunityPreparationState,
     SQLiteOpportunityStore,
 )
-from jarvis.component_doctor import ComponentDoctor
+from jarvis.component_doctor import ComponentDoctor, RoutedRepairResearch
 from jarvis.control_center import (
     ControlCenterContribution,
     ControlCenterItem,
@@ -245,6 +245,7 @@ from jarvis.recovery import (
     TrustedRecoveryAuthority,
     compute_application_build_hash,
 )
+from jarvis.repair_state import RepairCaseStatus, RepairStoreError, SQLiteRepairStore
 from jarvis.resources import ResourceGovernor, SystemResourceTelemetry
 from jarvis.sandbox_proxies import HostProxy, HostProxyAudit, HostProxyManifest
 from jarvis.security import (
@@ -285,6 +286,7 @@ from jarvis.windows_sandbox import SandboxSecurityStatus
 from jarvis.workflows import (
     ProcedureBank,
     ProcedureEvidenceAuthority,
+    ProcedureLearningService,
     SQLiteWorkflowProcedureStore,
     WorkflowProcedureStoreError,
     WorkflowTemplateRegistry,
@@ -676,6 +678,8 @@ class RuntimeContainer:
     workflow_procedure_store: SQLiteWorkflowProcedureStore
     procedure_evidence_authority: ProcedureEvidenceAuthority
     procedure_bank: ProcedureBank
+    procedure_learning: ProcedureLearningService
+    repair_store: SQLiteRepairStore | None
     automation_service: AutomationService
     capability_health: CapabilityHealthService
     component_doctor: ComponentDoctor
@@ -1208,6 +1212,7 @@ class ApplicationRuntime:
         trace_store: TraceStore | None = None
         golden_workflow_store: GoldenWorkflowStore | None = None
         workflow_procedure_store: SQLiteWorkflowProcedureStore | None = None
+        repair_store: SQLiteRepairStore | None = None
         backup: BackupService | None = None
         automation_service: AutomationService | None = None
         recovery: RecoveryStore | None = None
@@ -1952,6 +1957,7 @@ class ApplicationRuntime:
                 store=workflow_procedure_store,
                 evidence_authority=procedure_evidence_authority,
             )
+            procedure_learning = ProcedureLearningService(procedure_bank)
             workflow_templates = WorkflowTemplateRegistry(store=workflow_procedure_store)
             paths.validate_storage_layout()
             automation_store = SQLiteAutomationStore(paths.automation_database)
@@ -2029,7 +2035,15 @@ class ApplicationRuntime:
             )
             if capability_lifecycle_restorer is not None:
                 capability_lifecycle_restorer.bind_health(capability_health)
-            component_doctor = ComponentDoctor(capability_health)
+            repair_store = SQLiteRepairStore(
+                paths.workflow_procedure_database.with_name("repair.sqlite3")
+            )
+            component_doctor = ComponentDoctor(
+                capability_health,
+                repair_store=repair_store,
+                research=RoutedRepairResearch(inference_dispatcher),
+            )
+            capability_health.bind_canonical_repair(component_doctor.repair_from_health)
             presence_projection = PresenceProjection(events)
             semantic_events = SemanticEventService(events)
             episode_composer = EpisodeComposer(
@@ -2284,6 +2298,39 @@ class ApplicationRuntime:
                     for report in capability_health.reports()
                 )
 
+            def repair_projection() -> tuple[ControlCenterItem, ...]:
+                if repair_store is None:
+                    return (
+                        ControlCenterItem(
+                            "repair-store",
+                            "Self-repair state",
+                            ControlCenterStatus.NOT_AVAILABLE,
+                            "Durable repair state is unavailable; Safe Mode and trusted "
+                            "recovery remain independent",
+                        ),
+                    )
+                return tuple(
+                    ControlCenterItem(
+                        f"repair.{case.case_id}",
+                        f"Repair: {case.component_id}",
+                        (
+                            ControlCenterStatus.AVAILABLE
+                            if case.status is RepairCaseStatus.VERIFIED_REPAIRED
+                            else ControlCenterStatus.DEGRADED
+                        ),
+                        case.terminal_reason or case.status.value,
+                        metadata=(
+                            ("state", case.status.value),
+                            ("attempts", str(case.attempt_count)),
+                            (
+                                "approval",
+                                str(case.status is RepairCaseStatus.PERMISSION_REQUIRED).lower(),
+                            ),
+                        ),
+                    )
+                    for case in repair_store.cases()
+                )
+
             def audit_projection() -> tuple[ControlCenterItem, ...]:
                 return (
                     ControlCenterItem(
@@ -2429,6 +2476,7 @@ class ApplicationRuntime:
                 "capability-health",
                 capability_health_projection,
             )
+            control_center.register(ControlCenterSection.HEALTH, "repair", repair_projection)
             control_center.register(
                 ControlCenterSection.RECOVERY,
                 "store",
@@ -2541,6 +2589,8 @@ class ApplicationRuntime:
                 workflow_procedure_store=workflow_procedure_store,
                 procedure_evidence_authority=procedure_evidence_authority,
                 procedure_bank=procedure_bank,
+                procedure_learning=procedure_learning,
+                repair_store=repair_store,
                 automation_service=automation_service,
                 capability_health=capability_health,
                 component_doctor=component_doctor,
@@ -2663,6 +2713,7 @@ class ApplicationRuntime:
             TraceError,
             GoldenWorkflowError,
             WorkflowProcedureStoreError,
+            RepairStoreError,
             ProvisioningError,
             sqlite3.DatabaseError,
         ) as error:
@@ -2686,6 +2737,7 @@ class ApplicationRuntime:
                     )
             cls._close_partial_stores(
                 artifact_store,
+                repair_store,
                 automation_service,
                 trace_store,
                 golden_workflow_store,
@@ -2731,6 +2783,7 @@ class ApplicationRuntime:
                     )
             cls._close_partial_stores(
                 artifact_store,
+                repair_store,
                 automation_service,
                 trace_store,
                 golden_workflow_store,

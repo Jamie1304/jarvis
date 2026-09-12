@@ -571,6 +571,7 @@ class CapabilityHealthService:
         ) = None
         self._history: dict[str, list[DriftFinding]] = {}
         self._attention: list[AttentionNotice] = []
+        self._canonical_repair: Callable[..., object] | None = None
 
     @property
     def trace(self) -> ExecutionTrace:
@@ -612,6 +613,18 @@ class CapabilityHealthService:
             raise CapabilityHealthError("Lifecycle binding is malformed")
         self._activation_state_provider = state_provider
         self._activation_transition = transition
+
+    def bind_canonical_repair(self, repair_engine: Callable[..., object]) -> None:
+        """Bind the application-owned repair state machine.
+
+        Health remains an observation projection.  This hook exists so the
+        legacy synchronous ``repair`` API cannot evolve a second production
+        repair engine once the composition root has a canonical doctor.
+        """
+
+        if not callable(repair_engine):
+            raise CapabilityHealthError("Canonical repair engine is malformed")
+        self._canonical_repair = repair_engine
 
     def baseline(self, capability_id: str) -> BehaviorBaseline:
         capability_id = _text(capability_id, "Capability ID", 256)
@@ -822,6 +835,11 @@ class CapabilityHealthService:
         """
 
         capability_id = _text(capability_id, "Capability ID", 256)
+        if self._canonical_repair is not None:
+            delegated = self._canonical_repair(capability_id, provider, authorize)
+            if not isinstance(delegated, RepairResult):
+                raise CapabilityHealthError("Canonical repair engine returned malformed result")
+            return delegated
         if not all(
             callable(getattr(provider, name, None))
             for name in ("diagnose", "safe_repair", "rebuild_or_replace", "retest")

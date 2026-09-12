@@ -554,3 +554,20 @@ expected verification; trusted application code binds executable callbacks.
 Unknown repair outcomes quarantine without replay, while a safe fallback may
 degrade one capability without silently changing privacy or authority
 semantics. See `docs/component-doctor.md`.
+
+## Verified self-repair and procedural reliability
+
+Self-repair is verified recovery, not model autonomy. `CapabilityHealthService`
+owns health and drift observations; `ComponentDoctor` is the single repair
+state machine; `PermissionBroker` authorizes each exact effect;
+`VerificationEngine` or a trusted application-owned observation proves the
+post-repair result; and `SQLiteRepairStore` persists restart-safe cases and
+quarantines effects without a trusted terminal receipt. `ProcedureLearningService`
+feeds only trusted verified facts into the existing `ProcedureBank` and
+`SQLiteWorkflowProcedureStore`; learned procedures remain proposals that must
+return through `WorkflowTemplate`, `PlanValidator`, `PlanningEngine`,
+`ToolRegistry`, and `PermissionBroker`. `RecoveryCoordinator`, `BackupService`,
+and `TrustedRecoveryAuthority` remain the authority for Core recovery. P3C
+supplies bounded model research when deterministic diagnosis is insufficient;
+model output cannot approve, verify, or certify a repair. Controlled
+self-development and self-update remain a later phase.
