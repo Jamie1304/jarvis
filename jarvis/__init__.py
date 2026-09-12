@@ -1,3 +1,5 @@
 """JARVIS application package."""
 
-__version__ = "0.1.0"
+from jarvis.version import __version__
+
+__all__ = ["__version__"]

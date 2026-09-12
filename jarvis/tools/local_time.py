@@ -61,7 +61,7 @@ class LocalTimeTool(Tool[LocalTimeInput, LocalTimeOutput]):
     def input_model(self) -> type[LocalTimeInput]:
         return LocalTimeInput
 
-    async def execute(
+    async def _execute_authorized(
         self, context: ToolExecutionContext, validated_input: LocalTimeInput
     ) -> ToolResult:
         del context

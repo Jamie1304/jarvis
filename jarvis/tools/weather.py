@@ -64,7 +64,7 @@ class UnavailableWeatherTool(Tool[WeatherInput, WeatherOutput]):
             "Weather is unavailable until a network provider is approved",
         )
 
-    async def execute(
+    async def _execute_authorized(
         self, context: ToolExecutionContext, validated_input: WeatherInput
     ) -> ToolResult:
         del context, validated_input

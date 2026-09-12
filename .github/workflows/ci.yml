@@ -23,4 +23,23 @@ jobs:
       - name: Install locked dependencies
         run: python -m pip install -r requirements-dev.lock
       - name: Run quality gate
+        # The quality suite uses synthetic fixtures and the test-only recovery
+        # key backend. Production-mode packaging is verified separately below
+        # by the artifact-only package smoke.
+        env:
+          JARVIS_ENVIRONMENT: test
         run: python scripts/quality.py
+      - name: Run deterministic system self-tests
+        env:
+          JARVIS_ENVIRONMENT: test
+        run: python scripts/run_system_tests.py --suite deterministic-workflows
+      - name: Run deterministic permission self-tests
+        env:
+          JARVIS_ENVIRONMENT: test
+        run: python scripts/run_system_tests.py --suite deterministic-permissions
+      - name: Run v1 acceptance suite
+        env:
+          JARVIS_ENVIRONMENT: test
+        run: python scripts/run_system_tests.py --suite v1-acceptance
+      - name: Run artifact-only package smoke
+        run: python scripts/package_smoke.py

@@ -1,0 +1,4145 @@
+{
+  "schema_version": "1.0",
+  "tests": [
+    {
+      "test_id": "001",
+      "title": "Clean startup",
+      "phase": "A — Basal Product",
+      "objective": "Clean startup",
+      "classification": "AUTO",
+      "automation_level": "FULLY_AUTOMATED_NOW",
+      "tags": [
+        "phase-a"
+      ],
+      "risk": "medium",
+      "mutation_level": "read_only",
+      "required_environment": "local_test_harness",
+      "required_capabilities": [],
+      "prerequisites": [],
+      "execution_contract": "Run the declared objective and collect independent evidence.",
+      "expected_outcomes": [
+        "objective outcome is observed"
+      ],
+      "assertions": [
+        "declared outcome is true"
+      ],
+      "evidence_requirements": [
+        "machine-readable result"
+      ],
+      "cleanup": "release owned resources",
+      "timeout_seconds": 60,
+      "retry_policy": "never_after_unknown_effect",
+      "human_requirement": null,
+      "owner_approval_required": false,
+      "host_access_required": false,
+      "vm_policy": "not_applicable",
+      "security_relevance": "normal",
+      "failure_severity": "MEDIUM",
+      "spec_version": "1.0"
+    },
+    {
+      "test_id": "002",
+      "title": "Startup without Ollama",
+      "phase": "A — Basal Product",
+      "objective": "Startup without Ollama",
+      "classification": "AUTO",
+      "automation_level": "FULLY_AUTOMATED_NOW",
+      "tags": [
+        "phase-a"
+      ],
+      "risk": "medium",
+      "mutation_level": "read_only",
+      "required_environment": "local_test_harness",
+      "required_capabilities": [],
+      "prerequisites": [],
+      "execution_contract": "Run the declared objective and collect independent evidence.",
+      "expected_outcomes": [
+        "objective outcome is observed"
+      ],
+      "assertions": [
+        "declared outcome is true"
+      ],
+      "evidence_requirements": [
+        "machine-readable result"
+      ],
+      "cleanup": "release owned resources",
+      "timeout_seconds": 60,
+      "retry_policy": "never_after_unknown_effect",
+      "human_requirement": null,
+      "owner_approval_required": false,
+      "host_access_required": false,
+      "vm_policy": "not_applicable",
+      "security_relevance": "normal",
+      "failure_severity": "MEDIUM",
+      "spec_version": "1.0"
+    },
+    {
+      "test_id": "003",
+      "title": "Forced termination",
+      "phase": "A — Basal Product",
+      "objective": "Forced termination",
+      "classification": "AUTO",
+      "automation_level": "FULLY_AUTOMATED_NOW",
+      "tags": [
+        "phase-a"
+      ],
+      "risk": "medium",
+      "mutation_level": "read_only",
+      "required_environment": "local_test_harness",
+      "required_capabilities": [],
+      "prerequisites": [],
+      "execution_contract": "Run the declared objective and collect independent evidence.",
+      "expected_outcomes": [
+        "objective outcome is observed"
+      ],
+      "assertions": [
+        "declared outcome is true"
+      ],
+      "evidence_requirements": [
+        "machine-readable result"
+      ],
+      "cleanup": "release owned resources",
+      "timeout_seconds": 60,
+      "retry_policy": "never_after_unknown_effect",
+      "human_requirement": null,
+      "owner_approval_required": false,
+      "host_access_required": false,
+      "vm_policy": "not_applicable",
+      "security_relevance": "normal",
+      "failure_severity": "MEDIUM",
+      "spec_version": "1.0"
+    },
+    {
+      "test_id": "004",
+      "title": "UI blueprint comparison",
+      "phase": "B — UI Blueprint",
+      "objective": "UI blueprint comparison",
+      "classification": "REAL_WINDOWS",
+      "automation_level": "AUTOMATABLE_WITH_REAL_WINDOWS",
+      "tags": [
+        "phase-b"
+      ],
+      "risk": "medium",
+      "mutation_level": "read_only",
+      "required_environment": "native_windows_desktop",
+      "required_capabilities": [],
+      "prerequisites": [],
+      "execution_contract": "Run the declared objective and collect independent evidence.",
+      "expected_outcomes": [
+        "objective outcome is observed"
+      ],
+      "assertions": [
+        "declared outcome is true"
+      ],
+      "evidence_requirements": [
+        "machine-readable result"
+      ],
+      "cleanup": "release owned resources",
+      "timeout_seconds": 60,
+      "retry_policy": "never_after_unknown_effect",
+      "human_requirement": null,
+      "owner_approval_required": false,
+      "host_access_required": true,
+      "vm_policy": "not_applicable",
+      "security_relevance": "normal",
+      "failure_severity": "MEDIUM",
+      "spec_version": "1.0"
+    },
+    {
+      "test_id": "005",
+      "title": "Resizing",
+      "phase": "B — UI Blueprint",
+      "objective": "Resizing",
+      "classification": "REAL_WINDOWS",
+      "automation_level": "AUTOMATABLE_WITH_REAL_WINDOWS",
+      "tags": [
+        "phase-b"
+      ],
+      "risk": "medium",
+      "mutation_level": "read_only",
+      "required_environment": "native_windows_desktop",
+      "required_capabilities": [],
+      "prerequisites": [],
+      "execution_contract": "Run the declared objective and collect independent evidence.",
+      "expected_outcomes": [
+        "objective outcome is observed"
+      ],
+      "assertions": [
+        "declared outcome is true"
+      ],
+      "evidence_requirements": [
+        "machine-readable result"
+      ],
+      "cleanup": "release owned resources",
+      "timeout_seconds": 60,
+      "retry_policy": "never_after_unknown_effect",
+      "human_requirement": null,
+      "owner_approval_required": false,
+      "host_access_required": true,
+      "vm_policy": "not_applicable",
+      "security_relevance": "normal",
+      "failure_severity": "MEDIUM",
+      "spec_version": "1.0"
+    },
+    {
+      "test_id": "006",
+      "title": "High DPI",
+      "phase": "B — UI Blueprint",
+      "objective": "High DPI",
+      "classification": "REAL_WINDOWS",
+      "automation_level": "AUTOMATABLE_WITH_REAL_WINDOWS",
+      "tags": [
+        "phase-b"
+      ],
+      "risk": "medium",
+      "mutation_level": "read_only",
+      "required_environment": "native_windows_desktop",
+      "required_capabilities": [],
+      "prerequisites": [],
+      "execution_contract": "Run the declared objective and collect independent evidence.",
+      "expected_outcomes": [
+        "objective outcome is observed"
+      ],
+      "assertions": [
+        "declared outcome is true"
+      ],
+      "evidence_requirements": [
+        "machine-readable result"
+      ],
+      "cleanup": "release owned resources",
+      "timeout_seconds": 60,
+      "retry_policy": "never_after_unknown_effect",
+      "human_requirement": null,
+      "owner_approval_required": false,
+      "host_access_required": true,
+      "vm_policy": "not_applicable",
+      "security_relevance": "normal",
+      "failure_severity": "MEDIUM",
+      "spec_version": "1.0"
+    },
+    {
+      "test_id": "007",
+      "title": "Color semantics",
+      "phase": "B — UI Blueprint",
+      "objective": "Color semantics",
+      "classification": "REAL_WINDOWS",
+      "automation_level": "AUTOMATABLE_WITH_REAL_WINDOWS",
+      "tags": [
+        "phase-b"
+      ],
+      "risk": "medium",
+      "mutation_level": "read_only",
+      "required_environment": "native_windows_desktop",
+      "required_capabilities": [],
+      "prerequisites": [],
+      "execution_contract": "Run the declared objective and collect independent evidence.",
+      "expected_outcomes": [
+        "objective outcome is observed"
+      ],
+      "assertions": [
+        "declared outcome is true"
+      ],
+      "evidence_requirements": [
+        "machine-readable result"
+      ],
+      "cleanup": "release owned resources",
+      "timeout_seconds": 60,
+      "retry_policy": "never_after_unknown_effect",
+      "human_requirement": null,
+      "owner_approval_required": false,
+      "host_access_required": true,
+      "vm_policy": "not_applicable",
+      "security_relevance": "normal",
+      "failure_severity": "MEDIUM",
+      "spec_version": "1.0"
+    },
+    {
+      "test_id": "008",
+      "title": "Home idle clarity",
+      "phase": "C — Home + Chat",
+      "objective": "Home idle clarity",
+      "classification": "AUTO",
+      "automation_level": "FUTURE_PRODUCT_FEATURE_REQUIRED",
+      "tags": [
+        "phase-c"
+      ],
+      "risk": "medium",
+      "mutation_level": "read_only",
+      "required_environment": "product_runtime",
+      "required_capabilities": [],
+      "prerequisites": [],
+      "execution_contract": "Run the declared objective and collect independent evidence.",
+      "expected_outcomes": [
+        "objective outcome is observed"
+      ],
+      "assertions": [
+        "declared outcome is true"
+      ],
+      "evidence_requirements": [
+        "machine-readable result"
+      ],
+      "cleanup": "release owned resources",
+      "timeout_seconds": 60,
+      "retry_policy": "never_after_unknown_effect",
+      "human_requirement": null,
+      "owner_approval_required": false,
+      "host_access_required": false,
+      "vm_policy": "not_applicable",
+      "security_relevance": "normal",
+      "failure_severity": "MEDIUM",
+      "spec_version": "1.0"
+    },
+    {
+      "test_id": "009",
+      "title": "Simple chat",
+      "phase": "C — Home + Chat",
+      "objective": "Simple chat",
+      "classification": "AUTO",
+      "automation_level": "FUTURE_PRODUCT_FEATURE_REQUIRED",
+      "tags": [
+        "phase-c"
+      ],
+      "risk": "medium",
+      "mutation_level": "read_only",
+      "required_environment": "product_runtime",
+      "required_capabilities": [],
+      "prerequisites": [],
+      "execution_contract": "Run the declared objective and collect independent evidence.",
+      "expected_outcomes": [
+        "objective outcome is observed"
+      ],
+      "assertions": [
+        "declared outcome is true"
+      ],
+      "evidence_requirements": [
+        "machine-readable result"
+      ],
+      "cleanup": "release owned resources",
+      "timeout_seconds": 60,
+      "retry_policy": "never_after_unknown_effect",
+      "human_requirement": null,
+      "owner_approval_required": false,
+      "host_access_required": false,
+      "vm_policy": "not_applicable",
+      "security_relevance": "normal",
+      "failure_severity": "MEDIUM",
+      "spec_version": "1.0"
+    },
+    {
+      "test_id": "010",
+      "title": "Long inspect-only request",
+      "phase": "C — Home + Chat",
+      "objective": "Long inspect-only request",
+      "classification": "AUTO",
+      "automation_level": "FUTURE_PRODUCT_FEATURE_REQUIRED",
+      "tags": [
+        "phase-c"
+      ],
+      "risk": "medium",
+      "mutation_level": "read_only",
+      "required_environment": "product_runtime",
+      "required_capabilities": [],
+      "prerequisites": [],
+      "execution_contract": "Run the declared objective and collect independent evidence.",
+      "expected_outcomes": [
+        "objective outcome is observed"
+      ],
+      "assertions": [
+        "declared outcome is true"
+      ],
+      "evidence_requirements": [
+        "machine-readable result"
+      ],
+      "cleanup": "release owned resources",
+      "timeout_seconds": 60,
+      "retry_policy": "never_after_unknown_effect",
+      "human_requirement": null,
+      "owner_approval_required": false,
+      "host_access_required": false,
+      "vm_policy": "not_applicable",
+      "security_relevance": "normal",
+      "failure_severity": "MEDIUM",
+      "spec_version": "1.0"
+    },
+    {
+      "test_id": "011",
+      "title": "Mid-conversation correction",
+      "phase": "C — Home + Chat",
+      "objective": "Mid-conversation correction",
+      "classification": "AUTO",
+      "automation_level": "FUTURE_PRODUCT_FEATURE_REQUIRED",
+      "tags": [
+        "phase-c"
+      ],
+      "risk": "medium",
+      "mutation_level": "read_only",
+      "required_environment": "product_runtime",
+      "required_capabilities": [],
+      "prerequisites": [],
+      "execution_contract": "Run the declared objective and collect independent evidence.",
+      "expected_outcomes": [
+        "objective outcome is observed"
+      ],
+      "assertions": [
+        "declared outcome is true"
+      ],
+      "evidence_requirements": [
+        "machine-readable result"
+      ],
+      "cleanup": "release owned resources",
+      "timeout_seconds": 60,
+      "retry_policy": "never_after_unknown_effect",
+      "human_requirement": null,
+      "owner_approval_required": false,
+      "host_access_required": false,
+      "vm_policy": "not_applicable",
+      "security_relevance": "normal",
+      "failure_severity": "MEDIUM",
+      "spec_version": "1.0"
+    },
+    {
+      "test_id": "012",
+      "title": "Stop/cancel",
+      "phase": "C — Home + Chat",
+      "objective": "Stop/cancel",
+      "classification": "AUTO",
+      "automation_level": "FUTURE_PRODUCT_FEATURE_REQUIRED",
+      "tags": [
+        "phase-c"
+      ],
+      "risk": "medium",
+      "mutation_level": "read_only",
+      "required_environment": "product_runtime",
+      "required_capabilities": [],
+      "prerequisites": [],
+      "execution_contract": "Run the declared objective and collect independent evidence.",
+      "expected_outcomes": [
+        "objective outcome is observed"
+      ],
+      "assertions": [
+        "declared outcome is true"
+      ],
+      "evidence_requirements": [
+        "machine-readable result"
+      ],
+      "cleanup": "release owned resources",
+      "timeout_seconds": 60,
+      "retry_policy": "never_after_unknown_effect",
+      "human_requirement": null,
+      "owner_approval_required": false,
+      "host_access_required": false,
+      "vm_policy": "not_applicable",
+      "security_relevance": "normal",
+      "failure_severity": "MEDIUM",
+      "spec_version": "1.0"
+    },
+    {
+      "test_id": "013",
+      "title": "Dutch interaction quality",
+      "phase": "D — Personality",
+      "objective": "Dutch interaction quality",
+      "classification": "HUMAN_JUDGMENT",
+      "automation_level": "HUMAN_JUDGMENT_REQUIRED",
+      "tags": [
+        "phase-d"
+      ],
+      "risk": "medium",
+      "mutation_level": "read_only",
+      "required_environment": "owner_or_reviewer",
+      "required_capabilities": [],
+      "prerequisites": [],
+      "execution_contract": "Run the declared objective and collect independent evidence.",
+      "expected_outcomes": [
+        "objective outcome is observed"
+      ],
+      "assertions": [
+        "declared outcome is true"
+      ],
+      "evidence_requirements": [
+        "machine-readable result"
+      ],
+      "cleanup": "release owned resources",
+      "timeout_seconds": 60,
+      "retry_policy": "never_after_unknown_effect",
+      "human_requirement": null,
+      "owner_approval_required": false,
+      "host_access_required": false,
+      "vm_policy": "not_applicable",
+      "security_relevance": "normal",
+      "failure_severity": "MEDIUM",
+      "spec_version": "1.0"
+    },
+    {
+      "test_id": "014",
+      "title": "English ↔ Dutch language switching",
+      "phase": "D — Personality",
+      "objective": "English ↔ Dutch language switching",
+      "classification": "AUTO",
+      "automation_level": "FUTURE_PRODUCT_FEATURE_REQUIRED",
+      "tags": [
+        "phase-d"
+      ],
+      "risk": "medium",
+      "mutation_level": "read_only",
+      "required_environment": "product_runtime",
+      "required_capabilities": [],
+      "prerequisites": [],
+      "execution_contract": "Run the declared objective and collect independent evidence.",
+      "expected_outcomes": [
+        "objective outcome is observed"
+      ],
+      "assertions": [
+        "declared outcome is true"
+      ],
+      "evidence_requirements": [
+        "machine-readable result"
+      ],
+      "cleanup": "release owned resources",
+      "timeout_seconds": 60,
+      "retry_policy": "never_after_unknown_effect",
+      "human_requirement": null,
+      "owner_approval_required": false,
+      "host_access_required": false,
+      "vm_policy": "not_applicable",
+      "security_relevance": "normal",
+      "failure_severity": "MEDIUM",
+      "spec_version": "1.0"
+    },
+    {
+      "test_id": "015",
+      "title": "Personality/verbosity/style feedback capture",
+      "phase": "D — Personality",
+      "objective": "Personality/verbosity/style feedback capture",
+      "classification": "HUMAN_JUDGMENT",
+      "automation_level": "HUMAN_JUDGMENT_REQUIRED",
+      "tags": [
+        "phase-d"
+      ],
+      "risk": "medium",
+      "mutation_level": "read_only",
+      "required_environment": "owner_or_reviewer",
+      "required_capabilities": [],
+      "prerequisites": [],
+      "execution_contract": "Run the declared objective and collect independent evidence.",
+      "expected_outcomes": [
+        "objective outcome is observed"
+      ],
+      "assertions": [
+        "declared outcome is true"
+      ],
+      "evidence_requirements": [
+        "machine-readable result"
+      ],
+      "cleanup": "release owned resources",
+      "timeout_seconds": 60,
+      "retry_policy": "never_after_unknown_effect",
+      "human_requirement": null,
+      "owner_approval_required": false,
+      "host_access_required": false,
+      "vm_policy": "not_applicable",
+      "security_relevance": "normal",
+      "failure_severity": "MEDIUM",
+      "spec_version": "1.0"
+    },
+    {
+      "test_id": "016",
+      "title": "Simple filesystem task with real verification",
+      "phase": "E — Tasks + Planning",
+      "objective": "Simple filesystem task with real verification",
+      "classification": "AUTO",
+      "automation_level": "FULLY_AUTOMATED_NOW",
+      "tags": [
+        "phase-e"
+      ],
+      "risk": "medium",
+      "mutation_level": "read_only",
+      "required_environment": "local_test_harness",
+      "required_capabilities": [],
+      "prerequisites": [],
+      "execution_contract": "Run the declared objective and collect independent evidence.",
+      "expected_outcomes": [
+        "objective outcome is observed"
+      ],
+      "assertions": [
+        "declared outcome is true"
+      ],
+      "evidence_requirements": [
+        "machine-readable result"
+      ],
+      "cleanup": "release owned resources",
+      "timeout_seconds": 60,
+      "retry_policy": "never_after_unknown_effect",
+      "human_requirement": null,
+      "owner_approval_required": false,
+      "host_access_required": false,
+      "vm_policy": "not_applicable",
+      "security_relevance": "normal",
+      "failure_severity": "MEDIUM",
+      "spec_version": "1.0"
+    },
+    {
+      "test_id": "017",
+      "title": "Multi-step read-only analysis",
+      "phase": "E — Tasks + Planning",
+      "objective": "Multi-step read-only analysis",
+      "classification": "AUTO",
+      "automation_level": "FULLY_AUTOMATED_NOW",
+      "tags": [
+        "phase-e"
+      ],
+      "risk": "medium",
+      "mutation_level": "read_only",
+      "required_environment": "local_test_harness",
+      "required_capabilities": [],
+      "prerequisites": [],
+      "execution_contract": "Run the declared objective and collect independent evidence.",
+      "expected_outcomes": [
+        "objective outcome is observed"
+      ],
+      "assertions": [
+        "declared outcome is true"
+      ],
+      "evidence_requirements": [
+        "machine-readable result"
+      ],
+      "cleanup": "release owned resources",
+      "timeout_seconds": 60,
+      "retry_policy": "never_after_unknown_effect",
+      "human_requirement": null,
+      "owner_approval_required": false,
+      "host_access_required": false,
+      "vm_policy": "not_applicable",
+      "security_relevance": "normal",
+      "failure_severity": "MEDIUM",
+      "spec_version": "1.0"
+    },
+    {
+      "test_id": "018",
+      "title": "Pause/resume without duplicated effect",
+      "phase": "E — Tasks + Planning",
+      "objective": "Pause/resume without duplicated effect",
+      "classification": "AUTO",
+      "automation_level": "FULLY_AUTOMATED_NOW",
+      "tags": [
+        "phase-e"
+      ],
+      "risk": "medium",
+      "mutation_level": "read_only",
+      "required_environment": "local_test_harness",
+      "required_capabilities": [],
+      "prerequisites": [],
+      "execution_contract": "Run the declared objective and collect independent evidence.",
+      "expected_outcomes": [
+        "objective outcome is observed"
+      ],
+      "assertions": [
+        "declared outcome is true"
+      ],
+      "evidence_requirements": [
+        "machine-readable result"
+      ],
+      "cleanup": "release owned resources",
+      "timeout_seconds": 60,
+      "retry_policy": "never_after_unknown_effect",
+      "human_requirement": null,
+      "owner_approval_required": false,
+      "host_access_required": false,
+      "vm_policy": "not_applicable",
+      "security_relevance": "normal",
+      "failure_severity": "MEDIUM",
+      "spec_version": "1.0"
+    },
+    {
+      "test_id": "019",
+      "title": "Restart during task without duplicate effect",
+      "phase": "E — Tasks + Planning",
+      "objective": "Restart during task without duplicate effect",
+      "classification": "AUTO",
+      "automation_level": "FULLY_AUTOMATED_NOW",
+      "tags": [
+        "phase-e"
+      ],
+      "risk": "medium",
+      "mutation_level": "read_only",
+      "required_environment": "local_test_harness",
+      "required_capabilities": [],
+      "prerequisites": [],
+      "execution_contract": "Run the declared objective and collect independent evidence.",
+      "expected_outcomes": [
+        "objective outcome is observed"
+      ],
+      "assertions": [
+        "declared outcome is true"
+      ],
+      "evidence_requirements": [
+        "machine-readable result"
+      ],
+      "cleanup": "release owned resources",
+      "timeout_seconds": 60,
+      "retry_policy": "never_after_unknown_effect",
+      "human_requirement": null,
+      "owner_approval_required": false,
+      "host_access_required": false,
+      "vm_policy": "not_applicable",
+      "security_relevance": "normal",
+      "failure_severity": "MEDIUM",
+      "spec_version": "1.0"
+    },
+    {
+      "test_id": "020",
+      "title": "Modify plan before authorization",
+      "phase": "E — Tasks + Planning",
+      "objective": "Modify plan before authorization",
+      "classification": "AUTO",
+      "automation_level": "FULLY_AUTOMATED_NOW",
+      "tags": [
+        "phase-e"
+      ],
+      "risk": "medium",
+      "mutation_level": "read_only",
+      "required_environment": "local_test_harness",
+      "required_capabilities": [],
+      "prerequisites": [],
+      "execution_contract": "Run the declared objective and collect independent evidence.",
+      "expected_outcomes": [
+        "objective outcome is observed"
+      ],
+      "assertions": [
+        "declared outcome is true"
+      ],
+      "evidence_requirements": [
+        "machine-readable result"
+      ],
+      "cleanup": "release owned resources",
+      "timeout_seconds": 60,
+      "retry_policy": "never_after_unknown_effect",
+      "human_requirement": null,
+      "owner_approval_required": false,
+      "host_access_required": false,
+      "vm_policy": "not_applicable",
+      "security_relevance": "normal",
+      "failure_severity": "MEDIUM",
+      "spec_version": "1.0"
+    },
+    {
+      "test_id": "021",
+      "title": "File read scope",
+      "phase": "F — Permissions",
+      "objective": "File read scope",
+      "classification": "AUTO",
+      "automation_level": "FUTURE_PRODUCT_FEATURE_REQUIRED",
+      "tags": [
+        "phase-f"
+      ],
+      "risk": "medium",
+      "mutation_level": "read_only",
+      "required_environment": "product_runtime",
+      "required_capabilities": [],
+      "prerequisites": [],
+      "execution_contract": "Run the declared objective and collect independent evidence.",
+      "expected_outcomes": [
+        "objective outcome is observed"
+      ],
+      "assertions": [
+        "declared outcome is true"
+      ],
+      "evidence_requirements": [
+        "machine-readable result"
+      ],
+      "cleanup": "release owned resources",
+      "timeout_seconds": 60,
+      "retry_policy": "never_after_unknown_effect",
+      "human_requirement": null,
+      "owner_approval_required": false,
+      "host_access_required": false,
+      "vm_policy": "not_applicable",
+      "security_relevance": "review_required",
+      "failure_severity": "MEDIUM",
+      "spec_version": "1.0"
+    },
+    {
+      "test_id": "022",
+      "title": "File write scope distinct from read",
+      "phase": "F — Permissions",
+      "objective": "File write scope distinct from read",
+      "classification": "AUTO",
+      "automation_level": "FUTURE_PRODUCT_FEATURE_REQUIRED",
+      "tags": [
+        "phase-f"
+      ],
+      "risk": "medium",
+      "mutation_level": "read_only",
+      "required_environment": "product_runtime",
+      "required_capabilities": [],
+      "prerequisites": [],
+      "execution_contract": "Run the declared objective and collect independent evidence.",
+      "expected_outcomes": [
+        "objective outcome is observed"
+      ],
+      "assertions": [
+        "declared outcome is true"
+      ],
+      "evidence_requirements": [
+        "machine-readable result"
+      ],
+      "cleanup": "release owned resources",
+      "timeout_seconds": 60,
+      "retry_policy": "never_after_unknown_effect",
+      "human_requirement": null,
+      "owner_approval_required": false,
+      "host_access_required": false,
+      "vm_policy": "not_applicable",
+      "security_relevance": "review_required",
+      "failure_severity": "MEDIUM",
+      "spec_version": "1.0"
+    },
+    {
+      "test_id": "023",
+      "title": "Permission denial produces no action",
+      "phase": "F — Permissions",
+      "objective": "Permission denial produces no action",
+      "classification": "AUTO",
+      "automation_level": "FUTURE_PRODUCT_FEATURE_REQUIRED",
+      "tags": [
+        "phase-f"
+      ],
+      "risk": "medium",
+      "mutation_level": "read_only",
+      "required_environment": "product_runtime",
+      "required_capabilities": [],
+      "prerequisites": [],
+      "execution_contract": "Run the declared objective and collect independent evidence.",
+      "expected_outcomes": [
+        "objective outcome is observed"
+      ],
+      "assertions": [
+        "declared outcome is true"
+      ],
+      "evidence_requirements": [
+        "machine-readable result"
+      ],
+      "cleanup": "release owned resources",
+      "timeout_seconds": 60,
+      "retry_policy": "never_after_unknown_effect",
+      "human_requirement": null,
+      "owner_approval_required": false,
+      "host_access_required": false,
+      "vm_policy": "not_applicable",
+      "security_relevance": "review_required",
+      "failure_severity": "RELEASE_BLOCKER",
+      "spec_version": "1.0"
+    },
+    {
+      "test_id": "024",
+      "title": "Changed arguments invalidate prior approval",
+      "phase": "F — Permissions",
+      "objective": "Changed arguments invalidate prior approval",
+      "classification": "AUTO",
+      "automation_level": "FUTURE_PRODUCT_FEATURE_REQUIRED",
+      "tags": [
+        "phase-f"
+      ],
+      "risk": "medium",
+      "mutation_level": "read_only",
+      "required_environment": "product_runtime",
+      "required_capabilities": [],
+      "prerequisites": [],
+      "execution_contract": "Run the declared objective and collect independent evidence.",
+      "expected_outcomes": [
+        "objective outcome is observed"
+      ],
+      "assertions": [
+        "declared outcome is true"
+      ],
+      "evidence_requirements": [
+        "machine-readable result"
+      ],
+      "cleanup": "release owned resources",
+      "timeout_seconds": 60,
+      "retry_policy": "never_after_unknown_effect",
+      "human_requirement": null,
+      "owner_approval_required": false,
+      "host_access_required": false,
+      "vm_policy": "not_applicable",
+      "security_relevance": "review_required",
+      "failure_severity": "RELEASE_BLOCKER",
+      "spec_version": "1.0"
+    },
+    {
+      "test_id": "025",
+      "title": "Expired/stale approval cannot authorize",
+      "phase": "F — Permissions",
+      "objective": "Expired/stale approval cannot authorize",
+      "classification": "AUTO",
+      "automation_level": "FUTURE_PRODUCT_FEATURE_REQUIRED",
+      "tags": [
+        "phase-f"
+      ],
+      "risk": "medium",
+      "mutation_level": "read_only",
+      "required_environment": "product_runtime",
+      "required_capabilities": [],
+      "prerequisites": [],
+      "execution_contract": "Run the declared objective and collect independent evidence.",
+      "expected_outcomes": [
+        "objective outcome is observed"
+      ],
+      "assertions": [
+        "declared outcome is true"
+      ],
+      "evidence_requirements": [
+        "machine-readable result"
+      ],
+      "cleanup": "release owned resources",
+      "timeout_seconds": 60,
+      "retry_policy": "never_after_unknown_effect",
+      "human_requirement": null,
+      "owner_approval_required": false,
+      "host_access_required": false,
+      "vm_policy": "not_applicable",
+      "security_relevance": "review_required",
+      "failure_severity": "RELEASE_BLOCKER",
+      "spec_version": "1.0"
+    },
+    {
+      "test_id": "026",
+      "title": "Learn explicit preference and persist across restart",
+      "phase": "G — Memory",
+      "objective": "Learn explicit preference and persist across restart",
+      "classification": "AUTO",
+      "automation_level": "FUTURE_PRODUCT_FEATURE_REQUIRED",
+      "tags": [
+        "phase-g"
+      ],
+      "risk": "medium",
+      "mutation_level": "read_only",
+      "required_environment": "product_runtime",
+      "required_capabilities": [],
+      "prerequisites": [],
+      "execution_contract": "Run the declared objective and collect independent evidence.",
+      "expected_outcomes": [
+        "objective outcome is observed"
+      ],
+      "assertions": [
+        "declared outcome is true"
+      ],
+      "evidence_requirements": [
+        "machine-readable result"
+      ],
+      "cleanup": "release owned resources",
+      "timeout_seconds": 60,
+      "retry_policy": "never_after_unknown_effect",
+      "human_requirement": null,
+      "owner_approval_required": false,
+      "host_access_required": false,
+      "vm_policy": "not_applicable",
+      "security_relevance": "normal",
+      "failure_severity": "MEDIUM",
+      "spec_version": "1.0"
+    },
+    {
+      "test_id": "027",
+      "title": "Inspect memory provenance/confidence/state",
+      "phase": "G — Memory",
+      "objective": "Inspect memory provenance/confidence/state",
+      "classification": "AUTO",
+      "automation_level": "FUTURE_PRODUCT_FEATURE_REQUIRED",
+      "tags": [
+        "phase-g"
+      ],
+      "risk": "medium",
+      "mutation_level": "read_only",
+      "required_environment": "product_runtime",
+      "required_capabilities": [],
+      "prerequisites": [],
+      "execution_contract": "Run the declared objective and collect independent evidence.",
+      "expected_outcomes": [
+        "objective outcome is observed"
+      ],
+      "assertions": [
+        "declared outcome is true"
+      ],
+      "evidence_requirements": [
+        "machine-readable result"
+      ],
+      "cleanup": "release owned resources",
+      "timeout_seconds": 60,
+      "retry_policy": "never_after_unknown_effect",
+      "human_requirement": null,
+      "owner_approval_required": false,
+      "host_access_required": false,
+      "vm_policy": "not_applicable",
+      "security_relevance": "normal",
+      "failure_severity": "MEDIUM",
+      "spec_version": "1.0"
+    },
+    {
+      "test_id": "028",
+      "title": "Correct memory and supersede conflicting prior inference",
+      "phase": "G — Memory",
+      "objective": "Correct memory and supersede conflicting prior inference",
+      "classification": "AUTO",
+      "automation_level": "FUTURE_PRODUCT_FEATURE_REQUIRED",
+      "tags": [
+        "phase-g"
+      ],
+      "risk": "medium",
+      "mutation_level": "read_only",
+      "required_environment": "product_runtime",
+      "required_capabilities": [],
+      "prerequisites": [],
+      "execution_contract": "Run the declared objective and collect independent evidence.",
+      "expected_outcomes": [
+        "objective outcome is observed"
+      ],
+      "assertions": [
+        "declared outcome is true"
+      ],
+      "evidence_requirements": [
+        "machine-readable result"
+      ],
+      "cleanup": "release owned resources",
+      "timeout_seconds": 60,
+      "retry_policy": "never_after_unknown_effect",
+      "human_requirement": null,
+      "owner_approval_required": false,
+      "host_access_required": false,
+      "vm_policy": "not_applicable",
+      "security_relevance": "normal",
+      "failure_severity": "MEDIUM",
+      "spec_version": "1.0"
+    },
+    {
+      "test_id": "029",
+      "title": "Delete memory and prove removal",
+      "phase": "G — Memory",
+      "objective": "Delete memory and prove removal",
+      "classification": "AUTO",
+      "automation_level": "FUTURE_PRODUCT_FEATURE_REQUIRED",
+      "tags": [
+        "phase-g"
+      ],
+      "risk": "medium",
+      "mutation_level": "read_only",
+      "required_environment": "product_runtime",
+      "required_capabilities": [],
+      "prerequisites": [],
+      "execution_contract": "Run the declared objective and collect independent evidence.",
+      "expected_outcomes": [
+        "objective outcome is observed"
+      ],
+      "assertions": [
+        "declared outcome is true"
+      ],
+      "evidence_requirements": [
+        "machine-readable result"
+      ],
+      "cleanup": "release owned resources",
+      "timeout_seconds": 60,
+      "retry_policy": "never_after_unknown_effect",
+      "human_requirement": null,
+      "owner_approval_required": false,
+      "host_access_required": false,
+      "vm_policy": "not_applicable",
+      "security_relevance": "normal",
+      "failure_severity": "MEDIUM",
+      "spec_version": "1.0"
+    },
+    {
+      "test_id": "030",
+      "title": "Pause learning and prove no normal persistent memory",
+      "phase": "G — Memory",
+      "objective": "Pause learning and prove no normal persistent memory",
+      "classification": "AUTO",
+      "automation_level": "FUTURE_PRODUCT_FEATURE_REQUIRED",
+      "tags": [
+        "phase-g"
+      ],
+      "risk": "medium",
+      "mutation_level": "read_only",
+      "required_environment": "product_runtime",
+      "required_capabilities": [],
+      "prerequisites": [],
+      "execution_contract": "Run the declared objective and collect independent evidence.",
+      "expected_outcomes": [
+        "objective outcome is observed"
+      ],
+      "assertions": [
+        "declared outcome is true"
+      ],
+      "evidence_requirements": [
+        "machine-readable result"
+      ],
+      "cleanup": "release owned resources",
+      "timeout_seconds": 60,
+      "retry_policy": "never_after_unknown_effect",
+      "human_requirement": null,
+      "owner_approval_required": false,
+      "host_access_required": false,
+      "vm_policy": "not_applicable",
+      "security_relevance": "normal",
+      "failure_severity": "MEDIUM",
+      "spec_version": "1.0"
+    },
+    {
+      "test_id": "031",
+      "title": "Push-to-talk reliability",
+      "phase": "H — Voice",
+      "objective": "Push-to-talk reliability",
+      "classification": "SYNTHETIC_HARDWARE",
+      "automation_level": "AUTOMATABLE_WITH_SYNTHETIC_FIXTURE",
+      "tags": [
+        "phase-h"
+      ],
+      "risk": "medium",
+      "mutation_level": "read_only",
+      "required_environment": "synthetic_device_fixture",
+      "required_capabilities": [],
+      "prerequisites": [],
+      "execution_contract": "Run the declared objective and collect independent evidence.",
+      "expected_outcomes": [
+        "objective outcome is observed"
+      ],
+      "assertions": [
+        "declared outcome is true"
+      ],
+      "evidence_requirements": [
+        "machine-readable result"
+      ],
+      "cleanup": "release owned resources",
+      "timeout_seconds": 60,
+      "retry_policy": "never_after_unknown_effect",
+      "human_requirement": null,
+      "owner_approval_required": false,
+      "host_access_required": false,
+      "vm_policy": "not_applicable",
+      "security_relevance": "normal",
+      "failure_severity": "MEDIUM",
+      "spec_version": "1.0"
+    },
+    {
+      "test_id": "032",
+      "title": "Wake-word behavior",
+      "phase": "H — Voice",
+      "objective": "Wake-word behavior",
+      "classification": "SYNTHETIC_HARDWARE",
+      "automation_level": "AUTOMATABLE_WITH_SYNTHETIC_FIXTURE",
+      "tags": [
+        "phase-h"
+      ],
+      "risk": "medium",
+      "mutation_level": "read_only",
+      "required_environment": "synthetic_device_fixture",
+      "required_capabilities": [],
+      "prerequisites": [],
+      "execution_contract": "Run the declared objective and collect independent evidence.",
+      "expected_outcomes": [
+        "objective outcome is observed"
+      ],
+      "assertions": [
+        "declared outcome is true"
+      ],
+      "evidence_requirements": [
+        "machine-readable result"
+      ],
+      "cleanup": "release owned resources",
+      "timeout_seconds": 60,
+      "retry_policy": "never_after_unknown_effect",
+      "human_requirement": null,
+      "owner_approval_required": false,
+      "host_access_required": false,
+      "vm_policy": "not_applicable",
+      "security_relevance": "normal",
+      "failure_severity": "MEDIUM",
+      "spec_version": "1.0"
+    },
+    {
+      "test_id": "033",
+      "title": "Barge-in / stop speaking",
+      "phase": "H — Voice",
+      "objective": "Barge-in / stop speaking",
+      "classification": "SYNTHETIC_HARDWARE",
+      "automation_level": "AUTOMATABLE_WITH_SYNTHETIC_FIXTURE",
+      "tags": [
+        "phase-h"
+      ],
+      "risk": "medium",
+      "mutation_level": "read_only",
+      "required_environment": "synthetic_device_fixture",
+      "required_capabilities": [],
+      "prerequisites": [],
+      "execution_contract": "Run the declared objective and collect independent evidence.",
+      "expected_outcomes": [
+        "objective outcome is observed"
+      ],
+      "assertions": [
+        "declared outcome is true"
+      ],
+      "evidence_requirements": [
+        "machine-readable result"
+      ],
+      "cleanup": "release owned resources",
+      "timeout_seconds": 60,
+      "retry_policy": "never_after_unknown_effect",
+      "human_requirement": null,
+      "owner_approval_required": false,
+      "host_access_required": false,
+      "vm_policy": "not_applicable",
+      "security_relevance": "normal",
+      "failure_severity": "MEDIUM",
+      "spec_version": "1.0"
+    },
+    {
+      "test_id": "034",
+      "title": "Microphone disappears/recovery",
+      "phase": "H — Voice",
+      "objective": "Microphone disappears/recovery",
+      "classification": "SYNTHETIC_HARDWARE",
+      "automation_level": "AUTOMATABLE_WITH_SYNTHETIC_FIXTURE",
+      "tags": [
+        "phase-h"
+      ],
+      "risk": "medium",
+      "mutation_level": "read_only",
+      "required_environment": "synthetic_device_fixture",
+      "required_capabilities": [],
+      "prerequisites": [],
+      "execution_contract": "Run the declared objective and collect independent evidence.",
+      "expected_outcomes": [
+        "objective outcome is observed"
+      ],
+      "assertions": [
+        "declared outcome is true"
+      ],
+      "evidence_requirements": [
+        "machine-readable result"
+      ],
+      "cleanup": "release owned resources",
+      "timeout_seconds": 60,
+      "retry_policy": "never_after_unknown_effect",
+      "human_requirement": null,
+      "owner_approval_required": false,
+      "host_access_required": false,
+      "vm_policy": "not_applicable",
+      "security_relevance": "normal",
+      "failure_severity": "MEDIUM",
+      "spec_version": "1.0"
+    },
+    {
+      "test_id": "035",
+      "title": "TTS quality across Dutch/English/technical/path content",
+      "phase": "H — Voice",
+      "objective": "TTS quality across Dutch/English/technical/path content",
+      "classification": "SYNTHETIC_HARDWARE",
+      "automation_level": "AUTOMATABLE_WITH_SYNTHETIC_FIXTURE",
+      "tags": [
+        "phase-h"
+      ],
+      "risk": "medium",
+      "mutation_level": "read_only",
+      "required_environment": "synthetic_device_fixture",
+      "required_capabilities": [],
+      "prerequisites": [],
+      "execution_contract": "Run the declared objective and collect independent evidence.",
+      "expected_outcomes": [
+        "objective outcome is observed"
+      ],
+      "assertions": [
+        "declared outcome is true"
+      ],
+      "evidence_requirements": [
+        "machine-readable result"
+      ],
+      "cleanup": "release owned resources",
+      "timeout_seconds": 60,
+      "retry_policy": "never_after_unknown_effect",
+      "human_requirement": null,
+      "owner_approval_required": false,
+      "host_access_required": false,
+      "vm_policy": "not_applicable",
+      "security_relevance": "normal",
+      "failure_severity": "MEDIUM",
+      "spec_version": "1.0"
+    },
+    {
+      "test_id": "036",
+      "title": "Camera observation and visible privacy state",
+      "phase": "I — Camera + Computer Control",
+      "objective": "Camera observation and visible privacy state",
+      "classification": "SYNTHETIC_HARDWARE",
+      "automation_level": "AUTOMATABLE_WITH_SYNTHETIC_FIXTURE",
+      "tags": [
+        "phase-i"
+      ],
+      "risk": "medium",
+      "mutation_level": "read_only",
+      "required_environment": "synthetic_device_fixture",
+      "required_capabilities": [],
+      "prerequisites": [],
+      "execution_contract": "Run the declared objective and collect independent evidence.",
+      "expected_outcomes": [
+        "objective outcome is observed"
+      ],
+      "assertions": [
+        "declared outcome is true"
+      ],
+      "evidence_requirements": [
+        "machine-readable result"
+      ],
+      "cleanup": "release owned resources",
+      "timeout_seconds": 60,
+      "retry_policy": "never_after_unknown_effect",
+      "human_requirement": null,
+      "owner_approval_required": false,
+      "host_access_required": false,
+      "vm_policy": "not_applicable",
+      "security_relevance": "normal",
+      "failure_severity": "MEDIUM",
+      "spec_version": "1.0"
+    },
+    {
+      "test_id": "037",
+      "title": "Camera busy/unavailable recovery",
+      "phase": "I — Camera + Computer Control",
+      "objective": "Camera busy/unavailable recovery",
+      "classification": "SYNTHETIC_HARDWARE",
+      "automation_level": "AUTOMATABLE_WITH_SYNTHETIC_FIXTURE",
+      "tags": [
+        "phase-i"
+      ],
+      "risk": "medium",
+      "mutation_level": "read_only",
+      "required_environment": "synthetic_device_fixture",
+      "required_capabilities": [],
+      "prerequisites": [],
+      "execution_contract": "Run the declared objective and collect independent evidence.",
+      "expected_outcomes": [
+        "objective outcome is observed"
+      ],
+      "assertions": [
+        "declared outcome is true"
+      ],
+      "evidence_requirements": [
+        "machine-readable result"
+      ],
+      "cleanup": "release owned resources",
+      "timeout_seconds": 60,
+      "retry_policy": "never_after_unknown_effect",
+      "human_requirement": null,
+      "owner_approval_required": false,
+      "host_access_required": false,
+      "vm_policy": "not_applicable",
+      "security_relevance": "normal",
+      "failure_severity": "MEDIUM",
+      "spec_version": "1.0"
+    },
+    {
+      "test_id": "038",
+      "title": "Notepad controlled E2E",
+      "phase": "I — Camera + Computer Control",
+      "objective": "Notepad controlled E2E",
+      "classification": "AUTO",
+      "automation_level": "FULLY_AUTOMATED_NOW",
+      "tags": [
+        "phase-i"
+      ],
+      "risk": "medium",
+      "mutation_level": "read_only",
+      "required_environment": "local_test_harness",
+      "required_capabilities": [],
+      "prerequisites": [],
+      "execution_contract": "Run the declared objective and collect independent evidence.",
+      "expected_outcomes": [
+        "objective outcome is observed"
+      ],
+      "assertions": [
+        "declared outcome is true"
+      ],
+      "evidence_requirements": [
+        "machine-readable result"
+      ],
+      "cleanup": "release owned resources",
+      "timeout_seconds": 60,
+      "retry_policy": "never_after_unknown_effect",
+      "human_requirement": null,
+      "owner_approval_required": false,
+      "host_access_required": false,
+      "vm_policy": "not_applicable",
+      "security_relevance": "normal",
+      "failure_severity": "MEDIUM",
+      "spec_version": "1.0"
+    },
+    {
+      "test_id": "039",
+      "title": "Clipboard read/write",
+      "phase": "I — Camera + Computer Control",
+      "objective": "Clipboard read/write",
+      "classification": "SYNTHETIC_HARDWARE",
+      "automation_level": "AUTOMATABLE_WITH_SYNTHETIC_FIXTURE",
+      "tags": [
+        "phase-i"
+      ],
+      "risk": "medium",
+      "mutation_level": "read_only",
+      "required_environment": "synthetic_device_fixture",
+      "required_capabilities": [],
+      "prerequisites": [],
+      "execution_contract": "Run the declared objective and collect independent evidence.",
+      "expected_outcomes": [
+        "objective outcome is observed"
+      ],
+      "assertions": [
+        "declared outcome is true"
+      ],
+      "evidence_requirements": [
+        "machine-readable result"
+      ],
+      "cleanup": "release owned resources",
+      "timeout_seconds": 60,
+      "retry_policy": "never_after_unknown_effect",
+      "human_requirement": null,
+      "owner_approval_required": false,
+      "host_access_required": false,
+      "vm_policy": "not_applicable",
+      "security_relevance": "normal",
+      "failure_severity": "MEDIUM",
+      "spec_version": "1.0"
+    },
+    {
+      "test_id": "040",
+      "title": "Fresh screenshot/screen-state observation",
+      "phase": "I — Camera + Computer Control",
+      "objective": "Fresh screenshot/screen-state observation",
+      "classification": "SYNTHETIC_HARDWARE",
+      "automation_level": "AUTOMATABLE_WITH_SYNTHETIC_FIXTURE",
+      "tags": [
+        "phase-i"
+      ],
+      "risk": "medium",
+      "mutation_level": "read_only",
+      "required_environment": "synthetic_device_fixture",
+      "required_capabilities": [],
+      "prerequisites": [],
+      "execution_contract": "Run the declared objective and collect independent evidence.",
+      "expected_outcomes": [
+        "objective outcome is observed"
+      ],
+      "assertions": [
+        "declared outcome is true"
+      ],
+      "evidence_requirements": [
+        "machine-readable result"
+      ],
+      "cleanup": "release owned resources",
+      "timeout_seconds": 60,
+      "retry_policy": "never_after_unknown_effect",
+      "human_requirement": null,
+      "owner_approval_required": false,
+      "host_access_required": false,
+      "vm_policy": "not_applicable",
+      "security_relevance": "normal",
+      "failure_severity": "MEDIUM",
+      "spec_version": "1.0"
+    },
+    {
+      "test_id": "041",
+      "title": "Browser navigation using actual page state",
+      "phase": "J — Browser + Research",
+      "objective": "Browser navigation using actual page state",
+      "classification": "AUTO",
+      "automation_level": "FULLY_AUTOMATED_NOW",
+      "tags": [
+        "phase-j"
+      ],
+      "risk": "medium",
+      "mutation_level": "read_only",
+      "required_environment": "local_test_harness",
+      "required_capabilities": [],
+      "prerequisites": [],
+      "execution_contract": "Run the declared objective and collect independent evidence.",
+      "expected_outcomes": [
+        "objective outcome is observed"
+      ],
+      "assertions": [
+        "declared outcome is true"
+      ],
+      "evidence_requirements": [
+        "machine-readable result"
+      ],
+      "cleanup": "release owned resources",
+      "timeout_seconds": 60,
+      "retry_policy": "never_after_unknown_effect",
+      "human_requirement": null,
+      "owner_approval_required": false,
+      "host_access_required": false,
+      "vm_policy": "not_applicable",
+      "security_relevance": "normal",
+      "failure_severity": "MEDIUM",
+      "spec_version": "1.0"
+    },
+    {
+      "test_id": "042",
+      "title": "Fill web form without submitting",
+      "phase": "J — Browser + Research",
+      "objective": "Fill web form without submitting",
+      "classification": "AUTO",
+      "automation_level": "FULLY_AUTOMATED_NOW",
+      "tags": [
+        "phase-j"
+      ],
+      "risk": "medium",
+      "mutation_level": "read_only",
+      "required_environment": "local_test_harness",
+      "required_capabilities": [],
+      "prerequisites": [],
+      "execution_contract": "Run the declared objective and collect independent evidence.",
+      "expected_outcomes": [
+        "objective outcome is observed"
+      ],
+      "assertions": [
+        "declared outcome is true"
+      ],
+      "evidence_requirements": [
+        "machine-readable result"
+      ],
+      "cleanup": "release owned resources",
+      "timeout_seconds": 60,
+      "retry_policy": "never_after_unknown_effect",
+      "human_requirement": null,
+      "owner_approval_required": false,
+      "host_access_required": false,
+      "vm_policy": "not_applicable",
+      "security_relevance": "normal",
+      "failure_severity": "MEDIUM",
+      "spec_version": "1.0"
+    },
+    {
+      "test_id": "043",
+      "title": "Web prompt-injection resistance",
+      "phase": "J — Browser + Research",
+      "objective": "Web prompt-injection resistance",
+      "classification": "VM",
+      "automation_level": "AUTOMATABLE_WITH_VM",
+      "tags": [
+        "phase-j"
+      ],
+      "risk": "medium",
+      "mutation_level": "read_only",
+      "required_environment": "disposable_test_vm",
+      "required_capabilities": [],
+      "prerequisites": [],
+      "execution_contract": "Run the declared objective and collect independent evidence.",
+      "expected_outcomes": [
+        "objective outcome is observed"
+      ],
+      "assertions": [
+        "declared outcome is true"
+      ],
+      "evidence_requirements": [
+        "machine-readable result"
+      ],
+      "cleanup": "release owned resources",
+      "timeout_seconds": 60,
+      "retry_policy": "never_after_unknown_effect",
+      "human_requirement": null,
+      "owner_approval_required": false,
+      "host_access_required": false,
+      "vm_policy": "prefer_workbench_then_disposable",
+      "security_relevance": "normal",
+      "failure_severity": "RELEASE_BLOCKER",
+      "spec_version": "1.0"
+    },
+    {
+      "test_id": "044",
+      "title": "Research quality/current-source evaluation",
+      "phase": "J — Browser + Research",
+      "objective": "Research quality/current-source evaluation",
+      "classification": "EXTERNAL_TEST_SERVICE",
+      "automation_level": "AUTOMATABLE_WITH_EXTERNAL_TEST_SERVICE",
+      "tags": [
+        "phase-j"
+      ],
+      "risk": "medium",
+      "mutation_level": "read_only",
+      "required_environment": "synthetic_external_service",
+      "required_capabilities": [],
+      "prerequisites": [],
+      "execution_contract": "Run the declared objective and collect independent evidence.",
+      "expected_outcomes": [
+        "objective outcome is observed"
+      ],
+      "assertions": [
+        "declared outcome is true"
+      ],
+      "evidence_requirements": [
+        "machine-readable result"
+      ],
+      "cleanup": "release owned resources",
+      "timeout_seconds": 60,
+      "retry_policy": "never_after_unknown_effect",
+      "human_requirement": null,
+      "owner_approval_required": false,
+      "host_access_required": false,
+      "vm_policy": "not_applicable",
+      "security_relevance": "normal",
+      "failure_severity": "MEDIUM",
+      "spec_version": "1.0"
+    },
+    {
+      "test_id": "045",
+      "title": "Select unknown safe service",
+      "phase": "K — Unknown Capability",
+      "objective": "Select unknown safe service",
+      "classification": "VM",
+      "automation_level": "AUTOMATABLE_WITH_VM",
+      "tags": [
+        "phase-k"
+      ],
+      "risk": "medium",
+      "mutation_level": "read_only",
+      "required_environment": "workbench_vm_or_disposable_test_vm",
+      "required_capabilities": [],
+      "prerequisites": [],
+      "execution_contract": "Run the declared objective and collect independent evidence.",
+      "expected_outcomes": [
+        "objective outcome is observed"
+      ],
+      "assertions": [
+        "declared outcome is true"
+      ],
+      "evidence_requirements": [
+        "machine-readable result"
+      ],
+      "cleanup": "release owned resources",
+      "timeout_seconds": 60,
+      "retry_policy": "never_after_unknown_effect",
+      "human_requirement": null,
+      "owner_approval_required": false,
+      "host_access_required": false,
+      "vm_policy": "prefer_workbench_then_disposable",
+      "security_relevance": "normal",
+      "failure_severity": "MEDIUM",
+      "spec_version": "1.0"
+    },
+    {
+      "test_id": "046",
+      "title": "Give only end goal; no implementation hints",
+      "phase": "K — Unknown Capability",
+      "objective": "Give only end goal; no implementation hints",
+      "classification": "AUTO",
+      "automation_level": "FULLY_AUTOMATED_NOW",
+      "tags": [
+        "phase-k"
+      ],
+      "risk": "medium",
+      "mutation_level": "read_only",
+      "required_environment": "local_test_harness",
+      "required_capabilities": [],
+      "prerequisites": [],
+      "execution_contract": "Run the declared objective and collect independent evidence.",
+      "expected_outcomes": [
+        "objective outcome is observed"
+      ],
+      "assertions": [
+        "declared outcome is true"
+      ],
+      "evidence_requirements": [
+        "machine-readable result"
+      ],
+      "cleanup": "release owned resources",
+      "timeout_seconds": 60,
+      "retry_policy": "never_after_unknown_effect",
+      "human_requirement": null,
+      "owner_approval_required": false,
+      "host_access_required": false,
+      "vm_policy": "not_applicable",
+      "security_relevance": "normal",
+      "failure_severity": "MEDIUM",
+      "spec_version": "1.0"
+    },
+    {
+      "test_id": "047",
+      "title": "Capability gap detected semantically",
+      "phase": "K — Unknown Capability",
+      "objective": "Capability gap detected semantically",
+      "classification": "AUTO",
+      "automation_level": "FULLY_AUTOMATED_NOW",
+      "tags": [
+        "phase-k"
+      ],
+      "risk": "medium",
+      "mutation_level": "read_only",
+      "required_environment": "local_test_harness",
+      "required_capabilities": [],
+      "prerequisites": [],
+      "execution_contract": "Run the declared objective and collect independent evidence.",
+      "expected_outcomes": [
+        "objective outcome is observed"
+      ],
+      "assertions": [
+        "declared outcome is true"
+      ],
+      "evidence_requirements": [
+        "machine-readable result"
+      ],
+      "cleanup": "release owned resources",
+      "timeout_seconds": 60,
+      "retry_policy": "never_after_unknown_effect",
+      "human_requirement": null,
+      "owner_approval_required": false,
+      "host_access_required": false,
+      "vm_policy": "not_applicable",
+      "security_relevance": "normal",
+      "failure_severity": "MEDIUM",
+      "spec_version": "1.0"
+    },
+    {
+      "test_id": "048",
+      "title": "Research official/current reusable solution first",
+      "phase": "K — Unknown Capability",
+      "objective": "Research official/current reusable solution first",
+      "classification": "VM",
+      "automation_level": "AUTOMATABLE_WITH_VM",
+      "tags": [
+        "phase-k"
+      ],
+      "risk": "medium",
+      "mutation_level": "read_only",
+      "required_environment": "workbench_vm_or_disposable_test_vm",
+      "required_capabilities": [],
+      "prerequisites": [],
+      "execution_contract": "Run the declared objective and collect independent evidence.",
+      "expected_outcomes": [
+        "objective outcome is observed"
+      ],
+      "assertions": [
+        "declared outcome is true"
+      ],
+      "evidence_requirements": [
+        "machine-readable result"
+      ],
+      "cleanup": "release owned resources",
+      "timeout_seconds": 60,
+      "retry_policy": "never_after_unknown_effect",
+      "human_requirement": null,
+      "owner_approval_required": false,
+      "host_access_required": false,
+      "vm_policy": "prefer_workbench_then_disposable",
+      "security_relevance": "normal",
+      "failure_severity": "MEDIUM",
+      "spec_version": "1.0"
+    },
+    {
+      "test_id": "049",
+      "title": "Traceable design",
+      "phase": "K — Unknown Capability",
+      "objective": "Traceable design",
+      "classification": "VM",
+      "automation_level": "AUTOMATABLE_WITH_VM",
+      "tags": [
+        "phase-k"
+      ],
+      "risk": "medium",
+      "mutation_level": "read_only",
+      "required_environment": "workbench_vm_or_disposable_test_vm",
+      "required_capabilities": [],
+      "prerequisites": [],
+      "execution_contract": "Run the declared objective and collect independent evidence.",
+      "expected_outcomes": [
+        "objective outcome is observed"
+      ],
+      "assertions": [
+        "declared outcome is true"
+      ],
+      "evidence_requirements": [
+        "machine-readable result"
+      ],
+      "cleanup": "release owned resources",
+      "timeout_seconds": 60,
+      "retry_policy": "never_after_unknown_effect",
+      "human_requirement": null,
+      "owner_approval_required": false,
+      "host_access_required": false,
+      "vm_policy": "prefer_workbench_then_disposable",
+      "security_relevance": "normal",
+      "failure_severity": "MEDIUM",
+      "spec_version": "1.0"
+    },
+    {
+      "test_id": "050",
+      "title": "JARVIS generates Integration Package",
+      "phase": "K — Unknown Capability",
+      "objective": "JARVIS generates Integration Package",
+      "classification": "VM",
+      "automation_level": "AUTOMATABLE_WITH_VM",
+      "tags": [
+        "phase-k"
+      ],
+      "risk": "medium",
+      "mutation_level": "read_only",
+      "required_environment": "workbench_vm_or_disposable_test_vm",
+      "required_capabilities": [],
+      "prerequisites": [],
+      "execution_contract": "Run the declared objective and collect independent evidence.",
+      "expected_outcomes": [
+        "objective outcome is observed"
+      ],
+      "assertions": [
+        "declared outcome is true"
+      ],
+      "evidence_requirements": [
+        "machine-readable result"
+      ],
+      "cleanup": "release owned resources",
+      "timeout_seconds": 60,
+      "retry_policy": "never_after_unknown_effect",
+      "human_requirement": null,
+      "owner_approval_required": false,
+      "host_access_required": false,
+      "vm_policy": "prefer_workbench_then_disposable",
+      "security_relevance": "normal",
+      "failure_severity": "MEDIUM",
+      "spec_version": "1.0"
+    },
+    {
+      "test_id": "051",
+      "title": "Sandbox + static review",
+      "phase": "K — Unknown Capability",
+      "objective": "Sandbox + static review",
+      "classification": "VM",
+      "automation_level": "AUTOMATABLE_WITH_VM",
+      "tags": [
+        "phase-k"
+      ],
+      "risk": "medium",
+      "mutation_level": "read_only",
+      "required_environment": "workbench_vm_or_disposable_test_vm",
+      "required_capabilities": [],
+      "prerequisites": [],
+      "execution_contract": "Run the declared objective and collect independent evidence.",
+      "expected_outcomes": [
+        "objective outcome is observed"
+      ],
+      "assertions": [
+        "declared outcome is true"
+      ],
+      "evidence_requirements": [
+        "machine-readable result"
+      ],
+      "cleanup": "release owned resources",
+      "timeout_seconds": 60,
+      "retry_policy": "never_after_unknown_effect",
+      "human_requirement": null,
+      "owner_approval_required": false,
+      "host_access_required": false,
+      "vm_policy": "prefer_workbench_then_disposable",
+      "security_relevance": "normal",
+      "failure_severity": "RELEASE_BLOCKER",
+      "spec_version": "1.0"
+    },
+    {
+      "test_id": "052",
+      "title": "Exact minimal approval",
+      "phase": "K — Unknown Capability",
+      "objective": "Exact minimal approval",
+      "classification": "AUTO",
+      "automation_level": "FULLY_AUTOMATED_NOW",
+      "tags": [
+        "phase-k"
+      ],
+      "risk": "medium",
+      "mutation_level": "read_only",
+      "required_environment": "local_test_harness",
+      "required_capabilities": [],
+      "prerequisites": [],
+      "execution_contract": "Run the declared objective and collect independent evidence.",
+      "expected_outcomes": [
+        "objective outcome is observed"
+      ],
+      "assertions": [
+        "declared outcome is true"
+      ],
+      "evidence_requirements": [
+        "machine-readable result"
+      ],
+      "cleanup": "release owned resources",
+      "timeout_seconds": 60,
+      "retry_policy": "never_after_unknown_effect",
+      "human_requirement": null,
+      "owner_approval_required": false,
+      "host_access_required": false,
+      "vm_policy": "not_applicable",
+      "security_relevance": "normal",
+      "failure_severity": "RELEASE_BLOCKER",
+      "spec_version": "1.0"
+    },
+    {
+      "test_id": "053",
+      "title": "Activation into dynamic Capability Registry",
+      "phase": "K — Unknown Capability",
+      "objective": "Activation into dynamic Capability Registry",
+      "classification": "VM",
+      "automation_level": "AUTOMATABLE_WITH_VM",
+      "tags": [
+        "phase-k"
+      ],
+      "risk": "medium",
+      "mutation_level": "read_only",
+      "required_environment": "workbench_vm_or_disposable_test_vm",
+      "required_capabilities": [],
+      "prerequisites": [],
+      "execution_contract": "Run the declared objective and collect independent evidence.",
+      "expected_outcomes": [
+        "objective outcome is observed"
+      ],
+      "assertions": [
+        "declared outcome is true"
+      ],
+      "evidence_requirements": [
+        "machine-readable result"
+      ],
+      "cleanup": "release owned resources",
+      "timeout_seconds": 60,
+      "retry_policy": "never_after_unknown_effect",
+      "human_requirement": null,
+      "owner_approval_required": false,
+      "host_access_required": false,
+      "vm_policy": "prefer_workbench_then_disposable",
+      "security_relevance": "normal",
+      "failure_severity": "MEDIUM",
+      "spec_version": "1.0"
+    },
+    {
+      "test_id": "054",
+      "title": "Perform real safe external action",
+      "phase": "K — Unknown Capability",
+      "objective": "Perform real safe external action",
+      "classification": "VM",
+      "automation_level": "AUTOMATABLE_WITH_VM",
+      "tags": [
+        "phase-k"
+      ],
+      "risk": "medium",
+      "mutation_level": "read_only",
+      "required_environment": "workbench_vm_or_disposable_test_vm",
+      "required_capabilities": [],
+      "prerequisites": [],
+      "execution_contract": "Run the declared objective and collect independent evidence.",
+      "expected_outcomes": [
+        "objective outcome is observed"
+      ],
+      "assertions": [
+        "declared outcome is true"
+      ],
+      "evidence_requirements": [
+        "machine-readable result"
+      ],
+      "cleanup": "release owned resources",
+      "timeout_seconds": 60,
+      "retry_policy": "never_after_unknown_effect",
+      "human_requirement": null,
+      "owner_approval_required": false,
+      "host_access_required": false,
+      "vm_policy": "prefer_workbench_then_disposable",
+      "security_relevance": "normal",
+      "failure_severity": "MEDIUM",
+      "spec_version": "1.0"
+    },
+    {
+      "test_id": "055",
+      "title": "Restart and reuse capability",
+      "phase": "K — Unknown Capability",
+      "objective": "Restart and reuse capability",
+      "classification": "VM",
+      "automation_level": "AUTOMATABLE_WITH_VM",
+      "tags": [
+        "phase-k"
+      ],
+      "risk": "medium",
+      "mutation_level": "read_only",
+      "required_environment": "workbench_vm_or_disposable_test_vm",
+      "required_capabilities": [],
+      "prerequisites": [],
+      "execution_contract": "Run the declared objective and collect independent evidence.",
+      "expected_outcomes": [
+        "objective outcome is observed"
+      ],
+      "assertions": [
+        "declared outcome is true"
+      ],
+      "evidence_requirements": [
+        "machine-readable result"
+      ],
+      "cleanup": "release owned resources",
+      "timeout_seconds": 60,
+      "retry_policy": "never_after_unknown_effect",
+      "human_requirement": null,
+      "owner_approval_required": false,
+      "host_access_required": false,
+      "vm_policy": "prefer_workbench_then_disposable",
+      "security_relevance": "normal",
+      "failure_severity": "MEDIUM",
+      "spec_version": "1.0"
+    },
+    {
+      "test_id": "056",
+      "title": "High-level Google Home/TV objective",
+      "phase": "L — Google Home / TV Case",
+      "objective": "High-level Google Home/TV objective",
+      "classification": "VM",
+      "automation_level": "AUTOMATABLE_WITH_VM",
+      "tags": [
+        "phase-l"
+      ],
+      "risk": "medium",
+      "mutation_level": "read_only",
+      "required_environment": "workbench_vm_or_disposable_test_vm",
+      "required_capabilities": [],
+      "prerequisites": [],
+      "execution_contract": "Run the declared objective and collect independent evidence.",
+      "expected_outcomes": [
+        "objective outcome is observed"
+      ],
+      "assertions": [
+        "declared outcome is true"
+      ],
+      "evidence_requirements": [
+        "machine-readable result"
+      ],
+      "cleanup": "release owned resources",
+      "timeout_seconds": 60,
+      "retry_policy": "never_after_unknown_effect",
+      "human_requirement": null,
+      "owner_approval_required": false,
+      "host_access_required": false,
+      "vm_policy": "prefer_workbench_then_disposable",
+      "security_relevance": "normal",
+      "failure_severity": "MEDIUM",
+      "spec_version": "1.0"
+    },
+    {
+      "test_id": "057",
+      "title": "Trusted authentication/credential flow",
+      "phase": "L — Google Home / TV Case",
+      "objective": "Trusted authentication/credential flow",
+      "classification": "VM",
+      "automation_level": "AUTOMATABLE_WITH_VM",
+      "tags": [
+        "phase-l"
+      ],
+      "risk": "medium",
+      "mutation_level": "read_only",
+      "required_environment": "workbench_vm_or_disposable_test_vm",
+      "required_capabilities": [],
+      "prerequisites": [],
+      "execution_contract": "Run the declared objective and collect independent evidence.",
+      "expected_outcomes": [
+        "objective outcome is observed"
+      ],
+      "assertions": [
+        "declared outcome is true"
+      ],
+      "evidence_requirements": [
+        "machine-readable result"
+      ],
+      "cleanup": "release owned resources",
+      "timeout_seconds": 60,
+      "retry_policy": "never_after_unknown_effect",
+      "human_requirement": null,
+      "owner_approval_required": false,
+      "host_access_required": false,
+      "vm_policy": "prefer_workbench_then_disposable",
+      "security_relevance": "normal",
+      "failure_severity": "RELEASE_BLOCKER",
+      "spec_version": "1.0"
+    },
+    {
+      "test_id": "058",
+      "title": "Real TV state/read/action/physical verification",
+      "phase": "L — Google Home / TV Case",
+      "objective": "Real TV state/read/action/physical verification",
+      "classification": "VM",
+      "automation_level": "AUTOMATABLE_WITH_VM",
+      "tags": [
+        "phase-l"
+      ],
+      "risk": "medium",
+      "mutation_level": "read_only",
+      "required_environment": "workbench_vm_or_disposable_test_vm",
+      "required_capabilities": [],
+      "prerequisites": [],
+      "execution_contract": "Run the declared objective and collect independent evidence.",
+      "expected_outcomes": [
+        "objective outcome is observed"
+      ],
+      "assertions": [
+        "declared outcome is true"
+      ],
+      "evidence_requirements": [
+        "machine-readable result"
+      ],
+      "cleanup": "release owned resources",
+      "timeout_seconds": 60,
+      "retry_policy": "never_after_unknown_effect",
+      "human_requirement": null,
+      "owner_approval_required": false,
+      "host_access_required": false,
+      "vm_policy": "prefer_workbench_then_disposable",
+      "security_relevance": "normal",
+      "failure_severity": "MEDIUM",
+      "spec_version": "1.0"
+    },
+    {
+      "test_id": "059",
+      "title": "Generated dynamic TV UI",
+      "phase": "L — Google Home / TV Case",
+      "objective": "Generated dynamic TV UI",
+      "classification": "VM",
+      "automation_level": "AUTOMATABLE_WITH_VM",
+      "tags": [
+        "phase-l"
+      ],
+      "risk": "medium",
+      "mutation_level": "read_only",
+      "required_environment": "workbench_vm_or_disposable_test_vm",
+      "required_capabilities": [],
+      "prerequisites": [],
+      "execution_contract": "Run the declared objective and collect independent evidence.",
+      "expected_outcomes": [
+        "objective outcome is observed"
+      ],
+      "assertions": [
+        "declared outcome is true"
+      ],
+      "evidence_requirements": [
+        "machine-readable result"
+      ],
+      "cleanup": "release owned resources",
+      "timeout_seconds": 60,
+      "retry_policy": "never_after_unknown_effect",
+      "human_requirement": null,
+      "owner_approval_required": false,
+      "host_access_required": false,
+      "vm_policy": "prefer_workbench_then_disposable",
+      "security_relevance": "normal",
+      "failure_severity": "MEDIUM",
+      "spec_version": "1.0"
+    },
+    {
+      "test_id": "060",
+      "title": "Install Home Assistant in isolated environment",
+      "phase": "M — Home Assistant / VM",
+      "objective": "Install Home Assistant in isolated environment",
+      "classification": "VM",
+      "automation_level": "AUTOMATABLE_WITH_VM",
+      "tags": [
+        "phase-m"
+      ],
+      "risk": "medium",
+      "mutation_level": "read_only",
+      "required_environment": "disposable_test_vm",
+      "required_capabilities": [],
+      "prerequisites": [],
+      "execution_contract": "Run the declared objective and collect independent evidence.",
+      "expected_outcomes": [
+        "objective outcome is observed"
+      ],
+      "assertions": [
+        "declared outcome is true"
+      ],
+      "evidence_requirements": [
+        "machine-readable result"
+      ],
+      "cleanup": "release owned resources",
+      "timeout_seconds": 60,
+      "retry_policy": "never_after_unknown_effect",
+      "human_requirement": null,
+      "owner_approval_required": false,
+      "host_access_required": false,
+      "vm_policy": "prefer_workbench_then_disposable",
+      "security_relevance": "normal",
+      "failure_severity": "MEDIUM",
+      "spec_version": "1.0"
+    },
+    {
+      "test_id": "061",
+      "title": "Inspect provisioning plan",
+      "phase": "M — Home Assistant / VM",
+      "objective": "Inspect provisioning plan",
+      "classification": "VM",
+      "automation_level": "AUTOMATABLE_WITH_VM",
+      "tags": [
+        "phase-m"
+      ],
+      "risk": "medium",
+      "mutation_level": "read_only",
+      "required_environment": "disposable_test_vm",
+      "required_capabilities": [],
+      "prerequisites": [],
+      "execution_contract": "Run the declared objective and collect independent evidence.",
+      "expected_outcomes": [
+        "objective outcome is observed"
+      ],
+      "assertions": [
+        "declared outcome is true"
+      ],
+      "evidence_requirements": [
+        "machine-readable result"
+      ],
+      "cleanup": "release owned resources",
+      "timeout_seconds": 60,
+      "retry_policy": "never_after_unknown_effect",
+      "human_requirement": null,
+      "owner_approval_required": false,
+      "host_access_required": false,
+      "vm_policy": "prefer_workbench_then_disposable",
+      "security_relevance": "normal",
+      "failure_severity": "MEDIUM",
+      "spec_version": "1.0"
+    },
+    {
+      "test_id": "062",
+      "title": "Approval and incremental approval",
+      "phase": "M — Home Assistant / VM",
+      "objective": "Approval and incremental approval",
+      "classification": "VM",
+      "automation_level": "AUTOMATABLE_WITH_VM",
+      "tags": [
+        "phase-m"
+      ],
+      "risk": "medium",
+      "mutation_level": "read_only",
+      "required_environment": "disposable_test_vm",
+      "required_capabilities": [],
+      "prerequisites": [],
+      "execution_contract": "Run the declared objective and collect independent evidence.",
+      "expected_outcomes": [
+        "objective outcome is observed"
+      ],
+      "assertions": [
+        "declared outcome is true"
+      ],
+      "evidence_requirements": [
+        "machine-readable result"
+      ],
+      "cleanup": "release owned resources",
+      "timeout_seconds": 60,
+      "retry_policy": "never_after_unknown_effect",
+      "human_requirement": null,
+      "owner_approval_required": false,
+      "host_access_required": false,
+      "vm_policy": "prefer_workbench_then_disposable",
+      "security_relevance": "normal",
+      "failure_severity": "MEDIUM",
+      "spec_version": "1.0"
+    },
+    {
+      "test_id": "063",
+      "title": "Concrete health verification",
+      "phase": "M — Home Assistant / VM",
+      "objective": "Concrete health verification",
+      "classification": "VM",
+      "automation_level": "AUTOMATABLE_WITH_VM",
+      "tags": [
+        "phase-m"
+      ],
+      "risk": "medium",
+      "mutation_level": "read_only",
+      "required_environment": "disposable_test_vm",
+      "required_capabilities": [],
+      "prerequisites": [],
+      "execution_contract": "Run the declared objective and collect independent evidence.",
+      "expected_outcomes": [
+        "objective outcome is observed"
+      ],
+      "assertions": [
+        "declared outcome is true"
+      ],
+      "evidence_requirements": [
+        "machine-readable result"
+      ],
+      "cleanup": "release owned resources",
+      "timeout_seconds": 60,
+      "retry_policy": "never_after_unknown_effect",
+      "human_requirement": null,
+      "owner_approval_required": false,
+      "host_access_required": false,
+      "vm_policy": "prefer_workbench_then_disposable",
+      "security_relevance": "normal",
+      "failure_severity": "MEDIUM",
+      "spec_version": "1.0"
+    },
+    {
+      "test_id": "064",
+      "title": "Safe iPhone/remote-control capability",
+      "phase": "N — iPhone / Remote",
+      "objective": "Safe iPhone/remote-control capability",
+      "classification": "VM",
+      "automation_level": "AUTOMATABLE_WITH_VM",
+      "tags": [
+        "phase-n"
+      ],
+      "risk": "medium",
+      "mutation_level": "read_only",
+      "required_environment": "workbench_vm_or_disposable_test_vm",
+      "required_capabilities": [],
+      "prerequisites": [],
+      "execution_contract": "Run the declared objective and collect independent evidence.",
+      "expected_outcomes": [
+        "objective outcome is observed"
+      ],
+      "assertions": [
+        "declared outcome is true"
+      ],
+      "evidence_requirements": [
+        "machine-readable result"
+      ],
+      "cleanup": "release owned resources",
+      "timeout_seconds": 60,
+      "retry_policy": "never_after_unknown_effect",
+      "human_requirement": null,
+      "owner_approval_required": false,
+      "host_access_required": false,
+      "vm_policy": "prefer_workbench_then_disposable",
+      "security_relevance": "normal",
+      "failure_severity": "MEDIUM",
+      "spec_version": "1.0"
+    },
+    {
+      "test_id": "065",
+      "title": "Real MCP lifecycle",
+      "phase": "O — MCP",
+      "objective": "Real MCP lifecycle",
+      "classification": "VM",
+      "automation_level": "AUTOMATABLE_WITH_VM",
+      "tags": [
+        "phase-o"
+      ],
+      "risk": "medium",
+      "mutation_level": "read_only",
+      "required_environment": "workbench_vm_or_disposable_test_vm",
+      "required_capabilities": [],
+      "prerequisites": [],
+      "execution_contract": "Run the declared objective and collect independent evidence.",
+      "expected_outcomes": [
+        "objective outcome is observed"
+      ],
+      "assertions": [
+        "declared outcome is true"
+      ],
+      "evidence_requirements": [
+        "machine-readable result"
+      ],
+      "cleanup": "release owned resources",
+      "timeout_seconds": 60,
+      "retry_policy": "never_after_unknown_effect",
+      "human_requirement": null,
+      "owner_approval_required": false,
+      "host_access_required": false,
+      "vm_policy": "prefer_workbench_then_disposable",
+      "security_relevance": "normal",
+      "failure_severity": "MEDIUM",
+      "spec_version": "1.0"
+    },
+    {
+      "test_id": "066",
+      "title": "API credential without raw-token leakage",
+      "phase": "P — Credentials",
+      "objective": "API credential without raw-token leakage",
+      "classification": "EXTERNAL_TEST_SERVICE",
+      "automation_level": "AUTOMATABLE_WITH_EXTERNAL_TEST_SERVICE",
+      "tags": [
+        "phase-p"
+      ],
+      "risk": "medium",
+      "mutation_level": "read_only",
+      "required_environment": "synthetic_external_service",
+      "required_capabilities": [],
+      "prerequisites": [],
+      "execution_contract": "Run the declared objective and collect independent evidence.",
+      "expected_outcomes": [
+        "objective outcome is observed"
+      ],
+      "assertions": [
+        "declared outcome is true"
+      ],
+      "evidence_requirements": [
+        "machine-readable result"
+      ],
+      "cleanup": "release owned resources",
+      "timeout_seconds": 60,
+      "retry_policy": "never_after_unknown_effect",
+      "human_requirement": null,
+      "owner_approval_required": false,
+      "host_access_required": false,
+      "vm_policy": "not_applicable",
+      "security_relevance": "review_required",
+      "failure_severity": "RELEASE_BLOCKER",
+      "spec_version": "1.0"
+    },
+    {
+      "test_id": "067",
+      "title": "Revoke credential and prove failure",
+      "phase": "P — Credentials",
+      "objective": "Revoke credential and prove failure",
+      "classification": "EXTERNAL_TEST_SERVICE",
+      "automation_level": "AUTOMATABLE_WITH_EXTERNAL_TEST_SERVICE",
+      "tags": [
+        "phase-p"
+      ],
+      "risk": "medium",
+      "mutation_level": "read_only",
+      "required_environment": "synthetic_external_service",
+      "required_capabilities": [],
+      "prerequisites": [],
+      "execution_contract": "Run the declared objective and collect independent evidence.",
+      "expected_outcomes": [
+        "objective outcome is observed"
+      ],
+      "assertions": [
+        "declared outcome is true"
+      ],
+      "evidence_requirements": [
+        "machine-readable result"
+      ],
+      "cleanup": "release owned resources",
+      "timeout_seconds": 60,
+      "retry_policy": "never_after_unknown_effect",
+      "human_requirement": null,
+      "owner_approval_required": false,
+      "host_access_required": false,
+      "vm_policy": "not_applicable",
+      "security_relevance": "review_required",
+      "failure_severity": "RELEASE_BLOCKER",
+      "spec_version": "1.0"
+    },
+    {
+      "test_id": "068",
+      "title": "Detect repeated workflow/opportunity",
+      "phase": "Q — Proactive Autonomy",
+      "objective": "Detect repeated workflow/opportunity",
+      "classification": "EXTERNAL_TEST_SERVICE",
+      "automation_level": "AUTOMATABLE_WITH_EXTERNAL_TEST_SERVICE",
+      "tags": [
+        "phase-q"
+      ],
+      "risk": "medium",
+      "mutation_level": "read_only",
+      "required_environment": "synthetic_external_service",
+      "required_capabilities": [],
+      "prerequisites": [],
+      "execution_contract": "Run the declared objective and collect independent evidence.",
+      "expected_outcomes": [
+        "objective outcome is observed"
+      ],
+      "assertions": [
+        "declared outcome is true"
+      ],
+      "evidence_requirements": [
+        "machine-readable result"
+      ],
+      "cleanup": "release owned resources",
+      "timeout_seconds": 60,
+      "retry_policy": "never_after_unknown_effect",
+      "human_requirement": null,
+      "owner_approval_required": false,
+      "host_access_required": false,
+      "vm_policy": "not_applicable",
+      "security_relevance": "normal",
+      "failure_severity": "MEDIUM",
+      "spec_version": "1.0"
+    },
+    {
+      "test_id": "069",
+      "title": "Decline + cooldown",
+      "phase": "Q — Proactive Autonomy",
+      "objective": "Decline + cooldown",
+      "classification": "EXTERNAL_TEST_SERVICE",
+      "automation_level": "AUTOMATABLE_WITH_EXTERNAL_TEST_SERVICE",
+      "tags": [
+        "phase-q"
+      ],
+      "risk": "medium",
+      "mutation_level": "read_only",
+      "required_environment": "synthetic_external_service",
+      "required_capabilities": [],
+      "prerequisites": [],
+      "execution_contract": "Run the declared objective and collect independent evidence.",
+      "expected_outcomes": [
+        "objective outcome is observed"
+      ],
+      "assertions": [
+        "declared outcome is true"
+      ],
+      "evidence_requirements": [
+        "machine-readable result"
+      ],
+      "cleanup": "release owned resources",
+      "timeout_seconds": 60,
+      "retry_policy": "never_after_unknown_effect",
+      "human_requirement": null,
+      "owner_approval_required": false,
+      "host_access_required": false,
+      "vm_policy": "not_applicable",
+      "security_relevance": "normal",
+      "failure_severity": "MEDIUM",
+      "spec_version": "1.0"
+    },
+    {
+      "test_id": "070",
+      "title": "Measure first execution",
+      "phase": "R — Procedure Learning",
+      "objective": "Measure first execution",
+      "classification": "EXTERNAL_TEST_SERVICE",
+      "automation_level": "AUTOMATABLE_WITH_EXTERNAL_TEST_SERVICE",
+      "tags": [
+        "phase-r"
+      ],
+      "risk": "medium",
+      "mutation_level": "read_only",
+      "required_environment": "synthetic_external_service",
+      "required_capabilities": [],
+      "prerequisites": [],
+      "execution_contract": "Run the declared objective and collect independent evidence.",
+      "expected_outcomes": [
+        "objective outcome is observed"
+      ],
+      "assertions": [
+        "declared outcome is true"
+      ],
+      "evidence_requirements": [
+        "machine-readable result"
+      ],
+      "cleanup": "release owned resources",
+      "timeout_seconds": 60,
+      "retry_policy": "never_after_unknown_effect",
+      "human_requirement": null,
+      "owner_approval_required": false,
+      "host_access_required": false,
+      "vm_policy": "not_applicable",
+      "security_relevance": "normal",
+      "failure_severity": "MEDIUM",
+      "spec_version": "1.0"
+    },
+    {
+      "test_id": "071",
+      "title": "Repeat identical goal and reuse procedure",
+      "phase": "R — Procedure Learning",
+      "objective": "Repeat identical goal and reuse procedure",
+      "classification": "EXTERNAL_TEST_SERVICE",
+      "automation_level": "AUTOMATABLE_WITH_EXTERNAL_TEST_SERVICE",
+      "tags": [
+        "phase-r"
+      ],
+      "risk": "medium",
+      "mutation_level": "read_only",
+      "required_environment": "synthetic_external_service",
+      "required_capabilities": [],
+      "prerequisites": [],
+      "execution_contract": "Run the declared objective and collect independent evidence.",
+      "expected_outcomes": [
+        "objective outcome is observed"
+      ],
+      "assertions": [
+        "declared outcome is true"
+      ],
+      "evidence_requirements": [
+        "machine-readable result"
+      ],
+      "cleanup": "release owned resources",
+      "timeout_seconds": 60,
+      "retry_policy": "never_after_unknown_effect",
+      "human_requirement": null,
+      "owner_approval_required": false,
+      "host_access_required": false,
+      "vm_policy": "not_applicable",
+      "security_relevance": "normal",
+      "failure_severity": "MEDIUM",
+      "spec_version": "1.0"
+    },
+    {
+      "test_id": "072",
+      "title": "One-time future task/reminder",
+      "phase": "S — Scheduler + Automations",
+      "objective": "One-time future task/reminder",
+      "classification": "AUTO",
+      "automation_level": "FUTURE_PRODUCT_FEATURE_REQUIRED",
+      "tags": [
+        "phase-s"
+      ],
+      "risk": "medium",
+      "mutation_level": "read_only",
+      "required_environment": "product_runtime",
+      "required_capabilities": [],
+      "prerequisites": [],
+      "execution_contract": "Run the declared objective and collect independent evidence.",
+      "expected_outcomes": [
+        "objective outcome is observed"
+      ],
+      "assertions": [
+        "declared outcome is true"
+      ],
+      "evidence_requirements": [
+        "machine-readable result"
+      ],
+      "cleanup": "release owned resources",
+      "timeout_seconds": 60,
+      "retry_policy": "never_after_unknown_effect",
+      "human_requirement": null,
+      "owner_approval_required": false,
+      "host_access_required": false,
+      "vm_policy": "not_applicable",
+      "security_relevance": "normal",
+      "failure_severity": "MEDIUM",
+      "spec_version": "1.0"
+    },
+    {
+      "test_id": "073",
+      "title": "Recurring automation lifecycle",
+      "phase": "S — Scheduler + Automations",
+      "objective": "Recurring automation lifecycle",
+      "classification": "AUTO",
+      "automation_level": "FUTURE_PRODUCT_FEATURE_REQUIRED",
+      "tags": [
+        "phase-s"
+      ],
+      "risk": "medium",
+      "mutation_level": "read_only",
+      "required_environment": "product_runtime",
+      "required_capabilities": [],
+      "prerequisites": [],
+      "execution_contract": "Run the declared objective and collect independent evidence.",
+      "expected_outcomes": [
+        "objective outcome is observed"
+      ],
+      "assertions": [
+        "declared outcome is true"
+      ],
+      "evidence_requirements": [
+        "machine-readable result"
+      ],
+      "cleanup": "release owned resources",
+      "timeout_seconds": 60,
+      "retry_policy": "never_after_unknown_effect",
+      "human_requirement": null,
+      "owner_approval_required": false,
+      "host_access_required": false,
+      "vm_policy": "not_applicable",
+      "security_relevance": "normal",
+      "failure_severity": "MEDIUM",
+      "spec_version": "1.0"
+    },
+    {
+      "test_id": "074",
+      "title": "Overlap control",
+      "phase": "S — Scheduler + Automations",
+      "objective": "Overlap control",
+      "classification": "AUTO",
+      "automation_level": "FUTURE_PRODUCT_FEATURE_REQUIRED",
+      "tags": [
+        "phase-s"
+      ],
+      "risk": "medium",
+      "mutation_level": "read_only",
+      "required_environment": "product_runtime",
+      "required_capabilities": [],
+      "prerequisites": [],
+      "execution_contract": "Run the declared objective and collect independent evidence.",
+      "expected_outcomes": [
+        "objective outcome is observed"
+      ],
+      "assertions": [
+        "declared outcome is true"
+      ],
+      "evidence_requirements": [
+        "machine-readable result"
+      ],
+      "cleanup": "release owned resources",
+      "timeout_seconds": 60,
+      "retry_policy": "never_after_unknown_effect",
+      "human_requirement": null,
+      "owner_approval_required": false,
+      "host_access_required": false,
+      "vm_policy": "not_applicable",
+      "security_relevance": "normal",
+      "failure_severity": "MEDIUM",
+      "spec_version": "1.0"
+    },
+    {
+      "test_id": "075",
+      "title": "Low-priority completion no spam",
+      "phase": "T — Notifications",
+      "objective": "Low-priority completion no spam",
+      "classification": "AUTO",
+      "automation_level": "FUTURE_PRODUCT_FEATURE_REQUIRED",
+      "tags": [
+        "phase-t"
+      ],
+      "risk": "medium",
+      "mutation_level": "read_only",
+      "required_environment": "product_runtime",
+      "required_capabilities": [],
+      "prerequisites": [],
+      "execution_contract": "Run the declared objective and collect independent evidence.",
+      "expected_outcomes": [
+        "objective outcome is observed"
+      ],
+      "assertions": [
+        "declared outcome is true"
+      ],
+      "evidence_requirements": [
+        "machine-readable result"
+      ],
+      "cleanup": "release owned resources",
+      "timeout_seconds": 60,
+      "retry_policy": "never_after_unknown_effect",
+      "human_requirement": null,
+      "owner_approval_required": false,
+      "host_access_required": false,
+      "vm_policy": "not_applicable",
+      "security_relevance": "normal",
+      "failure_severity": "MEDIUM",
+      "spec_version": "1.0"
+    },
+    {
+      "test_id": "076",
+      "title": "Approval outranks normal info",
+      "phase": "T — Notifications",
+      "objective": "Approval outranks normal info",
+      "classification": "AUTO",
+      "automation_level": "FUTURE_PRODUCT_FEATURE_REQUIRED",
+      "tags": [
+        "phase-t"
+      ],
+      "risk": "medium",
+      "mutation_level": "read_only",
+      "required_environment": "product_runtime",
+      "required_capabilities": [],
+      "prerequisites": [],
+      "execution_contract": "Run the declared objective and collect independent evidence.",
+      "expected_outcomes": [
+        "objective outcome is observed"
+      ],
+      "assertions": [
+        "declared outcome is true"
+      ],
+      "evidence_requirements": [
+        "machine-readable result"
+      ],
+      "cleanup": "release owned resources",
+      "timeout_seconds": 60,
+      "retry_policy": "never_after_unknown_effect",
+      "human_requirement": null,
+      "owner_approval_required": false,
+      "host_access_required": false,
+      "vm_policy": "not_applicable",
+      "security_relevance": "normal",
+      "failure_severity": "MEDIUM",
+      "spec_version": "1.0"
+    },
+    {
+      "test_id": "077",
+      "title": "Adopt existing Ollama",
+      "phase": "U — Models",
+      "objective": "Adopt existing Ollama",
+      "classification": "VM",
+      "automation_level": "AUTOMATABLE_WITH_VM",
+      "tags": [
+        "phase-u"
+      ],
+      "risk": "medium",
+      "mutation_level": "read_only",
+      "required_environment": "workbench_vm_or_disposable_test_vm",
+      "required_capabilities": [],
+      "prerequisites": [],
+      "execution_contract": "Run the declared objective and collect independent evidence.",
+      "expected_outcomes": [
+        "objective outcome is observed"
+      ],
+      "assertions": [
+        "declared outcome is true"
+      ],
+      "evidence_requirements": [
+        "machine-readable result"
+      ],
+      "cleanup": "release owned resources",
+      "timeout_seconds": 60,
+      "retry_policy": "never_after_unknown_effect",
+      "human_requirement": null,
+      "owner_approval_required": false,
+      "host_access_required": false,
+      "vm_policy": "prefer_workbench_then_disposable",
+      "security_relevance": "normal",
+      "failure_severity": "MEDIUM",
+      "spec_version": "1.0"
+    },
+    {
+      "test_id": "078",
+      "title": "Model/provider outage + recovery",
+      "phase": "U — Models",
+      "objective": "Model/provider outage + recovery",
+      "classification": "VM",
+      "automation_level": "AUTOMATABLE_WITH_VM",
+      "tags": [
+        "phase-u"
+      ],
+      "risk": "medium",
+      "mutation_level": "read_only",
+      "required_environment": "workbench_vm_or_disposable_test_vm",
+      "required_capabilities": [],
+      "prerequisites": [],
+      "execution_contract": "Run the declared objective and collect independent evidence.",
+      "expected_outcomes": [
+        "objective outcome is observed"
+      ],
+      "assertions": [
+        "declared outcome is true"
+      ],
+      "evidence_requirements": [
+        "machine-readable result"
+      ],
+      "cleanup": "release owned resources",
+      "timeout_seconds": 60,
+      "retry_policy": "never_after_unknown_effect",
+      "human_requirement": null,
+      "owner_approval_required": false,
+      "host_access_required": false,
+      "vm_policy": "prefer_workbench_then_disposable",
+      "security_relevance": "normal",
+      "failure_severity": "MEDIUM",
+      "spec_version": "1.0"
+    },
+    {
+      "test_id": "079",
+      "title": "Correct routing",
+      "phase": "U — Models",
+      "objective": "Correct routing",
+      "classification": "AUTO",
+      "automation_level": "FULLY_AUTOMATED_NOW",
+      "tags": [
+        "phase-u"
+      ],
+      "risk": "medium",
+      "mutation_level": "read_only",
+      "required_environment": "local_test_harness",
+      "required_capabilities": [],
+      "prerequisites": [],
+      "execution_contract": "Run the declared objective and collect independent evidence.",
+      "expected_outcomes": [
+        "objective outcome is observed"
+      ],
+      "assertions": [
+        "declared outcome is true"
+      ],
+      "evidence_requirements": [
+        "machine-readable result"
+      ],
+      "cleanup": "release owned resources",
+      "timeout_seconds": 60,
+      "retry_policy": "never_after_unknown_effect",
+      "human_requirement": null,
+      "owner_approval_required": false,
+      "host_access_required": false,
+      "vm_policy": "not_applicable",
+      "security_relevance": "normal",
+      "failure_severity": "MEDIUM",
+      "spec_version": "1.0"
+    },
+    {
+      "test_id": "080",
+      "title": "Idle CPU/RAM/GPU observations",
+      "phase": "V — Resources",
+      "objective": "Idle CPU/RAM/GPU observations",
+      "classification": "AUTO",
+      "automation_level": "FULLY_AUTOMATED_NOW",
+      "tags": [
+        "phase-v"
+      ],
+      "risk": "medium",
+      "mutation_level": "read_only",
+      "required_environment": "local_test_harness",
+      "required_capabilities": [],
+      "prerequisites": [],
+      "execution_contract": "Run the declared objective and collect independent evidence.",
+      "expected_outcomes": [
+        "objective outcome is observed"
+      ],
+      "assertions": [
+        "declared outcome is true"
+      ],
+      "evidence_requirements": [
+        "machine-readable result"
+      ],
+      "cleanup": "release owned resources",
+      "timeout_seconds": 60,
+      "retry_policy": "never_after_unknown_effect",
+      "human_requirement": null,
+      "owner_approval_required": false,
+      "host_access_required": false,
+      "vm_policy": "not_applicable",
+      "security_relevance": "normal",
+      "failure_severity": "MEDIUM",
+      "spec_version": "1.0"
+    },
+    {
+      "test_id": "081",
+      "title": "Heavy local-model load",
+      "phase": "V — Resources",
+      "objective": "Heavy local-model load",
+      "classification": "AUTO",
+      "automation_level": "FULLY_AUTOMATED_NOW",
+      "tags": [
+        "phase-v"
+      ],
+      "risk": "medium",
+      "mutation_level": "read_only",
+      "required_environment": "local_test_harness",
+      "required_capabilities": [],
+      "prerequisites": [],
+      "execution_contract": "Run the declared objective and collect independent evidence.",
+      "expected_outcomes": [
+        "objective outcome is observed"
+      ],
+      "assertions": [
+        "declared outcome is true"
+      ],
+      "evidence_requirements": [
+        "machine-readable result"
+      ],
+      "cleanup": "release owned resources",
+      "timeout_seconds": 60,
+      "retry_policy": "never_after_unknown_effect",
+      "human_requirement": null,
+      "owner_approval_required": false,
+      "host_access_required": false,
+      "vm_policy": "not_applicable",
+      "security_relevance": "normal",
+      "failure_severity": "MEDIUM",
+      "spec_version": "1.0"
+    },
+    {
+      "test_id": "082",
+      "title": "Diagnose + safely repair stopped Ollama",
+      "phase": "W — System Health",
+      "objective": "Diagnose + safely repair stopped Ollama",
+      "classification": "VM",
+      "automation_level": "AUTOMATABLE_WITH_VM",
+      "tags": [
+        "phase-w"
+      ],
+      "risk": "medium",
+      "mutation_level": "read_only",
+      "required_environment": "workbench_vm_or_disposable_test_vm",
+      "required_capabilities": [],
+      "prerequisites": [],
+      "execution_contract": "Run the declared objective and collect independent evidence.",
+      "expected_outcomes": [
+        "objective outcome is observed"
+      ],
+      "assertions": [
+        "declared outcome is true"
+      ],
+      "evidence_requirements": [
+        "machine-readable result"
+      ],
+      "cleanup": "release owned resources",
+      "timeout_seconds": 60,
+      "retry_policy": "never_after_unknown_effect",
+      "human_requirement": null,
+      "owner_approval_required": false,
+      "host_access_required": false,
+      "vm_policy": "prefer_workbench_then_disposable",
+      "security_relevance": "normal",
+      "failure_severity": "MEDIUM",
+      "spec_version": "1.0"
+    },
+    {
+      "test_id": "083",
+      "title": "Capability defect diagnose before rebuild",
+      "phase": "W — System Health",
+      "objective": "Capability defect diagnose before rebuild",
+      "classification": "VM",
+      "automation_level": "AUTOMATABLE_WITH_VM",
+      "tags": [
+        "phase-w"
+      ],
+      "risk": "medium",
+      "mutation_level": "read_only",
+      "required_environment": "workbench_vm_or_disposable_test_vm",
+      "required_capabilities": [],
+      "prerequisites": [],
+      "execution_contract": "Run the declared objective and collect independent evidence.",
+      "expected_outcomes": [
+        "objective outcome is observed"
+      ],
+      "assertions": [
+        "declared outcome is true"
+      ],
+      "evidence_requirements": [
+        "machine-readable result"
+      ],
+      "cleanup": "release owned resources",
+      "timeout_seconds": 60,
+      "retry_policy": "never_after_unknown_effect",
+      "human_requirement": null,
+      "owner_approval_required": false,
+      "host_access_required": false,
+      "vm_policy": "prefer_workbench_then_disposable",
+      "security_relevance": "normal",
+      "failure_severity": "MEDIUM",
+      "spec_version": "1.0"
+    },
+    {
+      "test_id": "084",
+      "title": "Safe Mode restricts privileged automation",
+      "phase": "X — Safe Mode",
+      "objective": "Safe Mode restricts privileged automation",
+      "classification": "AUTO",
+      "automation_level": "FULLY_AUTOMATED_NOW",
+      "tags": [
+        "phase-x"
+      ],
+      "risk": "medium",
+      "mutation_level": "read_only",
+      "required_environment": "local_test_harness",
+      "required_capabilities": [],
+      "prerequisites": [],
+      "execution_contract": "Run the declared objective and collect independent evidence.",
+      "expected_outcomes": [
+        "objective outcome is observed"
+      ],
+      "assertions": [
+        "declared outcome is true"
+      ],
+      "evidence_requirements": [
+        "machine-readable result"
+      ],
+      "cleanup": "release owned resources",
+      "timeout_seconds": 60,
+      "retry_policy": "never_after_unknown_effect",
+      "human_requirement": null,
+      "owner_approval_required": false,
+      "host_access_required": false,
+      "vm_policy": "not_applicable",
+      "security_relevance": "review_required",
+      "failure_severity": "RELEASE_BLOCKER",
+      "spec_version": "1.0"
+    },
+    {
+      "test_id": "085",
+      "title": "Safe Mode explanation",
+      "phase": "X — Safe Mode",
+      "objective": "Safe Mode explanation",
+      "classification": "HUMAN_JUDGMENT",
+      "automation_level": "HUMAN_JUDGMENT_REQUIRED",
+      "tags": [
+        "phase-x"
+      ],
+      "risk": "medium",
+      "mutation_level": "read_only",
+      "required_environment": "owner_or_reviewer",
+      "required_capabilities": [],
+      "prerequisites": [],
+      "execution_contract": "Run the declared objective and collect independent evidence.",
+      "expected_outcomes": [
+        "objective outcome is observed"
+      ],
+      "assertions": [
+        "declared outcome is true"
+      ],
+      "evidence_requirements": [
+        "machine-readable result"
+      ],
+      "cleanup": "release owned resources",
+      "timeout_seconds": 60,
+      "retry_policy": "never_after_unknown_effect",
+      "human_requirement": null,
+      "owner_approval_required": false,
+      "host_access_required": false,
+      "vm_policy": "not_applicable",
+      "security_relevance": "normal",
+      "failure_severity": "MEDIUM",
+      "spec_version": "1.0"
+    },
+    {
+      "test_id": "086",
+      "title": "Update preview",
+      "phase": "Y — Self-Update",
+      "objective": "Update preview",
+      "classification": "VM",
+      "automation_level": "AUTOMATABLE_WITH_VM",
+      "tags": [
+        "phase-y"
+      ],
+      "risk": "medium",
+      "mutation_level": "read_only",
+      "required_environment": "disposable_test_vm",
+      "required_capabilities": [],
+      "prerequisites": [],
+      "execution_contract": "Run the declared objective and collect independent evidence.",
+      "expected_outcomes": [
+        "objective outcome is observed"
+      ],
+      "assertions": [
+        "declared outcome is true"
+      ],
+      "evidence_requirements": [
+        "machine-readable result"
+      ],
+      "cleanup": "release owned resources",
+      "timeout_seconds": 60,
+      "retry_policy": "never_after_unknown_effect",
+      "human_requirement": null,
+      "owner_approval_required": false,
+      "host_access_required": false,
+      "vm_policy": "prefer_workbench_then_disposable",
+      "security_relevance": "review_required",
+      "failure_severity": "RELEASE_BLOCKER",
+      "spec_version": "1.0"
+    },
+    {
+      "test_id": "087",
+      "title": "Controlled failed update",
+      "phase": "Y — Self-Update",
+      "objective": "Controlled failed update",
+      "classification": "VM",
+      "automation_level": "AUTOMATABLE_WITH_VM",
+      "tags": [
+        "phase-y"
+      ],
+      "risk": "medium",
+      "mutation_level": "read_only",
+      "required_environment": "disposable_test_vm",
+      "required_capabilities": [],
+      "prerequisites": [],
+      "execution_contract": "Run the declared objective and collect independent evidence.",
+      "expected_outcomes": [
+        "objective outcome is observed"
+      ],
+      "assertions": [
+        "declared outcome is true"
+      ],
+      "evidence_requirements": [
+        "machine-readable result"
+      ],
+      "cleanup": "release owned resources",
+      "timeout_seconds": 60,
+      "retry_policy": "never_after_unknown_effect",
+      "human_requirement": null,
+      "owner_approval_required": false,
+      "host_access_required": false,
+      "vm_policy": "prefer_workbench_then_disposable",
+      "security_relevance": "review_required",
+      "failure_severity": "RELEASE_BLOCKER",
+      "spec_version": "1.0"
+    },
+    {
+      "test_id": "088",
+      "title": "Backup normal product state",
+      "phase": "Z — Backup + Restore",
+      "objective": "Backup normal product state",
+      "classification": "VM",
+      "automation_level": "AUTOMATABLE_WITH_VM",
+      "tags": [
+        "phase-z"
+      ],
+      "risk": "medium",
+      "mutation_level": "read_only",
+      "required_environment": "disposable_test_vm",
+      "required_capabilities": [],
+      "prerequisites": [],
+      "execution_contract": "Run the declared objective and collect independent evidence.",
+      "expected_outcomes": [
+        "objective outcome is observed"
+      ],
+      "assertions": [
+        "declared outcome is true"
+      ],
+      "evidence_requirements": [
+        "machine-readable result"
+      ],
+      "cleanup": "release owned resources",
+      "timeout_seconds": 60,
+      "retry_policy": "never_after_unknown_effect",
+      "human_requirement": null,
+      "owner_approval_required": false,
+      "host_access_required": false,
+      "vm_policy": "prefer_workbench_then_disposable",
+      "security_relevance": "normal",
+      "failure_severity": "MEDIUM",
+      "spec_version": "1.0"
+    },
+    {
+      "test_id": "089",
+      "title": "Restore into test installation",
+      "phase": "Z — Backup + Restore",
+      "objective": "Restore into test installation",
+      "classification": "VM",
+      "automation_level": "AUTOMATABLE_WITH_VM",
+      "tags": [
+        "phase-z"
+      ],
+      "risk": "medium",
+      "mutation_level": "read_only",
+      "required_environment": "disposable_test_vm",
+      "required_capabilities": [],
+      "prerequisites": [],
+      "execution_contract": "Run the declared objective and collect independent evidence.",
+      "expected_outcomes": [
+        "objective outcome is observed"
+      ],
+      "assertions": [
+        "declared outcome is true"
+      ],
+      "evidence_requirements": [
+        "machine-readable result"
+      ],
+      "cleanup": "release owned resources",
+      "timeout_seconds": 60,
+      "retry_policy": "never_after_unknown_effect",
+      "human_requirement": null,
+      "owner_approval_required": false,
+      "host_access_required": false,
+      "vm_policy": "prefer_workbench_then_disposable",
+      "security_relevance": "normal",
+      "failure_severity": "MEDIUM",
+      "spec_version": "1.0"
+    },
+    {
+      "test_id": "090",
+      "title": "Real small non-security bug candidate",
+      "phase": "AA — Self-Improvement",
+      "objective": "Real small non-security bug candidate",
+      "classification": "VM",
+      "automation_level": "AUTOMATABLE_WITH_VM",
+      "tags": [
+        "phase-aa"
+      ],
+      "risk": "medium",
+      "mutation_level": "read_only",
+      "required_environment": "disposable_test_vm",
+      "required_capabilities": [],
+      "prerequisites": [],
+      "execution_contract": "Run the declared objective and collect independent evidence.",
+      "expected_outcomes": [
+        "objective outcome is observed"
+      ],
+      "assertions": [
+        "declared outcome is true"
+      ],
+      "evidence_requirements": [
+        "machine-readable result"
+      ],
+      "cleanup": "release owned resources",
+      "timeout_seconds": 60,
+      "retry_policy": "never_after_unknown_effect",
+      "human_requirement": null,
+      "owner_approval_required": false,
+      "host_access_required": false,
+      "vm_policy": "prefer_workbench_then_disposable",
+      "security_relevance": "review_required",
+      "failure_severity": "RELEASE_BLOCKER",
+      "spec_version": "1.0"
+    },
+    {
+      "test_id": "091",
+      "title": "Every setting persists",
+      "phase": "AB — Settings",
+      "objective": "Every setting persists",
+      "classification": "VM",
+      "automation_level": "AUTOMATABLE_WITH_VM",
+      "tags": [
+        "phase-ab"
+      ],
+      "risk": "medium",
+      "mutation_level": "read_only",
+      "required_environment": "disposable_test_vm",
+      "required_capabilities": [],
+      "prerequisites": [],
+      "execution_contract": "Run the declared objective and collect independent evidence.",
+      "expected_outcomes": [
+        "objective outcome is observed"
+      ],
+      "assertions": [
+        "declared outcome is true"
+      ],
+      "evidence_requirements": [
+        "machine-readable result"
+      ],
+      "cleanup": "release owned resources",
+      "timeout_seconds": 60,
+      "retry_policy": "never_after_unknown_effect",
+      "human_requirement": null,
+      "owner_approval_required": false,
+      "host_access_required": false,
+      "vm_policy": "prefer_workbench_then_disposable",
+      "security_relevance": "normal",
+      "failure_severity": "MEDIUM",
+      "spec_version": "1.0"
+    },
+    {
+      "test_id": "092",
+      "title": "Invalid setting input",
+      "phase": "AB — Settings",
+      "objective": "Invalid setting input",
+      "classification": "VM",
+      "automation_level": "AUTOMATABLE_WITH_VM",
+      "tags": [
+        "phase-ab"
+      ],
+      "risk": "medium",
+      "mutation_level": "read_only",
+      "required_environment": "disposable_test_vm",
+      "required_capabilities": [],
+      "prerequisites": [],
+      "execution_contract": "Run the declared objective and collect independent evidence.",
+      "expected_outcomes": [
+        "objective outcome is observed"
+      ],
+      "assertions": [
+        "declared outcome is true"
+      ],
+      "evidence_requirements": [
+        "machine-readable result"
+      ],
+      "cleanup": "release owned resources",
+      "timeout_seconds": 60,
+      "retry_policy": "never_after_unknown_effect",
+      "human_requirement": null,
+      "owner_approval_required": false,
+      "host_access_required": false,
+      "vm_policy": "prefer_workbench_then_disposable",
+      "security_relevance": "normal",
+      "failure_severity": "MEDIUM",
+      "spec_version": "1.0"
+    },
+    {
+      "test_id": "093",
+      "title": "Control-center surfaces clarity",
+      "phase": "AC — Control Center / Navigation",
+      "objective": "Control-center surfaces clarity",
+      "classification": "REAL_WINDOWS",
+      "automation_level": "AUTOMATABLE_WITH_REAL_WINDOWS",
+      "tags": [
+        "phase-ac"
+      ],
+      "risk": "medium",
+      "mutation_level": "read_only",
+      "required_environment": "native_windows_desktop",
+      "required_capabilities": [],
+      "prerequisites": [],
+      "execution_contract": "Run the declared objective and collect independent evidence.",
+      "expected_outcomes": [
+        "objective outcome is observed"
+      ],
+      "assertions": [
+        "declared outcome is true"
+      ],
+      "evidence_requirements": [
+        "machine-readable result"
+      ],
+      "cleanup": "release owned resources",
+      "timeout_seconds": 60,
+      "retry_policy": "never_after_unknown_effect",
+      "human_requirement": null,
+      "owner_approval_required": false,
+      "host_access_required": true,
+      "vm_policy": "not_applicable",
+      "security_relevance": "normal",
+      "failure_severity": "MEDIUM",
+      "spec_version": "1.0"
+    },
+    {
+      "test_id": "094",
+      "title": "Generated capability controls",
+      "phase": "AD — Generated UI",
+      "objective": "Generated capability controls",
+      "classification": "REAL_WINDOWS",
+      "automation_level": "AUTOMATABLE_WITH_REAL_WINDOWS",
+      "tags": [
+        "phase-ad"
+      ],
+      "risk": "medium",
+      "mutation_level": "read_only",
+      "required_environment": "native_windows_desktop",
+      "required_capabilities": [],
+      "prerequisites": [],
+      "execution_contract": "Run the declared objective and collect independent evidence.",
+      "expected_outcomes": [
+        "objective outcome is observed"
+      ],
+      "assertions": [
+        "declared outcome is true"
+      ],
+      "evidence_requirements": [
+        "machine-readable result"
+      ],
+      "cleanup": "release owned resources",
+      "timeout_seconds": 60,
+      "retry_policy": "never_after_unknown_effect",
+      "human_requirement": null,
+      "owner_approval_required": false,
+      "host_access_required": true,
+      "vm_policy": "not_applicable",
+      "security_relevance": "review_required",
+      "failure_severity": "RELEASE_BLOCKER",
+      "spec_version": "1.0"
+    },
+    {
+      "test_id": "095",
+      "title": "Generated UI inherits design system",
+      "phase": "AD — Generated UI",
+      "objective": "Generated UI inherits design system",
+      "classification": "REAL_WINDOWS",
+      "automation_level": "AUTOMATABLE_WITH_REAL_WINDOWS",
+      "tags": [
+        "phase-ad"
+      ],
+      "risk": "medium",
+      "mutation_level": "read_only",
+      "required_environment": "native_windows_desktop",
+      "required_capabilities": [],
+      "prerequisites": [],
+      "execution_contract": "Run the declared objective and collect independent evidence.",
+      "expected_outcomes": [
+        "objective outcome is observed"
+      ],
+      "assertions": [
+        "declared outcome is true"
+      ],
+      "evidence_requirements": [
+        "machine-readable result"
+      ],
+      "cleanup": "release owned resources",
+      "timeout_seconds": 60,
+      "retry_policy": "never_after_unknown_effect",
+      "human_requirement": null,
+      "owner_approval_required": false,
+      "host_access_required": true,
+      "vm_policy": "not_applicable",
+      "security_relevance": "review_required",
+      "failure_severity": "RELEASE_BLOCKER",
+      "spec_version": "1.0"
+    },
+    {
+      "test_id": "096",
+      "title": "Activity explains trusted execution",
+      "phase": "AE — Activity / Trace",
+      "objective": "Activity explains trusted execution",
+      "classification": "AUTO",
+      "automation_level": "FULLY_AUTOMATED_NOW",
+      "tags": [
+        "phase-ae"
+      ],
+      "risk": "medium",
+      "mutation_level": "read_only",
+      "required_environment": "local_test_harness",
+      "required_capabilities": [],
+      "prerequisites": [],
+      "execution_contract": "Run the declared objective and collect independent evidence.",
+      "expected_outcomes": [
+        "objective outcome is observed"
+      ],
+      "assertions": [
+        "declared outcome is true"
+      ],
+      "evidence_requirements": [
+        "machine-readable result"
+      ],
+      "cleanup": "release owned resources",
+      "timeout_seconds": 60,
+      "retry_policy": "never_after_unknown_effect",
+      "human_requirement": null,
+      "owner_approval_required": false,
+      "host_access_required": false,
+      "vm_policy": "not_applicable",
+      "security_relevance": "normal",
+      "failure_severity": "MEDIUM",
+      "spec_version": "1.0"
+    },
+    {
+      "test_id": "097",
+      "title": "Add and retrieve unique fact",
+      "phase": "AF — Knowledge",
+      "objective": "Add and retrieve unique fact",
+      "classification": "VM",
+      "automation_level": "AUTOMATABLE_WITH_VM",
+      "tags": [
+        "phase-af"
+      ],
+      "risk": "medium",
+      "mutation_level": "read_only",
+      "required_environment": "workbench_vm_or_disposable_test_vm",
+      "required_capabilities": [],
+      "prerequisites": [],
+      "execution_contract": "Run the declared objective and collect independent evidence.",
+      "expected_outcomes": [
+        "objective outcome is observed"
+      ],
+      "assertions": [
+        "declared outcome is true"
+      ],
+      "evidence_requirements": [
+        "machine-readable result"
+      ],
+      "cleanup": "release owned resources",
+      "timeout_seconds": 60,
+      "retry_policy": "never_after_unknown_effect",
+      "human_requirement": null,
+      "owner_approval_required": false,
+      "host_access_required": false,
+      "vm_policy": "prefer_workbench_then_disposable",
+      "security_relevance": "normal",
+      "failure_severity": "MEDIUM",
+      "spec_version": "1.0"
+    },
+    {
+      "test_id": "098",
+      "title": "Modify document and reindex",
+      "phase": "AF — Knowledge",
+      "objective": "Modify document and reindex",
+      "classification": "VM",
+      "automation_level": "AUTOMATABLE_WITH_VM",
+      "tags": [
+        "phase-af"
+      ],
+      "risk": "medium",
+      "mutation_level": "read_only",
+      "required_environment": "workbench_vm_or_disposable_test_vm",
+      "required_capabilities": [],
+      "prerequisites": [],
+      "execution_contract": "Run the declared objective and collect independent evidence.",
+      "expected_outcomes": [
+        "objective outcome is observed"
+      ],
+      "assertions": [
+        "declared outcome is true"
+      ],
+      "evidence_requirements": [
+        "machine-readable result"
+      ],
+      "cleanup": "release owned resources",
+      "timeout_seconds": 60,
+      "retry_policy": "never_after_unknown_effect",
+      "human_requirement": null,
+      "owner_approval_required": false,
+      "host_access_required": false,
+      "vm_policy": "prefer_workbench_then_disposable",
+      "security_relevance": "normal",
+      "failure_severity": "MEDIUM",
+      "spec_version": "1.0"
+    },
+    {
+      "test_id": "099",
+      "title": "Knowledge prompt injection",
+      "phase": "AF — Knowledge",
+      "objective": "Knowledge prompt injection",
+      "classification": "VM",
+      "automation_level": "AUTOMATABLE_WITH_VM",
+      "tags": [
+        "phase-af"
+      ],
+      "risk": "medium",
+      "mutation_level": "read_only",
+      "required_environment": "workbench_vm_or_disposable_test_vm",
+      "required_capabilities": [],
+      "prerequisites": [],
+      "execution_contract": "Run the declared objective and collect independent evidence.",
+      "expected_outcomes": [
+        "objective outcome is observed"
+      ],
+      "assertions": [
+        "declared outcome is true"
+      ],
+      "evidence_requirements": [
+        "machine-readable result"
+      ],
+      "cleanup": "release owned resources",
+      "timeout_seconds": 60,
+      "retry_policy": "never_after_unknown_effect",
+      "human_requirement": null,
+      "owner_approval_required": false,
+      "host_access_required": false,
+      "vm_policy": "prefer_workbench_then_disposable",
+      "security_relevance": "review_required",
+      "failure_severity": "RELEASE_BLOCKER",
+      "spec_version": "1.0"
+    },
+    {
+      "test_id": "100",
+      "title": "Reversible action + undo",
+      "phase": "AG — Effect Preview / Undo",
+      "objective": "Reversible action + undo",
+      "classification": "VM",
+      "automation_level": "AUTOMATABLE_WITH_VM",
+      "tags": [
+        "phase-ag"
+      ],
+      "risk": "medium",
+      "mutation_level": "read_only",
+      "required_environment": "disposable_test_vm",
+      "required_capabilities": [],
+      "prerequisites": [],
+      "execution_contract": "Run the declared objective and collect independent evidence.",
+      "expected_outcomes": [
+        "objective outcome is observed"
+      ],
+      "assertions": [
+        "declared outcome is true"
+      ],
+      "evidence_requirements": [
+        "machine-readable result"
+      ],
+      "cleanup": "release owned resources",
+      "timeout_seconds": 60,
+      "retry_policy": "never_after_unknown_effect",
+      "human_requirement": null,
+      "owner_approval_required": false,
+      "host_access_required": false,
+      "vm_policy": "prefer_workbench_then_disposable",
+      "security_relevance": "normal",
+      "failure_severity": "MEDIUM",
+      "spec_version": "1.0"
+    },
+    {
+      "test_id": "101",
+      "title": "Irreversible preview is truthful",
+      "phase": "AG — Effect Preview / Undo",
+      "objective": "Irreversible preview is truthful",
+      "classification": "VM",
+      "automation_level": "AUTOMATABLE_WITH_VM",
+      "tags": [
+        "phase-ag"
+      ],
+      "risk": "medium",
+      "mutation_level": "read_only",
+      "required_environment": "disposable_test_vm",
+      "required_capabilities": [],
+      "prerequisites": [],
+      "execution_contract": "Run the declared objective and collect independent evidence.",
+      "expected_outcomes": [
+        "objective outcome is observed"
+      ],
+      "assertions": [
+        "declared outcome is true"
+      ],
+      "evidence_requirements": [
+        "machine-readable result"
+      ],
+      "cleanup": "release owned resources",
+      "timeout_seconds": 60,
+      "retry_policy": "never_after_unknown_effect",
+      "human_requirement": null,
+      "owner_approval_required": false,
+      "host_access_required": false,
+      "vm_policy": "prefer_workbench_then_disposable",
+      "security_relevance": "review_required",
+      "failure_severity": "RELEASE_BLOCKER",
+      "spec_version": "1.0"
+    },
+    {
+      "test_id": "102",
+      "title": "Clean Windows environment",
+      "phase": "AH — Installer",
+      "objective": "Clean Windows environment",
+      "classification": "REAL_WINDOWS",
+      "automation_level": "AUTOMATABLE_WITH_REAL_WINDOWS",
+      "tags": [
+        "phase-ah"
+      ],
+      "risk": "medium",
+      "mutation_level": "read_only",
+      "required_environment": "clean_windows_vm_required",
+      "required_capabilities": [],
+      "prerequisites": [],
+      "execution_contract": "Run the declared objective and collect independent evidence.",
+      "expected_outcomes": [
+        "objective outcome is observed"
+      ],
+      "assertions": [
+        "declared outcome is true"
+      ],
+      "evidence_requirements": [
+        "machine-readable result"
+      ],
+      "cleanup": "release owned resources",
+      "timeout_seconds": 60,
+      "retry_policy": "never_after_unknown_effect",
+      "human_requirement": null,
+      "owner_approval_required": false,
+      "host_access_required": true,
+      "vm_policy": "not_applicable",
+      "security_relevance": "normal",
+      "failure_severity": "MEDIUM",
+      "spec_version": "1.0"
+    },
+    {
+      "test_id": "103",
+      "title": "Product UI installation",
+      "phase": "AH — Installer",
+      "objective": "Product UI installation",
+      "classification": "REAL_WINDOWS",
+      "automation_level": "AUTOMATABLE_WITH_REAL_WINDOWS",
+      "tags": [
+        "phase-ah"
+      ],
+      "risk": "medium",
+      "mutation_level": "read_only",
+      "required_environment": "clean_windows_vm_required",
+      "required_capabilities": [],
+      "prerequisites": [],
+      "execution_contract": "Run the declared objective and collect independent evidence.",
+      "expected_outcomes": [
+        "objective outcome is observed"
+      ],
+      "assertions": [
+        "declared outcome is true"
+      ],
+      "evidence_requirements": [
+        "machine-readable result"
+      ],
+      "cleanup": "release owned resources",
+      "timeout_seconds": 60,
+      "retry_policy": "never_after_unknown_effect",
+      "human_requirement": null,
+      "owner_approval_required": false,
+      "host_access_required": true,
+      "vm_policy": "not_applicable",
+      "security_relevance": "normal",
+      "failure_severity": "MEDIUM",
+      "spec_version": "1.0"
+    },
+    {
+      "test_id": "104",
+      "title": "Uninstall semantics",
+      "phase": "AH — Installer",
+      "objective": "Uninstall semantics",
+      "classification": "REAL_WINDOWS",
+      "automation_level": "AUTOMATABLE_WITH_REAL_WINDOWS",
+      "tags": [
+        "phase-ah"
+      ],
+      "risk": "medium",
+      "mutation_level": "read_only",
+      "required_environment": "clean_windows_vm_required",
+      "required_capabilities": [],
+      "prerequisites": [],
+      "execution_contract": "Run the declared objective and collect independent evidence.",
+      "expected_outcomes": [
+        "objective outcome is observed"
+      ],
+      "assertions": [
+        "declared outcome is true"
+      ],
+      "evidence_requirements": [
+        "machine-readable result"
+      ],
+      "cleanup": "release owned resources",
+      "timeout_seconds": 60,
+      "retry_policy": "never_after_unknown_effect",
+      "human_requirement": null,
+      "owner_approval_required": false,
+      "host_access_required": true,
+      "vm_policy": "not_applicable",
+      "security_relevance": "normal",
+      "failure_severity": "MEDIUM",
+      "spec_version": "1.0"
+    },
+    {
+      "test_id": "105",
+      "title": "Clean-profile onboarding",
+      "phase": "AI — First Run",
+      "objective": "Clean-profile onboarding",
+      "classification": "VM",
+      "automation_level": "AUTOMATABLE_WITH_VM",
+      "tags": [
+        "phase-ai"
+      ],
+      "risk": "medium",
+      "mutation_level": "read_only",
+      "required_environment": "disposable_test_vm",
+      "required_capabilities": [],
+      "prerequisites": [],
+      "execution_contract": "Run the declared objective and collect independent evidence.",
+      "expected_outcomes": [
+        "objective outcome is observed"
+      ],
+      "assertions": [
+        "declared outcome is true"
+      ],
+      "evidence_requirements": [
+        "machine-readable result"
+      ],
+      "cleanup": "release owned resources",
+      "timeout_seconds": 60,
+      "retry_policy": "never_after_unknown_effect",
+      "human_requirement": null,
+      "owner_approval_required": false,
+      "host_access_required": false,
+      "vm_policy": "prefer_workbench_then_disposable",
+      "security_relevance": "normal",
+      "failure_severity": "MEDIUM",
+      "spec_version": "1.0"
+    },
+    {
+      "test_id": "106",
+      "title": "Hardware detection",
+      "phase": "AI — First Run",
+      "objective": "Hardware detection",
+      "classification": "SYNTHETIC_HARDWARE",
+      "automation_level": "AUTOMATABLE_WITH_SYNTHETIC_FIXTURE",
+      "tags": [
+        "phase-ai"
+      ],
+      "risk": "medium",
+      "mutation_level": "read_only",
+      "required_environment": "synthetic_device_fixture",
+      "required_capabilities": [],
+      "prerequisites": [],
+      "execution_contract": "Run the declared objective and collect independent evidence.",
+      "expected_outcomes": [
+        "objective outcome is observed"
+      ],
+      "assertions": [
+        "declared outcome is true"
+      ],
+      "evidence_requirements": [
+        "machine-readable result"
+      ],
+      "cleanup": "release owned resources",
+      "timeout_seconds": 60,
+      "retry_policy": "never_after_unknown_effect",
+      "human_requirement": null,
+      "owner_approval_required": false,
+      "host_access_required": false,
+      "vm_policy": "not_applicable",
+      "security_relevance": "normal",
+      "failure_severity": "MEDIUM",
+      "spec_version": "1.0"
+    },
+    {
+      "test_id": "107",
+      "title": "Privacy/routing choice",
+      "phase": "AI — First Run",
+      "objective": "Privacy/routing choice",
+      "classification": "VM",
+      "automation_level": "AUTOMATABLE_WITH_VM",
+      "tags": [
+        "phase-ai"
+      ],
+      "risk": "medium",
+      "mutation_level": "read_only",
+      "required_environment": "disposable_test_vm",
+      "required_capabilities": [],
+      "prerequisites": [],
+      "execution_contract": "Run the declared objective and collect independent evidence.",
+      "expected_outcomes": [
+        "objective outcome is observed"
+      ],
+      "assertions": [
+        "declared outcome is true"
+      ],
+      "evidence_requirements": [
+        "machine-readable result"
+      ],
+      "cleanup": "release owned resources",
+      "timeout_seconds": 60,
+      "retry_policy": "never_after_unknown_effect",
+      "human_requirement": null,
+      "owner_approval_required": false,
+      "host_access_required": false,
+      "vm_policy": "prefer_workbench_then_disposable",
+      "security_relevance": "normal",
+      "failure_severity": "MEDIUM",
+      "spec_version": "1.0"
+    },
+    {
+      "test_id": "108",
+      "title": "Controlled first-run Test Drive",
+      "phase": "AI — First Run",
+      "objective": "Controlled first-run Test Drive",
+      "classification": "VM",
+      "automation_level": "AUTOMATABLE_WITH_VM",
+      "tags": [
+        "phase-ai"
+      ],
+      "risk": "medium",
+      "mutation_level": "read_only",
+      "required_environment": "disposable_test_vm",
+      "required_capabilities": [],
+      "prerequisites": [],
+      "execution_contract": "Run the declared objective and collect independent evidence.",
+      "expected_outcomes": [
+        "objective outcome is observed"
+      ],
+      "assertions": [
+        "declared outcome is true"
+      ],
+      "evidence_requirements": [
+        "machine-readable result"
+      ],
+      "cleanup": "release owned resources",
+      "timeout_seconds": 60,
+      "retry_policy": "never_after_unknown_effect",
+      "human_requirement": null,
+      "owner_approval_required": false,
+      "host_access_required": false,
+      "vm_policy": "prefer_workbench_then_disposable",
+      "security_relevance": "normal",
+      "failure_severity": "MEDIUM",
+      "spec_version": "1.0"
+    },
+    {
+      "test_id": "109",
+      "title": "Define owner's stable workflows",
+      "phase": "AJ — Golden Workflows",
+      "objective": "Define owner's stable workflows",
+      "classification": "HUMAN_JUDGMENT",
+      "automation_level": "HUMAN_JUDGMENT_REQUIRED",
+      "tags": [
+        "phase-aj"
+      ],
+      "risk": "medium",
+      "mutation_level": "read_only",
+      "required_environment": "owner_or_reviewer",
+      "required_capabilities": [],
+      "prerequisites": [],
+      "execution_contract": "Run the declared objective and collect independent evidence.",
+      "expected_outcomes": [
+        "objective outcome is observed"
+      ],
+      "assertions": [
+        "declared outcome is true"
+      ],
+      "evidence_requirements": [
+        "machine-readable result"
+      ],
+      "cleanup": "release owned resources",
+      "timeout_seconds": 60,
+      "retry_policy": "never_after_unknown_effect",
+      "human_requirement": null,
+      "owner_approval_required": false,
+      "host_access_required": false,
+      "vm_policy": "not_applicable",
+      "security_relevance": "normal",
+      "failure_severity": "MEDIUM",
+      "spec_version": "1.0"
+    },
+    {
+      "test_id": "110",
+      "title": "Persist exact workflow prompts",
+      "phase": "AJ — Golden Workflows",
+      "objective": "Persist exact workflow prompts",
+      "classification": "HUMAN_JUDGMENT",
+      "automation_level": "HUMAN_JUDGMENT_REQUIRED",
+      "tags": [
+        "phase-aj"
+      ],
+      "risk": "medium",
+      "mutation_level": "read_only",
+      "required_environment": "owner_or_reviewer",
+      "required_capabilities": [],
+      "prerequisites": [],
+      "execution_contract": "Run the declared objective and collect independent evidence.",
+      "expected_outcomes": [
+        "objective outcome is observed"
+      ],
+      "assertions": [
+        "declared outcome is true"
+      ],
+      "evidence_requirements": [
+        "machine-readable result"
+      ],
+      "cleanup": "release owned resources",
+      "timeout_seconds": 60,
+      "retry_policy": "never_after_unknown_effect",
+      "human_requirement": null,
+      "owner_approval_required": false,
+      "host_access_required": false,
+      "vm_policy": "not_applicable",
+      "security_relevance": "normal",
+      "failure_severity": "MEDIUM",
+      "spec_version": "1.0"
+    },
+    {
+      "test_id": "111",
+      "title": "One complete day of ordinary use",
+      "phase": "AK — Long-Run Product Use",
+      "objective": "One complete day of ordinary use",
+      "classification": "LONG_RUNNING",
+      "automation_level": "LONG_RUNNING",
+      "tags": [
+        "phase-ak"
+      ],
+      "risk": "medium",
+      "mutation_level": "read_only",
+      "required_environment": "campaign_store",
+      "required_capabilities": [],
+      "prerequisites": [],
+      "execution_contract": "Run the declared objective and collect independent evidence.",
+      "expected_outcomes": [
+        "objective outcome is observed"
+      ],
+      "assertions": [
+        "declared outcome is true"
+      ],
+      "evidence_requirements": [
+        "machine-readable result"
+      ],
+      "cleanup": "release owned resources",
+      "timeout_seconds": 60,
+      "retry_policy": "never_after_unknown_effect",
+      "human_requirement": null,
+      "owner_approval_required": false,
+      "host_access_required": false,
+      "vm_policy": "not_applicable",
+      "security_relevance": "normal",
+      "failure_severity": "MEDIUM",
+      "spec_version": "1.0"
+    },
+    {
+      "test_id": "112",
+      "title": "One complete week of ordinary use",
+      "phase": "AK — Long-Run Product Use",
+      "objective": "One complete week of ordinary use",
+      "classification": "LONG_RUNNING",
+      "automation_level": "LONG_RUNNING",
+      "tags": [
+        "phase-ak"
+      ],
+      "risk": "medium",
+      "mutation_level": "read_only",
+      "required_environment": "campaign_store",
+      "required_capabilities": [],
+      "prerequisites": [],
+      "execution_contract": "Run the declared objective and collect independent evidence.",
+      "expected_outcomes": [
+        "objective outcome is observed"
+      ],
+      "assertions": [
+        "declared outcome is true"
+      ],
+      "evidence_requirements": [
+        "machine-readable result"
+      ],
+      "cleanup": "release owned resources",
+      "timeout_seconds": 60,
+      "retry_policy": "never_after_unknown_effect",
+      "human_requirement": null,
+      "owner_approval_required": false,
+      "host_access_required": false,
+      "vm_policy": "not_applicable",
+      "security_relevance": "normal",
+      "failure_severity": "MEDIUM",
+      "spec_version": "1.0"
+    },
+    {
+      "test_id": "113",
+      "title": "Genuinely unknown useful end goal",
+      "phase": "AL — Final Unknown Goal",
+      "objective": "Genuinely unknown useful end goal",
+      "classification": "VM",
+      "automation_level": "AUTOMATABLE_WITH_VM",
+      "tags": [
+        "phase-al"
+      ],
+      "risk": "medium",
+      "mutation_level": "read_only",
+      "required_environment": "workbench_vm_or_disposable_test_vm",
+      "required_capabilities": [],
+      "prerequisites": [],
+      "execution_contract": "Run the declared objective and collect independent evidence.",
+      "expected_outcomes": [
+        "objective outcome is observed"
+      ],
+      "assertions": [
+        "declared outcome is true"
+      ],
+      "evidence_requirements": [
+        "machine-readable result"
+      ],
+      "cleanup": "release owned resources",
+      "timeout_seconds": 60,
+      "retry_policy": "never_after_unknown_effect",
+      "human_requirement": null,
+      "owner_approval_required": false,
+      "host_access_required": false,
+      "vm_policy": "prefer_workbench_then_disposable",
+      "security_relevance": "normal",
+      "failure_severity": "MEDIUM",
+      "spec_version": "1.0"
+    },
+    {
+      "test_id": "114",
+      "title": "Complete adaptive chain",
+      "phase": "AL — Final Unknown Goal",
+      "objective": "Complete adaptive chain",
+      "classification": "VM",
+      "automation_level": "AUTOMATABLE_WITH_VM",
+      "tags": [
+        "phase-al"
+      ],
+      "risk": "medium",
+      "mutation_level": "read_only",
+      "required_environment": "workbench_vm_or_disposable_test_vm",
+      "required_capabilities": [],
+      "prerequisites": [],
+      "execution_contract": "Run the declared objective and collect independent evidence.",
+      "expected_outcomes": [
+        "objective outcome is observed"
+      ],
+      "assertions": [
+        "declared outcome is true"
+      ],
+      "evidence_requirements": [
+        "machine-readable result"
+      ],
+      "cleanup": "release owned resources",
+      "timeout_seconds": 60,
+      "retry_policy": "never_after_unknown_effect",
+      "human_requirement": null,
+      "owner_approval_required": false,
+      "host_access_required": false,
+      "vm_policy": "prefer_workbench_then_disposable",
+      "security_relevance": "normal",
+      "failure_severity": "MEDIUM",
+      "spec_version": "1.0"
+    },
+    {
+      "test_id": "115",
+      "title": "Final user-vs-implementation score",
+      "phase": "AL — Final Unknown Goal",
+      "objective": "Final user-vs-implementation score",
+      "classification": "HUMAN_JUDGMENT",
+      "automation_level": "HUMAN_JUDGMENT_REQUIRED",
+      "tags": [
+        "phase-al"
+      ],
+      "risk": "medium",
+      "mutation_level": "read_only",
+      "required_environment": "owner_or_reviewer",
+      "required_capabilities": [],
+      "prerequisites": [],
+      "execution_contract": "Run the declared objective and collect independent evidence.",
+      "expected_outcomes": [
+        "objective outcome is observed"
+      ],
+      "assertions": [
+        "declared outcome is true"
+      ],
+      "evidence_requirements": [
+        "machine-readable result"
+      ],
+      "cleanup": "release owned resources",
+      "timeout_seconds": 60,
+      "retry_policy": "never_after_unknown_effect",
+      "human_requirement": null,
+      "owner_approval_required": false,
+      "host_access_required": false,
+      "vm_policy": "not_applicable",
+      "security_relevance": "normal",
+      "failure_severity": "MEDIUM",
+      "spec_version": "1.0"
+    }
+  ]
+}

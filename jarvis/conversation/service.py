@@ -6,8 +6,24 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
-from jarvis.ai.models import ChatMessage, GenerationRequest, MessageRole, ProviderHealth
+from jarvis.ai.models import (
+    ChatMessage,
+    GenerationChunk,
+    GenerationRequest,
+    MessageRole,
+    PrivacyContext,
+    ProviderHealth,
+)
+from jarvis.ai.privacy import PrivacyGuardedProvider
 from jarvis.ai.providers.base import AIProvider
+from jarvis.ai.providers.registry import ProviderMetadata
+from jarvis.ai.routing import (
+    DispatchChunk,
+    InferenceDispatcher,
+    RouteRequest,
+    RoutingPolicy,
+)
+from jarvis.ai.sessions import AgentSessionStore, AgentSessionType
 from jarvis.core.errors import ConversationCancelledError
 
 
@@ -24,18 +40,53 @@ class ConversationUpdate:
 class ConversationService:
     """Own process-local history and stream provider-neutral assistant responses."""
 
-    def __init__(self, provider: AIProvider, *, model: str, context_limit: int) -> None:
-        self._provider = provider
+    def __init__(
+        self,
+        provider: AIProvider,
+        *,
+        model: str,
+        context_limit: int,
+        session_store: AgentSessionStore | None = None,
+        session_type: AgentSessionType = AgentSessionType.INTERACTIVE,
+        provider_id: str = "default",
+        provider_metadata: ProviderMetadata | None = None,
+        dispatcher: InferenceDispatcher | None = None,
+        routing_policy: RoutingPolicy = RoutingPolicy.BALANCED,
+    ) -> None:
+        self._provider = (
+            provider
+            if isinstance(provider, PrivacyGuardedProvider)
+            else PrivacyGuardedProvider(
+                provider,
+                provider_metadata
+                or ProviderMetadata(provider_id, provider_id, "untrusted-compatibility"),
+            )
+        )
         self._model = model
         self._context_limit = context_limit
         self._messages: dict[UUID, list[ChatMessage]] = {}
         self._cancellations: dict[UUID, threading.Event] = {}
+        self._generations: dict[UUID, int] = {}
+        self._session_store = session_store
+        self._session_type = session_type
+        self._provider_id = provider_id
+        self._sessions: dict[UUID, UUID] = {}
+        self._dispatcher = dispatcher
+        self._routing_policy = routing_policy
 
     def create_conversation(self, system_prompt: str | None = None) -> UUID:
         """Create a conversation, optionally seeded with a system instruction."""
 
         conversation_id = uuid4()
         self._messages[conversation_id] = []
+        if self._session_store is not None:
+            session = self._session_store.create(
+                self._session_type,
+                self._provider_id,
+                self._model,
+                context_metadata=(("conversation_id", str(conversation_id)),),
+            )
+            self._sessions[conversation_id] = session.session_id
         if system_prompt:
             self._messages[conversation_id].append(
                 self._message(conversation_id, MessageRole.SYSTEM, system_prompt)
@@ -47,12 +98,26 @@ class ConversationService:
 
         return tuple(self._messages.get(conversation_id, []))
 
+    def has_conversation(self, conversation_id: UUID) -> bool:
+        """Return whether this process-local service owns the conversation reference."""
+
+        return conversation_id in self._messages
+
     def cancel(self, conversation_id: UUID) -> None:
         """Request cancellation from any thread, including the desktop UI thread."""
 
         cancellation = self._cancellations.get(conversation_id)
         if cancellation is not None:
             cancellation.set()
+        self._generations[conversation_id] = self._generations.get(conversation_id, 0) + 1
+        session_id = self._sessions.get(conversation_id)
+        if session_id is not None and self._session_store is not None:
+            self._session_store.mark_synchronized(session_id, False)
+
+    def session_id(self, conversation_id: UUID) -> UUID | None:
+        """Return the bound execution session, if session persistence is enabled."""
+
+        return self._sessions.get(conversation_id)
 
     async def provider_health(self) -> ProviderHealth:
         """Expose provider connectivity without leaking its concrete implementation."""
@@ -65,24 +130,96 @@ class ConversationService:
         await self._provider.aclose()
 
     async def stream_reply(
-        self, conversation_id: UUID, user_content: str
+        self,
+        conversation_id: UUID,
+        user_content: str,
+        *,
+        privacy_context: PrivacyContext | None = None,
     ) -> AsyncIterator[ConversationUpdate]:
-        """Store a user message then yield and retain one assistant response."""
+        """Store a user message then yield and retain one assistant response.
+
+        Remote disclosure classification is trusted application input. An
+        omitted classification remains UNKNOWN and is blocked by the privacy
+        boundary for non-local providers.
+        """
 
         messages = self._messages.setdefault(conversation_id, [])
+        session_id = self._sessions.get(conversation_id)
+        self._generations[conversation_id] = self._generations.get(conversation_id, 0) + 1
+        generation = self._generations[conversation_id]
+        previous = self._cancellations.get(conversation_id)
+        if previous is not None:
+            previous.set()
+            if session_id is not None and self._session_store is not None:
+                self._session_store.mark_synchronized(session_id, False)
         messages.append(self._message(conversation_id, MessageRole.USER, user_content))
         cancellation = threading.Event()
         self._cancellations[conversation_id] = cancellation
         assistant_id = uuid4()
         content = ""
+        provided_privacy = privacy_context or PrivacyContext()
+        decision = None
+        if self._dispatcher is not None:
+            intent = RouteRequest(
+                task=user_content,
+                profile="conversation",
+                task_class="conversation",
+                responsibility="conversation",
+                context_tokens=sum(len(item.content) for item in messages) // 4,
+                policy=self._routing_policy,
+                privacy_context=provided_privacy,
+            )
+            decision = self._dispatcher.route(intent)
+            if decision.primary is None:
+                raise RuntimeError("No eligible conversation inference model")
+            session_id = self._ensure_session(
+                conversation_id,
+                provider_id=decision.primary.provider_id,
+                model=decision.primary.model_id,
+            )
+        else:
+            session_id = self._ensure_session(conversation_id)
         request = GenerationRequest(
             messages=self._within_context(messages),
             model=self._model,
             context_limit=self._context_limit,
+            privacy_context=PrivacyContext(
+                provided_privacy.classification,
+                provided_privacy.known_private_values,
+                allowed_message_ids=(messages[-1].id,),
+            ),
         )
         try:
-            async for chunk in self._provider.stream(request):
-                self._raise_if_cancelled(cancellation)
+            stream: AsyncIterator[GenerationChunk | DispatchChunk]
+            if self._dispatcher is None:
+                stream = self._provider.stream(request)
+            else:
+                assert decision is not None
+                stream = self._dispatcher.stream(request, intent, decision=decision)
+            async for item in stream:
+                if isinstance(item, DispatchChunk):
+                    actual = item.decision.primary
+                    current_session = (
+                        self._session_store.get(session_id)
+                        if self._session_store is not None and session_id is not None
+                        else None
+                    )
+                    if actual is not None and (
+                        current_session is None
+                        or current_session.provider_id != actual.provider_id
+                        or current_session.model_id != actual.model_id
+                    ):
+                        session_id = self._ensure_session(
+                            conversation_id,
+                            provider_id=actual.provider_id,
+                            model=actual.model_id,
+                        )
+                    chunk = item.chunk
+                else:
+                    chunk = item
+                self._raise_if_cancelled(
+                    cancellation, conversation_id, generation, self._generations
+                )
                 content += chunk.content
                 yield ConversationUpdate(
                     conversation_id=conversation_id,
@@ -90,18 +227,61 @@ class ConversationService:
                     content=chunk.content,
                     done=chunk.done,
                 )
-            self._raise_if_cancelled(cancellation)
+            self._raise_if_cancelled(cancellation, conversation_id, generation, self._generations)
+            if session_id is not None and self._session_store is not None:
+                self._session_store.mark_synchronized(session_id, True)
+                self._session_store.record_usage(session_id, max(1, len(content) // 4))
         finally:
-            self._cancellations.pop(conversation_id, None)
-        messages.append(
-            ChatMessage(
-                id=assistant_id,
-                conversation_id=conversation_id,
-                role=MessageRole.ASSISTANT,
-                content=content,
-                created_at=datetime.now(UTC),
+            if self._cancellations.get(conversation_id) is cancellation:
+                self._cancellations.pop(conversation_id, None)
+        if generation == self._generations.get(conversation_id):
+            messages.append(
+                ChatMessage(
+                    id=assistant_id,
+                    conversation_id=conversation_id,
+                    role=MessageRole.ASSISTANT,
+                    content=content,
+                    created_at=datetime.now(UTC),
+                )
             )
-        )
+
+    def _ensure_session(
+        self,
+        conversation_id: UUID,
+        *,
+        provider_id: str | None = None,
+        model: str | None = None,
+    ) -> UUID | None:
+        if self._session_store is None:
+            return None
+        provider_id = provider_id or self._provider_id
+        model = model or self._model
+        session_id = self._sessions.get(conversation_id)
+        if session_id is None:
+            session = self._session_store.create(
+                self._session_type,
+                provider_id,
+                model,
+                context_metadata=(("conversation_id", str(conversation_id)),),
+            )
+            self._sessions[conversation_id] = session.session_id
+            return session.session_id
+        current = self._session_store.get(session_id)
+        if current is not None and (
+            current.provider_id != provider_id or current.model_id != model
+        ):
+            replacement = self._session_store.change_route(session_id, provider_id, model)
+            self._sessions[conversation_id] = replacement.session_id
+            return replacement.session_id
+        if current is None or current.archived or not current.synchronized:
+            replacement = (
+                self._session_store.rebuild(session_id)
+                if current
+                else self._session_store.create(self._session_type, provider_id, model)
+            )
+            self._sessions[conversation_id] = replacement.session_id
+            return replacement.session_id
+        return session_id
 
     def _within_context(self, messages: list[ChatMessage]) -> tuple[ChatMessage, ...]:
         """Bound request size conservatively until tokenization becomes provider-aware."""
@@ -128,6 +308,11 @@ class ConversationService:
         )
 
     @staticmethod
-    def _raise_if_cancelled(cancellation: threading.Event) -> None:
-        if cancellation.is_set():
+    def _raise_if_cancelled(
+        cancellation: threading.Event,
+        conversation_id: UUID,
+        generation: int,
+        generations: dict[UUID, int],
+    ) -> None:
+        if cancellation.is_set() or generation != generations.get(conversation_id):
             raise ConversationCancelledError("Assistant response was cancelled")

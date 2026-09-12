@@ -9,6 +9,8 @@ from uuid import UUID
 
 from pydantic import BaseModel
 
+from jarvis.permissions.models import AuthorizationReceipt, Permission
+
 
 class ToolResultStatus(StrEnum):
     """All outcomes a tool may return across the stable execution boundary."""
@@ -21,6 +23,15 @@ class ToolResultStatus(StrEnum):
     VALIDATION_ERROR = "validation_error"
     CANCELLED = "cancelled"
     INTERNAL_FAILURE = "internal_failure"
+    UNKNOWN_OUTCOME = "unknown_outcome"
+
+
+class ToolEffectDisposition(StrEnum):
+    """Trusted provider knowledge about whether an external effect began."""
+
+    NO_EFFECT = "no_effect"
+    CONFIRMED_EFFECT = "confirmed_effect"
+    UNKNOWN = "unknown"
 
 
 class ToolHealthStatus(StrEnum):
@@ -46,15 +57,6 @@ class ToolCaller(StrEnum):
     AGENT = "agent"
     USER_INTERFACE = "user_interface"
     TEST = "test"
-
-
-class ToolPermission(StrEnum):
-    """Permission labels declared by tools; Phase 3 tools require none."""
-
-    NETWORK = "network"
-    FILESYSTEM_READ = "filesystem_read"
-    FILESYSTEM_WRITE = "filesystem_write"
-    COMPUTER_CONTROL = "computer_control"
 
 
 class ToolPlatform(StrEnum):
@@ -88,7 +90,7 @@ class ToolManifest:
     capability_tags: frozenset[str]
     input_schema: type[BaseModel]
     output_schema: type[BaseModel]
-    declared_permissions: frozenset[ToolPermission]
+    declared_permissions: frozenset[Permission]
     supported_platforms: frozenset[ToolPlatform]
     timeout_seconds: float
     implementation_id: str | None = None
@@ -112,18 +114,6 @@ class ToolHealth:
 
 
 @dataclass(frozen=True, slots=True)
-class PermissionContext:
-    """Explicit placeholder for future permission-broker decisions."""
-
-    granted: frozenset[ToolPermission] = frozenset()
-
-    def allows(self, permissions: frozenset[ToolPermission]) -> bool:
-        """Return whether all declared permissions were explicitly granted."""
-
-        return permissions.issubset(self.granted)
-
-
-@dataclass(frozen=True, slots=True)
 class ToolExecutionContext:
     """Minimal context supplied to tools; never an application service container."""
 
@@ -131,8 +121,9 @@ class ToolExecutionContext:
     correlation_id: UUID
     caller: ToolCaller
     cancellation: asyncio.Event
-    permissions: PermissionContext
     logger: logging.Logger
+    user_id: str | None = None
+    authorization: AuthorizationReceipt | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -168,6 +159,7 @@ class ToolResult:
     error: ToolResultError | None = None
     evidence: tuple[ToolEvidence, ...] = ()
     metadata: tuple[ToolMetadata, ...] = ()
+    effect_disposition: ToolEffectDisposition = ToolEffectDisposition.UNKNOWN
 
     @property
     def succeeded(self) -> bool:
@@ -183,7 +175,13 @@ class ToolResult:
         evidence: tuple[ToolEvidence, ...] = (),
         metadata: tuple[ToolMetadata, ...] = (),
     ) -> "ToolResult":
-        return cls(ToolResultStatus.SUCCESS, output=output, evidence=evidence, metadata=metadata)
+        return cls(
+            ToolResultStatus.SUCCESS,
+            output=output,
+            evidence=evidence,
+            metadata=metadata,
+            effect_disposition=ToolEffectDisposition.CONFIRMED_EFFECT,
+        )
 
     @classmethod
     def failure(
@@ -193,11 +191,13 @@ class ToolResult:
         message: str,
         *,
         metadata: tuple[ToolMetadata, ...] = (),
+        effect_disposition: ToolEffectDisposition = ToolEffectDisposition.UNKNOWN,
     ) -> "ToolResult":
         return cls(
             status=status,
             error=ToolResultError(code=code, message=message),
             metadata=metadata,
+            effect_disposition=effect_disposition,
         )
 
 
