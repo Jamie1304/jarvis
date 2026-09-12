@@ -87,7 +87,7 @@ from jarvis.capability_opportunities import (
     OpportunityPreparationState,
     SQLiteOpportunityStore,
 )
-from jarvis.component_doctor import ComponentDoctor, RoutedRepairResearch
+from jarvis.component_doctor import BrokeredRepairAuthorizer, ComponentDoctor, RoutedRepairResearch
 from jarvis.control_center import (
     ControlCenterContribution,
     ControlCenterItem,
@@ -194,7 +194,14 @@ from jarvis.permissions import (
     SQLiteAuditSink,
     TrustedApprovalAuthenticator,
 )
-from jarvis.permissions.models import ApprovalSource, Permission, Risk
+from jarvis.permissions.models import (
+    ApprovalSource,
+    Decision,
+    Permission,
+    PolicyRule,
+    Risk,
+    ScopeConstraint,
+)
 from jarvis.planning.engine import (
     BrokeredPlanningStepExecutor,
     CompletionCriteriaVerifier,
@@ -245,7 +252,7 @@ from jarvis.recovery import (
     TrustedRecoveryAuthority,
     compute_application_build_hash,
 )
-from jarvis.repair_state import RepairCaseStatus, RepairStoreError, SQLiteRepairStore
+from jarvis.repair_state import RepairCase, RepairCaseStatus, RepairStoreError, SQLiteRepairStore
 from jarvis.resources import ResourceGovernor, SystemResourceTelemetry
 from jarvis.sandbox_proxies import HostProxy, HostProxyAudit, HostProxyManifest
 from jarvis.security import (
@@ -1357,6 +1364,15 @@ class ApplicationRuntime:
             )
             if not isinstance(policy, PolicyEngine):
                 raise ConfigurationError("Trusted permission policy is malformed")
+            policy = policy.with_additional_rules(
+                PolicyRule(
+                    "jarvis.repair.authority",
+                    Permission.REPAIR_EXECUTE,
+                    Decision.REQUIRE_APPROVAL,
+                    ScopeConstraint(tools=frozenset({"repair.authority"})),
+                    frozenset({"repair.execute"}),
+                )
+            )
             desktop_approval_authenticator = TrustedApprovalAuthenticator(ApprovalSource.TRUSTED_UI)
             broker = PermissionBroker(
                 policy,
@@ -1439,6 +1455,10 @@ class ApplicationRuntime:
                 principal_id="desktop-local-user",
                 source=ActorContextSource.LOCAL_DESKTOP_SESSION,
                 display_label="Local Desktop",
+            )
+            repair_authorizer = BrokeredRepairAuthorizer(
+                broker,
+                user_id=actor_context.principal_id,
             )
             persona_kernel = PersonaKernel(user_model_store)
             knowledge_library = KnowledgeLibrary(paths.knowledge_library_database)
@@ -2038,10 +2058,21 @@ class ApplicationRuntime:
             repair_store = SQLiteRepairStore(
                 paths.workflow_procedure_database.with_name("repair.sqlite3")
             )
+
+            async def observe_repair_case(case: RepairCase) -> None:
+                try:
+                    procedure_learning.observe_repair_case(repair_store, case.case_id)
+                except Exception:
+                    # Learning is a bounded projection and never becomes
+                    # repair authority or a reason to replay an effect.
+                    return
+
             component_doctor = ComponentDoctor(
                 capability_health,
                 repair_store=repair_store,
                 research=RoutedRepairResearch(inference_dispatcher),
+                repair_authorizer=repair_authorizer,
+                repair_observer=observe_repair_case,
             )
             capability_health.bind_canonical_repair(component_doctor.repair_from_health)
             presence_projection = PresenceProjection(events)

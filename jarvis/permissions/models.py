@@ -79,6 +79,7 @@ class Permission(StrEnum):
     NETWORK_REQUEST = "network.request"
     CODE_MODIFY = "code.modify"
     SYSTEM_POWER = "system.power"
+    REPAIR_EXECUTE = "repair.execute"
 
 
 class Decision(StrEnum):

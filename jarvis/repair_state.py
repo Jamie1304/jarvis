@@ -102,6 +102,7 @@ class RepairCase:
     fallback: str | None = None
     terminal_reason: str | None = None
     updated_at: datetime | None = None
+    failure_observation_id: str | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.case_id, UUID):
@@ -126,6 +127,7 @@ class RepairCase:
             (self.verification_reference, "verification reference"),
             (self.fallback, "fallback"),
             (self.terminal_reason, "terminal reason"),
+            (self.failure_observation_id, "failure observation ID"),
         ):
             if value is not None:
                 _text(value, name, 2_000)
@@ -183,7 +185,7 @@ def repair_case_key(
 class SQLiteRepairStore:
     """Bounded SQLite owner for repair cases and factual attempt history."""
 
-    _SCHEMA_VERSION = 1
+    _SCHEMA_VERSION = 2
 
     def __init__(self, path: Path) -> None:
         if not isinstance(path, Path):
@@ -250,6 +252,7 @@ class SQLiteRepairStore:
                     verification_reference TEXT,
                     fallback TEXT,
                     terminal_reason TEXT,
+                    failure_observation_id TEXT,
                     updated_at TEXT NOT NULL
                 );
                 CREATE INDEX repair_cases_key ON repair_cases(case_key, updated_at, case_id);
@@ -268,10 +271,23 @@ class SQLiteRepairStore:
             )
             self._conn.execute(
                 "INSERT INTO repair_schema(version, name) VALUES (?, ?)",
-                (self._SCHEMA_VERSION, "repair-cases-v1"),
+                (self._SCHEMA_VERSION, "repair-cases-v2"),
             )
             self._conn.commit()
-        elif versions.get(1) != "repair-cases-v1":
+        elif versions.get(1) == "repair-cases-v1" and 2 not in versions:
+            try:
+                self._conn.execute(
+                    "ALTER TABLE repair_cases ADD COLUMN failure_observation_id TEXT"
+                )
+                self._conn.execute(
+                    "INSERT INTO repair_schema(version, name) VALUES (?, ?)",
+                    (2, "repair-cases-v2"),
+                )
+                self._conn.commit()
+            except sqlite3.DatabaseError as error:
+                self._conn.rollback()
+                raise RepairStoreError("Repair store migration failed") from error
+        elif versions.get(2) != "repair-cases-v2":
             raise RepairStoreError("Repair store migration identity mismatch")
 
     def _integrity_check(self) -> None:
@@ -288,8 +304,11 @@ class SQLiteRepairStore:
         component_version: str | None,
         attempt_budget: int,
         now: datetime,
+        failure_observation_id: str | None = None,
     ) -> tuple[RepairCase, bool]:
         key = repair_case_key(component_id, owner, failure_code, component_version)
+        if failure_observation_id is not None:
+            failure_observation_id = _text(failure_observation_id, "failure observation ID", 256)
         with self._lock:
             row = self._conn.execute(
                 "SELECT * FROM repair_cases WHERE case_key=? "
@@ -298,7 +317,15 @@ class SQLiteRepairStore:
             ).fetchone()
             if row is not None:
                 existing = self._case(row)
-                if existing.status in _ACTIVE or existing.status is RepairCaseStatus.QUARANTINED:
+                if existing.status in _ACTIVE:
+                    return existing, False
+                if existing.status is RepairCaseStatus.QUARANTINED:
+                    if existing.failure_observation_id == failure_observation_id:
+                        return existing, False
+                elif (
+                    existing.failure_observation_id == failure_observation_id
+                    or failure_observation_id is None
+                ):
                     return existing, False
             case = RepairCase(
                 uuid4(),
@@ -310,6 +337,7 @@ class SQLiteRepairStore:
                 now,
                 RepairCaseStatus.DIAGNOSIS_PENDING,
                 attempt_budget,
+                failure_observation_id=failure_observation_id,
             )
             self._write_case(case)
             return case, True
@@ -430,17 +458,31 @@ class SQLiteRepairStore:
 
     def close(self) -> None:
         with self._lock:
-            self._conn.close()
+            if self._connection is not None:
+                self._connection.close()
+                self._connection = None
 
     def _write_case(self, case: RepairCase) -> None:
         try:
             self._conn.execute(
-                "INSERT OR REPLACE INTO repair_cases "
+                "INSERT INTO repair_cases "
                 "(case_id, case_key, component_id, owner, failure_code, component_version, "
                 "opened_at, status, "
                 "attempt_budget, attempt_count, latest_diagnosis, selected_action, effect_outcome, "
-                "verification_reference, fallback, terminal_reason, updated_at) VALUES "
-                "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "verification_reference, fallback, terminal_reason, failure_observation_id, "
+                "updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(case_id) DO UPDATE SET "
+                "case_key=excluded.case_key, component_id=excluded.component_id, "
+                "owner=excluded.owner, failure_code=excluded.failure_code, "
+                "component_version=excluded.component_version, opened_at=excluded.opened_at, "
+                "status=excluded.status, attempt_budget=excluded.attempt_budget, "
+                "attempt_count=excluded.attempt_count, latest_diagnosis=excluded.latest_diagnosis, "
+                "selected_action=excluded.selected_action, effect_outcome=excluded.effect_outcome, "
+                "verification_reference=excluded.verification_reference, "
+                "fallback=excluded.fallback, "
+                "terminal_reason=excluded.terminal_reason, "
+                "failure_observation_id=excluded.failure_observation_id, "
+                "updated_at=excluded.updated_at",
                 (
                     str(case.case_id),
                     case.case_key,
@@ -458,6 +500,7 @@ class SQLiteRepairStore:
                     case.verification_reference,
                     case.fallback,
                     case.terminal_reason,
+                    case.failure_observation_id,
                     _iso(case.updated_at or case.opened_at),
                 ),
             )
@@ -489,6 +532,9 @@ class SQLiteRepairStore:
                 None if row["fallback"] is None else str(row["fallback"]),
                 None if row["terminal_reason"] is None else str(row["terminal_reason"]),
                 _parse_time(row["updated_at"], "updated_at"),
+                None
+                if row["failure_observation_id"] is None
+                else str(row["failure_observation_id"]),
             )
         except (KeyError, TypeError, ValueError, RepairStoreError) as error:
             if isinstance(error, RepairStoreError):

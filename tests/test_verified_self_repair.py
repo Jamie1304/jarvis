@@ -324,7 +324,9 @@ async def test_failed_repair_uses_safe_fallback_and_never_reports_healthy(tmp_pa
     doctor.register_fallback(
         "synthetic.component",
         FallbackOption("degrade", "Text-only mode remains available"),
-        lambda _problem: True,
+        lambda _problem: RepairExecution(
+            RepairEffectOutcome.EFFECT_CONFIRMED, True, "fallback applied"
+        ),
     )
     result = await doctor.run(_problem())
     assert result.status is DoctorStatus.DEGRADED
@@ -336,56 +338,106 @@ async def test_failed_repair_uses_safe_fallback_and_never_reports_healthy(tmp_pa
 
 def test_procedure_reliability_is_signed_sanitized_and_restart_safe(tmp_path: Path) -> None:
     store = SQLiteWorkflowProcedureStore(tmp_path / "workflow.sqlite3")
+    repair_store = SQLiteRepairStore(tmp_path / "repair.sqlite3")
     authority = ProcedureEvidenceAuthority(cast(PlanningStore, object()))
     bank = ProcedureBank(store=store, evidence_authority=authority)
-    verified = VerificationResult(
-        "synthetic repair",
-        VerificationLevel.AUTOMATED_TESTED,
-        True,
-        VerificationDisposition.COMPLETE,
-    )
-    first = authority.issue_reliability(
-        "repair.synthetic",
+
+    def terminal_case(
+        observation_id: str,
+        status: RepairCaseStatus,
+        outcome: str,
+        attempt_state: str,
+    ) -> RepairCase:
+        case, created = repair_store.open_case(
+            component_id="synthetic.component",
+            owner="capability",
+            failure_code="synthetic.failure",
+            component_version=None,
+            attempt_budget=2,
+            now=NOW,
+            failure_observation_id=observation_id,
+        )
+        assert created
+        case = replace(
+            case,
+            status=status,
+            attempt_count=1,
+            selected_action="repair",
+            effect_outcome=outcome,
+            verification_reference=(
+                "fresh-probe" if status is RepairCaseStatus.VERIFIED_REPAIRED else None
+            ),
+        )
+        repair_store.save_case(case)
+        repair_store.save_attempt(
+            RepairAttemptRecord(
+                case.case_id,
+                1,
+                attempt_state,
+                outcome,
+                "durable test evidence",
+                NOW,
+                NOW,
+                case.verification_reference,
+            )
+        )
+        return case
+
+    first_case = terminal_case(
         "success-1",
-        EffectOutcome.EFFECT_CONFIRMED,
-        verification=verified,
-        compatibility_key="v1",
+        RepairCaseStatus.VERIFIED_REPAIRED,
+        EffectOutcome.EFFECT_CONFIRMED.value,
+        "verified",
+    )
+    first = authority.issue_reliability_from_repair(
+        repair_store, first_case.case_id, compatibility_key="v1"
     )
     assert bank.record_reliability(first) is not None
     first_projection = bank.record_reliability(first)
     assert first_projection is not None
     assert first_projection.verified_successes == 1
-    second = authority.issue_reliability(
-        "repair.synthetic",
+    second_case = terminal_case(
         "success-2",
-        EffectOutcome.EFFECT_CONFIRMED,
-        verification=verified,
-        compatibility_key="v1",
+        RepairCaseStatus.VERIFIED_REPAIRED,
+        EffectOutcome.EFFECT_CONFIRMED.value,
+        "verified",
+    )
+    second = authority.issue_reliability_from_repair(
+        repair_store, second_case.case_id, compatibility_key="v1"
     )
     projection = bank.record_reliability(second)
     assert projection is not None
     assert projection.sample_sufficient
-    failure = authority.issue_reliability(
-        "repair.synthetic", "failure-1", EffectOutcome.PRE_EFFECT_FAILURE
+    failure_case = terminal_case(
+        "failure-1",
+        RepairCaseStatus.FAILED,
+        EffectOutcome.PRE_EFFECT_FAILURE.value,
+        "failed",
     )
+    failure = authority.issue_reliability_from_repair(repair_store, failure_case.case_id)
     failure_projection = bank.record_reliability(failure)
     assert failure_projection is not None
     assert failure_projection.verified_failures == 1
-    unknown = authority.issue_reliability(
-        "repair.synthetic", "unknown-1", EffectOutcome.UNKNOWN_OUTCOME
+    unknown_case = terminal_case(
+        "unknown-1",
+        RepairCaseStatus.QUARANTINED,
+        EffectOutcome.UNKNOWN_OUTCOME.value,
+        "unknown_outcome",
     )
+    unknown = authority.issue_reliability_from_repair(repair_store, unknown_case.case_id)
     unknown_projection = bank.record_reliability(unknown)
     assert unknown_projection is not None
     assert unknown_projection.status is ProcedureReliabilityStatus.UNKNOWN
-    drifted = bank.mark_dependency_drift("repair.synthetic", "v2-incompatible")
+    drifted = bank.mark_dependency_drift("repair:synthetic.component:repair", "v2-incompatible")
     assert drifted.status is ProcedureReliabilityStatus.REVALIDATION_REQUIRED
     store.close()
     restarted_store = SQLiteWorkflowProcedureStore(tmp_path / "workflow.sqlite3")
     restarted = ProcedureBank(store=restarted_store, evidence_authority=authority)
-    restarted_projection = restarted.reliability("repair.synthetic")
+    restarted_projection = restarted.reliability("repair:synthetic.component:repair")
     assert restarted_projection is not None
     assert restarted_projection.verified_successes == 2
     restarted_store.close()
+    repair_store.close()
 
 
 def test_repair_store_rejects_future_schema(tmp_path: Path) -> None:
@@ -609,7 +661,9 @@ def test_component_doctor_rejects_untrusted_bindings_and_bad_inputs(tmp_path: Pa
     with pytest.raises(Exception, match="already bound"):
         doctor.register_verifier("synthetic.component", "repair", lambda _p, _a, _e: True)
     with pytest.raises(Exception, match="Fallback"):
-        doctor.register_fallback("synthetic.component", cast(Any, object()), lambda _p: True)
+        doctor.register_fallback(
+            "synthetic.component", cast(Any, object()), cast(Any, lambda _p: True)
+        )
     assert doctor.playbooks()
     doctor.close()
 

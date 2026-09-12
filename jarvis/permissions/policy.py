@@ -282,6 +282,11 @@ class PolicyEngine:
             )
         self._rules = tuple(normalized)
 
+    def with_additional_rules(self, *rules: PolicyRule) -> "PolicyEngine":
+        """Return a policy retaining this trusted configuration plus rules."""
+
+        return PolicyEngine(self._rules + tuple(rules))
+
     def evaluate(
         self,
         request: PermissionRequest | object,

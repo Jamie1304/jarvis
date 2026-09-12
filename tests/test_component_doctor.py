@@ -4,7 +4,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import replace
 from datetime import UTC, datetime
 from hashlib import sha256
-from typing import cast
+from typing import Any, cast
 from uuid import UUID, uuid4
 
 import pytest
@@ -121,7 +121,7 @@ async def test_known_repair_runs_owner_probe_and_verification() -> None:
     assert result.signature is not None
     assert result.probes[0].passed
     assert result.attempts[0].state is RepairAttemptState.VERIFIED
-    assert probe_calls == ["fixture.component"]
+    assert probe_calls == ["fixture.component", "fixture.component"]
     assert action_calls == ["restart"]
 
 
@@ -163,12 +163,14 @@ async def test_failed_repair_degrades_to_declared_safe_fallback() -> None:
     service.register_fallback(
         "fixture.component",
         FallbackOption("ptt", "Push-to-talk remains available"),
-        lambda _item: True,
+        lambda _item: RepairExecution(
+            RepairEffectOutcome.EFFECT_CONFIRMED, True, "fallback applied"
+        ),
     )
     result = await service.run(problem())
     assert result.status is DoctorStatus.DEGRADED
     assert result.fallback_id == "ptt"
-    assert len(result.attempts) == 2
+    assert len(result.attempts) == 3
     assert calls == ["restart", "restart"]
 
 
@@ -230,8 +232,8 @@ async def test_capability_crash_is_isolated_and_marks_only_component_unavailable
 
     service.register_action("fixture.component", "restart", crashing_callback)
     result = await service.run(problem())
-    assert result.status is DoctorStatus.FAILED
-    assert service._health.health("fixture.component").status is HealthStatus.UNAVAILABLE
+    assert result.status is DoctorStatus.QUARANTINED
+    assert service._health.health("fixture.component").status is HealthStatus.QUARANTINED
 
 
 def test_ownership_and_security_rules_reject_cross_owner_or_unsafe_actions() -> None:
@@ -504,25 +506,27 @@ def test_registration_rejects_duplicate_or_undeclared_bindings() -> None:
         service.register_fallback(
             "fixture.component",
             FallbackOption("unknown", "Unknown"),
-            lambda _item: True,
+            cast(Any, lambda _item: True),
         )
     with pytest.raises(ComponentDoctorSecurityError):
         service.register_fallback(
             "fixture.component",
             FallbackOption("fallback", "Fallback"),
-            lambda _item: True,
+            cast(Any, lambda _item: True),
             owner=DiagnosticOwner.PROVIDER,
         )
     service.register_fallback(
         "fixture.component",
         FallbackOption("fallback", "Fallback"),
-        lambda _item: True,
+        lambda _item: RepairExecution(
+            RepairEffectOutcome.EFFECT_CONFIRMED, True, "fallback applied"
+        ),
     )
     with pytest.raises(ComponentDoctorError):
         service.register_fallback(
             "fixture.component",
             FallbackOption("fallback", "Fallback"),
-            lambda _item: True,
+            cast(Any, lambda _item: True),
         )
     with pytest.raises(ComponentDoctorError):
         service.owner_for("missing.component")
@@ -589,7 +593,9 @@ async def test_doctor_research_validation_and_fallback_boundaries() -> None:
     approval_fallback.register_fallback(
         "fixture.component",
         FallbackOption("text", "Text-only", requires_approval=True),
-        lambda _item: True,
+        lambda _item: RepairExecution(
+            RepairEffectOutcome.EFFECT_CONFIRMED, True, "fallback applied"
+        ),
     )
     result = await approval_fallback.run(problem("unrecognized"))
     assert result.status is DoctorStatus.PERMISSION_REQUIRED
@@ -615,7 +621,7 @@ async def test_doctor_isolates_probe_callback_and_malformed_repair_results() -> 
         lambda _item, _action: cast(RepairExecution, object()),
     )
     result = await service.run(problem())
-    assert result.status is DoctorStatus.FAILED
+    assert result.status is DoctorStatus.QUARANTINED
     assert result.probes[0].passed is False
 
     fallback_error = ComponentDoctor(CapabilityHealthService(clock=lambda: NOW), clock=lambda: NOW)
@@ -626,5 +632,5 @@ async def test_doctor_isolates_probe_callback_and_malformed_repair_results() -> 
         lambda _item: (_ for _ in ()).throw(RuntimeError("fallback crashed")),
     )
     result = await fallback_error.run(problem())
-    assert result.status is DoctorStatus.FAILED
+    assert result.status is DoctorStatus.QUARANTINED
     await fallback_error.aclose()

@@ -24,6 +24,7 @@ from uuid import UUID, uuid4, uuid5
 from jarvis.planning.models import EffectOutcome, OwnedPlan
 from jarvis.planning.store import PlanningStore
 from jarvis.planning.validation import PlanProposal, PlanValidator, ProposedStep
+from jarvis.repair_state import RepairCaseStatus, RepairStoreError, SQLiteRepairStore
 from jarvis.skills import SkillContextRequirements
 from jarvis.tools.models import SemanticVersion
 from jarvis.verification import VerificationLevel, VerificationResult
@@ -1030,30 +1031,89 @@ class ProcedureEvidenceAuthority:
         compatibility_key: str | None = None,
         verification: VerificationResult | None = None,
     ) -> TrustedProcedureReliability:
-        """Issue a process-local token from trusted application facts.
+        del method_key, verification_id, outcome, compatibility_key, verification
+        raise WorkflowTemplateError(
+            "Reliability issuance requires durable canonical repair evidence"
+        )
 
-        The token is intentionally not a cross-restart authority.  The bank
-        stores only the sanitized reliability projection; a new process must
-        obtain fresh trusted evidence before adding another fact.
-        """
+    def issue_reliability_from_repair(
+        self,
+        repair_store: SQLiteRepairStore,
+        case_id: UUID,
+        *,
+        method_key: str | None = None,
+        compatibility_key: str | None = None,
+    ) -> TrustedProcedureReliability:
+        """Mint reliability only from a durable terminal repair record."""
 
-        if not isinstance(outcome, EffectOutcome):
-            raise WorkflowTemplateError("Reliability outcome is malformed")
-        if outcome is EffectOutcome.EFFECT_CONFIRMED and (
-            verification is None
-            or not verification.passed
-            or verification.contradictions
-            or verification.stale_evidence
-            or verification.rejected_model_claims
+        if not isinstance(repair_store, SQLiteRepairStore) or not isinstance(case_id, UUID):
+            raise WorkflowTemplateError("Durable repair evidence input is malformed")
+        try:
+            case = repair_store.load(case_id)
+            attempts = repair_store.attempts(case_id)
+        except RepairStoreError as error:
+            raise WorkflowTemplateError("Durable repair evidence is unavailable") from error
+        if (
+            case is None
+            or not attempts
+            or case.status
+            not in {
+                RepairCaseStatus.VERIFIED_REPAIRED,
+                RepairCaseStatus.DEGRADED_FALLBACK,
+                RepairCaseStatus.FAILED,
+                RepairCaseStatus.QUARANTINED,
+            }
         ):
-            raise WorkflowTemplateError("Successful reliability needs independent verification")
-        _bounded(method_key, "Reliability method", 256)
-        _bounded(verification_id, "Reliability verification ID", 128)
+            raise WorkflowTemplateError("Reliability requires terminal repair evidence")
+        latest = attempts[-1]
+        if latest.number != case.attempt_count and case.attempt_count:
+            raise WorkflowTemplateError("Repair evidence attempt is not the durable latest attempt")
+        if case.status in {
+            RepairCaseStatus.VERIFIED_REPAIRED,
+            RepairCaseStatus.DEGRADED_FALLBACK,
+        }:
+            if case.effect_outcome != EffectOutcome.EFFECT_CONFIRMED.value:
+                raise WorkflowTemplateError("Successful repair lacks a confirmed durable effect")
+            if case.selected_action is None:
+                raise WorkflowTemplateError("Successful repair lacks a canonical action")
+            if (
+                case.status is RepairCaseStatus.VERIFIED_REPAIRED
+                and not case.verification_reference
+            ):
+                raise WorkflowTemplateError("Verified repair lacks durable verification reference")
+            if latest.outcome != EffectOutcome.EFFECT_CONFIRMED.value or latest.state not in {
+                "verified",
+                "degraded",
+            }:
+                raise WorkflowTemplateError("Successful repair lacks a terminal verified attempt")
+            outcome = EffectOutcome.EFFECT_CONFIRMED
+        elif case.status is RepairCaseStatus.QUARANTINED:
+            if case.effect_outcome != EffectOutcome.UNKNOWN_OUTCOME.value:
+                raise WorkflowTemplateError("Quarantined repair lacks an unknown durable outcome")
+            if latest.outcome != EffectOutcome.UNKNOWN_OUTCOME.value:
+                raise WorkflowTemplateError("Quarantined repair lacks an unknown terminal attempt")
+            outcome = EffectOutcome.UNKNOWN_OUTCOME
+        elif latest.outcome in {
+            EffectOutcome.PRE_EFFECT_FAILURE.value,
+            EffectOutcome.SAFE_TO_RETRY.value,
+        }:
+            outcome = EffectOutcome(latest.outcome)
+        else:
+            raise WorkflowTemplateError("Failed repair lacks a trusted retryable failure attempt")
+        derived_method = (
+            f"repair:{case.component_id}:{case.selected_action or case.fallback or 'unknown'}"
+        )
+        if method_key is not None and method_key != derived_method:
+            raise WorkflowTemplateError("Repair reliability method is not canonical")
+        _bounded(derived_method, "Reliability method", 256)
+        if compatibility_key is not None:
+            _bounded(compatibility_key, "Reliability compatibility", 256)
+        verification_id = f"repair:{case.case_id}:{latest.number}"
         issued = TrustedProcedureReliability(
             verification_id,
-            method_key,
+            derived_method,
             outcome,
-            _utc_now(),
+            latest.finished_at or latest.started_at,
             compatibility_key,
             b"0" * hashlib.sha256().digest_size,
         )
@@ -1141,6 +1201,10 @@ class ProcedureBank:
             for reliability in store.list_reliability():
                 self._reliability[reliability.method_key] = reliability
                 self._reliability_evidence_ids.update(reliability.evidence_ids)
+
+    @property
+    def evidence_authority(self) -> ProcedureEvidenceValidator | None:
+        return self._evidence_authority
 
     def observe(self, observation: ProcedureObservation) -> RoutineCandidate | None:
         # Legacy boolean flags remain accepted as inert input for compatibility.
@@ -1411,6 +1475,25 @@ class ProcedureLearningService:
     ) -> ProcedureReliability | None:
         if not isinstance(evidence, TrustedProcedureReliability):
             raise WorkflowTemplateError("Procedure reliability evidence is malformed")
+        return self._bank.record_reliability(evidence)
+
+    def observe_repair_case(
+        self,
+        repair_store: SQLiteRepairStore,
+        case_id: UUID,
+        *,
+        compatibility_key: str | None = None,
+    ) -> ProcedureReliability | None:
+        """Project only terminal facts validated by the durable repair owner."""
+
+        authority = self._bank.evidence_authority
+        if not isinstance(authority, ProcedureEvidenceAuthority):
+            raise WorkflowTemplateError("Procedure evidence authority is unavailable")
+        evidence = authority.issue_reliability_from_repair(
+            repair_store,
+            case_id,
+            compatibility_key=compatibility_key,
+        )
         return self._bank.record_reliability(evidence)
 
 

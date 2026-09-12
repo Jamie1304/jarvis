@@ -41,6 +41,15 @@ from jarvis.integration_package import (
     IntegrationPackage,
     SafeRepairAction,
 )
+from jarvis.permissions.broker import PermissionBroker
+from jarvis.permissions.models import (
+    ActionDescriptor,
+    Permission,
+    PermissionRequest,
+    PermissionScope,
+    Risk,
+    SafeArgument,
+)
 from jarvis.repair_state import (
     RepairAttemptRecord,
     RepairCase,
@@ -93,6 +102,7 @@ class RepairAttemptState(StrEnum):
     PROPOSED = "proposed"
     PERMISSION_REQUIRED = "permission_required"
     APPLYING = "applying"
+    VERIFICATION_PENDING = "verification_pending"
     VERIFIED = "verified"
     FAILED = "failed"
     UNKNOWN_OUTCOME = "unknown_outcome"
@@ -150,6 +160,7 @@ class ComponentProblem:
     evidence: tuple[str, ...] = ()
     occurred_at: datetime = field(default_factory=lambda: datetime.now(UTC))
     component_version: str | None = None
+    failure_observation_id: str | None = None
 
     def __post_init__(self) -> None:
         _text(self.component_id, "Component ID", 256)
@@ -160,6 +171,8 @@ class ComponentProblem:
             _text(self.failure_code, "Failure code", 256)
         if self.component_version is not None:
             _text(self.component_version, "Component version", 256)
+        if self.failure_observation_id is not None:
+            _text(self.failure_observation_id, "Failure observation ID", 256)
         if not isinstance(self.health_status, HealthStatus):
             raise ComponentDoctorError("Problem health status is malformed")
         source = _text(self.source, "Problem source", 256).casefold()
@@ -392,11 +405,15 @@ ProbeCallback = Callable[
 RepairCallback = Callable[
     [ComponentProblem, RepairAction], RepairExecution | Awaitable[RepairExecution]
 ]
-FallbackCallback = Callable[[ComponentProblem], bool | Awaitable[bool]]
+FallbackCallback = Callable[[ComponentProblem], RepairExecution | Awaitable[RepairExecution]]
 ResearchCallback = Callable[
     [ComponentProblem], RepairCandidate | None | Awaitable[RepairCandidate | None]
 ]
 AuthorizationCallback = Callable[[ComponentProblem, RepairAction], bool | Awaitable[bool]]
+RepairAuthorizationCallback = Callable[
+    [ComponentProblem, RepairAction, UUID], bool | Awaitable[bool]
+]
+RepairObservationCallback = Callable[[RepairCase], object | Awaitable[object]]
 IndependentVerificationCallback = Callable[
     [ComponentProblem, RepairAction, RepairExecution],
     VerificationResult | bool | str | Awaitable[VerificationResult | bool | str],
@@ -458,6 +475,53 @@ class RoutedRepairResearch:
             return None
 
 
+class BrokeredRepairAuthorizer:
+    """Application-owned repair authority adapter backed by PermissionBroker."""
+
+    def __init__(self, broker: PermissionBroker, *, user_id: str | None) -> None:
+        if not isinstance(broker, PermissionBroker) or not isinstance(user_id, str) or not user_id:
+            raise ComponentDoctorError("Repair broker authority context is malformed")
+        self._broker = broker
+        self._user_id = user_id
+        self._identity = object()
+        self._declared = frozenset({Permission.REPAIR_EXECUTE})
+        broker.register_tool("repair.authority", self._identity, self._declared)
+
+    async def __call__(
+        self, problem: ComponentProblem, action: RepairAction, case_id: UUID
+    ) -> bool:
+        if not isinstance(problem, ComponentProblem) or not isinstance(action, RepairAction):
+            return False
+        arguments = {
+            "case_id": str(case_id),
+            "component_id": problem.component_id,
+            "failure_code": problem.failure_code or "<none>",
+            "component_version": problem.component_version or "<none>",
+            "action_id": action.action_id,
+            "required_permissions": ",".join(item.value for item in action.required_permissions),
+        }
+        descriptor = ActionDescriptor(
+            "repair.execute",
+            tuple(
+                # The values are trusted, bounded repair facts, not model text.
+                SafeArgument(name, value)
+                for name, value in sorted(arguments.items())
+            ),
+            Risk.HIGH,
+            (PermissionRequest(Permission.REPAIR_EXECUTE, PermissionScope(task_id=case_id)),),
+        )
+        result = await self._broker.authorize(
+            tool_id="repair.authority",
+            tool_identity=self._identity,
+            declared_permissions=self._declared,
+            task_id=case_id,
+            user_id=self._user_id,
+            descriptor=descriptor,
+            normalized_arguments=arguments,
+        )
+        return result.authorized
+
+
 class ComponentDoctor:
     """Route failures to their owner and isolate repair failures."""
 
@@ -472,6 +536,8 @@ class ComponentDoctor:
         max_attempts: int = 2,
         repair_store: SQLiteRepairStore | None = None,
         verifier: IndependentVerificationCallback | None = None,
+        repair_authorizer: RepairAuthorizationCallback | None = None,
+        repair_observer: RepairObservationCallback | None = None,
     ) -> None:
         if not isinstance(health, CapabilityHealthService):
             raise ComponentDoctorError("Capability health service is malformed")
@@ -487,8 +553,14 @@ class ComponentDoctor:
             raise ComponentDoctorError("Repair store is malformed")
         if verifier is not None and not callable(verifier):
             raise ComponentDoctorError("Independent verifier is malformed")
+        if repair_authorizer is not None and not callable(repair_authorizer):
+            raise ComponentDoctorError("Repair authorizer is malformed")
+        if repair_observer is not None and not callable(repair_observer):
+            raise ComponentDoctorError("Repair observer is malformed")
         self._repair_store = repair_store
         self._verifier = verifier
+        self._repair_authorizer = repair_authorizer
+        self._repair_observer = repair_observer
         self._playbooks: dict[str, RepairPlaybook] = {}
         self._probes: dict[tuple[str, str], ProbeCallback] = {}
         self._actions: dict[tuple[str, str], RepairCallback] = {}
@@ -611,10 +683,16 @@ class ComponentDoctor:
                     component_version=problem.component_version,
                     attempt_budget=self._max_attempts,
                     now=self._now(),
+                    failure_observation_id=problem.failure_observation_id,
                 )
             except RepairStoreError as error:
                 raise ComponentDoctorError("Repair persistence is unavailable") from error
-            if not created:
+            if not created and case.status not in {
+                RepairCaseStatus.PERMISSION_REQUIRED,
+                RepairCaseStatus.DIAGNOSIS_PENDING,
+                RepairCaseStatus.AUTHORITY_PENDING,
+                RepairCaseStatus.VERIFICATION_PENDING,
+            }:
                 return self._result_for_existing_case(problem, case)
         playbook = self._playbooks.get(problem.component_id)
         if playbook is None:
@@ -636,6 +714,9 @@ class ComponentDoctor:
             )
         if playbook.owner is not problem.owner:
             raise ComponentDoctorSecurityError("Problem owner does not own the component")
+
+        if case is not None and case.status is RepairCaseStatus.VERIFICATION_PENDING:
+            return await self._resume_verification(problem, playbook, case)
 
         signature = self._match_signature(playbook, problem)
         probe_results = await self._run_probes(playbook, problem)
@@ -691,7 +772,7 @@ class ComponentDoctor:
                 candidate,
                 case=case,
             )
-        if action.requires_approval and not await self._authorized(problem, action):
+        if action.requires_approval and not await self._authorized(problem, action, case):
             if case is not None:
                 case = self._case_update(
                     case,
@@ -708,6 +789,19 @@ class ComponentDoctor:
                 "Fresh trusted approval is required before repair",
             )
             attempts.append(attempt)
+            if case is not None:
+                assert self._repair_store is not None
+                self._repair_store.save_attempt(
+                    RepairAttemptRecord(
+                        case.case_id,
+                        max(1, case.attempt_count),
+                        RepairAttemptState.PERMISSION_REQUIRED.value,
+                        None,
+                        attempt.detail,
+                        attempt.started_at,
+                        self._now(),
+                    )
+                )
             return self._result(
                 problem,
                 DoctorStatus.PERMISSION_REQUIRED,
@@ -747,22 +841,16 @@ class ComponentDoctor:
                 execution = raw_execution
             except Exception:
                 execution = RepairExecution(
-                    RepairEffectOutcome.PRE_EFFECT_FAILURE,
+                    RepairEffectOutcome.UNKNOWN_OUTCOME,
                     False,
-                    "Trusted repair callback failed",
+                    "Repair callback failed after effect execution began",
                 )
             state = (
-                RepairAttemptState.VERIFIED
-                if (
-                    execution.outcome is RepairEffectOutcome.EFFECT_CONFIRMED
-                    and execution.verified
-                    and self._verification_satisfied(playbook, execution)
-                )
-                else (
-                    RepairAttemptState.UNKNOWN_OUTCOME
-                    if execution.outcome is RepairEffectOutcome.UNKNOWN_OUTCOME
-                    else RepairAttemptState.FAILED
-                )
+                RepairAttemptState.UNKNOWN_OUTCOME
+                if execution.outcome is RepairEffectOutcome.UNKNOWN_OUTCOME
+                else RepairAttemptState.VERIFICATION_PENDING
+                if execution.outcome is RepairEffectOutcome.EFFECT_CONFIRMED
+                else RepairAttemptState.FAILED
             )
             attempts.append(
                 self._attempt(
@@ -776,11 +864,46 @@ class ComponentDoctor:
                 )
             )
             verification_reference: str | None = None
-            if execution.outcome is RepairEffectOutcome.EFFECT_CONFIRMED and execution.verified:
+            if execution.outcome is RepairEffectOutcome.EFFECT_CONFIRMED:
+                if case is not None:
+                    case = self._case_update(
+                        case,
+                        status=RepairCaseStatus.VERIFICATION_PENDING,
+                        effect_outcome=execution.outcome.value,
+                        selected_action=action.action_id,
+                    )
+                    assert self._repair_store is not None
+                    self._repair_store.save_attempt(
+                        RepairAttemptRecord(
+                            case.case_id,
+                            number,
+                            RepairAttemptState.VERIFICATION_PENDING.value,
+                            execution.outcome.value,
+                            execution.detail,
+                            attempts[-1].started_at,
+                            self._now(),
+                        )
+                    )
                 independently_verified, verification_reference = await self._verify_after_repair(
-                    problem, action, execution, probe_results, playbook
+                    problem,
+                    action,
+                    execution,
+                    probe_results,
+                    playbook,
+                    durable=case is not None and self._repair_authorizer is not None,
                 )
-                if not independently_verified:
+                if independently_verified:
+                    state = RepairAttemptState.VERIFIED
+                    attempts[-1] = self._attempt(
+                        problem,
+                        action,
+                        number,
+                        state,
+                        execution.outcome,
+                        execution.detail,
+                        execution.evidence,
+                    )
+                else:
                     state = RepairAttemptState.FAILED
                     attempts[-1] = self._attempt(
                         problem,
@@ -814,6 +937,7 @@ class ComponentDoctor:
                         verification_reference=verification_reference or "trusted-probe",
                         terminal_reason="Independent post-repair verification passed",
                     )
+                    case = await self._observe_terminal(case)
                 await self._safe_health(problem, HealthStatus.HEALTHY, "Repair verified")
                 return self._result(
                     problem,
@@ -835,6 +959,7 @@ class ComponentDoctor:
                         effect_outcome=execution.outcome.value,
                         terminal_reason="Trusted terminal effect outcome is unknown",
                     )
+                    case = await self._observe_terminal(case)
                 await self._safe_health(
                     problem, HealthStatus.QUARANTINED, "Repair outcome is unknown"
                 )
@@ -892,8 +1017,10 @@ class ComponentDoctor:
         problem: ComponentProblem,
         action: RepairAction,
         execution: RepairExecution,
-        initial_probes: tuple[DiagnosticProbeResult, ...],
+        _initial_probes: tuple[DiagnosticProbeResult, ...],
         playbook: RepairPlaybook,
+        *,
+        durable: bool = False,
     ) -> tuple[bool, str | None]:
         verifier = self._verifiers.get((problem.component_id, action.action_id), self._verifier)
         if verifier is not None:
@@ -909,9 +1036,9 @@ class ComponentDoctor:
                     and not result.rejected_model_claims
                 )
                 return passed, f"verification:{result.disposition.value}"
-            if type(result) is bool:
+            if type(result) is bool and not durable:
                 return result, "independent-verifier"
-            if type(result) is str and result.strip():
+            if type(result) is str and result.strip() and not durable:
                 return True, result.strip()[:256]
             return False, "independent-verification-malformed"
 
@@ -920,12 +1047,92 @@ class ComponentDoctor:
         # rescue a failed observation.  New composed repairs bind an explicit
         # verifier (or rerun a previously failing probe) and receive a durable
         # verification reference.
-        if not initial_probes:
-            return False, "independent-verifier-missing"
-        if all(item.passed for item in initial_probes):
-            return True, "trusted-probe-compatibility"
         refreshed = await self._run_probes(playbook, problem)
         return bool(refreshed) and all(item.passed for item in refreshed), "fresh-probe"
+
+    async def _resume_verification(
+        self, problem: ComponentProblem, playbook: RepairPlaybook, case: RepairCase
+    ) -> DoctorResult:
+        """Complete durable verification after restart without replaying effects."""
+
+        if case.selected_action is None:
+            case = self._case_update(
+                case,
+                status=RepairCaseStatus.QUARANTINED,
+                effect_outcome=RepairEffectOutcome.UNKNOWN_OUTCOME.value,
+                terminal_reason="Verification-pending case has no selected action",
+            )
+            case = await self._observe_terminal(case)
+            return self._result_for_existing_case(problem, case)
+        action = self._declared_action(playbook, case.selected_action)
+        execution = RepairExecution(
+            RepairEffectOutcome.EFFECT_CONFIRMED,
+            True,
+            "Resuming durable verification after restart",
+        )
+        passed, reference = await self._verify_after_repair(
+            problem, action, execution, (), playbook, durable=True
+        )
+        number = max(1, case.attempt_count)
+        state = RepairAttemptState.VERIFIED if passed else RepairAttemptState.FAILED
+        attempt = self._attempt(
+            problem,
+            action,
+            number,
+            state,
+            execution.outcome,
+            "Durable post-repair verification passed"
+            if passed
+            else "Durable post-repair verification failed",
+        )
+        if self._repair_store is not None:
+            self._repair_store.save_attempt(
+                RepairAttemptRecord(
+                    case.case_id,
+                    number,
+                    state.value,
+                    execution.outcome.value,
+                    attempt.detail,
+                    attempt.started_at,
+                    self._now(),
+                    reference,
+                )
+            )
+        if passed:
+            case = self._case_update(
+                case,
+                status=RepairCaseStatus.VERIFIED_REPAIRED,
+                effect_outcome=execution.outcome.value,
+                verification_reference=reference or "fresh-probe",
+                terminal_reason="Independent post-repair verification passed after restart",
+            )
+            case = await self._observe_terminal(case)
+            await self._safe_health(problem, HealthStatus.HEALTHY, "Repair verified after restart")
+            status, detail = DoctorStatus.REPAIRED, attempt.detail
+        else:
+            case = self._case_update(
+                case,
+                status=RepairCaseStatus.FAILED,
+                effect_outcome=execution.outcome.value,
+                verification_reference=reference,
+                terminal_reason="Independent post-repair verification failed after restart",
+            )
+            case = await self._observe_terminal(case)
+            detail = case.terminal_reason or "Repair verification failed"
+            await self._safe_health(problem, HealthStatus.UNAVAILABLE, detail)
+            status = DoctorStatus.FAILED
+        return self._result(
+            problem,
+            status,
+            playbook.owner,
+            None,
+            (),
+            (attempt,),
+            None,
+            None,
+            detail,
+            case_id=case.case_id,
+        )
 
     def _case_update(self, case: RepairCase, **changes: object) -> RepairCase:
         if self._repair_store is None:
@@ -997,6 +1204,7 @@ class ComponentDoctor:
             trusted=True,
             evidence=tuple(finding.detail for finding in report.findings[:8]),
             occurred_at=report.observation.observed_at,
+            failure_observation_id=str(report.findings[0].finding_id),
         )
 
         def approved(item: ComponentProblem, action: RepairAction) -> bool:
@@ -1054,14 +1262,17 @@ class ComponentDoctor:
         candidate: RepairCandidate | None = None,
         case: RepairCase | None = None,
     ) -> DoctorResult:
+        attempts = list(attempts)
         for fallback_id in playbook.fallback_strategy:
             binding = self._fallbacks.get((problem.component_id, fallback_id))
             if binding is None:
                 continue
             option, callback = binding
-            if option.requires_approval and not await self._authorized_fallback(problem, option):
+            if option.requires_approval and not await self._authorized_fallback(
+                problem, option, case
+            ):
                 if case is not None:
-                    self._case_update(
+                    case = self._case_update(
                         case,
                         status=RepairCaseStatus.PERMISSION_REQUIRED,
                         fallback=option.option_id,
@@ -1079,18 +1290,104 @@ class ComponentDoctor:
                     "Fallback requires fresh trusted approval",
                     case_id=None if case is None else case.case_id,
                 )
+            number = 1 if case is None else min(3, max(1, case.attempt_count + 1))
+            if case is not None:
+                case = self._case_update(
+                    case,
+                    status=RepairCaseStatus.EFFECT_IN_PROGRESS,
+                    attempt_count=number,
+                    selected_action=option.option_id,
+                    fallback=option.option_id,
+                )
+                assert self._repair_store is not None
+                self._repair_store.save_attempt(
+                    RepairAttemptRecord(
+                        case.case_id,
+                        number,
+                        RepairAttemptState.APPLYING.value,
+                        None,
+                        "Fallback execution started; no trusted terminal receipt exists",
+                        self._now(),
+                    )
+                )
             try:
-                applied = await self._invoke(callback, problem)
+                raw_execution = await self._invoke(callback, problem)
+                if not isinstance(raw_execution, RepairExecution):
+                    raise ComponentDoctorError("Fallback callback returned malformed result")
+                execution = raw_execution
             except Exception:
-                applied = False
-            if type(applied) is bool and applied:
+                execution = RepairExecution(
+                    RepairEffectOutcome.UNKNOWN_OUTCOME,
+                    False,
+                    "Fallback callback failed after effect execution began",
+                )
+            state = (
+                RepairAttemptState.VERIFIED
+                if execution.outcome is RepairEffectOutcome.EFFECT_CONFIRMED and execution.verified
+                else RepairAttemptState.UNKNOWN_OUTCOME
+                if execution.outcome is RepairEffectOutcome.UNKNOWN_OUTCOME
+                else RepairAttemptState.FAILED
+            )
+            fallback_attempt = self._attempt(
+                problem,
+                RepairAction(option.option_id, option.description),
+                number,
+                state,
+                execution.outcome,
+                execution.detail,
+                execution.evidence,
+            )
+            if case is not None:
+                assert self._repair_store is not None
+                self._repair_store.save_attempt(
+                    RepairAttemptRecord(
+                        case.case_id,
+                        number,
+                        state.value,
+                        execution.outcome.value,
+                        execution.detail,
+                        fallback_attempt.started_at,
+                        self._now(),
+                    )
+                )
+            attempts.append(fallback_attempt)
+            if state is RepairAttemptState.UNKNOWN_OUTCOME:
                 if case is not None:
-                    self._case_update(
+                    case = self._case_update(
+                        case,
+                        status=RepairCaseStatus.QUARANTINED,
+                        effect_outcome=execution.outcome.value,
+                        terminal_reason="Fallback effect outcome is unknown",
+                    )
+                    case = await self._observe_terminal(case)
+                await self._safe_health(
+                    problem,
+                    HealthStatus.QUARANTINED,
+                    "Fallback outcome is unknown",
+                )
+                return self._result(
+                    problem,
+                    DoctorStatus.QUARANTINED,
+                    playbook.owner,
+                    signature,
+                    probes,
+                    tuple(attempts),
+                    None,
+                    candidate,
+                    "Unknown fallback outcome is not replayed",
+                    case_id=None if case is None else case.case_id,
+                )
+            if state is RepairAttemptState.VERIFIED:
+                if case is not None:
+                    case = self._case_update(
                         case,
                         status=RepairCaseStatus.DEGRADED_FALLBACK,
+                        effect_outcome=execution.outcome.value,
+                        verification_reference=f"fallback:{option.option_id}",
                         fallback=option.option_id,
                         terminal_reason="Safe fallback applied",
                     )
+                    case = await self._observe_terminal(case)
                 await self._safe_health(problem, HealthStatus.DEGRADED, option.description)
                 return self._result(
                     problem,
@@ -1104,12 +1401,20 @@ class ComponentDoctor:
                     f"Degraded to safe fallback: {option.description}",
                     case_id=None if case is None else case.case_id,
                 )
+            # A pre-effect failure is safe to abandon, but the same fallback
+            # callback is never replayed after an ambiguous or malformed result.
+            if execution.outcome not in {
+                RepairEffectOutcome.PRE_EFFECT_FAILURE,
+                RepairEffectOutcome.SAFE_TO_RETRY,
+            }:
+                break
         if case is not None:
-            self._case_update(
+            case = self._case_update(
                 case,
                 status=RepairCaseStatus.FAILED,
                 terminal_reason=detail,
             )
+            case = await self._observe_terminal(case)
         await self._safe_health(problem, HealthStatus.UNAVAILABLE, detail)
         return self._result(
             problem,
@@ -1124,7 +1429,17 @@ class ComponentDoctor:
             case_id=None if case is None else case.case_id,
         )
 
-    async def _authorized(self, problem: ComponentProblem, action: RepairAction) -> bool:
+    async def _authorized(
+        self, problem: ComponentProblem, action: RepairAction, case: RepairCase | None = None
+    ) -> bool:
+        if self._repair_authorizer is not None:
+            if case is None:
+                return False
+            try:
+                result = await self._invoke(self._repair_authorizer, problem, action, case.case_id)
+            except Exception:
+                return False
+            return type(result) is bool and result
         if self._authorize is None:
             return False
         try:
@@ -1133,11 +1448,26 @@ class ComponentDoctor:
             return False
         return type(result) is bool and result
 
-    async def _authorized_fallback(self, problem: ComponentProblem, option: FallbackOption) -> bool:
-        if self._authorize is None:
+    async def _authorized_fallback(
+        self, problem: ComponentProblem, option: FallbackOption, case: RepairCase | None = None
+    ) -> bool:
+        if self._authorize is None and self._repair_authorizer is None:
             return False
         synthetic = RepairAction(option.option_id, option.description)
-        return await self._authorized(problem, synthetic)
+        return await self._authorized(problem, synthetic, case)
+
+    async def _observe_terminal(self, case: RepairCase) -> RepairCase:
+        if self._repair_observer is not None and case.status in {
+            RepairCaseStatus.VERIFIED_REPAIRED,
+            RepairCaseStatus.DEGRADED_FALLBACK,
+            RepairCaseStatus.FAILED,
+            RepairCaseStatus.QUARANTINED,
+        }:
+            try:
+                await self._invoke(self._repair_observer, case)
+            except Exception:
+                pass
+        return case
 
     async def _safe_health(
         self, problem: ComponentProblem, status: HealthStatus, detail: str
@@ -1275,16 +1605,13 @@ class ComponentDoctor:
     def _now(self) -> datetime:
         return _time(self._clock(), "Doctor clock")
 
-    @staticmethod
-    def _verification_satisfied(playbook: RepairPlaybook, execution: RepairExecution) -> bool:
-        return set(playbook.expected_repair_verification) <= set(execution.evidence)
-
     async def aclose(self) -> None:
         """No external resources are owned; reserved for composition-root symmetry."""
 
 
 __all__ = [
     "ComponentDoctor",
+    "BrokeredRepairAuthorizer",
     "ComponentDoctorError",
     "ComponentDoctorSecurityError",
     "ComponentOwner",
