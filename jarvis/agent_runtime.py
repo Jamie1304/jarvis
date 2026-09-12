@@ -15,6 +15,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import StrEnum
+from math import ceil
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -234,24 +235,14 @@ class ContextManager:
             raise ValueError("Agent context/provider limits disagree")
         if context.reserved_output >= context_limit:
             raise ValueError("Reserved output exceeds selected provider context")
-        protected = {
-            "request": context.request,
-            "goal": context.goal,
-            "constraints": context.constraints,
-            "current_step": context.current_step,
-            "selected_memory": context.selected_memory,
-            "required_knowledge": context.required_knowledge,
-            "evidence": context.evidence,
-            "tool_outputs": context.tool_outputs,
-            "security_context": context.security_context,
-            "completion_criteria": context.constraints,
-            "provenance": context.provenance,
-        }
-        system = AgentMessage(
-            MessageRole.SYSTEM,
-            json.dumps(protected, sort_keys=True, separators=(",", ":")),
-        )
-        bounded = self._compact(tuple(messages), context_limit, context.reserved_output)
+        system = self._protected_message(context)
+        available_characters = (context_limit - context.reserved_output) * 4
+        message_budget = available_characters - len(system.content)
+        if message_budget < 0:
+            raise ValueError("Protected agent context exceeds selected provider capacity")
+        bounded = self._compact(tuple(messages), message_budget)
+        if self.estimate_required_context_tokens(context, bounded) > context_limit:
+            raise ValueError("Projected agent context exceeds selected provider capacity")
         privacy = context.privacy_context
         known_private_values = tuple(
             dict.fromkeys(
@@ -282,10 +273,39 @@ class ContextManager:
         )
 
     @staticmethod
-    def _compact(
-        messages: tuple[AgentMessage, ...], context_limit: int, reserved_output: int
-    ) -> tuple[AgentMessage, ...]:
-        budget = max(256, (context_limit - reserved_output) * 4)
+    def _protected_message(context: AgentContext) -> AgentMessage:
+        protected = {
+            "request": context.request,
+            "goal": context.goal,
+            "constraints": context.constraints,
+            "current_step": context.current_step,
+            "selected_memory": context.selected_memory,
+            "required_knowledge": context.required_knowledge,
+            "evidence": context.evidence,
+            "tool_outputs": context.tool_outputs,
+            "security_context": context.security_context,
+            "completion_criteria": context.constraints,
+            "provenance": context.provenance,
+        }
+        return AgentMessage(
+            MessageRole.SYSTEM,
+            json.dumps(protected, sort_keys=True, separators=(",", ":")),
+        )
+
+    def estimate_required_context_tokens(
+        self, context: AgentContext, messages: Iterable[AgentMessage]
+    ) -> int:
+        """Conservatively estimate the complete projected input plus reserve."""
+
+        projected_characters = len(self._protected_message(context).content) + sum(
+            len(item.content) for item in messages
+        )
+        return ceil(projected_characters / 4) + context.reserved_output
+
+    @staticmethod
+    def _compact(messages: tuple[AgentMessage, ...], budget: int) -> tuple[AgentMessage, ...]:
+        if budget < 0:
+            raise ValueError("Agent message budget is invalid")
         if sum(len(item.content) for item in messages) <= budget:
             return messages
         # Keep the initial request/system facts and the newest exchanges. Old
@@ -300,7 +320,7 @@ class ContextManager:
             tail.append(item)
             used += len(item.content)
         omitted = messages[2 : len(messages) - len(tail)]
-        if omitted:
+        if omitted and used + 256 <= budget:
             digest = hashlib.sha256(
                 "|".join(item.content for item in omitted).encode("utf-8")
             ).hexdigest()
@@ -527,7 +547,9 @@ class AgentLoop:
                         role=agent_context.required_role,
                         context_tokens=max(
                             agent_context.token_estimate,
-                            sum(len(item.content) for item in messages) // 4,
+                            self._context_manager.estimate_required_context_tokens(
+                                agent_context, messages
+                            ),
                         ),
                         requires_tools=bool(
                             messages

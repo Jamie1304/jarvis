@@ -4,11 +4,11 @@ import asyncio
 from collections.abc import AsyncIterator, Mapping
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 from uuid import uuid4
 
 import pytest
-from jarvis.agent_runtime import AgentContext, AgentLoop, ContextManager
+from jarvis.agent_runtime import AgentContext, AgentLoop, AgentMessage, ContextManager
 from jarvis.ai.knowledge import (
     CookbookObservation,
     CookbookOutcome,
@@ -39,7 +39,9 @@ from jarvis.ai.routing import (
     DispatchChunk,
     InferenceDispatcher,
     InferenceDispatchError,
+    ProviderHealthSnapshot,
     ProviderRouter,
+    RouteBenchmark,
     RouteFailureClass,
     RouteRequest,
     RouteStatus,
@@ -777,3 +779,317 @@ async def test_agent_loop_accepts_smaller_selected_context_and_rejects_overflow(
     )
     assert oversized.primary is None
     await dispatcher.aclose()
+
+
+@pytest.mark.asyncio
+async def test_protected_context_selects_large_model_without_manual_token_inflation(
+    tmp_path: Path,
+) -> None:
+    small = FakeAIProvider(('{"kind":"response","content":"small"}',))
+    large = FakeAIProvider(('{"kind":"response","content":"large"}',))
+    small_metadata = ModelMetadata(
+        "small-model",
+        2048,
+        frozenset({"structured_output", "tool_use"}),
+        frozenset({ModelRole.GENERAL, ModelRole.TOOL_USE}),
+        version="v1",
+        quantization="q4",
+        runtime="fixture",
+        modalities=frozenset({"text"}),
+        quality_score=0.99,
+    )
+    large_metadata = ModelMetadata(
+        "large-model",
+        4096,
+        frozenset({"structured_output", "tool_use"}),
+        frozenset({ModelRole.GENERAL, ModelRole.TOOL_USE}),
+        version="v1",
+        quantization="q4",
+        runtime="fixture",
+        modalities=frozenset({"text"}),
+        quality_score=0.90,
+    )
+    registry = ProviderRegistry(
+        (
+            ProviderDefinition(
+                ProviderMetadata("small", "Small", "fixture", locality=ProviderLocality.REMOTE),
+                lambda _: small,
+                (small_metadata,),
+            ),
+            ProviderDefinition(
+                ProviderMetadata("large", "Large", "fixture", locality=ProviderLocality.REMOTE),
+                lambda _: large,
+                (large_metadata,),
+            ),
+        )
+    )
+    knowledge = _knowledge(tmp_path, registry)
+    dispatcher = InferenceDispatcher(
+        ProviderRouter(registry, knowledge=knowledge),
+        registry,
+        providers={"small": small, "large": large},
+    )
+    loop = AgentLoop(
+        small,
+        ToolRegistry(()),
+        model="small-model",
+        context_limit=4096,
+        provider_metadata=registry.definition("small").metadata,
+        dispatcher=dispatcher,
+    )
+    agent_context = AgentContext(
+        request="answer",
+        goal="answer",
+        selected_memory=("protected-fact " * 100,) * 5,
+        provider_context_limit=4096,
+        reserved_output=512,
+        token_estimate=0,
+        privacy_context=PrivacyContext(PrivacyClassification.SAFE_PUBLIC),
+        routing_policy=RoutingPolicy.QUALITY_FIRST,
+    )
+    accounting = ContextManager().estimate_required_context_tokens(
+        agent_context, (AgentMessage(MessageRole.USER, "answer"),)
+    )
+    assert accounting > 2048 and accounting <= 4096
+    intent = RouteRequest(
+        "answer",
+        "agent",
+        context_tokens=accounting,
+        policy=RoutingPolicy.QUALITY_FIRST,
+        privacy_context=PrivacyContext(PrivacyClassification.SAFE_PUBLIC),
+        provider_health=(ProviderHealthSnapshot("small", True),),
+    )
+    decision = dispatcher.route(intent)
+    assert decision.primary is not None and decision.primary.provider_id == "large"
+    prepared = ContextManager().prepare(
+        agent_context,
+        (AgentMessage(MessageRole.USER, "answer"),),
+        conversation_id=uuid4(),
+        model="large-model",
+        context_limit=4096,
+    )
+    dispatched = await dispatcher.generate(prepared, intent, decision=decision)
+    assert dispatched.result.content == '{"kind":"response","content":"large"}'
+    result = await loop.run(
+        uuid4(),
+        "answer",
+        context=agent_context,
+    )
+    assert result.proposed_result == "large"
+    assert not small.requests
+    assert large.requests and large.requests[0].context_limit == 4096
+    await dispatcher.aclose()
+
+
+def test_context_manager_preserves_protected_projection_and_compacts_history() -> None:
+    context = AgentContext(
+        request="answer",
+        goal="answer",
+        constraints=("retain trusted criteria",),
+        selected_memory=("memory fact",),
+        evidence=("durable evidence",),
+        provider_context_limit=512,
+        reserved_output=64,
+    )
+    messages = tuple(
+        [AgentMessage(MessageRole.USER, "new request")]
+        + [AgentMessage(MessageRole.ASSISTANT, "historical output " * 40) for _ in range(8)]
+    )
+    prepared = ContextManager().prepare(
+        context,
+        messages,
+        conversation_id=uuid4(),
+        model="compact-model",
+        context_limit=512,
+    )
+    characters = sum(len(item.content) for item in prepared.messages)
+    assert prepared.messages[0].role is MessageRole.SYSTEM
+    assert any("compacted prior tool exchanges" in item.content for item in prepared.messages)
+    assert (characters + 3) // 4 + context.reserved_output <= prepared.context_limit
+    assert '"goal":"answer"' in prepared.messages[0].content
+
+
+def test_context_manager_rejects_unrepresentable_protected_and_projected_input() -> None:
+    protected = AgentContext(
+        request="answer",
+        goal="answer",
+        selected_memory=("protected " * 100,) * 5,
+        provider_context_limit=512,
+        reserved_output=64,
+    )
+    with pytest.raises(ValueError, match="Protected agent context"):
+        ContextManager().prepare(
+            protected,
+            (AgentMessage(MessageRole.USER, "small"),),
+            conversation_id=uuid4(),
+            model="too-small",
+            context_limit=512,
+        )
+
+    projected = AgentContext(
+        request="answer",
+        goal="answer",
+        provider_context_limit=512,
+        reserved_output=64,
+    )
+    with pytest.raises(ValueError, match="Projected agent context"):
+        ContextManager().prepare(
+            projected,
+            (
+                AgentMessage(MessageRole.USER, "x" * 2_000),
+                AgentMessage(MessageRole.ASSISTANT, "y" * 2_000),
+            ),
+            conversation_id=uuid4(),
+            model="too-small",
+            context_limit=512,
+        )
+
+
+@pytest.mark.asyncio
+async def test_agent_loop_makes_no_provider_call_when_no_context_model_fits(
+    tmp_path: Path,
+) -> None:
+    provider = FakeAIProvider(('{"kind":"response","content":"must-not-run"}',))
+    registry = ProviderRegistry(
+        (
+            ProviderDefinition(
+                ProviderMetadata("small", "Small", "fixture", locality=ProviderLocality.LOCAL),
+                lambda _: provider,
+                (
+                    ModelMetadata(
+                        "small-model",
+                        2048,
+                        frozenset({"structured_output", "tool_use"}),
+                        frozenset({ModelRole.GENERAL, ModelRole.TOOL_USE}),
+                    ),
+                ),
+            ),
+        )
+    )
+    knowledge = _knowledge(tmp_path, registry)
+    dispatcher = InferenceDispatcher(
+        ProviderRouter(registry, knowledge=knowledge),
+        registry,
+        providers={"small": provider},
+    )
+    loop = AgentLoop(
+        provider,
+        ToolRegistry(()),
+        model="small-model",
+        context_limit=4096,
+        provider_metadata=registry.definition("small").metadata,
+        dispatcher=dispatcher,
+    )
+    result = await loop.run(
+        uuid4(),
+        "answer",
+        context=AgentContext(
+            request="answer",
+            goal="answer",
+            selected_memory=("protected " * 100,) * 8,
+            provider_context_limit=4096,
+            reserved_output=512,
+            token_estimate=0,
+            privacy_context=PrivacyContext(PrivacyClassification.UNKNOWN),
+        ),
+    )
+    assert result.proposed_result is None
+    assert result.termination_reason.value == "provider_failure"
+    assert not provider.requests
+    await dispatcher.aclose()
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (
+        ("request", ""),
+        ("goal", ""),
+        ("provider_context_limit", 0),
+        ("reserved_output", -1),
+        ("token_estimate", -1),
+        ("priority", -1),
+        ("reserved_output", 4096),
+        ("privacy_context", cast(Any, object())),
+        ("task_class", ""),
+        ("responsibility", ""),
+        ("routing_policy", cast(Any, "invalid")),
+        ("required_role", cast(Any, "invalid")),
+        ("required_capabilities", cast(Any, {"tool_use"})),
+        ("requires_structured_output", cast(Any, 1)),
+        ("minimum_expected_reliability", 1.1),
+        ("constraints", ("x" * 16_001,)),
+        ("security_context", (("", "untrusted"),)),
+    ),
+)
+def test_agent_context_validation_rejects_malformed_routing_inputs(
+    field: str, value: object
+) -> None:
+    values: dict[str, object] = {"request": "request", "goal": "goal", field: value}
+    with pytest.raises(ValueError):
+        AgentContext(**cast(Any, values))
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (
+        ("task", ""),
+        ("profile", ""),
+        ("modality", ""),
+        ("complexity", ""),
+        ("classification", ""),
+        ("task_class", ""),
+        ("responsibility", ""),
+        ("role", cast(Any, "invalid")),
+        ("context_tokens", -1),
+        ("concurrency", 0),
+        ("policy", cast(Any, "invalid")),
+        ("requires_tools", 1),
+        ("latency_budget_ms", 0),
+        ("preferred_provider_id", ""),
+        ("benchmarks", []),
+        ("provider_health", []),
+        ("priority", cast(Any, "invalid")),
+        ("privacy_context", cast(Any, object())),
+        ("required_capabilities", cast(Any, {"tool_use"})),
+        ("minimum_expected_reliability", -0.1),
+        ("max_cost_per_million", -1),
+        ("previous_failure", cast(Any, "invalid")),
+        ("excluded_identities", []),
+    ),
+)
+def test_route_request_validation_rejects_malformed_inputs(field: str, value: object) -> None:
+    values: dict[str, object] = {"task": "answer", "profile": "test", field: value}
+    with pytest.raises(ValueError):
+        RouteRequest(**cast(Any, values))
+
+
+@pytest.mark.parametrize(
+    ("provider_id", "available", "detail"),
+    (("", True, ""), ("provider", 1, ""), ("provider", True, cast(Any, None))),
+)
+def test_provider_health_validation_rejects_malformed_inputs(
+    provider_id: str, available: object, detail: object
+) -> None:
+    with pytest.raises(ValueError):
+        ProviderHealthSnapshot(provider_id, cast(Any, available), cast(Any, detail))
+
+
+@pytest.mark.parametrize(
+    "values",
+    (
+        {"provider_id": ""},
+        {"model_id": ""},
+        {"measured_at": datetime.now()},
+        {"latency_ms": float("nan")},
+        {"input_cost_per_million": -1},
+    ),
+)
+def test_route_benchmark_validation_rejects_malformed_inputs(values: dict[str, object]) -> None:
+    benchmark_values: dict[str, object] = {
+        "provider_id": "provider",
+        "model_id": "model",
+        "measured_at": datetime.now(UTC),
+        **values,
+    }
+    with pytest.raises(ValueError):
+        RouteBenchmark(**cast(Any, benchmark_values))

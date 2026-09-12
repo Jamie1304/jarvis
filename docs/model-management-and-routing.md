@@ -64,6 +64,12 @@ among qualifying candidates, while `QUALITY_FIRST` remains reliability-oriented.
 Without an explicit threshold, best-effort routing remains conservative and
 reliability-first. Ties end in the full provider/model variant identity.
 
+Agent routing context eligibility includes the complete bounded model-visible
+protected projection and conversation messages, plus reserved output capacity.
+`ContextManager` revalidates the final projected request after deterministic
+history compaction; a smaller or cheaper model is selected only when that real
+request fits.
+
 Policies are `LOCAL_ONLY`, `PREFER_LOCAL`, `QUALITY_FIRST`, `SPEED_FIRST`,
 `LOWEST_COST`, `BALANCED`, and `PRIVACY_STRICT`. Unknown capacity or an
 unknown required latency benchmark is not treated as compatible. Routing does
