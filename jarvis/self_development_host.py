@@ -29,6 +29,8 @@ async def _observe(app_data: Path) -> int:
         recovery_key_backend=EphemeralQualificationSecretBackend(),
     )
     status = runtime.status
+    shutdown_clean = True
+    runtime_failure_code: str | None = None
     payload = {
         "application_hash": compute_application_build_hash(root),
         "environment_isolated": _environment_isolated(root),
@@ -38,12 +40,21 @@ async def _observe(app_data: Path) -> int:
     close = getattr(runtime, "aclose", None)
     try:
         if callable(close):
-            result = close()
-            if hasattr(result, "__await__"):
-                await result
+            try:
+                result = close()
+                if hasattr(result, "__await__"):
+                    await result
+            except Exception:
+                shutdown_clean = False
+                runtime_failure_code = "RUNTIME_SHUTDOWN_FAILED"
     finally:
+        if not shutdown_clean:
+            status = RuntimeStatus.ERROR
+        payload["shutdown_clean"] = shutdown_clean
+        payload["runtime_failure_code"] = runtime_failure_code
+        payload["status"] = status.value
         sys.stdout.write(json.dumps(payload, sort_keys=True) + "\n")
-    return 0 if status is RuntimeStatus.READY else 1
+    return 0 if status is RuntimeStatus.READY and shutdown_clean else 1
 
 
 def _environment_isolated(root: Path) -> bool:

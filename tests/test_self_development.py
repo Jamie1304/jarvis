@@ -469,6 +469,7 @@ def _activator(
     *,
     protected: bool = False,
     runtime_verifier: _TestRuntimeVerifier | None = None,
+    versioned: bool = False,
 ) -> tuple[
     TrustedSelfDevelopmentActivator,
     MergeDeploymentProposal,
@@ -479,7 +480,11 @@ def _activator(
     proposal, production, candidate, installation = _make_proposal(tmp_path, protected=protected)
     recovery, approval = _recovery(tmp_path, installation)
     task = proposal.task_id
-    target = (installation / Path(proposal.modification.changed_paths[0])).resolve()
+    target = (
+        installation.resolve()
+        if versioned
+        else (installation / Path(proposal.modification.changed_paths[0])).resolve()
+    )
     rules = tuple(
         PolicyRule(
             f"self-{permission.value}",
@@ -525,6 +530,9 @@ def _activator(
         gate_verifier=lambda _proposal, _classification: evidence,
         golden_runner=_golden_owner(tmp_path / "golden.sqlite3"),
         runtime_verifier=runtime_verifier or _TestRuntimeVerifier(),
+        candidate_installer=(
+            ProductionCandidateInstaller(production, installation, recovery) if versioned else None
+        ),
         clock=lambda: NOW,
     )
     return service, proposal, installation, approval, broker
@@ -569,6 +577,185 @@ async def test_exact_activation_promotes_only_after_recovery_verification(tmp_pa
     ]
     assert (installation / "jarvis/example.py").read_text(encoding="utf-8") == "VALUE = 2\n"
     assert service.store.get(record.activation_id) == final
+
+
+@pytest.mark.asyncio
+async def test_versioned_candidate_binds_application_identity_and_brokered_materialization(
+    tmp_path: Path,
+) -> None:
+    class VersionedRuntimeVerifier(_TestRuntimeVerifier):
+        def start_candidate(
+            self, *, installation_root: Path, expected_revision: str, expected_hash: str
+        ) -> CandidateStartEvidence:
+            self.calls.append("start")
+            return CandidateStartEvidence(
+                True,
+                expected_revision,
+                expected_hash,
+                hashlib.sha256(b"versioned-start").hexdigest(),
+                observed_root=str(installation_root.resolve()),
+                snapshot_id=installation_root.name,
+            )
+
+    service, proposal, installation, approval, broker = _activator(
+        tmp_path, versioned=True, runtime_verifier=VersionedRuntimeVerifier()
+    )
+    record = service.prepare(
+        proposal,
+        current_version="1",
+        candidate_version="2",
+        changed_subsystems=("jarvis",),
+        preview_gates=_preview_gates(),
+    )
+    assert record.candidate_application_hash != record.candidate_hash
+    context = approval.issue_context(
+        request_id=approval_request_id(record),
+        choice=ApprovalChoice.APPROVE_ONCE,
+        identity=ApprovalIdentity("trusted-user", ApprovalActorKind.TRUSTED_USER),
+    )
+    record = await service.approve(record.activation_id, context)
+    pending = await service._authorize_effect(record)
+    permission_contexts = tuple(
+        approval.issue_context(
+            request_id=request.request_id,
+            choice=ApprovalChoice.APPROVE_ONCE,
+            identity=ApprovalIdentity("trusted-user", ApprovalActorKind.TRUSTED_USER),
+        )
+        for request in pending.approval_requests
+    )
+    events: list[str] = []
+    authorize = broker.authorize
+    begin = broker.begin_execution
+    installer = cast(ProductionCandidateInstaller, service._candidate_installer)
+    stage = installer.stage
+
+    async def observed_authorize(*args: Any, **kwargs: Any) -> Any:
+        events.append("authorize")
+        return await authorize(*args, **kwargs)
+
+    async def observed_begin(*args: Any, **kwargs: Any) -> Any:
+        events.append("begin_execution")
+        return await begin(*args, **kwargs)
+
+    def observed_stage(*args: Any, **kwargs: Any) -> CandidateInstallation:
+        events.append("materialize")
+        return stage(*args, **kwargs)
+
+    broker.__dict__["authorize"] = observed_authorize
+    broker.__dict__["begin_execution"] = observed_begin
+    installer.__dict__["stage"] = observed_stage
+    final = await service.activate(record.activation_id, permission_contexts=permission_contexts)
+
+    assert final.status is ActivationStatus.COMMITTED
+    assert final.candidate_snapshot_id is not None
+    candidate_root = installation / final.candidate_snapshot_id
+    assert compute_application_build_hash(candidate_root) == record.candidate_application_hash
+    assert (installation / "jarvis" / "example.py").read_text(encoding="utf-8") == "VALUE = 1\n"
+    assert events.index("authorize") < events.index("begin_execution") < events.index("materialize")
+    assert final.previous_lkg_snapshot_id is not None
+    assert final.previous_lkg_application_hash is not None
+
+
+@pytest.mark.asyncio
+async def test_versioned_materialization_failure_is_unknown_and_quarantined(tmp_path: Path) -> None:
+    service, proposal, _installation, approval, _broker = _activator(tmp_path, versioned=True)
+    record = service.prepare(
+        proposal,
+        current_version="1",
+        candidate_version="2",
+        changed_subsystems=("jarvis",),
+        preview_gates=_preview_gates(),
+    )
+    context = approval.issue_context(
+        request_id=approval_request_id(record),
+        choice=ApprovalChoice.APPROVE_ONCE,
+        identity=ApprovalIdentity("trusted-user", ApprovalActorKind.TRUSTED_USER),
+    )
+    record = await service.approve(record.activation_id, context)
+    pending = await service._authorize_effect(record)
+    permission_contexts = tuple(
+        approval.issue_context(
+            request_id=request.request_id,
+            choice=ApprovalChoice.APPROVE_ONCE,
+            identity=ApprovalIdentity("trusted-user", ApprovalActorKind.TRUSTED_USER),
+        )
+        for request in pending.approval_requests
+    )
+    installer = cast(ProductionCandidateInstaller, service._candidate_installer)
+
+    def fail_stage(*_args: Any, **_kwargs: Any) -> CandidateInstallation:
+        raise OSError("materialization probe")
+
+    installer.__dict__["stage"] = fail_stage
+    final = await service.activate(record.activation_id, permission_contexts=permission_contexts)
+    assert final.status is ActivationStatus.QUARANTINED
+    assert final.failure_reason == "materialization outcome unknown: OSError"
+
+
+def test_versioned_binding_establishes_an_initial_authenticated_lkg(tmp_path: Path) -> None:
+    service, proposal, _installation, _approval, _broker = _activator(tmp_path, versioned=True)
+    record = service.prepare(
+        proposal,
+        current_version="1",
+        candidate_version="2",
+        changed_subsystems=("jarvis",),
+        preview_gates=_preview_gates(),
+    )
+    authority = TrustedRecoveryAuthority("initial-lkg", TestOnlyInMemorySecretBackend())
+    authority.initialize()
+    fresh_store = RecoveryStore(
+        tmp_path / "fresh-recovery", trusted_authority=authority, clock=lambda: NOW
+    )
+    service.recovery = RecoveryCoordinator(fresh_store, clock=lambda: NOW)
+    bound = service._bind_previous_lkg(record, "00000000-0000-0000-0000-000000000203", proposal)
+    assert bound.previous_lkg_snapshot_id is not None
+    assert bound.previous_lkg_application_hash == compute_application_build_hash(
+        service.production_root
+    )
+    assert bound.previous_lkg_revision == proposal.workspace.base_revision
+
+
+@pytest.mark.asyncio
+async def test_versioned_resume_verifies_the_authenticated_candidate_snapshot(
+    tmp_path: Path,
+) -> None:
+    class VersionedRuntimeVerifier(_TestRuntimeVerifier):
+        def start_candidate(
+            self, *, installation_root: Path, expected_revision: str, expected_hash: str
+        ) -> CandidateStartEvidence:
+            self.calls.append("start")
+            return CandidateStartEvidence(
+                True,
+                expected_revision,
+                expected_hash,
+                hashlib.sha256(b"resume-start").hexdigest(),
+                observed_root=str(installation_root.resolve()),
+                snapshot_id=installation_root.name,
+            )
+
+    service, proposal, installation, _approval, _broker = _activator(
+        tmp_path, versioned=True, runtime_verifier=VersionedRuntimeVerifier()
+    )
+    record = service.prepare(
+        proposal,
+        current_version="1",
+        candidate_version="2",
+        changed_subsystems=("jarvis",),
+        preview_gates=_preview_gates(),
+    )
+    transaction_id = "00000000-0000-0000-0000-000000000202"
+    record = replace(record, recovery_transaction_id=transaction_id)
+    installer = cast(ProductionCandidateInstaller, service._candidate_installer)
+    candidate = installer.stage(proposal, record)
+    interrupted = replace(
+        record,
+        status=ActivationStatus.APPLYING,
+        candidate_snapshot_id=candidate.snapshot_id,
+    )
+    service.store.put(interrupted)
+    final = await service.resume(record.activation_id)
+    assert final.status is ActivationStatus.COMMITTED
+    assert (installation / candidate.snapshot_id).is_dir()
 
 
 @pytest.mark.asyncio
@@ -715,6 +902,7 @@ def test_durable_activation_state_reconstructs_after_store_restart(tmp_path: Pat
         digest,
         digest,
         digest,
+        digest,
         ("jarvis/example.py",),
         2,
         ("quality",),
@@ -726,6 +914,10 @@ def test_durable_activation_state_reconstructs_after_store_restart(tmp_path: Pat
     first.put(record)
     restarted = ActivationStateStore(tmp_path / "state.sqlite3")
     assert restarted.get(record.activation_id) == record
+    durable = self_development._record_to_json(record)
+    durable.pop("candidate_application_hash")
+    with pytest.raises(ActivationError, match="application identity"):
+        self_development._record_from_json(durable)
 
 
 def test_durable_proposal_owner_reconstructs_typed_proposal(tmp_path: Path) -> None:
@@ -880,7 +1072,7 @@ def test_candidate_start_typed_failures_are_fail_closed(tmp_path: Path) -> None:
         preview_gates=_preview_gates(),
     )
     candidate = ProductionCandidateInstaller(
-        Path(__file__).resolve().parents[1], installation, service.recovery
+        proposal.workspace.root, installation, service.recovery
     ).stage(proposal, record)
     selector = TrustedSelfDevelopmentBootSelector(
         Path(__file__).resolve().parents[1], installation, service.recovery
@@ -891,11 +1083,11 @@ def test_candidate_start_typed_failures_are_fail_closed(tmp_path: Path) -> None:
     result = verifier.start_candidate(
         installation_root=candidate.root,
         expected_revision="wrong-revision",
-        expected_hash=record.candidate_hash,
+        expected_hash=record.candidate_application_hash,
     )
     assert result.started is False
     assert result.outcome is CandidateStartOutcome.RECOVERY_AUTH_MISMATCH
-    assert result.observed_hash == candidate.tree_digest
+    assert result.observed_application_hash == candidate.tree_digest
 
 
 def test_ephemeral_qualification_backend_is_not_persistent(tmp_path: Path) -> None:
@@ -1002,6 +1194,7 @@ def test_runtime_lkg_observation_requires_an_authenticated_manifest(
                     {
                         "application_hash": compute_application_build_hash(source),
                         "environment_isolated": True,
+                        "shutdown_clean": True,
                         "root": str(source),
                         "status": "ready",
                     }
@@ -1063,7 +1256,7 @@ def test_candidate_host_failure_taxonomy_does_not_echo_expected_inputs(
         preview_gates=_preview_gates(),
     )
     candidate = ProductionCandidateInstaller(
-        Path(__file__).resolve().parents[1], installation, service.recovery
+        proposal.workspace.root, installation, service.recovery
     ).stage(proposal, record)
     selector = TrustedSelfDevelopmentBootSelector(
         Path(__file__).resolve().parents[1], installation, service.recovery
@@ -1083,6 +1276,7 @@ def test_candidate_host_failure_taxonomy_does_not_echo_expected_inputs(
                     {
                         "application_hash": application_hash,
                         "environment_isolated": True,
+                        "shutdown_clean": True,
                         "root": str(candidate.root),
                         "status": "ready",
                     }
@@ -1099,10 +1293,11 @@ def test_candidate_host_failure_taxonomy_does_not_echo_expected_inputs(
         expected_revision=record.candidate_revision,
         expected_hash="f" * 64,
     )
-    assert observed.started
-    assert observed.observed_hash == application_hash
-    assert observed.observed_hash != "f" * 64
-    assert observed.outcome is CandidateStartOutcome.STARTED
+    assert not observed.started
+    assert observed.outcome is CandidateStartOutcome.RECOVERY_AUTH_MISMATCH
+    assert observed.observed_application_hash == application_hash
+    assert observed.observed_application_hash != "f" * 64
+    assert verifier.last_start_evidence == observed
 
     class WrongRootProcess(FakeProcess):
         def communicate(self, **_kwargs: Any) -> tuple[str, str]:
@@ -1115,7 +1310,7 @@ def test_candidate_host_failure_taxonomy_does_not_echo_expected_inputs(
     wrong_root = verifier.start_candidate(
         installation_root=candidate.root,
         expected_revision=record.candidate_revision,
-        expected_hash=record.candidate_hash,
+        expected_hash=record.candidate_application_hash,
     )
     assert wrong_root.outcome is CandidateStartOutcome.ROOT_MISMATCH
 
@@ -1127,10 +1322,95 @@ def test_candidate_host_failure_taxonomy_does_not_echo_expected_inputs(
         verifier.start_candidate(
             installation_root=candidate.root,
             expected_revision=record.candidate_revision,
-            expected_hash=record.candidate_hash,
+            expected_hash=record.candidate_application_hash,
         ).outcome
         is CandidateStartOutcome.NONZERO_EXIT
     )
+
+    class PayloadProcess(FakeProcess):
+        payload_changes: dict[str, object] = {}
+
+        def communicate(self, **_kwargs: Any) -> tuple[str, str]:
+            value, stderr = super().communicate()
+            payload = json.loads(value)
+            payload.update(self.payload_changes)
+            return json.dumps(payload), stderr
+
+    for changes, expected in (
+        ({"environment_isolated": False}, CandidateStartOutcome.UNSAFE_ENVIRONMENT),
+        ({"application_hash": "f" * 64}, CandidateStartOutcome.TREE_HASH_MISMATCH),
+        ({"status": "starting"}, CandidateStartOutcome.NOT_READY),
+        ({"shutdown_clean": False}, CandidateStartOutcome.SHUTDOWN_FAILED),
+    ):
+        process_type = type("PayloadVariant", (PayloadProcess,), {"payload_changes": changes})
+        monkeypatch.setattr(
+            subprocess, "Popen", lambda *a, process_type=process_type, **k: process_type()
+        )
+        assert (
+            verifier.start_candidate(
+                installation_root=candidate.root,
+                expected_revision=record.candidate_revision,
+                expected_hash=record.candidate_application_hash,
+            ).outcome
+            is expected
+        )
+
+    class MalformedProcess(FakeProcess):
+        def communicate(self, **_kwargs: Any) -> tuple[str, str]:
+            return "not-json", ""
+
+    monkeypatch.setattr(subprocess, "Popen", lambda *a, **k: MalformedProcess())
+    assert (
+        verifier.start_candidate(
+            installation_root=candidate.root,
+            expected_revision=record.candidate_revision,
+            expected_hash=record.candidate_application_hash,
+        ).outcome
+        is CandidateStartOutcome.MALFORMED_PAYLOAD
+    )
+
+    class ChangedManifestVerifier(ProductionSelfDevelopmentRuntimeVerifier):
+        def _authenticated_tree_digest(self, _root: Path) -> str | None:
+            return "f" * 64
+
+    changed_verifier = ChangedManifestVerifier(Path(__file__).resolve().parents[1], selector)
+    monkeypatch.setattr(subprocess, "Popen", lambda *a, **k: FakeProcess())
+    assert (
+        changed_verifier.start_candidate(
+            installation_root=candidate.root,
+            expected_revision=record.candidate_revision,
+            expected_hash=record.candidate_application_hash,
+        ).outcome
+        is CandidateStartOutcome.RECOVERY_AUTH_MISMATCH
+    )
+
+    class OversizedProcess(FakeProcess):
+        def communicate(self, **_kwargs: Any) -> tuple[str, str]:
+            return "x" * 16_385, ""
+
+    monkeypatch.setattr(subprocess, "Popen", lambda *a, **k: OversizedProcess())
+    assert (
+        verifier.start_candidate(
+            installation_root=candidate.root,
+            expected_revision=record.candidate_revision,
+            expected_hash=record.candidate_application_hash,
+        ).outcome
+        is CandidateStartOutcome.MALFORMED_PAYLOAD
+    )
+
+    normal_timeout = verifier._remaining_host_timeout
+    remaining = iter((10.0, 0.0))
+    monkeypatch.setattr(verifier, "_remaining_host_timeout", lambda: next(remaining))
+    monkeypatch.setattr(subprocess, "Popen", lambda *a, **k: FakeProcess())
+    assert (
+        verifier.start_candidate(
+            installation_root=candidate.root,
+            expected_revision=record.candidate_revision,
+            expected_hash=record.candidate_application_hash,
+        ).outcome
+        is CandidateStartOutcome.STARTUP_DEADLINE_EXCEEDED
+    )
+    monkeypatch.setattr(verifier, "_remaining_host_timeout", normal_timeout)
 
     class TimeoutProcess(FakeProcess):
         def communicate(self, **kwargs: Any) -> tuple[str, str]:
@@ -1143,7 +1423,7 @@ def test_candidate_host_failure_taxonomy_does_not_echo_expected_inputs(
         verifier.start_candidate(
             installation_root=candidate.root,
             expected_revision=record.candidate_revision,
-            expected_hash=record.candidate_hash,
+            expected_hash=record.candidate_application_hash,
         ).outcome
         is CandidateStartOutcome.PROCESS_TIMEOUT
     )
@@ -1153,7 +1433,7 @@ def test_candidate_host_failure_taxonomy_does_not_echo_expected_inputs(
         verifier.start_candidate(
             installation_root=candidate.root,
             expected_revision=record.candidate_revision,
-            expected_hash=record.candidate_hash,
+            expected_hash=record.candidate_application_hash,
         ).outcome
         is CandidateStartOutcome.NONZERO_EXIT
     )
@@ -1189,6 +1469,19 @@ def test_candidate_host_entrypoint_is_bounded_and_typed(
         lambda *a, **k: FailedRuntime(),
     )
     assert self_development_host.main([str(tmp_path / "app-data")]) == 1
+
+    class ShutdownFailureRuntime:
+        status = RuntimeStatus.READY
+
+        async def aclose(self) -> None:
+            raise RuntimeError("shutdown")
+
+    monkeypatch.setattr(
+        cast(Any, self_development_host).ApplicationRuntime,
+        "create",
+        lambda *a, **k: ShutdownFailureRuntime(),
+    )
+    assert self_development_host.main([str(tmp_path / "shutdown-data")]) == 1
 
 
 def test_unavailable_runtime_and_boot_identity_paths_fail_closed(tmp_path: Path) -> None:
@@ -1297,22 +1590,13 @@ def test_production_installer_rejects_duplicate_staging_and_excludes_runtime_dat
     installer = ProductionCandidateInstaller(
         production, service.installation_root, service.recovery
     )
-    identity_material = "\x1f".join(
-        (
-            record.proposal_fingerprint,
-            record.candidate_hash,
-            record.candidate_revision,
-            record.candidate_tree_digest,
-        )
-    )
-    staging = (
-        service.installation_root
-        / f".staging-{hashlib.sha256(identity_material.encode()).hexdigest()}"
-    )
+    staging = installer.planned_root(record)
     staging.mkdir()
     with pytest.raises(ActivationError, match="already staged"):
         installer.stage(proposal, record)
     staging.rmdir()
+    with pytest.raises(ActivationError, match="application hash"):
+        installer.stage(proposal, replace(record, candidate_application_hash="f" * 64))
     changed_path = candidate / Path(proposal.modification.changed_paths[0])
     changed_path.unlink()
     changed_path.mkdir()
@@ -1423,6 +1707,12 @@ def test_production_candidate_is_complete_and_recovery_selects_only_authenticate
     store.begin_start("00000000-0000-0000-0000-000000000101")
     store.commit_start("00000000-0000-0000-0000-000000000101", source_snapshot.snapshot_id)
     installer = ProductionCandidateInstaller(source, installation, service.recovery)
+    expected_candidate = tmp_path / "expected-candidate"
+    shutil.copytree(source, expected_candidate)
+    (expected_candidate / "jarvis" / "example.py").write_text("VALUE = 2\n", encoding="utf-8")
+    record = replace(
+        record, candidate_application_hash=compute_application_build_hash(expected_candidate)
+    )
     candidate = installer.stage(proposal, record)
     assert isinstance(candidate, CandidateInstallation)
     assert (candidate.root / "jarvis" / "runtime.py").is_file()
@@ -1435,7 +1725,7 @@ def test_production_candidate_is_complete_and_recovery_selects_only_authenticate
         evidence = verifier.start_candidate(
             installation_root=candidate.root,
             expected_revision=record.candidate_revision,
-            expected_hash=record.candidate_hash,
+            expected_hash=record.candidate_application_hash,
         )
         assert evidence.started, (
             f"candidate start failed: outcome={evidence.outcome} "
@@ -1445,10 +1735,10 @@ def test_production_candidate_is_complete_and_recovery_selects_only_authenticate
     def health() -> bool:
         return (
             verifier.observe_candidate_health(
-                installation_root=candidate.root, expected_hash=record.candidate_hash
+                installation_root=candidate.root, expected_hash=record.candidate_application_hash
             ).passed
             and verifier.observe_candidate_security(
-                installation_root=candidate.root, expected_hash=record.candidate_hash
+                installation_root=candidate.root, expected_hash=record.candidate_application_hash
             ).passed
         )
 
@@ -1499,6 +1789,14 @@ def test_typed_activation_records_and_gate_evidence_fail_closed() -> None:
         GateEvidence("bad name", True, digest)
     with pytest.raises(ValueError):
         GateEvidence("gate", True, "bad")
+    with pytest.raises(ValueError):
+        CandidateStartEvidence(
+            False,
+            REVISION,
+            digest,
+            digest,
+            cast(Any, "invalid-outcome"),
+        )
     values: dict[str, Any] = dict(
         activation_id="a",
         proposal_id="p",
@@ -1507,6 +1805,7 @@ def test_typed_activation_records_and_gate_evidence_fail_closed() -> None:
         base_revision=REVISION,
         candidate_revision=REVISION,
         candidate_hash=digest,
+        candidate_application_hash=digest,
         candidate_tree_digest=digest,
         candidate_diff_digest=digest,
         changed_paths=("a.py",),
@@ -1953,6 +2252,7 @@ async def test_edge_authority_rejections_and_async_evidence_are_covered(tmp_path
         "base_revision": record.base_revision,
         "candidate_revision": record.candidate_revision,
         "candidate_hash": record.candidate_hash,
+        "candidate_application_hash": record.candidate_application_hash,
         "candidate_tree_digest": record.candidate_tree_digest,
         "candidate_diff_digest": record.candidate_diff_digest,
         "changed_paths": record.changed_paths,

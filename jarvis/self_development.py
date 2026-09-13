@@ -144,6 +144,7 @@ class ActivationRecord:
     base_revision: str
     candidate_revision: str
     candidate_hash: str
+    candidate_application_hash: str
     candidate_tree_digest: str
     candidate_diff_digest: str
     changed_paths: tuple[str, ...]
@@ -160,6 +161,9 @@ class ActivationRecord:
     candidate_snapshot_id: str | None = None
     effect_receipt_id: str | None = None
     failure_reason: str | None = None
+    previous_lkg_snapshot_id: str | None = None
+    previous_lkg_application_hash: str | None = None
+    previous_lkg_revision: str | None = None
 
     def __post_init__(self) -> None:
         if not self.activation_id or not self.proposal_id:
@@ -167,6 +171,7 @@ class ActivationRecord:
         for value in (
             self.proposal_fingerprint,
             self.candidate_hash,
+            self.candidate_application_hash,
             self.candidate_tree_digest,
             self.candidate_diff_digest,
             self.preview_fingerprint,
@@ -350,6 +355,7 @@ class CandidateStartOutcome(StrEnum):
     TREE_HASH_MISMATCH = "TREE_HASH_MISMATCH"
     RECOVERY_AUTH_MISMATCH = "RECOVERY_AUTH_MISMATCH"
     UNSAFE_ENVIRONMENT = "UNSAFE_ENVIRONMENT"
+    SHUTDOWN_FAILED = "SHUTDOWN_FAILED"
     STARTUP_DEADLINE_EXCEEDED = "STARTUP_DEADLINE_EXCEEDED"
 
 
@@ -359,7 +365,7 @@ class CandidateStartEvidence:
 
     started: bool
     observed_revision: str
-    observed_hash: str
+    observed_application_hash: str
     evidence_digest: str
     outcome: CandidateStartOutcome = CandidateStartOutcome.STARTED
     observed_root: str = ""
@@ -367,9 +373,9 @@ class CandidateStartEvidence:
     detail: str = ""
 
     def __post_init__(self) -> None:
-        if type(self.started) is not bool or len(self.observed_hash) != 64:
+        if type(self.started) is not bool or len(self.observed_application_hash) != 64:
             raise ValueError("Candidate start evidence is malformed")
-        int(self.observed_hash, 16)
+        int(self.observed_application_hash, 16)
         if len(self.evidence_digest) != 64:
             raise ValueError("Candidate start evidence digest is malformed")
         int(self.evidence_digest, 16)
@@ -526,6 +532,10 @@ class CandidateInstallation:
     tree_digest: str
     identity: str
 
+    @property
+    def application_hash(self) -> str:
+        return self.tree_digest
+
 
 class CandidateInstaller(Protocol):
     def stage(
@@ -550,7 +560,6 @@ class ProductionCandidateInstaller:
             "tmp",
             "build",
             "dist",
-            "knowledge",
             ".pytest_cache",
             ".mypy_cache",
             ".ruff_cache",
@@ -566,19 +575,34 @@ class ProductionCandidateInstaller:
         self.installation_root = _directory(installation_root, "installation root")
         self.recovery = recovery
 
-    def stage(
-        self, proposal: MergeDeploymentProposal, record: ActivationRecord
-    ) -> CandidateInstallation:
+    def _identity(self, record: ActivationRecord) -> str:
         identity_material = "\x1f".join(
             (
                 record.proposal_fingerprint,
                 record.candidate_hash,
+                record.candidate_application_hash,
                 record.candidate_revision,
                 record.candidate_tree_digest,
             )
         )
-        identity = hashlib.sha256(identity_material.encode("utf-8")).hexdigest()
-        staging = self.installation_root / f".staging-{identity}"
+        return hashlib.sha256(identity_material.encode("utf-8")).hexdigest()
+
+    def planned_root(self, record: ActivationRecord) -> Path:
+        """Return the exact versioned namespace authorized before materialization."""
+
+        identity = self._identity(record)
+        root = self.installation_root / f".staging-{identity}"
+        _contained_directory_target(root, self.installation_root)
+        return root
+
+    def effect_paths(self, record: ActivationRecord) -> tuple[str, ...]:
+        return (str(self.planned_root(record)),)
+
+    def stage(
+        self, proposal: MergeDeploymentProposal, record: ActivationRecord
+    ) -> CandidateInstallation:
+        identity = self._identity(record)
+        staging = self.planned_root(record)
         if staging.exists():
             raise ActivationError("candidate identity is already staged")
         staging.mkdir(parents=True)
@@ -596,19 +620,27 @@ class ProductionCandidateInstaller:
                     shutil.copy2(source, target)
                 else:
                     target.unlink(missing_ok=True)
-            tree_digest = compute_application_build_hash(staging)
+            application_hash = compute_application_build_hash(staging)
+            if application_hash != record.candidate_application_hash:
+                raise ActivationError("materialized candidate application hash mismatches record")
             manifest = self.recovery.store.create_snapshot(
                 transaction_id=record.recovery_transaction_id or str(uuid4()),
                 app_revision=record.candidate_revision,
-                application_hash=tree_digest,
-                configuration={"candidate_identity": identity},
+                application_hash=application_hash,
+                configuration={
+                    "candidate_identity": identity,
+                    "candidate_application_hash": application_hash,
+                },
                 database_schema={},
                 integration_versions={},
                 files=(),
             )
-            final_root = self.installation_root / manifest.snapshot_id
-            staging.rename(final_root)
-            return CandidateInstallation(final_root, manifest.snapshot_id, tree_digest, identity)
+            staged_root = self.installation_root / manifest.snapshot_id
+            _contained_directory_target(staged_root, self.installation_root)
+            staging.rename(staged_root)
+            return CandidateInstallation(
+                staged_root, manifest.snapshot_id, application_hash, identity
+            )
         except Exception:
             shutil.rmtree(staging, ignore_errors=True)
             raise
@@ -875,6 +907,7 @@ class ProductionGoldenExecutor:
                 and payload.get("status") == "ready"
                 and payload.get("root") == str(root)
                 and payload.get("environment_isolated") is True
+                and payload.get("shutdown_clean") is True
                 and payload.get("application_hash") == expected_hash
             )
             observation_digest = hashlib.sha256(
@@ -959,6 +992,11 @@ class ProductionSelfDevelopmentRuntimeVerifier:
         self._host_timeout_seconds = startup_deadline_seconds - safety_margin_seconds
         self._safety_margin_seconds = safety_margin_seconds
         self._observations: dict[Path, tuple[int, Mapping[str, object] | None, str]] = {}
+        self._last_start_evidence: CandidateStartEvidence | None = None
+
+    @property
+    def last_start_evidence(self) -> CandidateStartEvidence | None:
+        return self._last_start_evidence
 
     def start_candidate(
         self, *, installation_root: Path, expected_revision: str, expected_hash: str
@@ -973,7 +1011,11 @@ class ProductionSelfDevelopmentRuntimeVerifier:
                 "authenticated candidate manifest unavailable",
                 tree_digest,
             )
-        if manifest.app_revision != expected_revision or manifest.application_hash != tree_digest:
+        if (
+            manifest.app_revision != expected_revision
+            or manifest.application_hash != expected_hash
+            or manifest.application_hash != tree_digest
+        ):
             return self._evidence(
                 root,
                 CandidateStartOutcome.RECOVERY_AUTH_MISMATCH,
@@ -1035,6 +1077,9 @@ class ProductionSelfDevelopmentRuntimeVerifier:
                 elif payload.get("environment_isolated") is not True:
                     outcome = CandidateStartOutcome.UNSAFE_ENVIRONMENT
                     detail = "candidate host environment was not isolated"
+                elif payload.get("shutdown_clean") is not True:
+                    outcome = CandidateStartOutcome.SHUTDOWN_FAILED
+                    detail = "candidate host shutdown was not clean"
                 elif payload.get("application_hash") != tree_digest:
                     outcome = CandidateStartOutcome.TREE_HASH_MISMATCH
                     detail = "candidate host reported a different application hash"
@@ -1087,6 +1132,7 @@ class ProductionSelfDevelopmentRuntimeVerifier:
             and payload.get("root") == str(installation_root.resolve())
             and payload.get("environment_isolated") is True
             and payload.get("application_hash") == observed[2]
+            and observed[2] == expected_hash
             and self._authenticated_tree_digest(installation_root.resolve()) == observed[2]
         )
         return RuntimeVerificationEvidence(
@@ -1108,6 +1154,7 @@ class ProductionSelfDevelopmentRuntimeVerifier:
             observed is not None
             and observed[0] == 0
             and observed[2] == compute_application_build_hash(root)
+            and observed[2] == expected_hash
             and self._authenticated_tree_digest(root) == observed[2]
         )
         return RuntimeVerificationEvidence(
@@ -1134,8 +1181,14 @@ class ProductionSelfDevelopmentRuntimeVerifier:
             expected_revision=manifest.app_revision,
             expected_hash=manifest.application_hash,
         )
+        if not evidence.started:
+            return RuntimeVerificationEvidence(
+                False,
+                hashlib.sha256(f"lkg-start:{root}:{evidence.evidence_digest}".encode()).hexdigest(),
+                "authenticated known-good runtime did not start",
+            )
         health = self.observe_candidate_health(
-            installation_root=root, expected_hash=evidence.observed_hash
+            installation_root=root, expected_hash=evidence.observed_application_hash
         )
         return RuntimeVerificationEvidence(
             health.passed,
@@ -1188,7 +1241,7 @@ class ProductionSelfDevelopmentRuntimeVerifier:
         digest = hashlib.sha256(
             f"{pid}:{root}:{returncode}:{tree_digest}:{outcome.value}:{sanitized_stderr}".encode()
         ).hexdigest()
-        return CandidateStartEvidence(
+        evidence = CandidateStartEvidence(
             outcome is CandidateStartOutcome.STARTED,
             observed_revision,
             tree_digest,
@@ -1198,6 +1251,8 @@ class ProductionSelfDevelopmentRuntimeVerifier:
             snapshot_id,
             detail,
         )
+        self._last_start_evidence = evidence
+        return evidence
 
     def _authenticated_tree_digest(self, root: Path) -> str | None:
         manifest = self._authenticated_manifest(root)
@@ -1265,6 +1320,7 @@ class TrustedSelfDevelopmentActivator:
         candidate_hash = _candidate_hash(proposal)
         workspace = _candidate_workspace(proposal)
         tree_digest = _tree_digest(workspace)
+        candidate_application_hash = compute_application_build_hash(workspace)
         if tree_digest != proposal.modification.tree_digest:
             raise ActivationError("candidate tree does not match tested proposal")
         diff_digest = _git_diff_digest(
@@ -1295,6 +1351,7 @@ class TrustedSelfDevelopmentActivator:
             base_revision=proposal.workspace.base_revision,
             candidate_revision=proposal.modification.candidate_revision or candidate_hash,
             candidate_hash=candidate_hash,
+            candidate_application_hash=candidate_application_hash,
             candidate_tree_digest=tree_digest,
             candidate_diff_digest=diff_digest,
             changed_paths=proposal.modification.changed_paths,
@@ -1373,13 +1430,17 @@ class TrustedSelfDevelopmentActivator:
                 raise ActivationError("SELF_IMPROVEMENT GoldenWorkflow did not pass")
             record = self._transition(record, ActivationStatus.PREPARING)
             transaction_id = str(uuid4())
-            snapshot_id = self._snapshot_current(transaction_id, record.changed_paths, proposal)
-            record = self._transition(
-                record,
-                ActivationStatus.SNAPSHOT_CREATED,
-                recovery_transaction_id=transaction_id,
-                recovery_snapshot_id=snapshot_id,
-            )
+            record = replace(record, recovery_transaction_id=transaction_id)
+            self.store.put(record)
+            if self._candidate_installer is None:
+                snapshot_id = self._snapshot_current(transaction_id, record.changed_paths, proposal)
+                record = self._transition(
+                    record,
+                    ActivationStatus.SNAPSHOT_CREATED,
+                    recovery_snapshot_id=snapshot_id,
+                )
+            else:
+                record = self._bind_previous_lkg(record, transaction_id, proposal)
             authorization = await self._authorize_effect(record)
             supplied_permission_contexts = permission_contexts + (
                 (permission_context,) if permission_context is not None else ()
@@ -1418,24 +1479,45 @@ class TrustedSelfDevelopmentActivator:
             if begin_reason is not None:
                 raise ActivationError(f"effect receipt unavailable: {begin_reason.value}")
             record = self._transition(record, ActivationStatus.APPLYING)
-            try:
-                self._apply_exact(proposal)
-            except Exception as error:
-                await self.broker.record_execution_outcome(authorization.receipt, "unknown_outcome")
-                return self._fail(
-                    record,
-                    ActivationStatus.QUARANTINED,
-                    f"apply outcome unknown: {type(error).__name__}",
-                )
+            candidate_installation = None
+            if self._candidate_installer is not None:
+                try:
+                    candidate_installation = self._candidate_installer.stage(proposal, record)
+                    if candidate_installation.identity != self._candidate_identity(record):
+                        raise ActivationError("candidate installation identity is not exact")
+                    if candidate_installation.tree_digest != record.candidate_application_hash:
+                        raise ActivationError(
+                            "candidate installation application hash is not exact"
+                        )
+                except Exception as error:
+                    await self.broker.record_execution_outcome(
+                        authorization.receipt, "unknown_outcome"
+                    )
+                    return self._fail(
+                        record,
+                        ActivationStatus.QUARANTINED,
+                        f"materialization outcome unknown: {type(error).__name__}",
+                    )
+            else:
+                try:
+                    self._apply_exact(proposal)
+                except Exception as error:
+                    await self.broker.record_execution_outcome(
+                        authorization.receipt, "unknown_outcome"
+                    )
+                    return self._fail(
+                        record,
+                        ActivationStatus.QUARANTINED,
+                        f"apply outcome unknown: {type(error).__name__}",
+                    )
             await self.broker.record_execution_outcome(authorization.receipt, "success")
-            if _installed_candidate_hash(proposal, self.installation_root) != record.candidate_hash:
+            if (
+                candidate_installation is None
+                and _installed_candidate_hash(proposal, self.installation_root)
+                != record.candidate_hash
+            ):
                 raise ActivationError("installed candidate hash does not match exact candidate")
             record = self._transition(record, ActivationStatus.APPLIED)
-            candidate_installation = (
-                self._candidate_installer.stage(proposal, record)
-                if self._candidate_installer is not None
-                else None
-            )
             candidate_root = (
                 candidate_installation.root
                 if candidate_installation is not None
@@ -1462,25 +1544,35 @@ class TrustedSelfDevelopmentActivator:
                 start_evidence = self._runtime_verifier.start_candidate(
                     installation_root=candidate_root,
                     expected_revision=record.candidate_revision,
-                    expected_hash=record.candidate_hash,
+                    expected_hash=record.candidate_application_hash,
                 )
                 if (
                     not start_evidence.started
                     or start_evidence.observed_revision != record.candidate_revision
-                    or start_evidence.observed_hash != record.candidate_hash
+                    or start_evidence.observed_application_hash != record.candidate_application_hash
+                    or (
+                        self._candidate_installer is not None
+                        and (
+                            start_evidence.observed_root != str(candidate_root.resolve())
+                            or start_evidence.snapshot_id != candidate_snapshot
+                        )
+                    )
                 ):
-                    raise ActivationError("trusted candidate start did not observe exact candidate")
+                    raise ActivationError(
+                        "trusted candidate start did not observe exact candidate: "
+                        f"outcome={start_evidence.outcome.value};detail={start_evidence.detail}"
+                    )
 
             def verify_candidate() -> bool:
                 health = self._runtime_verifier.observe_candidate_health(
                     installation_root=candidate_root,
-                    expected_hash=record.candidate_hash,
+                    expected_hash=record.candidate_application_hash,
                 )
                 if not health.passed:
                     return False
                 security = self._runtime_verifier.observe_candidate_security(
                     installation_root=candidate_root,
-                    expected_hash=record.candidate_hash,
+                    expected_hash=record.candidate_application_hash,
                 )
                 return security.passed
 
@@ -1505,6 +1597,14 @@ class TrustedSelfDevelopmentActivator:
             )
             if result == candidate_snapshot:
                 return self._transition(record, ActivationStatus.COMMITTED)
+            if start_evidence is not None:
+                return self._fail(
+                    record,
+                    ActivationStatus.SAFE_MODE_REQUIRED
+                    if coordinator.safe_mode
+                    else ActivationStatus.ROLLED_BACK,
+                    self._start_failure_detail(start_evidence),
+                )
             if coordinator.safe_mode:
                 return self._fail(
                     record,
@@ -1548,23 +1648,51 @@ class TrustedSelfDevelopmentActivator:
         }:
             return record
         try:
-            current = _installed_candidate_hash(proposal, self.installation_root)
-            if current != record.candidate_hash:
-                old = _known_good_candidate_hash(self.recovery, proposal)
-                if old is not None and current == old:
+            self._revalidate(record, proposal)
+            if self._candidate_installer is not None:
+                candidate_snapshot_id = record.candidate_snapshot_id
+                if candidate_snapshot_id is None:
                     return self._fail(
-                        record, ActivationStatus.FAILED, "effect did not start; no automatic retry"
+                        record,
+                        ActivationStatus.QUARANTINED,
+                        "versioned candidate snapshot is unavailable during recovery",
                     )
-                return self._fail(
-                    record, ActivationStatus.QUARANTINED, "ambiguous activation state"
-                )
-            if record.candidate_snapshot_id is None:
-                snapshot = self._snapshot_candidate(
-                    record.recovery_transaction_id or str(uuid4()), record.changed_paths, proposal
-                )
-                record = self._transition(
-                    record, ActivationStatus.APPLIED, candidate_snapshot_id=snapshot
-                )
+                candidate_root = self.installation_root / candidate_snapshot_id
+                _contained_directory_target(candidate_root, self.installation_root)
+                manifest = self.recovery.store.load(candidate_snapshot_id)
+                current = compute_application_build_hash(candidate_root)
+                if (
+                    manifest.app_revision != record.candidate_revision
+                    or manifest.application_hash != record.candidate_application_hash
+                    or current != record.candidate_application_hash
+                ):
+                    return self._fail(
+                        record,
+                        ActivationStatus.QUARANTINED,
+                        "versioned candidate identity is contradictory",
+                    )
+            else:
+                current = _installed_candidate_hash(proposal, self.installation_root)
+                if current != record.candidate_hash:
+                    old = _known_good_candidate_hash(self.recovery, proposal)
+                    if old is not None and current == old:
+                        return self._fail(
+                            record,
+                            ActivationStatus.FAILED,
+                            "effect did not start; no automatic retry",
+                        )
+                    return self._fail(
+                        record, ActivationStatus.QUARANTINED, "ambiguous activation state"
+                    )
+                if record.candidate_snapshot_id is None:
+                    snapshot = self._snapshot_candidate(
+                        record.recovery_transaction_id or str(uuid4()),
+                        record.changed_paths,
+                        proposal,
+                    )
+                    record = self._transition(
+                        record, ActivationStatus.APPLIED, candidate_snapshot_id=snapshot
+                    )
             candidate_snapshot_id = record.candidate_snapshot_id
             if candidate_snapshot_id is None:
                 raise ActivationError("candidate snapshot is unavailable during recovery")
@@ -1573,30 +1701,43 @@ class TrustedSelfDevelopmentActivator:
                 if self._candidate_installer is not None
                 else self.installation_root
             )
+            start_evidence: CandidateStartEvidence | None = None
 
             def start() -> None:
+                nonlocal start_evidence
                 evidence = self._runtime_verifier.start_candidate(
                     installation_root=candidate_root,
                     expected_revision=record.candidate_revision,
-                    expected_hash=record.candidate_hash,
+                    expected_hash=record.candidate_application_hash,
                 )
+                start_evidence = evidence
                 if (
                     not evidence.started
                     or evidence.observed_revision != record.candidate_revision
-                    or evidence.observed_hash != record.candidate_hash
+                    or evidence.observed_application_hash != record.candidate_application_hash
+                    or (
+                        self._candidate_installer is not None
+                        and (
+                            evidence.observed_root != str(candidate_root.resolve())
+                            or evidence.snapshot_id != candidate_snapshot_id
+                        )
+                    )
                 ):
-                    raise ActivationError("trusted candidate start did not observe exact candidate")
+                    raise ActivationError(
+                        "trusted candidate start did not observe exact candidate: "
+                        f"outcome={evidence.outcome.value};detail={evidence.detail}"
+                    )
 
             def verify_candidate() -> bool:
                 health = self._runtime_verifier.observe_candidate_health(
                     installation_root=candidate_root,
-                    expected_hash=record.candidate_hash,
+                    expected_hash=record.candidate_application_hash,
                 )
                 if not health.passed:
                     return False
                 security = self._runtime_verifier.observe_candidate_security(
                     installation_root=candidate_root,
-                    expected_hash=record.candidate_hash,
+                    expected_hash=record.candidate_application_hash,
                 )
                 return security.passed
 
@@ -1621,6 +1762,14 @@ class TrustedSelfDevelopmentActivator:
             )
             if result == candidate_snapshot_id:
                 return self._transition(record, ActivationStatus.COMMITTED)
+            if start_evidence is not None:
+                return self._fail(
+                    record,
+                    ActivationStatus.SAFE_MODE_REQUIRED
+                    if self.recovery.safe_mode
+                    else ActivationStatus.ROLLED_BACK,
+                    self._start_failure_detail(start_evidence),
+                )
             if self.recovery.safe_mode:
                 return self._fail(
                     record, ActivationStatus.SAFE_MODE_REQUIRED, "recovery failed during resume"
@@ -1700,6 +1849,8 @@ class TrustedSelfDevelopmentActivator:
             raise ActivationError("production base revision drifted")
         if _tree_digest(workspace) != record.candidate_tree_digest:
             raise ActivationError("candidate tree changed after testing")
+        if compute_application_build_hash(workspace) != record.candidate_application_hash:
+            raise ActivationError("candidate application identity changed after testing")
         if (
             _git_diff_digest(workspace, record.base_revision, record.changed_paths)
             != record.candidate_diff_digest
@@ -1740,9 +1891,13 @@ class TrustedSelfDevelopmentActivator:
         return bool(await _maybe(runner()))
 
     async def _authorize_effect(self, record: ActivationRecord) -> AuthorizationResult:
-        paths = tuple(
-            str((self.installation_root / Path(path)).resolve()) for path in record.changed_paths
-        )
+        if self._candidate_installer is not None:
+            paths = self._candidate_effect_paths(record)
+        else:
+            paths = tuple(
+                str((self.installation_root / Path(path)).resolve())
+                for path in record.changed_paths
+            )
         scope = PermissionScope(paths=paths, tool_id=self.TOOL_ID, task_id=record.task_id)
         descriptor = ActionDescriptor(
             "activate_exact_self_development",
@@ -1767,7 +1922,79 @@ class TrustedSelfDevelopmentActivator:
             normalized_arguments={
                 "activation_id": record.activation_id,
                 "candidate_hash": record.candidate_hash,
+                "candidate_application_hash": record.candidate_application_hash,
+                "effect_paths": paths,
             },
+        )
+
+    def _candidate_identity(self, record: ActivationRecord) -> str:
+        installer = self._candidate_installer
+        identity = getattr(installer, "_identity", None)
+        if not callable(identity):
+            return hashlib.sha256(
+                "\x1f".join(
+                    (
+                        record.proposal_fingerprint,
+                        record.candidate_hash,
+                        record.candidate_application_hash,
+                        record.candidate_revision,
+                        record.candidate_tree_digest,
+                    )
+                ).encode("utf-8")
+            ).hexdigest()
+        return str(identity(record))
+
+    def _candidate_effect_paths(self, record: ActivationRecord) -> tuple[str, ...]:
+        paths = getattr(self._candidate_installer, "effect_paths", None)
+        if not callable(paths):
+            raise ActivationError("candidate installer lacks an exact materialization plan")
+        return tuple(str(Path(path).resolve()) for path in paths(record))
+
+    def _bind_previous_lkg(
+        self, record: ActivationRecord, transaction_id: str, proposal: MergeDeploymentProposal
+    ) -> ActivationRecord:
+        trusted = self.recovery.store.last_known_good_record()
+        if trusted is None:
+            application_hash = compute_application_build_hash(self.production_root)
+            snapshot = self.recovery.store.create_snapshot(
+                transaction_id=transaction_id,
+                app_revision=proposal.workspace.base_revision,
+                application_hash=application_hash,
+                configuration={"source_root": str(self.production_root)},
+                database_schema={},
+                integration_versions={},
+                files=(),
+            )
+            self.recovery.begin_start(
+                transaction_id,
+                candidate_snapshot_id=snapshot.snapshot_id,
+                candidate_build=proposal.workspace.base_revision,
+                candidate_application_hash=application_hash,
+            )
+            if self.recovery.safe_mode:
+                raise ActivationError("Recovery entered safe mode while binding initial LKG")
+            self.recovery.store.commit_start(transaction_id, snapshot.snapshot_id)
+            trusted = self.recovery.store.last_known_good_record()
+            if trusted is None:
+                raise ActivationError("initial authenticated LKG could not be established")
+        manifest = self.recovery.store.load(trusted.snapshot_id)
+        if manifest.application_hash != trusted.application_hash:
+            raise ActivationError("authenticated LKG manifest identity is inconsistent")
+        return self._transition(
+            record,
+            ActivationStatus.SNAPSHOT_CREATED,
+            recovery_snapshot_id=trusted.snapshot_id,
+            previous_lkg_snapshot_id=trusted.snapshot_id,
+            previous_lkg_application_hash=trusted.application_hash,
+            previous_lkg_revision=trusted.app_revision,
+        )
+
+    def _start_failure_detail(self, evidence: CandidateStartEvidence) -> str:
+        return (
+            "candidate start failed: "
+            f"outcome={evidence.outcome.value};detail={evidence.detail};"
+            f"root={evidence.observed_root};snapshot={evidence.snapshot_id};"
+            f"application_hash={evidence.observed_application_hash}"
         )
 
     def _snapshot_current(
@@ -2087,6 +2314,7 @@ def approval_binding_fingerprint(record: ActivationRecord) -> str:
         "base_revision": record.base_revision,
         "candidate_revision": record.candidate_revision,
         "candidate_hash": record.candidate_hash,
+        "candidate_application_hash": record.candidate_application_hash,
         "candidate_tree_digest": record.candidate_tree_digest,
         "candidate_diff_digest": record.candidate_diff_digest,
         "changed_paths": list(record.changed_paths),
@@ -2095,6 +2323,9 @@ def approval_binding_fingerprint(record: ActivationRecord) -> str:
         "preview_fingerprint": record.preview_fingerprint,
         "activation_expires_at": record.expires_at.astimezone(UTC).isoformat(),
         "proposal_expires_at": record.expires_at.astimezone(UTC).isoformat(),
+        "previous_lkg_snapshot_id": record.previous_lkg_snapshot_id,
+        "previous_lkg_application_hash": record.previous_lkg_application_hash,
+        "previous_lkg_revision": record.previous_lkg_revision,
     }
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
@@ -2120,7 +2351,10 @@ def _activation_failure_status(detail: str) -> ActivationStatus:
 
 
 def _directory(path: Path, label: str) -> Path:
-    resolved = path.expanduser().resolve()
+    candidate = path.expanduser()
+    if candidate.is_symlink() or candidate.is_junction():
+        raise ActivationError(f"{label} is not a regular directory")
+    resolved = candidate.resolve()
     if not resolved.is_dir() or resolved.is_symlink() or resolved.is_junction():
         raise ActivationError(f"{label} is not a regular directory")
     return resolved
@@ -2162,6 +2396,23 @@ def _contained_regular_target(path: Path, root: Path) -> None:
         current = current / part
         if current.is_symlink() or current.is_junction():
             raise ActivationError("activation target contains a link")
+
+
+def _contained_directory_target(path: Path, root: Path) -> None:
+    """Validate a versioned directory namespace before any materialization."""
+
+    resolved_root = _directory(root, "installation root")
+    candidate = path.expanduser()
+    if candidate.is_symlink() or candidate.is_junction():
+        raise ActivationError("activation namespace contains a link")
+    resolved = candidate.resolve(strict=False)
+    if resolved == resolved_root or resolved_root not in resolved.parents:
+        raise ActivationError("activation namespace is not a child of installation root")
+    current = resolved_root
+    for part in resolved.relative_to(resolved_root).parts:
+        current = current / part
+        if current.is_symlink() or current.is_junction():
+            raise ActivationError("activation namespace contains a link")
 
 
 def _tree_digest(root: Path) -> str:
@@ -2318,6 +2569,10 @@ def _record_to_json(record: ActivationRecord) -> dict[str, Any]:
 
 def _record_from_json(value: Mapping[str, Any]) -> ActivationRecord:
     decoded = dict(value)
+    if "candidate_application_hash" not in decoded:
+        raise ActivationError(
+            "durable activation lacks candidate application identity; re-prepare is required"
+        )
     decoded["task_id"] = UUID(str(decoded["task_id"]))
     for key in ("created_at", "expires_at", "approval_expires_at"):
         if decoded.get(key) is not None:
