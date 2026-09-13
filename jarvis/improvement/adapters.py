@@ -372,6 +372,10 @@ class ProposalStore(ABC):
     def remove_unapproved(self, proposal_id: str, fingerprint: str) -> None:
         """Roll back a failed proposal transaction using its exact fingerprint."""
 
+    @abstractmethod
+    def get(self, proposal_id: str) -> MergeDeploymentProposal | None:
+        """Reload one exact proposal from the canonical owner."""
+
 
 class InMemoryProposalStore(ProposalStore):
     def __init__(self) -> None:

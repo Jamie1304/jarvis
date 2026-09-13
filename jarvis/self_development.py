@@ -15,15 +15,17 @@ import os
 import shutil
 import sqlite3
 import subprocess
+import sys
 import tempfile
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass, fields, replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from pathlib import Path
 from typing import Any, Protocol, cast
 from uuid import UUID, uuid4, uuid5
 
+from jarvis.improvement.adapters import ProposalStore
 from jarvis.improvement.integrity import compute_proposal_fingerprint
 from jarvis.improvement.models import (
     ChangeSpecification,
@@ -61,17 +63,23 @@ from jarvis.permissions.models import (
     SafeArgument,
     SafetyClass,
 )
-from jarvis.recovery import RecoveryCoordinator, RecoveryError
+from jarvis.recovery import RecoveryCoordinator, RecoveryError, compute_application_build_hash
 from jarvis.security.modification_policy import (
     ModificationTrustClassification,
     ModificationTrustClassifier,
     ModificationTrustLevel,
 )
 from jarvis.testing.golden import (
+    ExpectedResult,
+    Fixture,
     GoldenChangeKind,
     GoldenExecutor,
     GoldenGateError,
+    GoldenWorkflow,
+    GoldenWorkflowClass,
     GoldenWorkflowService,
+    GoldenWorkflowStore,
+    Version,
 )
 from jarvis.update_preview import (
     ControlledSelfUpdate,
@@ -79,6 +87,7 @@ from jarvis.update_preview import (
     UpdateMigrationSummary,
     UpdatePreview,
 )
+from jarvis.verification import EvidenceRecord, EvidenceType, VerificationLevel
 
 
 class ActivationError(RuntimeError):
@@ -201,7 +210,7 @@ class ActivationStateStore:
         return None if row is None else _record_from_json(json.loads(str(row[0])))
 
 
-class DurableProposalStore:
+class DurableProposalStore(ProposalStore):
     """Trusted JSON-backed owner for proposals that outlive one service object."""
 
     def __init__(self, path: Path) -> None:
@@ -214,17 +223,50 @@ class DurableProposalStore:
             )
 
     def put(self, proposal: MergeDeploymentProposal) -> None:
+        self.add(proposal)
+
+    def add(self, proposal: MergeDeploymentProposal) -> None:
         _assert_proposal_fingerprint(proposal)
         payload = json.dumps(_proposal_to_json(proposal), sort_keys=True, separators=(",", ":"))
         with sqlite3.connect(self.path) as connection:
+            existing = connection.execute(
+                "SELECT fingerprint,payload FROM self_development_proposals WHERE proposal_id=?",
+                (proposal.proposal_id,),
+            ).fetchone()
+            if existing is not None:
+                if (
+                    str(existing[0]) == proposal.proposal_fingerprint
+                    and str(existing[1]) == payload
+                ):
+                    raise ValueError("Proposal ID already exists")
+                raise ValueError("Proposal ID already exists with different contents")
+            duplicate = connection.execute(
+                "SELECT proposal_id FROM self_development_proposals WHERE fingerprint=?",
+                (proposal.proposal_fingerprint,),
+            ).fetchone()
+            if duplicate is not None:
+                raise ValueError("Exact change already has an awaiting proposal")
             connection.execute(
                 "INSERT INTO self_development_proposals(proposal_id,fingerprint,payload) "
-                "VALUES(?,?,?) ON CONFLICT(proposal_id) DO UPDATE SET "
-                "fingerprint=excluded.fingerprint,payload=excluded.payload",
+                "VALUES(?,?,?)",
                 (proposal.proposal_id, proposal.proposal_fingerprint, payload),
             )
 
-    add = put
+    def remove_unapproved(self, proposal_id: str, fingerprint: str) -> None:
+        with sqlite3.connect(self.path) as connection:
+            row = connection.execute(
+                "SELECT fingerprint,payload FROM self_development_proposals WHERE proposal_id=?",
+                (proposal_id,),
+            ).fetchone()
+            if row is None or str(row[0]) != fingerprint:
+                raise ValueError("Only the exact awaiting proposal can be rolled back from storage")
+            proposal = _proposal_from_json(json.loads(str(row[1])))
+            if proposal.status is not ProposalStatus.AWAITING_TRUSTED_APPROVAL:
+                raise ValueError("Only an awaiting proposal can be removed")
+            connection.execute(
+                "DELETE FROM self_development_proposals WHERE proposal_id=? AND fingerprint=?",
+                (proposal_id, fingerprint),
+            )
 
     def get(self, proposal_id: str) -> MergeDeploymentProposal | None:
         with sqlite3.connect(self.path) as connection:
@@ -366,6 +408,449 @@ class UnavailableSelfDevelopmentRuntimeVerifier:
         return RuntimeVerificationEvidence(False, self._DIGEST, "LKG observer unavailable")
 
 
+class SelfDevelopmentSupport(StrEnum):
+    SUPPORTED_SOURCE_INSTALLATION = "supported_source_installation"
+    UNSUPPORTED_PACKAGED_SELF_UPDATE = "unsupported_packaged_self_update"
+    UNSUPPORTED_READ_ONLY_INSTALLATION = "unsupported_read_only_installation"
+    UNSAFE_INSTALLATION_IDENTITY = "unsafe_installation_identity"
+
+
+@dataclass(frozen=True, slots=True)
+class SelfDevelopmentSupportResult:
+    status: SelfDevelopmentSupport
+    detail: str
+    production_root: Path
+
+
+class SelfDevelopmentSupportDetector:
+    """Deterministically classify the installation before composing update owners."""
+
+    def detect(
+        self, production_root: Path, installation_root: Path
+    ) -> SelfDevelopmentSupportResult:
+        raw_root = production_root.expanduser()
+        raw_target = installation_root.expanduser()
+        root = raw_root.resolve()
+        target = raw_target.resolve()
+        if getattr(sys, "frozen", False):
+            return SelfDevelopmentSupportResult(
+                SelfDevelopmentSupport.UNSUPPORTED_PACKAGED_SELF_UPDATE,
+                "frozen executable replacement is not supported",
+                root,
+            )
+        if (
+            root == target
+            or raw_root.is_symlink()
+            or raw_root.is_junction()
+            or raw_target.is_symlink()
+            or raw_target.is_junction()
+            or root.is_relative_to(target)
+            or target.is_relative_to(root)
+        ):
+            return SelfDevelopmentSupportResult(
+                SelfDevelopmentSupport.UNSAFE_INSTALLATION_IDENTITY,
+                "production and candidate roots must be distinct regular directories",
+                root,
+            )
+        required = (root / "jarvis" / "runtime.py", root / "jarvis" / "bootstrap.py")
+        if not root.is_dir() or any(not item.is_file() for item in required):
+            return SelfDevelopmentSupportResult(
+                SelfDevelopmentSupport.UNSAFE_INSTALLATION_IDENTITY,
+                "source installation identity is incomplete",
+                root,
+            )
+        try:
+            target.mkdir(parents=True, exist_ok=True)
+            probe = target / ".support-probe"
+            probe.write_text("trusted-support-probe", encoding="utf-8")
+            probe.unlink()
+        except OSError:
+            return SelfDevelopmentSupportResult(
+                SelfDevelopmentSupport.UNSUPPORTED_READ_ONLY_INSTALLATION,
+                "candidate installation root is not writable",
+                root,
+            )
+        return SelfDevelopmentSupportResult(
+            SelfDevelopmentSupport.SUPPORTED_SOURCE_INSTALLATION,
+            "trusted source installation and writable candidate root verified",
+            root,
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class CandidateInstallation:
+    root: Path
+    snapshot_id: str
+    tree_digest: str
+    identity: str
+
+
+class CandidateInstaller(Protocol):
+    def stage(
+        self, proposal: MergeDeploymentProposal, record: ActivationRecord
+    ) -> CandidateInstallation: ...
+
+
+class ProductionCandidateInstaller:
+    """Build a complete immutable candidate and bind it to an authenticated snapshot."""
+
+    _EXCLUDED_DIRECTORIES = frozenset(
+        {
+            ".git",
+            ".jarvis",
+            ".venv",
+            "__pycache__",
+            "artifacts",
+            "cache",
+            "data",
+            "logs",
+            "models",
+            "tmp",
+            "build",
+            "dist",
+            "knowledge",
+            ".pytest_cache",
+            ".mypy_cache",
+            ".ruff_cache",
+            "jarvis.egg-info",
+        }
+    )
+    _EXCLUDED_FILES = frozenset({".env", ".env.local", ".coverage"})
+
+    def __init__(
+        self, production_root: Path, installation_root: Path, recovery: RecoveryCoordinator
+    ) -> None:
+        self.production_root = _directory(production_root, "production root")
+        self.installation_root = _directory(installation_root, "installation root")
+        self.recovery = recovery
+
+    def stage(
+        self, proposal: MergeDeploymentProposal, record: ActivationRecord
+    ) -> CandidateInstallation:
+        identity_material = "\x1f".join(
+            (
+                record.proposal_fingerprint,
+                record.candidate_hash,
+                record.candidate_revision,
+                record.candidate_tree_digest,
+            )
+        )
+        identity = hashlib.sha256(identity_material.encode("utf-8")).hexdigest()
+        staging = self.installation_root / f".staging-{identity}"
+        if staging.exists():
+            raise ActivationError("candidate identity is already staged")
+        staging.mkdir(parents=True)
+        try:
+            self._copy_tree(self.production_root, staging)
+            workspace = _candidate_workspace(proposal)
+            for relative in proposal.modification.changed_paths:
+                source = workspace / Path(relative)
+                target = staging / Path(relative)
+                _contained_regular_target(target, staging)
+                if source.exists():
+                    if not source.is_file() or source.is_symlink() or source.is_junction():
+                        raise ActivationError("candidate changed path is not a regular file")
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(source, target)
+                else:
+                    target.unlink(missing_ok=True)
+            tree_digest = compute_application_build_hash(staging)
+            manifest = self.recovery.store.create_snapshot(
+                transaction_id=record.recovery_transaction_id or str(uuid4()),
+                app_revision=record.candidate_revision,
+                application_hash=tree_digest,
+                configuration={"candidate_identity": identity},
+                database_schema={},
+                integration_versions={},
+                files=(),
+            )
+            final_root = self.installation_root / manifest.snapshot_id
+            staging.rename(final_root)
+            return CandidateInstallation(final_root, manifest.snapshot_id, tree_digest, identity)
+        except Exception:
+            shutil.rmtree(staging, ignore_errors=True)
+            raise
+
+    def _copy_tree(
+        self,
+        source_root: Path,
+        target_root: Path,
+        seen_files: dict[tuple[int, int], Path] | None = None,
+    ) -> None:
+        source_root = source_root.resolve()
+        if source_root.is_symlink() or source_root.is_junction() or not source_root.is_dir():
+            raise ActivationError("candidate source root is unsafe")
+        seen_files = seen_files if seen_files is not None else {}
+        target_root.mkdir(parents=True, exist_ok=True)
+        for source in source_root.iterdir():
+            if source.name in self._EXCLUDED_DIRECTORIES or source.name in self._EXCLUDED_FILES:
+                continue
+            if source.is_symlink() or source.is_junction():
+                raise ActivationError("candidate source contains a link")
+            target = target_root / source.name
+            if source.is_dir():
+                self._copy_tree(source, target, seen_files)
+            elif source.is_file() and source.suffix in {".sqlite3", ".pyc", ".pyo"}:
+                continue
+            elif source.is_file() and source.suffix not in {".sqlite3", ".pyc", ".pyo"}:
+                stat = source.stat()
+                identity = (stat.st_dev, stat.st_ino)
+                if identity in seen_files:
+                    raise ActivationError("candidate source contains an unexpected hard link")
+                seen_files[identity] = source
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(source, target)
+            else:
+                raise ActivationError("candidate source contains a non-regular file")
+
+
+class ProductionSelfDevelopmentGateVerifier:
+    """Fresh current gate owner bound to one exact proposal and current policy."""
+
+    def __call__(
+        self, proposal: MergeDeploymentProposal, classification: ModificationTrustClassification
+    ) -> Mapping[str, GateEvidence]:
+        if classification != ModificationTrustClassifier().classify(
+            proposal.modification.changed_paths
+        ):
+            raise ActivationError("current trusted gate classification is stale")
+        _assert_proposal_fingerprint(proposal)
+        workspace = _candidate_workspace(proposal)
+        if _tree_digest(workspace) != proposal.modification.tree_digest:
+            raise ActivationError("current candidate tree gate failed")
+        if _git_head(workspace) != proposal.workspace.base_revision:
+            raise ActivationError("current candidate base gate failed")
+        if _git_changed_paths(workspace, proposal.workspace.base_revision) != set(
+            proposal.modification.changed_paths
+        ):
+            raise ActivationError("candidate changed-path set is broader than the proposal")
+        if (
+            _git_diff_digest(
+                workspace, proposal.workspace.base_revision, proposal.modification.changed_paths
+            )
+            != proposal.modification.diff_digest
+        ):
+            raise ActivationError("current candidate diff gate failed")
+        if proposal.dependency_assessment.changes:
+            raise ActivationError("dependency-changing candidate gate failed")
+        material = "\x1f".join(
+            (
+                proposal.proposal_fingerprint,
+                proposal.modification.tree_digest,
+                proposal.modification.diff_digest,
+                str(classification.level),
+                ",".join(classification.required_gates),
+            )
+        )
+        digest = hashlib.sha256(material.encode("utf-8")).hexdigest()
+        return {name: GateEvidence(name, True, digest) for name in classification.required_gates}
+
+
+def register_production_self_development_golden(store: object) -> GoldenWorkflow:
+    """Register one deterministic trusted self-improvement Golden workflow."""
+
+    workflow = GoldenWorkflow(
+        "jarvis-production-self-development",
+        "Production self-development readiness",
+        Version(1, 0, 0),
+        GoldenWorkflowClass.DETERMINISTIC,
+        (
+            Fixture(
+                "candidate-ready",
+                "Candidate runtime readiness",
+                {"criterion": "candidate_ready"},
+                ExpectedResult("Verify trusted candidate readiness", ("candidate_ready",)),
+            ),
+        ),
+        frozenset({GoldenChangeKind.SELF_IMPROVEMENT}),
+        provenance=("trusted:jarvis-production-self-development",),
+    )
+    return cast(GoldenWorkflowStore, store).register(workflow)
+
+
+class ProductionGoldenExecutor:
+    """Application-owned Golden executor; generated code cannot register or waive it."""
+
+    def __call__(self, workflow: GoldenWorkflow, fixture: Fixture) -> Sequence[EvidenceRecord]:
+        if (
+            workflow.workflow_id != "jarvis-production-self-development"
+            or fixture.fixture_id != "candidate-ready"
+        ):
+            raise GoldenGateError("production self-development Golden workflow is unknown")
+        now = datetime.now(UTC)
+        return (
+            EvidenceRecord(
+                EvidenceType.CUSTOM,
+                "trusted.production-self-development-golden",
+                now,
+                timedelta(minutes=5),
+                1.0,
+                "candidate_ready",
+                "candidate_ready",
+                level=VerificationLevel.AUTOMATED_TESTED,
+            ),
+        )
+
+
+class TrustedSelfDevelopmentBootSelector:
+    """Resolve boot code only from authenticated RecoveryStore known-good state."""
+
+    def __init__(
+        self, production_root: Path, installation_root: Path, recovery: RecoveryCoordinator
+    ) -> None:
+        self.production_root = _directory(production_root, "production root")
+        self.installation_root = _directory(installation_root, "installation root")
+        self.recovery = recovery
+
+    def select(self) -> Path:
+        record = self.recovery.store.last_known_good_record()
+        if record is None:
+            return self.production_root
+        manifest = self.recovery.store.load(record.snapshot_id)
+        candidate = self.installation_root / record.snapshot_id
+        if (
+            candidate.is_dir()
+            and compute_application_build_hash(candidate) == manifest.application_hash
+        ):
+            return candidate
+        if compute_application_build_hash(self.production_root) == manifest.application_hash:
+            return self.production_root
+        raise ActivationError("authenticated known-good candidate installation is unavailable")
+
+
+class ProductionSelfDevelopmentRuntimeVerifier:
+    """Trusted bounded Windows process observer for complete candidate roots."""
+
+    def __init__(
+        self, production_root: Path, boot_selector: TrustedSelfDevelopmentBootSelector
+    ) -> None:
+        self.production_root = _directory(production_root, "production root")
+        self.boot_selector = boot_selector
+        self._observations: dict[Path, tuple[int, str, str]] = {}
+
+    def start_candidate(
+        self, *, installation_root: Path, expected_revision: str, expected_hash: str
+    ) -> CandidateStartEvidence:
+        root = _directory(installation_root, "candidate installation root")
+        tree_digest = compute_application_build_hash(root)
+        app_data = Path(tempfile.mkdtemp(prefix="jarvis-candidate-data-"))
+        env = os.environ.copy()
+        env["PYTHONPATH"] = os.pathsep.join((str(root), env.get("PYTHONPATH", "")))
+        command = [sys.executable, "-m", "jarvis.self_development_host", str(app_data)]
+        try:
+            child = subprocess.Popen(
+                command,
+                cwd=root,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            try:
+                stdout, _stderr = child.communicate(timeout=90)
+            except subprocess.TimeoutExpired:
+                child.kill()
+                stdout, _stderr = child.communicate()
+            returncode = child.returncode
+            self._observations[root] = (returncode, stdout, tree_digest)
+            payload = _candidate_host_payload(stdout)
+            started = (
+                returncode == 0
+                and payload is not None
+                and payload.get("status") == "ready"
+                and payload.get("root") == str(root)
+                and payload.get("application_hash") == tree_digest
+                and self._authenticated_tree_digest(root) == tree_digest
+            )
+            digest = hashlib.sha256(
+                f"{child.pid}:{root}:{returncode}:{tree_digest}".encode()
+            ).hexdigest()
+            return CandidateStartEvidence(
+                started,
+                expected_revision,
+                expected_hash,
+                digest,
+            )
+        finally:
+            shutil.rmtree(app_data, ignore_errors=True)
+
+    def observe_candidate_health(
+        self, *, installation_root: Path, expected_hash: str
+    ) -> RuntimeVerificationEvidence:
+        observed = self._observations.get(installation_root.resolve())
+        payload = _candidate_host_payload(observed[1]) if observed is not None else None
+        passed = (
+            observed is not None
+            and observed[0] == 0
+            and payload is not None
+            and payload.get("status") == "ready"
+            and payload.get("root") == str(installation_root.resolve())
+            and payload.get("application_hash") == observed[2]
+            and self._authenticated_tree_digest(installation_root.resolve()) == observed[2]
+        )
+        return RuntimeVerificationEvidence(
+            passed,
+            hashlib.sha256(
+                f"health:{installation_root}:{expected_hash}:{passed}".encode()
+            ).hexdigest(),
+            "real candidate ApplicationRuntime startup observed"
+            if passed
+            else "candidate runtime was not READY",
+        )
+
+    def observe_candidate_security(
+        self, *, installation_root: Path, expected_hash: str
+    ) -> RuntimeVerificationEvidence:
+        root = installation_root.resolve()
+        observed = self._observations.get(root)
+        passed = (
+            observed is not None
+            and observed[0] == 0
+            and observed[2] == compute_application_build_hash(root)
+        )
+        return RuntimeVerificationEvidence(
+            passed,
+            hashlib.sha256(
+                f"security:{root}:{expected_hash}:{observed[2] if observed else ''}".encode()
+            ).hexdigest(),
+            "candidate root identity and complete tree are unchanged"
+            if passed
+            else "candidate integrity observation failed",
+        )
+
+    def observe_lkg_health(self, *, installation_root: Path) -> RuntimeVerificationEvidence:
+        root = self.boot_selector.select()
+        evidence = self.start_candidate(
+            installation_root=root,
+            expected_revision="known-good",
+            expected_hash=hashlib.sha256(str(root).encode()).hexdigest(),
+        )
+        health = self.observe_candidate_health(
+            installation_root=root, expected_hash=evidence.observed_hash
+        )
+        return RuntimeVerificationEvidence(
+            health.passed,
+            hashlib.sha256(f"lkg:{root}:{health.evidence_digest}".encode()).hexdigest(),
+            "authenticated known-good runtime health observed"
+            if health.passed
+            else "known-good runtime health failed",
+        )
+
+    def _authenticated_tree_digest(self, root: Path) -> str | None:
+        root = root.resolve()
+        if root == self.production_root:
+            record = self.boot_selector.recovery.store.last_known_good_record()
+            if record is None:
+                return None
+            return self.boot_selector.recovery.store.load(record.snapshot_id).application_hash
+        if root.parent != self.boot_selector.installation_root:
+            return None
+        try:
+            return self.boot_selector.recovery.store.load(root.name).application_hash
+        except RecoveryError:
+            return None
+
+
 class TrustedSelfDevelopmentActivator:
     """Application-owned composition root for exact local candidate activation."""
 
@@ -384,6 +869,7 @@ class TrustedSelfDevelopmentActivator:
         gate_verifier: GateVerifier,
         golden_runner: GoldenRunner,
         runtime_verifier: SelfDevelopmentRuntimeVerifier,
+        candidate_installer: CandidateInstaller | None = None,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
         self.production_root = _directory(production_root, "production root")
@@ -398,6 +884,7 @@ class TrustedSelfDevelopmentActivator:
         self._gate_verifier = gate_verifier
         self._golden_runner = golden_runner
         self._runtime_verifier = runtime_verifier
+        self._candidate_installer = candidate_installer
         self._clock = clock or (lambda: datetime.now(UTC))
         self._preview: dict[str, UpdatePreview] = {}
         self._identity = object()
@@ -591,8 +1078,22 @@ class TrustedSelfDevelopmentActivator:
             if _installed_candidate_hash(proposal, self.installation_root) != record.candidate_hash:
                 raise ActivationError("installed candidate hash does not match exact candidate")
             record = self._transition(record, ActivationStatus.APPLIED)
-            candidate_snapshot = self._snapshot_candidate(
-                record.recovery_transaction_id or transaction_id, record.changed_paths, proposal
+            candidate_installation = (
+                self._candidate_installer.stage(proposal, record)
+                if self._candidate_installer is not None
+                else None
+            )
+            candidate_root = (
+                candidate_installation.root
+                if candidate_installation is not None
+                else self.installation_root
+            )
+            candidate_snapshot = (
+                candidate_installation.snapshot_id
+                if candidate_installation is not None
+                else self._snapshot_candidate(
+                    record.recovery_transaction_id or transaction_id, record.changed_paths, proposal
+                )
             )
             record = self._transition(
                 record,
@@ -606,7 +1107,7 @@ class TrustedSelfDevelopmentActivator:
             def start() -> None:
                 nonlocal start_evidence
                 start_evidence = self._runtime_verifier.start_candidate(
-                    installation_root=self.installation_root,
+                    installation_root=candidate_root,
                     expected_revision=record.candidate_revision,
                     expected_hash=record.candidate_hash,
                 )
@@ -619,13 +1120,13 @@ class TrustedSelfDevelopmentActivator:
 
             def verify_candidate() -> bool:
                 health = self._runtime_verifier.observe_candidate_health(
-                    installation_root=self.installation_root,
+                    installation_root=candidate_root,
                     expected_hash=record.candidate_hash,
                 )
                 if not health.passed:
                     return False
                 security = self._runtime_verifier.observe_candidate_security(
-                    installation_root=self.installation_root,
+                    installation_root=candidate_root,
                     expected_hash=record.candidate_hash,
                 )
                 return security.passed
@@ -641,9 +1142,13 @@ class TrustedSelfDevelopmentActivator:
                 start=start,
                 health_check=verify_candidate,
                 lkg_health_check=verify_lkg,
-                destinations={
-                    path: self.installation_root / Path(path) for path in record.changed_paths
-                },
+                destinations=(
+                    {}
+                    if self._candidate_installer is not None
+                    else {
+                        path: self.installation_root / Path(path) for path in record.changed_paths
+                    }
+                ),
             )
             if result == candidate_snapshot:
                 return self._transition(record, ActivationStatus.COMMITTED)
@@ -710,10 +1215,15 @@ class TrustedSelfDevelopmentActivator:
             candidate_snapshot_id = record.candidate_snapshot_id
             if candidate_snapshot_id is None:
                 raise ActivationError("candidate snapshot is unavailable during recovery")
+            candidate_root = (
+                self.installation_root / candidate_snapshot_id
+                if self._candidate_installer is not None
+                else self.installation_root
+            )
 
             def start() -> None:
                 evidence = self._runtime_verifier.start_candidate(
-                    installation_root=self.installation_root,
+                    installation_root=candidate_root,
                     expected_revision=record.candidate_revision,
                     expected_hash=record.candidate_hash,
                 )
@@ -726,13 +1236,13 @@ class TrustedSelfDevelopmentActivator:
 
             def verify_candidate() -> bool:
                 health = self._runtime_verifier.observe_candidate_health(
-                    installation_root=self.installation_root,
+                    installation_root=candidate_root,
                     expected_hash=record.candidate_hash,
                 )
                 if not health.passed:
                     return False
                 security = self._runtime_verifier.observe_candidate_security(
-                    installation_root=self.installation_root,
+                    installation_root=candidate_root,
                     expected_hash=record.candidate_hash,
                 )
                 return security.passed
@@ -748,9 +1258,13 @@ class TrustedSelfDevelopmentActivator:
                 start=start,
                 health_check=verify_candidate,
                 lkg_health_check=verify_lkg,
-                destinations={
-                    path: self.installation_root / Path(path) for path in record.changed_paths
-                },
+                destinations=(
+                    {}
+                    if self._candidate_installer is not None
+                    else {
+                        path: self.installation_root / Path(path) for path in record.changed_paths
+                    }
+                ),
             )
             if result == candidate_snapshot_id:
                 return self._transition(record, ActivationStatus.COMMITTED)
@@ -1267,6 +1781,8 @@ def _tree_digest(root: Path) -> str:
         relative = path.relative_to(root).as_posix()
         if relative == ".git" or relative.startswith(".git/"):
             continue
+        if "__pycache__" in path.parts or path.suffix in {".pyc", ".pyo"}:
+            continue
         if path.is_symlink() or path.is_junction():
             raise ActivationError("links and junctions are forbidden")
         if path.is_dir():
@@ -1290,6 +1806,38 @@ def _git_head(root: Path) -> str:
     if result.returncode != 0:
         raise ActivationError("candidate or production Git identity is unavailable")
     return result.stdout.strip()
+
+
+def _candidate_host_payload(stdout: str) -> Mapping[str, object] | None:
+    try:
+        value = json.loads(stdout.strip().splitlines()[-1])
+    except (IndexError, json.JSONDecodeError):
+        return None
+    return value if isinstance(value, Mapping) else None
+
+
+def _git_changed_paths(root: Path, base: str) -> set[str]:
+    result = subprocess.run(
+        ["git", "-C", str(root), "diff", "--name-only", base, "--"],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    if result.returncode != 0:
+        raise ActivationError("candidate changed-path identity is unavailable")
+    changed = {line.strip() for line in result.stdout.splitlines() if line.strip()}
+    untracked = subprocess.run(
+        ["git", "-C", str(root), "ls-files", "--others", "--exclude-standard"],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    if untracked.returncode != 0:
+        raise ActivationError("candidate untracked-path identity is unavailable")
+    changed.update(line.strip() for line in untracked.stdout.splitlines() if line.strip())
+    return changed
 
 
 def _git_diff_digest(root: Path, base: str, paths: Sequence[str]) -> str:
@@ -1400,11 +1948,21 @@ __all__ = [
     "ActivationStateStore",
     "ActivationStatus",
     "CandidateStartEvidence",
+    "CandidateInstallation",
+    "CandidateInstaller",
     "DurableProposalStore",
     "GateEvidence",
     "GoldenWorkflowOwner",
     "RuntimeVerificationEvidence",
+    "ProductionCandidateInstaller",
+    "ProductionGoldenExecutor",
+    "ProductionSelfDevelopmentGateVerifier",
+    "ProductionSelfDevelopmentRuntimeVerifier",
+    "SelfDevelopmentSupport",
+    "SelfDevelopmentSupportDetector",
+    "SelfDevelopmentSupportResult",
     "SelfDevelopmentRuntimeVerifier",
+    "TrustedSelfDevelopmentBootSelector",
     "TrustedSelfDevelopmentActivator",
     "UnavailableSelfDevelopmentGateVerifier",
     "UnavailableSelfDevelopmentRuntimeVerifier",

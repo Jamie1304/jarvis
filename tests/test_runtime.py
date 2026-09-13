@@ -28,7 +28,12 @@ from jarvis.presence import PresenceProjection
 from jarvis.presentation import PresentationSurface
 from jarvis.recovery import RecoveryEvidence, RecoveryPhase, RecoveryStore
 from jarvis.runtime import ApplicationRuntime, RuntimePaths, RuntimeStatus
-from jarvis.self_development import TrustedSelfDevelopmentActivator
+from jarvis.self_development import (
+    ProductionCandidateInstaller,
+    ProductionSelfDevelopmentGateVerifier,
+    ProductionSelfDevelopmentRuntimeVerifier,
+    TrustedSelfDevelopmentActivator,
+)
 from jarvis.task_controller import PlanningTaskController
 from jarvis.update_preview import ControlledSelfUpdate
 
@@ -72,6 +77,7 @@ async def test_canonical_runtime_calculates_and_recovers_persisted_task(tmp_path
         "voice",
         "camera",
         "browser",
+        "self_development",
         "environment_discovery",
         "presentation",
         "ui_simulation",
@@ -109,6 +115,19 @@ async def test_canonical_runtime_calculates_and_recovers_persisted_task(tmp_path
     )
     assert runtime.container.self_development_activator.recovery.store is runtime.container.recovery
     assert isinstance(runtime.container.self_development_activator, TrustedSelfDevelopmentActivator)
+    assert isinstance(
+        runtime.container.self_development_activator._gate_verifier,
+        ProductionSelfDevelopmentGateVerifier,
+    )
+    assert isinstance(
+        runtime.container.self_development_activator._runtime_verifier,
+        ProductionSelfDevelopmentRuntimeVerifier,
+    )
+    assert isinstance(
+        runtime.container.self_development_activator._candidate_installer,
+        ProductionCandidateInstaller,
+    )
+    assert runtime.container.self_development_boot_selector is not None
     assert runtime.container.paths.self_development_database.is_file()
     assert runtime.container.paths.self_development_installation.is_dir()
     assert all(

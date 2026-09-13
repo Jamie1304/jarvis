@@ -174,13 +174,14 @@ that fingerprint before acceptance. Rollback metadata always names the previous
 known-good full revision. Duplicate proposal fingerprints are rejected by the
 current in-memory store.
 
-Proposal approval is deliberately outside this engine. Future approval and merge
-services must authenticate a trusted user, verify expiry and the exact fingerprint,
-revalidate repository state and all evidence, and independently pass the Permission
-Broker for every privileged action. They must not accept a model/tool claim that a
-proposal was approved. Approval of one fingerprint must not authorize changed
-arguments, a different revision, another task, dependency installation, a network
-push, or deployment.
+Proposal approval is deliberately outside this engine. The trusted
+self-development activator authenticates a trusted user, verifies expiry and the
+exact fingerprint, revalidates repository state and current gates, and independently
+passes the Permission Broker for every privileged action before Recovery-backed
+candidate startup. It does not accept a model/tool claim that a proposal was
+approved. Approval of one fingerprint does not authorize changed arguments, a
+different revision, another task, dependency installation, a network push, or
+unrelated deployment.
 
 ## Privileged capabilities and future integration
 

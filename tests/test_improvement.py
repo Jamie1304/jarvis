@@ -48,6 +48,7 @@ from jarvis.improvement import (
 from jarvis.improvement.adapters import (
     EXECUTABLE_GATE_KINDS,
     CodingAgent,
+    ProposalStore,
     ProtectedMetricProvider,
     SandboxAttestation,
     SandboxedProcessAdapter,
@@ -64,6 +65,7 @@ from jarvis.improvement.workspace import (
     WorkspaceSecurityError,
 )
 from jarvis.permissions.models import Risk
+from jarvis.self_development import DurableProposalStore
 
 _REVISION = "a" * 40
 _NOW = datetime(2026, 8, 11, 12, 0, tzinfo=UTC)
@@ -366,7 +368,7 @@ class EngineHarness:
     coding_agent: RecordingCodingAgent
     sandbox: FakeSandboxAdapter
     metrics: SequenceMetricProvider
-    proposals: InMemoryProposalStore
+    proposals: ProposalStore
     production_root: Path
     workspace_parent: Path
 
@@ -445,6 +447,7 @@ def _build_harness(
     gate_runner_failure: bool = False,
     evaluator_failure: bool = False,
     proposal_store_failure: bool = False,
+    durable_proposals: Path | None = None,
 ) -> EngineHarness:
     production, worktrees = _prepare_roots(root)
     git = FakeGitWorktreeClient(production, _BASE_FILES)
@@ -463,7 +466,13 @@ def _build_harness(
         for kind in sorted(EXECUTABLE_GATE_KINDS, key=lambda item: item.value)
     )
     metrics = SequenceMetricProvider(measurements)
-    proposals = FailingProposalStore() if proposal_store_failure else InMemoryProposalStore()
+    proposals: ProposalStore = (
+        FailingProposalStore()
+        if proposal_store_failure
+        else DurableProposalStore(durable_proposals)
+        if durable_proposals is not None
+        else InMemoryProposalStore()
+    )
     dependency_guard = ManifestDependencyGuard(manager)
     evaluator = ProtectedRegressionEvaluator(metrics)
     engine = ImprovementEngine(
@@ -1613,6 +1622,16 @@ async def test_success_produces_complete_immutable_awaiting_approval_proposal(
 
     with pytest.raises(ValueError, match="await trusted approval"):
         replace(proposal, status=ProposalStatus.APPROVED)
+
+
+@pytest.mark.asyncio
+async def test_engine_emits_to_the_durable_activation_proposal_owner(tmp_path: Path) -> None:
+    harness = _build_harness(tmp_path, durable_proposals=tmp_path / "self-development.sqlite3")
+    result = await harness.engine.run(_TASK_ID, (_signal(),))
+    assert result.status is ImprovementRunStatus.PROPOSAL_READY
+    assert result.proposal is not None
+    restarted = DurableProposalStore(tmp_path / "self-development.sqlite3")
+    assert restarted.get(result.proposal.proposal_id) == result.proposal
 
 
 @pytest.mark.asyncio

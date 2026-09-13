@@ -13,7 +13,7 @@ used the local machine. Every privileged operation remains a registered tool beh
 | Local multimodal vision | configurable `OllamaVisionProvider`, screenshot-store loader, health/model detection and strict JSON validation | deterministic-test verified; disabled in canonical runtime |
 | One-shot camera capture | `OpenCvCameraProvider`, explicit controller allowlist, ephemeral frame store | deterministic-test verified; hardware provider available but not verified |
 | Windows installed-app inventory | read-only uninstall registry provider; `winget` availability check | deterministic-test verified; host registry/package-manager acceptance disabled |
-| Application install/update | exact candidate/source/version plan and independent inventory/launch verification | disabled in canonical runtime |
+| Controlled self-development update | trusted proposal store, exact approval, complete versioned candidate, Recovery-backed boot selection, and real candidate runtime verification | supported for source installations; frozen/unsafe modes fail closed |
 | Local audio source/wake/VAD | `SoundDeviceAudioSource`, `OpenWakeWordProvider`, `EnergyVADProvider` | VAD deterministic-test verified; hardware/wake provider available but not verified |
 | Voice conversation UX | canonical task-controller integration only | disabled pending a separately configured UI/runtime composition |
 

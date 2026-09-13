@@ -570,4 +570,7 @@ return through `WorkflowTemplate`, `PlanValidator`, `PlanningEngine`,
 and `TrustedRecoveryAuthority` remain the authority for Core recovery. P3C
 supplies bounded model research when deterministic diagnosis is insufficient;
 model output cannot approve, verify, or certify a repair. Controlled
-self-development and self-update remain a later phase.
+Controlled self-development is now available for a verified Windows source
+installation through the trusted `DurableProposalStore`, exact approval,
+`PermissionBroker`, Recovery, and versioned candidate boot handoff. Frozen or
+ambiguous installation identities remain explicitly unavailable.

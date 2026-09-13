@@ -87,6 +87,8 @@ class ModificationTrustClassifier:
             "jarvis/security/integrity.py",
             "jarvis/security/modification_policy.py",
             "jarvis/security/startup.py",
+            "jarvis/bootstrap.py",
+            "jarvis/self_development.py",
         }
     )
     _LEVEL_5_PREFIXES = (

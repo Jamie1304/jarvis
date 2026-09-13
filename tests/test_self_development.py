@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import hashlib
+import os
+import runpy
 import shutil
 import sqlite3
 import subprocess
@@ -10,9 +12,12 @@ import sys
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, cast
 from uuid import UUID
 
+import jarvis.self_development as self_development
+import jarvis.self_development_host as self_development_host
 import pytest
 from jarvis.credentials import TestOnlyInMemorySecretBackend
 from jarvis.improvement.integrity import compute_proposal_fingerprint
@@ -32,6 +37,7 @@ from jarvis.improvement.models import (
     IsolatedWorkspace,
     MergeDeploymentProposal,
     ModificationResult,
+    ProposalStatus,
     Reversibility,
     RollbackMetadata,
     ScenarioResult,
@@ -50,23 +56,39 @@ from jarvis.permissions.models import (
     ScopeConstraint,
 )
 from jarvis.permissions.policy import PolicyEngine
-from jarvis.recovery import RecoveryCoordinator, RecoveryStore, TrustedRecoveryAuthority
+from jarvis.recovery import (
+    RecoveryCoordinator,
+    RecoveryStore,
+    TrustedRecoveryAuthority,
+    compute_application_build_hash,
+)
+from jarvis.runtime import RuntimeStatus
+from jarvis.security.modification_policy import ModificationTrustClassifier
 from jarvis.self_development import (
     ActivationError,
     ActivationRecord,
     ActivationStateStore,
     ActivationStatus,
+    CandidateInstallation,
     CandidateStartEvidence,
     DurableProposalStore,
     GateEvidence,
     GoldenWorkflowOwner,
+    ProductionCandidateInstaller,
+    ProductionGoldenExecutor,
+    ProductionSelfDevelopmentGateVerifier,
+    ProductionSelfDevelopmentRuntimeVerifier,
     RuntimeVerificationEvidence,
+    SelfDevelopmentSupport,
+    SelfDevelopmentSupportDetector,
     TrustedSelfDevelopmentActivator,
+    TrustedSelfDevelopmentBootSelector,
     UnavailableSelfDevelopmentGateVerifier,
     UnavailableSelfDevelopmentRuntimeVerifier,
     _activation_uuid,
     _aware,
     _candidate_hash,
+    _candidate_host_payload,
     _candidate_workspace,
     _contained_regular_target,
     _directory,
@@ -78,6 +100,7 @@ from jarvis.self_development import (
     _tree_digest,
     approval_binding_fingerprint,
     approval_request_id,
+    register_production_self_development_golden,
 )
 from jarvis.testing.golden import (
     ExpectedResult,
@@ -705,6 +728,21 @@ def test_durable_proposal_owner_reconstructs_typed_proposal(tmp_path: Path) -> N
     assert restarted.get(proposal.proposal_id) == proposal
 
 
+def test_durable_proposal_owner_rejects_duplicates_and_removes_exact_pending_row(
+    tmp_path: Path,
+) -> None:
+    proposal, _production, _candidate, _installation = _make_proposal(tmp_path / "first")
+    other, _production, _candidate, _installation = _make_proposal(tmp_path / "second")
+    store = DurableProposalStore(tmp_path / "self-development.sqlite3")
+    store.add(proposal)
+    with pytest.raises(ValueError, match="Proposal ID already exists"):
+        store.add(proposal)
+    with pytest.raises(ValueError, match="Proposal ID already exists with different contents"):
+        store.add(other)
+    store.remove_unapproved(proposal.proposal_id, proposal.proposal_fingerprint)
+    assert store.get(proposal.proposal_id) is None
+
+
 def test_durable_proposal_owner_rejects_missing_and_tampered_rows(tmp_path: Path) -> None:
     proposal, _production, _candidate, _installation = _make_proposal(tmp_path)
     store = DurableProposalStore(tmp_path / "self-development.sqlite3")
@@ -717,6 +755,339 @@ def test_durable_proposal_owner_rejects_missing_and_tampered_rows(tmp_path: Path
         )
     with pytest.raises(ActivationError, match="fingerprint mismatch"):
         store.get(proposal.proposal_id)
+
+
+def test_production_support_and_current_gate_are_fail_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    production = tmp_path / "source"
+    (production / "jarvis").mkdir(parents=True)
+    (production / "jarvis" / "runtime.py").write_text("runtime\n", encoding="utf-8")
+    (production / "jarvis" / "bootstrap.py").write_text("bootstrap\n", encoding="utf-8")
+    installation = tmp_path / "candidates"
+    support = SelfDevelopmentSupportDetector().detect(production, installation)
+    assert support.status is SelfDevelopmentSupport.SUPPORTED_SOURCE_INSTALLATION
+    assert SelfDevelopmentSupportDetector().detect(production, production).status is (
+        SelfDevelopmentSupport.UNSAFE_INSTALLATION_IDENTITY
+    )
+    blocked = tmp_path / "blocked"
+    blocked.write_text("not a directory", encoding="utf-8")
+    assert SelfDevelopmentSupportDetector().detect(production, blocked).status is (
+        SelfDevelopmentSupport.UNSUPPORTED_READ_ONLY_INSTALLATION
+    )
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    assert SelfDevelopmentSupportDetector().detect(production, installation).status is (
+        SelfDevelopmentSupport.UNSUPPORTED_PACKAGED_SELF_UPDATE
+    )
+    monkeypatch.delattr(sys, "frozen", raising=False)
+    proposal, _old_production, candidate, _installation = _make_proposal(tmp_path / "proposal")
+    classification = ModificationTrustClassifier().classify(proposal.modification.changed_paths)
+    evidence = ProductionSelfDevelopmentGateVerifier()(proposal, classification)
+    assert set(evidence) == set(classification.required_gates)
+    candidate_path = candidate / "jarvis/example.py"
+    candidate_path.write_text("VALUE = 3\n", encoding="utf-8")
+    with pytest.raises(ActivationError, match="tree gate"):
+        ProductionSelfDevelopmentGateVerifier()(proposal, classification)
+
+
+def test_production_support_rejects_incomplete_source(tmp_path: Path) -> None:
+    source = tmp_path / "incomplete"
+    source.mkdir()
+    result = SelfDevelopmentSupportDetector().detect(source, tmp_path / "install")
+    assert result.status is SelfDevelopmentSupport.UNSAFE_INSTALLATION_IDENTITY
+
+
+def test_candidate_host_entrypoint_is_bounded_and_typed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class ReadyRuntime:
+        status = RuntimeStatus.READY
+
+    class FailedRuntime:
+        status = RuntimeStatus.ERROR
+
+    monkeypatch.setattr(
+        cast(Any, self_development_host).ApplicationRuntime,
+        "create",
+        lambda *a, **k: ReadyRuntime(),
+    )
+    monkeypatch.setattr(
+        self_development_host,
+        "compute_application_build_hash",
+        lambda _root: "a" * 64,
+    )
+    assert self_development_host.main([str(tmp_path / "app-data")]) == 0
+    assert self_development_host.main([]) == 2
+    monkeypatch.setattr(
+        cast(Any, self_development_host).ApplicationRuntime,
+        "create",
+        lambda *a, **k: FailedRuntime(),
+    )
+    assert self_development_host.main([str(tmp_path / "app-data")]) == 1
+
+
+def test_unavailable_runtime_and_boot_identity_paths_fail_closed(tmp_path: Path) -> None:
+    digest = "a" * 64
+    verifier = UnavailableSelfDevelopmentRuntimeVerifier()
+    start = verifier.start_candidate(
+        installation_root=tmp_path,
+        expected_revision="revision",
+        expected_hash=digest,
+    )
+    assert not start.started
+    assert (
+        verifier.observe_candidate_health(installation_root=tmp_path, expected_hash=digest).passed
+        is False
+    )
+    assert (
+        verifier.observe_candidate_security(installation_root=tmp_path, expected_hash=digest).passed
+        is False
+    )
+    assert verifier.observe_lkg_health(installation_root=tmp_path).passed is False
+    assert self_development_host.main([str(tmp_path / "data"), "extra"]) == 2
+
+    service, _proposal, _installation, _approval, _broker = _activator(tmp_path / "service")
+    candidate_root = service.installation_root / "candidates"
+    candidate_root.mkdir()
+    authority = TrustedRecoveryAuthority(
+        "test-selector-installation", TestOnlyInMemorySecretBackend()
+    )
+    authority.initialize()
+    empty_store = RecoveryStore(tmp_path / "empty-recovery", trusted_authority=authority)
+    selector = TrustedSelfDevelopmentBootSelector(
+        service.installation_root,
+        candidate_root,
+        RecoveryCoordinator(empty_store),
+    )
+    assert selector.select() == service.installation_root
+    assert _candidate_host_payload("") is None
+    assert _candidate_host_payload("not-json") is None
+    assert _candidate_host_payload("[]") is None
+
+
+def test_production_gate_rechecks_each_current_candidate_identity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    proposal, _production, _candidate, _installation = _make_proposal(tmp_path)
+    classification = ModificationTrustClassifier().classify(proposal.modification.changed_paths)
+    verifier = ProductionSelfDevelopmentGateVerifier()
+    expected_tree = proposal.modification.tree_digest
+    monkeypatch.setattr(self_development, "_tree_digest", lambda _root: expected_tree)
+    monkeypatch.setattr(self_development, "_git_head", lambda _root: "wrong-base")
+    with pytest.raises(ActivationError, match="base gate"):
+        verifier(proposal, classification)
+    monkeypatch.setattr(
+        self_development, "_git_head", lambda _root: proposal.workspace.base_revision
+    )
+    monkeypatch.setattr(self_development, "_git_changed_paths", lambda _root, _base: set())
+    with pytest.raises(ActivationError, match="changed-path set"):
+        verifier(proposal, classification)
+    monkeypatch.setattr(
+        self_development,
+        "_git_changed_paths",
+        lambda _root, _base: set(proposal.modification.changed_paths),
+    )
+    monkeypatch.setattr(self_development, "_git_diff_digest", lambda _root, _base, _paths: "b" * 64)
+    with pytest.raises(ActivationError, match="diff gate"):
+        verifier(proposal, classification)
+    monkeypatch.setattr(
+        self_development,
+        "_git_diff_digest",
+        lambda _root, _base, _paths: proposal.modification.diff_digest,
+    )
+
+
+def test_durable_owner_requires_exact_removal_identity_and_is_callable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    proposal, _production, _candidate, _installation = _make_proposal(tmp_path)
+    store = DurableProposalStore(tmp_path / "self-development.sqlite3")
+    store.put(proposal)
+    assert store(proposal.proposal_id) == proposal
+    with pytest.raises(ValueError, match="exact awaiting proposal"):
+        store.remove_unapproved(proposal.proposal_id, "b" * 64)
+    monkeypatch.setattr(
+        self_development,
+        "_proposal_from_json",
+        lambda _value: cast(Any, SimpleNamespace(status=ProposalStatus.DENIED)),
+    )
+    with pytest.raises(ValueError, match="Only an awaiting proposal"):
+        store.remove_unapproved(proposal.proposal_id, proposal.proposal_fingerprint)
+
+
+def test_production_installer_rejects_duplicate_staging_and_excludes_runtime_data(
+    tmp_path: Path,
+) -> None:
+    proposal, production, candidate, _installation = _make_proposal(tmp_path / "proposal")
+    service, _unused_proposal, _unused_installation, _approval, _broker = _activator(
+        tmp_path / "service"
+    )
+    record = service.prepare(
+        proposal,
+        current_version="1",
+        candidate_version="2",
+        changed_subsystems=("jarvis",),
+        preview_gates=_preview_gates(),
+    )
+    installer = ProductionCandidateInstaller(
+        production, service.installation_root, service.recovery
+    )
+    identity_material = "\x1f".join(
+        (
+            record.proposal_fingerprint,
+            record.candidate_hash,
+            record.candidate_revision,
+            record.candidate_tree_digest,
+        )
+    )
+    staging = (
+        service.installation_root
+        / f".staging-{hashlib.sha256(identity_material.encode()).hexdigest()}"
+    )
+    staging.mkdir()
+    with pytest.raises(ActivationError, match="already staged"):
+        installer.stage(proposal, record)
+    staging.rmdir()
+    changed_path = candidate / Path(proposal.modification.changed_paths[0])
+    changed_path.unlink()
+    changed_path.mkdir()
+    with pytest.raises(ActivationError, match="regular file"):
+        installer.stage(proposal, record)
+
+    source = tmp_path / "copy-source"
+    target = tmp_path / "copy-target"
+    source.mkdir()
+    (source / "kept.txt").write_text("kept", encoding="utf-8")
+    for name in ("ignored.sqlite3", "ignored.pyc", "ignored.pyo"):
+        (source / name).write_bytes(b"ignored")
+    installer._copy_tree(source, target)
+    assert (target / "kept.txt").read_text(encoding="utf-8") == "kept"
+    assert not (target / "ignored.sqlite3").exists()
+    os.link(source / "kept.txt", source / "duplicate.txt")
+    with pytest.raises(ActivationError, match="hard link"):
+        installer._copy_tree(source, tmp_path / "hard-link-target")
+
+
+def test_production_gate_and_host_module_reject_stale_identity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    proposal, _production, _candidate, _installation = _make_proposal(tmp_path / "gate")
+    verifier = ProductionSelfDevelopmentGateVerifier()
+    stale = ModificationTrustClassifier().classify(("jarvis/bootstrap.py",))
+    current = ModificationTrustClassifier().classify(proposal.modification.changed_paths)
+    assert stale != current
+    with pytest.raises(ActivationError, match="classification is stale"):
+        verifier(proposal, stale)
+    monkeypatch.setattr(sys, "argv", ["jarvis.self_development_host"])
+    with pytest.raises(SystemExit) as raised:
+        runpy.run_path(
+            str(Path(__file__).resolve().parents[1] / "jarvis" / "self_development_host.py"),
+            run_name="__main__",
+        )
+    assert raised.value.code == 2
+
+
+def test_authenticated_boot_can_fall_back_to_production_root(tmp_path: Path) -> None:
+    production = tmp_path / "production"
+    installation = tmp_path / "installation"
+    production.mkdir()
+    installation.mkdir()
+    (production / "jarvis").mkdir()
+    (production / "jarvis" / "runtime.py").write_text("runtime", encoding="utf-8")
+    authority = TrustedRecoveryAuthority("fallback-installation", TestOnlyInMemorySecretBackend())
+    authority.initialize()
+    store = RecoveryStore(tmp_path / "recovery", trusted_authority=authority)
+    transaction = "00000000-0000-0000-0000-000000000201"
+    snapshot = store.create_snapshot(
+        transaction_id=transaction,
+        app_revision=REVISION,
+        application_hash=compute_application_build_hash(production),
+        configuration={},
+        database_schema={},
+        integration_versions={},
+        files=(),
+    )
+    store.begin_start(transaction, candidate_snapshot_id=snapshot.snapshot_id)
+    store.commit_start(transaction, snapshot.snapshot_id)
+    selector = TrustedSelfDevelopmentBootSelector(
+        production, installation, RecoveryCoordinator(store)
+    )
+    assert selector.select() == production
+
+
+@pytest.mark.asyncio
+async def test_production_golden_workflow_uses_trusted_executor(tmp_path: Path) -> None:
+    store = GoldenWorkflowStore(tmp_path / "golden.sqlite3")
+    workflow = register_production_self_development_golden(store)
+    owner = GoldenWorkflowOwner(GoldenWorkflowService(store), ProductionGoldenExecutor())
+    assert workflow.workflow_id == "jarvis-production-self-development"
+    assert await owner() is True
+
+
+def test_production_candidate_is_complete_and_recovery_selects_only_authenticated_root(
+    tmp_path: Path,
+) -> None:
+    service, proposal, installation, _approval, _broker = _activator(tmp_path)
+    record = service.prepare(
+        proposal,
+        current_version="1",
+        candidate_version="2",
+        changed_subsystems=("jarvis",),
+        preview_gates=_preview_gates(),
+    )
+    record = replace(record, recovery_transaction_id="00000000-0000-0000-0000-000000000102")
+    source = Path(__file__).resolve().parents[1]
+    store = service.recovery.store
+    source_snapshot = store.create_snapshot(
+        transaction_id="00000000-0000-0000-0000-000000000101",
+        app_revision=REVISION,
+        application_hash=compute_application_build_hash(source),
+        configuration={},
+        database_schema={},
+        integration_versions={},
+        files=(),
+    )
+    store.begin_start("00000000-0000-0000-0000-000000000101")
+    store.commit_start("00000000-0000-0000-0000-000000000101", source_snapshot.snapshot_id)
+    installer = ProductionCandidateInstaller(source, installation, service.recovery)
+    candidate = installer.stage(proposal, record)
+    assert isinstance(candidate, CandidateInstallation)
+    assert (candidate.root / "jarvis" / "runtime.py").is_file()
+    assert (candidate.root / "jarvis" / "bootstrap.py").is_file()
+    assert not (candidate.root / ".env").exists()
+    selector = TrustedSelfDevelopmentBootSelector(source, installation, service.recovery)
+    verifier = ProductionSelfDevelopmentRuntimeVerifier(source, selector)
+
+    def start() -> None:
+        evidence = verifier.start_candidate(
+            installation_root=candidate.root,
+            expected_revision=record.candidate_revision,
+            expected_hash=record.candidate_hash,
+        )
+        assert evidence.started
+
+    def health() -> bool:
+        return (
+            verifier.observe_candidate_health(
+                installation_root=candidate.root, expected_hash=record.candidate_hash
+            ).passed
+            and verifier.observe_candidate_security(
+                installation_root=candidate.root, expected_hash=record.candidate_hash
+            ).passed
+        )
+
+    result = service.recovery.boot_candidate(
+        record.recovery_transaction_id or "00000000-0000-0000-0000-000000000102",
+        candidate.snapshot_id,
+        start=start,
+        health_check=health,
+        lkg_health_check=lambda: True,
+    )
+    assert result == candidate.snapshot_id
+    assert selector.select() == candidate.root
+    (candidate.root / "jarvis" / "runtime.py").write_text("tampered\n", encoding="utf-8")
+    with pytest.raises(ActivationError, match="known-good candidate"):
+        selector.select()
 
 
 def test_trusted_runtime_evidence_types_and_unavailable_gate_fail_closed() -> None:

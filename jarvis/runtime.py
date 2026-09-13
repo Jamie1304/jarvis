@@ -8,7 +8,7 @@ import os
 import re
 import sqlite3
 import sys
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -271,10 +271,18 @@ from jarvis.self_development import (
     DurableProposalStore,
     GateVerifier,
     GoldenWorkflowOwner,
+    ProductionCandidateInstaller,
+    ProductionGoldenExecutor,
+    ProductionSelfDevelopmentGateVerifier,
+    ProductionSelfDevelopmentRuntimeVerifier,
     SelfDevelopmentRuntimeVerifier,
+    SelfDevelopmentSupportDetector,
+    SelfDevelopmentSupportResult,
     TrustedSelfDevelopmentActivator,
+    TrustedSelfDevelopmentBootSelector,
     UnavailableSelfDevelopmentGateVerifier,
     UnavailableSelfDevelopmentRuntimeVerifier,
+    register_production_self_development_golden,
 )
 from jarvis.setup_conductor import (
     DecisionCollector,
@@ -718,6 +726,8 @@ class RuntimeContainer:
     golden_workflows: GoldenWorkflowService
     self_development_proposals: DurableProposalStore | None
     self_development_activator: TrustedSelfDevelopmentActivator | None
+    self_development_support: SelfDevelopmentSupportResult | None
+    self_development_boot_selector: TrustedSelfDevelopmentBootSelector | None
     workflow_procedure_store: SQLiteWorkflowProcedureStore
     procedure_evidence_authority: ProcedureEvidenceAuthority
     procedure_bank: ProcedureBank
@@ -831,6 +841,22 @@ class RuntimeContainer:
                 else "no supported trusted browser backend"
             )
             return RuntimeServiceStatus(service_id, availability, detail)
+        if service_id == "self_development":
+            if self.self_development_support is None:
+                return RuntimeServiceStatus(
+                    service_id,
+                    RuntimeServiceAvailability.UNAVAILABLE,
+                    "self-development state store is unavailable",
+                )
+            availability = (
+                RuntimeServiceAvailability.AVAILABLE
+                if self.self_development_activator is not None
+                and self.self_development_support.status.value == "supported_source_installation"
+                else RuntimeServiceAvailability.UNAVAILABLE
+            )
+            return RuntimeServiceStatus(
+                service_id, availability, self.self_development_support.detail
+            )
         if service_id == "environment_discovery":
             return RuntimeServiceStatus(
                 service_id,
@@ -891,6 +917,7 @@ class RuntimeContainer:
                 "voice",
                 "camera",
                 "browser",
+                "self_development",
                 "environment_discovery",
                 "presentation",
                 "ui_simulation",
@@ -1256,6 +1283,8 @@ class ApplicationRuntime:
         golden_workflow_store: GoldenWorkflowStore | None = None
         self_development_proposals: DurableProposalStore | None = None
         self_development_activator: TrustedSelfDevelopmentActivator | None = None
+        self_development_support: SelfDevelopmentSupportResult | None = None
+        self_development_boot_selector: TrustedSelfDevelopmentBootSelector | None = None
         workflow_procedure_store: SQLiteWorkflowProcedureStore | None = None
         repair_store: SQLiteRepairStore | None = None
         backup: BackupService | None = None
@@ -1311,6 +1340,7 @@ class ApplicationRuntime:
             configure_logging(settings.log_level)
             # The application hash covers the trusted JARVIS package loaded by
             # this process, not an optional user/project knowledge root.
+            assert resolved_project_root is not None
             application_hash = compute_application_build_hash(Path(__file__).resolve().parents[1])
             backup = BackupService(
                 paths.backups,
@@ -1337,6 +1367,16 @@ class ApplicationRuntime:
                 paths.recovery,
                 trusted_authority=recovery_authority,
             )
+            preserved_candidate_snapshot: str | None = None
+            existing_lkg = recovery.last_known_good_record()
+            if existing_lkg is not None:
+                candidate_root = paths.self_development_installation / existing_lkg.snapshot_id
+                if (
+                    candidate_root.is_dir()
+                    and compute_application_build_hash(candidate_root)
+                    == existing_lkg.application_hash
+                ):
+                    preserved_candidate_snapshot = existing_lkg.snapshot_id
             try:
                 recovery_results = reconcile_pending_native_cleanup(
                     paths.sandboxes,
@@ -1720,8 +1760,59 @@ class ApplicationRuntime:
             try:
                 assert recovery_coordinator is not None
                 assert resolved_project_root is not None
+                self_development_support = SelfDevelopmentSupportDetector().detect(
+                    resolved_project_root, paths.self_development_installation
+                )
                 self_development_proposals = DurableProposalStore(paths.self_development_database)
                 activation_store = ActivationStateStore(paths.self_development_database)
+                if (
+                    test_fixture is None
+                    and self_development_support.status.value == "supported_source_installation"
+                ):
+                    register_production_self_development_golden(golden_workflow_store)
+                    boot_selector = TrustedSelfDevelopmentBootSelector(
+                        resolved_project_root,
+                        paths.self_development_installation,
+                        recovery_coordinator,
+                    )
+                    self_development_boot_selector = boot_selector
+                    gate_verifier: GateVerifier = ProductionSelfDevelopmentGateVerifier()
+                    golden_runner: Callable[[], object | Awaitable[object]] = GoldenWorkflowOwner(
+                        golden_workflows, ProductionGoldenExecutor()
+                    )
+                    runtime_verifier: SelfDevelopmentRuntimeVerifier = (
+                        ProductionSelfDevelopmentRuntimeVerifier(
+                            resolved_project_root, boot_selector
+                        )
+                    )
+                    candidate_installer = ProductionCandidateInstaller(
+                        resolved_project_root,
+                        paths.self_development_installation,
+                        recovery_coordinator,
+                    )
+                else:
+                    gate_verifier = (
+                        test_fixture.self_development_gate_verifier
+                        if test_fixture is not None
+                        and test_fixture.self_development_gate_verifier is not None
+                        else UnavailableSelfDevelopmentGateVerifier()
+                    )
+                    golden_runner = GoldenWorkflowOwner(
+                        golden_workflows,
+                        (
+                            test_fixture.self_development_golden_executor
+                            if test_fixture is not None
+                            and test_fixture.self_development_golden_executor is not None
+                            else _UnavailableSelfDevelopmentGoldenExecutor()
+                        ),
+                    )
+                    runtime_verifier = (
+                        test_fixture.self_development_runtime_verifier
+                        if test_fixture is not None
+                        and test_fixture.self_development_runtime_verifier is not None
+                        else UnavailableSelfDevelopmentRuntimeVerifier()
+                    )
+                    candidate_installer = None
                 self_development_activator = TrustedSelfDevelopmentActivator(
                     production_root=resolved_project_root,
                     installation_root=paths.self_development_installation,
@@ -1730,27 +1821,10 @@ class ApplicationRuntime:
                     permission_broker=broker,
                     approval_verifier=desktop_approval_authenticator.verifier(),
                     proposal_loader=self_development_proposals,
-                    gate_verifier=(
-                        test_fixture.self_development_gate_verifier
-                        if test_fixture is not None
-                        and test_fixture.self_development_gate_verifier is not None
-                        else UnavailableSelfDevelopmentGateVerifier()
-                    ),
-                    golden_runner=GoldenWorkflowOwner(
-                        golden_workflows,
-                        (
-                            test_fixture.self_development_golden_executor
-                            if test_fixture is not None
-                            and test_fixture.self_development_golden_executor is not None
-                            else _UnavailableSelfDevelopmentGoldenExecutor()
-                        ),
-                    ),
-                    runtime_verifier=(
-                        test_fixture.self_development_runtime_verifier
-                        if test_fixture is not None
-                        and test_fixture.self_development_runtime_verifier is not None
-                        else UnavailableSelfDevelopmentRuntimeVerifier()
-                    ),
+                    gate_verifier=gate_verifier,
+                    golden_runner=golden_runner,
+                    runtime_verifier=runtime_verifier,
+                    candidate_installer=candidate_installer,
                 )
             except (OSError, RuntimeError, ValueError, sqlite3.DatabaseError):
                 # Self-development state is auxiliary. Recovery and Safe Mode
@@ -2706,6 +2780,8 @@ class ApplicationRuntime:
                 golden_workflows=golden_workflows,
                 self_development_proposals=self_development_proposals,
                 self_development_activator=self_development_activator,
+                self_development_support=self_development_support,
+                self_development_boot_selector=self_development_boot_selector,
                 workflow_procedure_store=workflow_procedure_store,
                 procedure_evidence_authority=procedure_evidence_authority,
                 procedure_bank=procedure_bank,
@@ -2803,9 +2879,12 @@ class ApplicationRuntime:
                     "artifacts": "validated",
                 },
                 integration_versions={},
-                generated_package_state={"activation": "disabled"},
+                generated_package_state={"activation": "source_installation"},
+                files=(),
             )
-            recovery.commit_start(transaction_id, snapshot.snapshot_id)
+            recovery.commit_start(
+                transaction_id, preserved_candidate_snapshot or snapshot.snapshot_id
+            )
             # Start background services only after the container is fully
             # constructed and startup is durably committed. Before this point,
             # a failed composition has no owner able to cancel these tasks
