@@ -583,10 +583,14 @@ async def test_exact_activation_promotes_only_after_recovery_verification(tmp_pa
 async def test_versioned_candidate_binds_application_identity_and_brokered_materialization(
     tmp_path: Path,
 ) -> None:
+    events: list[str] = []
+
     class VersionedRuntimeVerifier(_TestRuntimeVerifier):
         def start_candidate(
             self, *, installation_root: Path, expected_revision: str, expected_hash: str
         ) -> CandidateStartEvidence:
+            self.boot_root = installation_root.resolve()
+            events.append("start")
             self.calls.append("start")
             return CandidateStartEvidence(
                 True,
@@ -597,8 +601,9 @@ async def test_versioned_candidate_binds_application_identity_and_brokered_mater
                 snapshot_id=installation_root.name,
             )
 
+    verifier = VersionedRuntimeVerifier()
     service, proposal, installation, approval, broker = _activator(
-        tmp_path, versioned=True, runtime_verifier=VersionedRuntimeVerifier()
+        tmp_path, versioned=True, runtime_verifier=verifier
     )
     record = service.prepare(
         proposal,
@@ -608,13 +613,19 @@ async def test_versioned_candidate_binds_application_identity_and_brokered_mater
         preview_gates=_preview_gates(),
     )
     assert record.candidate_application_hash != record.candidate_hash
+    request_before = approval_request_id(record)
+    installer = cast(ProductionCandidateInstaller, service._candidate_installer)
+    assert not installer.planned_root(record).exists()
+    assert verifier.calls == []
     context = approval.issue_context(
-        request_id=approval_request_id(record),
+        request_id=request_before,
         choice=ApprovalChoice.APPROVE_ONCE,
         identity=ApprovalIdentity("trusted-user", ApprovalActorKind.TRUSTED_USER),
     )
     record = await service.approve(record.activation_id, context)
+    assert approval_request_id(record) == request_before
     pending = await service._authorize_effect(record)
+    authorized_root = Path(pending.approval_requests[0].scope.paths[0]).resolve()
     permission_contexts = tuple(
         approval.issue_context(
             request_id=request.request_id,
@@ -623,11 +634,10 @@ async def test_versioned_candidate_binds_application_identity_and_brokered_mater
         )
         for request in pending.approval_requests
     )
-    events: list[str] = []
     authorize = broker.authorize
     begin = broker.begin_execution
-    installer = cast(ProductionCandidateInstaller, service._candidate_installer)
     stage = installer.stage
+    record_outcome = broker.record_execution_outcome
 
     async def observed_authorize(*args: Any, **kwargs: Any) -> Any:
         events.append("authorize")
@@ -641,8 +651,13 @@ async def test_versioned_candidate_binds_application_identity_and_brokered_mater
         events.append("materialize")
         return stage(*args, **kwargs)
 
+    async def observed_outcome(*args: Any, **kwargs: Any) -> Any:
+        events.append(str(args[-1] if args else kwargs.get("outcome")))
+        return await record_outcome(*args, **kwargs)
+
     broker.__dict__["authorize"] = observed_authorize
     broker.__dict__["begin_execution"] = observed_begin
+    broker.__dict__["record_execution_outcome"] = observed_outcome
     installer.__dict__["stage"] = observed_stage
     final = await service.activate(record.activation_id, permission_contexts=permission_contexts)
 
@@ -650,8 +665,18 @@ async def test_versioned_candidate_binds_application_identity_and_brokered_mater
     assert final.candidate_snapshot_id is not None
     candidate_root = installation / final.candidate_snapshot_id
     assert compute_application_build_hash(candidate_root) == record.candidate_application_hash
+    assert authorized_root == installation.resolve()
+    destinations = (candidate_root, *candidate_root.rglob("*"))
+    assert all(
+        destination.resolve() == authorized_root or authorized_root in destination.resolve().parents
+        for destination in destinations
+    )
+    assert installer.planned_root(record).resolve().parent == authorized_root
+    assert verifier.boot_root == candidate_root.resolve()
     assert (installation / "jarvis" / "example.py").read_text(encoding="utf-8") == "VALUE = 1\n"
     assert events.index("authorize") < events.index("begin_execution") < events.index("materialize")
+    assert events.index("materialize") < events.index("success") < events.index("start")
+    assert approval_request_id(final) == request_before
     assert final.previous_lkg_snapshot_id is not None
     assert final.previous_lkg_application_hash is not None
 
@@ -692,8 +717,12 @@ async def test_versioned_materialization_failure_is_unknown_and_quarantined(tmp_
     assert final.failure_reason == "materialization outcome unknown: OSError"
 
 
-def test_versioned_binding_establishes_an_initial_authenticated_lkg(tmp_path: Path) -> None:
-    service, proposal, _installation, _approval, _broker = _activator(tmp_path, versioned=True)
+@pytest.mark.asyncio
+async def test_versioned_permission_denial_has_zero_candidate_effect(tmp_path: Path) -> None:
+    verifier = _TestRuntimeVerifier()
+    service, proposal, installation, approval, _broker = _activator(
+        tmp_path, versioned=True, runtime_verifier=verifier
+    )
     record = service.prepare(
         proposal,
         current_version="1",
@@ -701,18 +730,101 @@ def test_versioned_binding_establishes_an_initial_authenticated_lkg(tmp_path: Pa
         changed_subsystems=("jarvis",),
         preview_gates=_preview_gates(),
     )
+    context = approval.issue_context(
+        request_id=approval_request_id(record),
+        choice=ApprovalChoice.APPROVE_ONCE,
+        identity=ApprovalIdentity("trusted-user", ApprovalActorKind.TRUSTED_USER),
+    )
+    approved = await service.approve(record.activation_id, context)
+    installer = cast(ProductionCandidateInstaller, service._candidate_installer)
+    final = await service.activate(approved.activation_id)
+
+    assert final.status is ActivationStatus.FAILED
+    assert not installer.planned_root(approved).exists()
+    assert tuple(path for path in installation.iterdir() if path.name != "jarvis") == ()
+    assert (installation / "jarvis" / "example.py").read_text(encoding="utf-8") == "VALUE = 1\n"
+    assert verifier.calls == []
+
+
+@pytest.mark.asyncio
+async def test_versioned_binding_establishes_an_initial_authenticated_lkg(tmp_path: Path) -> None:
+    service, proposal, installation, approval, _broker = _activator(tmp_path, versioned=True)
     authority = TrustedRecoveryAuthority("initial-lkg", TestOnlyInMemorySecretBackend())
     authority.initialize()
     fresh_store = RecoveryStore(
         tmp_path / "fresh-recovery", trusted_authority=authority, clock=lambda: NOW
     )
     service.recovery = RecoveryCoordinator(fresh_store, clock=lambda: NOW)
-    bound = service._bind_previous_lkg(record, "00000000-0000-0000-0000-000000000203", proposal)
-    assert bound.previous_lkg_snapshot_id is not None
-    assert bound.previous_lkg_application_hash == compute_application_build_hash(
+    record = service.prepare(
+        proposal,
+        current_version="1",
+        candidate_version="2",
+        changed_subsystems=("jarvis",),
+        preview_gates=_preview_gates(),
+    )
+    request_before = approval_request_id(record)
+    installer = cast(ProductionCandidateInstaller, service._candidate_installer)
+    assert record.previous_lkg_snapshot_id is not None
+    assert record.previous_lkg_application_hash == compute_application_build_hash(
         service.production_root
     )
-    assert bound.previous_lkg_revision == proposal.workspace.base_revision
+    assert record.previous_lkg_revision == proposal.workspace.base_revision
+    assert fresh_store.last_known_good_record() is not None
+    assert not installer.planned_root(record).exists()
+    assert tuple(path for path in installation.iterdir() if path.name != "jarvis") == ()
+    context = approval.issue_context(
+        request_id=request_before,
+        choice=ApprovalChoice.APPROVE_ONCE,
+        identity=ApprovalIdentity("trusted-user", ApprovalActorKind.TRUSTED_USER),
+    )
+    approved = await service.approve(record.activation_id, context)
+    assert approval_request_id(approved) == request_before
+
+
+@pytest.mark.asyncio
+async def test_versioned_lkg_drift_after_approval_fails_closed(tmp_path: Path) -> None:
+    verifier = _TestRuntimeVerifier()
+    service, proposal, _installation, approval, _broker = _activator(
+        tmp_path, versioned=True, runtime_verifier=verifier
+    )
+    record = service.prepare(
+        proposal,
+        current_version="1",
+        candidate_version="2",
+        changed_subsystems=("jarvis",),
+        preview_gates=_preview_gates(),
+    )
+    request_before = approval_request_id(record)
+    context = approval.issue_context(
+        request_id=request_before,
+        choice=ApprovalChoice.APPROVE_ONCE,
+        identity=ApprovalIdentity("trusted-user", ApprovalActorKind.TRUSTED_USER),
+    )
+    approved = await service.approve(record.activation_id, context)
+    store = service.recovery.store
+    drift = store.create_snapshot(
+        transaction_id="00000000-0000-0000-0000-000000000303",
+        app_revision="different-authenticated-lkg",
+        application_hash=compute_application_build_hash(service.production_root),
+        configuration={},
+        database_schema={},
+        integration_versions={},
+        files=(),
+    )
+    service.recovery.begin_start(
+        "00000000-0000-0000-0000-000000000303",
+        candidate_snapshot_id=drift.snapshot_id,
+        candidate_build=drift.app_revision,
+        candidate_application_hash=drift.application_hash,
+    )
+    service.recovery.store.commit_start("00000000-0000-0000-0000-000000000303", drift.snapshot_id)
+
+    final = await service.activate(approved.activation_id)
+
+    assert final.status is ActivationStatus.STALE
+    assert final.failure_reason == "authenticated LKG changed after exact approval"
+    assert approval_request_id(final) == request_before
+    assert verifier.calls == []
 
 
 @pytest.mark.asyncio

@@ -596,7 +596,8 @@ class ProductionCandidateInstaller:
         return root
 
     def effect_paths(self, record: ActivationRecord) -> tuple[str, ...]:
-        return (str(self.planned_root(record)),)
+        del record
+        return (str(self.installation_root),)
 
     def stage(
         self, proposal: MergeDeploymentProposal, record: ActivationRecord
@@ -1361,6 +1362,13 @@ class TrustedSelfDevelopmentActivator:
             created_at=now,
             expires_at=proposal.expires_at,
         )
+        if self._candidate_installer is not None:
+            record = self._bind_previous_lkg(
+                record,
+                str(uuid4()),
+                proposal,
+                transition=False,
+            )
         self.store.put(record)
         self._preview[record.activation_id] = preview
         return record
@@ -1951,9 +1959,30 @@ class TrustedSelfDevelopmentActivator:
         return tuple(str(Path(path).resolve()) for path in paths(record))
 
     def _bind_previous_lkg(
-        self, record: ActivationRecord, transaction_id: str, proposal: MergeDeploymentProposal
+        self,
+        record: ActivationRecord,
+        transaction_id: str,
+        proposal: MergeDeploymentProposal,
+        *,
+        transition: bool = True,
     ) -> ActivationRecord:
         trusted = self.recovery.store.last_known_good_record()
+        bound_lkg = (
+            record.previous_lkg_snapshot_id,
+            record.previous_lkg_application_hash,
+            record.previous_lkg_revision,
+        )
+        if any(item is not None for item in bound_lkg) and not all(
+            item is not None for item in bound_lkg
+        ):
+            raise ActivationError("authenticated LKG binding is incomplete")
+        if all(item is not None for item in bound_lkg):
+            if trusted is None or (
+                trusted.snapshot_id != record.previous_lkg_snapshot_id
+                or trusted.application_hash != record.previous_lkg_application_hash
+                or trusted.app_revision != record.previous_lkg_revision
+            ):
+                raise ActivationError("authenticated LKG changed after exact approval")
         if trusted is None:
             application_hash = compute_application_build_hash(self.production_root)
             snapshot = self.recovery.store.create_snapshot(
@@ -1980,14 +2009,15 @@ class TrustedSelfDevelopmentActivator:
         manifest = self.recovery.store.load(trusted.snapshot_id)
         if manifest.application_hash != trusted.application_hash:
             raise ActivationError("authenticated LKG manifest identity is inconsistent")
-        return self._transition(
-            record,
-            ActivationStatus.SNAPSHOT_CREATED,
-            recovery_snapshot_id=trusted.snapshot_id,
-            previous_lkg_snapshot_id=trusted.snapshot_id,
-            previous_lkg_application_hash=trusted.application_hash,
-            previous_lkg_revision=trusted.app_revision,
-        )
+        changes: dict[str, Any] = {
+            "recovery_snapshot_id": trusted.snapshot_id,
+            "previous_lkg_snapshot_id": trusted.snapshot_id,
+            "previous_lkg_application_hash": trusted.application_hash,
+            "previous_lkg_revision": trusted.app_revision,
+        }
+        if not transition:
+            return replace(record, **changes)
+        return self._transition(record, ActivationStatus.SNAPSHOT_CREATED, **changes)
 
     def _start_failure_detail(self, evidence: CandidateStartEvidence) -> str:
         return (
