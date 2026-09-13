@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import runpy
 import shutil
@@ -19,7 +20,11 @@ from uuid import UUID
 import jarvis.self_development as self_development
 import jarvis.self_development_host as self_development_host
 import pytest
-from jarvis.credentials import TestOnlyInMemorySecretBackend
+from jarvis.credentials import (
+    CredentialNotFound,
+    EphemeralQualificationSecretBackend,
+    TestOnlyInMemorySecretBackend,
+)
 from jarvis.improvement.integrity import compute_proposal_fingerprint
 from jarvis.improvement.models import (
     ChangeSpecification,
@@ -71,10 +76,12 @@ from jarvis.self_development import (
     ActivationStatus,
     CandidateInstallation,
     CandidateStartEvidence,
+    CandidateStartOutcome,
     DurableProposalStore,
     GateEvidence,
     GoldenWorkflowOwner,
     ProductionCandidateInstaller,
+    ProductionCurrentGateExecutor,
     ProductionGoldenExecutor,
     ProductionSelfDevelopmentGateVerifier,
     ProductionSelfDevelopmentRuntimeVerifier,
@@ -106,6 +113,7 @@ from jarvis.testing.golden import (
     ExpectedResult,
     Fixture,
     GoldenChangeKind,
+    GoldenGateError,
     GoldenWorkflow,
     GoldenWorkflowClass,
     GoldenWorkflowService,
@@ -782,8 +790,22 @@ def test_production_support_and_current_gate_are_fail_closed(
     monkeypatch.delattr(sys, "frozen", raising=False)
     proposal, _old_production, candidate, _installation = _make_proposal(tmp_path / "proposal")
     classification = ModificationTrustClassifier().classify(proposal.modification.changed_paths)
-    evidence = ProductionSelfDevelopmentGateVerifier()(proposal, classification)
-    assert set(evidence) == set(classification.required_gates)
+    evidence = ProductionSelfDevelopmentGateVerifier(
+        lambda _proposal, current: {
+            name: GateEvidence(name, True, "a" * 64)
+            for name in current.required_gates
+            if name
+            not in {
+                "trusted_approval",
+                "recovery_point",
+                "startup_health",
+                "runtime_integrity",
+            }
+        }
+    )(proposal, classification)
+    assert set(evidence).issubset(classification.required_gates)
+    assert "trusted_approval" not in evidence
+    assert "startup_health" not in evidence
     candidate_path = candidate / "jarvis/example.py"
     candidate_path.write_text("VALUE = 3\n", encoding="utf-8")
     with pytest.raises(ActivationError, match="tree gate"):
@@ -797,11 +819,354 @@ def test_production_support_rejects_incomplete_source(tmp_path: Path) -> None:
     assert result.status is SelfDevelopmentSupport.UNSAFE_INSTALLATION_IDENTITY
 
 
+def test_production_gate_executor_observes_each_pre_start_gate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    proposal, _production, candidate, _installation = _make_proposal(tmp_path)
+    classification = ModificationTrustClassifier().classify(proposal.modification.changed_paths)
+    executor = ProductionCurrentGateExecutor()
+    assert executor._static_security(candidate, proposal)[0]
+    assert executor._package_certification(candidate)[0]
+    monkeypatch.setattr(executor, "_static_security", lambda _root, _proposal: (True, "scan"))
+    monkeypatch.setattr(executor, "_package_certification", lambda _root: (True, "package"))
+    calls: list[tuple[Path, tuple[str, ...]]] = []
+
+    def run_command(root: Path, command: tuple[str, ...]) -> tuple[bool, str]:
+        calls.append((root, command))
+        return True, "executed"
+
+    monkeypatch.setattr(executor, "_run_command", run_command)
+    evidence = executor(proposal, classification)
+    assert set(evidence) == {
+        "static_security",
+        "sandbox_tests",
+        "package_certification",
+        "quality",
+        "integration_tests",
+        "protected_regression",
+    }
+    assert len(calls) == 4
+    assert all(root == candidate for root, _command in calls)
+    assert all(item.passed for item in evidence.values())
+
+
+def test_production_gate_executor_rejects_actual_security_and_command_failures(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    proposal, _production, candidate, _installation = _make_proposal(tmp_path)
+    candidate_file = candidate / Path(proposal.modification.changed_paths[0])
+    candidate_file.write_text("exec('untrusted')\n", encoding="utf-8")
+    executor = ProductionCurrentGateExecutor()
+    passed, detail = executor._static_security(candidate, proposal)
+    assert not passed
+    assert "rejected" in detail
+    candidate_file.write_text("VALUE = 2\n", encoding="utf-8")
+    monkeypatch.setattr(executor, "_static_security", lambda _root, _proposal: (True, "scan"))
+    monkeypatch.setattr(executor, "_package_certification", lambda _root: (True, "package"))
+    monkeypatch.setattr(executor, "_run_command", lambda _root, _command: (False, "failed"))
+    classification = ModificationTrustClassifier().classify(proposal.modification.changed_paths)
+    evidence = executor(proposal, classification)
+    assert evidence["sandbox_tests"].passed is False
+    assert "quality" not in evidence
+
+
+def test_candidate_start_typed_failures_are_fail_closed(tmp_path: Path) -> None:
+    service, proposal, installation, _approval, _broker = _activator(tmp_path)
+    record = service.prepare(
+        proposal,
+        current_version="1",
+        candidate_version="2",
+        changed_subsystems=("jarvis",),
+        preview_gates=_preview_gates(),
+    )
+    candidate = ProductionCandidateInstaller(
+        Path(__file__).resolve().parents[1], installation, service.recovery
+    ).stage(proposal, record)
+    selector = TrustedSelfDevelopmentBootSelector(
+        Path(__file__).resolve().parents[1], installation, service.recovery
+    )
+    verifier = ProductionSelfDevelopmentRuntimeVerifier(
+        Path(__file__).resolve().parents[1], selector
+    )
+    result = verifier.start_candidate(
+        installation_root=candidate.root,
+        expected_revision="wrong-revision",
+        expected_hash=record.candidate_hash,
+    )
+    assert result.started is False
+    assert result.outcome is CandidateStartOutcome.RECOVERY_AUTH_MISMATCH
+    assert result.observed_hash == candidate.tree_digest
+
+
+def test_ephemeral_qualification_backend_is_not_persistent(tmp_path: Path) -> None:
+    backend = EphemeralQualificationSecretBackend()
+    backend.put("jarvis:test", b"value")
+    assert backend.get("jarvis:test") == b"value"
+    backend.delete("jarvis:test")
+    with pytest.raises(CredentialNotFound, match="unavailable"):
+        backend.get("jarvis:test")
+
+
+def test_candidate_environment_proof_rejects_parent_test_state(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("PYTHONPATH", str(tmp_path))
+    monkeypatch.setenv("PYTEST_CURRENT_TEST", "parent-controlled")
+    assert self_development_host._environment_isolated(tmp_path) is False
+
+
+def test_runtime_observer_and_golden_fail_closed_without_authenticated_context(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    service, _proposal, _installation, _approval, _broker = _activator(tmp_path)
+    source = Path(__file__).resolve().parents[1]
+    selector = TrustedSelfDevelopmentBootSelector(
+        source, service.installation_root, service.recovery
+    )
+    verifier = ProductionSelfDevelopmentRuntimeVerifier(source, selector)
+    assert (
+        verifier.observe_candidate_health(installation_root=tmp_path, expected_hash="a" * 64).passed
+        is False
+    )
+    assert (
+        verifier.observe_candidate_security(
+            installation_root=tmp_path, expected_hash="a" * 64
+        ).passed
+        is False
+    )
+    with pytest.raises(ActivationError, match="known-good candidate"):
+        verifier.observe_lkg_health(installation_root=tmp_path)
+    workflow_store = GoldenWorkflowStore(tmp_path / "golden.sqlite3")
+    workflow = register_production_self_development_golden(workflow_store)
+    fixture = workflow.fixtures[0]
+    with pytest.raises(GoldenGateError, match="context"):
+        ProductionGoldenExecutor()(workflow, fixture)
+    assert ProductionCurrentGateExecutor()._package_certification(tmp_path)[0] is False
+
+    class TimeoutProcess:
+        pid = 202
+        returncode = -1
+        timed_out = False
+
+        def communicate(self, **_kwargs: Any) -> tuple[str, str]:
+            if self.timed_out:
+                return "", ""
+            self.timed_out = True
+            raise subprocess.TimeoutExpired("golden", 1)
+
+        def kill(self) -> None:
+            return None
+
+    monkeypatch.setattr(subprocess, "Popen", lambda *a, **k: TimeoutProcess())
+    bound = ProductionGoldenExecutor().for_candidate(root=source, proposal_fingerprint="b" * 64)
+    with pytest.raises(GoldenGateError, match="timed out"):
+        bound(workflow, fixture)
+
+
+def test_runtime_lkg_observation_requires_an_authenticated_manifest(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = Path(__file__).resolve().parents[1]
+    installation = tmp_path / "installation"
+    installation.mkdir()
+    authority = TrustedRecoveryAuthority("empty-lkg", TestOnlyInMemorySecretBackend())
+    authority.initialize()
+    store = RecoveryStore(tmp_path / "recovery", trusted_authority=authority)
+    recovery = RecoveryCoordinator(store)
+    selector = TrustedSelfDevelopmentBootSelector(source, installation, recovery)
+    verifier = ProductionSelfDevelopmentRuntimeVerifier(source, selector)
+    assert verifier._authenticated_manifest(tmp_path) is None
+    evidence = verifier.observe_lkg_health(installation_root=tmp_path)
+    assert evidence.passed is False
+    assert "manifest" in evidence.detail
+
+    source_snapshot = store.create_snapshot(
+        transaction_id="00000000-0000-0000-0000-000000000201",
+        app_revision=REVISION,
+        application_hash=compute_application_build_hash(source),
+        configuration={},
+        database_schema={},
+        integration_versions={},
+        files=(),
+    )
+    store.begin_start("00000000-0000-0000-0000-000000000201")
+    store.commit_start("00000000-0000-0000-0000-000000000201", source_snapshot.snapshot_id)
+
+    class ReadyProcess:
+        pid = 303
+        returncode = 0
+
+        def communicate(self, **_kwargs: Any) -> tuple[str, str]:
+            return (
+                json.dumps(
+                    {
+                        "application_hash": compute_application_build_hash(source),
+                        "environment_isolated": True,
+                        "root": str(source),
+                        "status": "ready",
+                    }
+                ),
+                "",
+            )
+
+    monkeypatch.setattr(subprocess, "Popen", lambda *a, **k: ReadyProcess())
+    healthy = verifier.observe_lkg_health(installation_root=source)
+    assert healthy.passed is True
+
+
+def test_production_gate_command_outcomes_are_typed_and_sanitized(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    executor = ProductionCurrentGateExecutor(timeout_seconds=1)
+    calls: list[tuple[tuple[str, ...], dict[str, str]]] = []
+
+    def success(command: tuple[str, ...], **kwargs: Any) -> SimpleNamespace:
+        calls.append((command, cast(dict[str, str], kwargs["env"])))
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(subprocess, "run", success)
+    passed, detail = executor._run_command(tmp_path, (sys.executable, "-m", "probe"))
+    assert passed and "passed" in detail
+    assert calls[-1][1]["PYTHONPATH"] == str(tmp_path)
+    assert "PYTEST_CURRENT_TEST" not in calls[-1][1]
+    passed, _detail = executor._run_command(tmp_path, (sys.executable, "scripts/quality.py"))
+    assert passed
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda *_args, **_kwargs: SimpleNamespace(returncode=1),
+    )
+    assert executor._run_command(tmp_path, (sys.executable, "-m", "probe"))[0] is False
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(subprocess.TimeoutExpired("probe", 1)),
+    )
+    assert executor._run_command(tmp_path, (sys.executable, "-m", "probe"))[0] is False
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("unavailable")),
+    )
+    assert executor._run_command(tmp_path, (sys.executable, "-m", "probe"))[0] is False
+
+
+def test_candidate_host_failure_taxonomy_does_not_echo_expected_inputs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    service, proposal, installation, _approval, _broker = _activator(tmp_path)
+    record = service.prepare(
+        proposal,
+        current_version="1",
+        candidate_version="2",
+        changed_subsystems=("jarvis",),
+        preview_gates=_preview_gates(),
+    )
+    candidate = ProductionCandidateInstaller(
+        Path(__file__).resolve().parents[1], installation, service.recovery
+    ).stage(proposal, record)
+    selector = TrustedSelfDevelopmentBootSelector(
+        Path(__file__).resolve().parents[1], installation, service.recovery
+    )
+    verifier = ProductionSelfDevelopmentRuntimeVerifier(
+        Path(__file__).resolve().parents[1], selector
+    )
+    application_hash = compute_application_build_hash(candidate.root)
+
+    class FakeProcess:
+        pid = 101
+        returncode = 0
+
+        def communicate(self, **_kwargs: Any) -> tuple[str, str]:
+            return (
+                json.dumps(
+                    {
+                        "application_hash": application_hash,
+                        "environment_isolated": True,
+                        "root": str(candidate.root),
+                        "status": "ready",
+                    }
+                ),
+                "",
+            )
+
+        def kill(self) -> None:
+            return None
+
+    monkeypatch.setattr(subprocess, "Popen", lambda *a, **k: FakeProcess())
+    observed = verifier.start_candidate(
+        installation_root=candidate.root,
+        expected_revision=record.candidate_revision,
+        expected_hash="f" * 64,
+    )
+    assert observed.started
+    assert observed.observed_hash == application_hash
+    assert observed.observed_hash != "f" * 64
+    assert observed.outcome is CandidateStartOutcome.STARTED
+
+    class WrongRootProcess(FakeProcess):
+        def communicate(self, **_kwargs: Any) -> tuple[str, str]:
+            value, stderr = super().communicate()
+            payload = json.loads(value)
+            payload["root"] = "C:\\wrong-candidate"
+            return json.dumps(payload), stderr
+
+    monkeypatch.setattr(subprocess, "Popen", lambda *a, **k: WrongRootProcess())
+    wrong_root = verifier.start_candidate(
+        installation_root=candidate.root,
+        expected_revision=record.candidate_revision,
+        expected_hash=record.candidate_hash,
+    )
+    assert wrong_root.outcome is CandidateStartOutcome.ROOT_MISMATCH
+
+    class NonzeroProcess(FakeProcess):
+        returncode = 1
+
+    monkeypatch.setattr(subprocess, "Popen", lambda *a, **k: NonzeroProcess())
+    assert (
+        verifier.start_candidate(
+            installation_root=candidate.root,
+            expected_revision=record.candidate_revision,
+            expected_hash=record.candidate_hash,
+        ).outcome
+        is CandidateStartOutcome.NONZERO_EXIT
+    )
+
+    class TimeoutProcess(FakeProcess):
+        def communicate(self, **kwargs: Any) -> tuple[str, str]:
+            if "timeout" in kwargs:
+                raise subprocess.TimeoutExpired("candidate", 1)
+            return "", ""
+
+    monkeypatch.setattr(subprocess, "Popen", lambda *a, **k: TimeoutProcess())
+    assert (
+        verifier.start_candidate(
+            installation_root=candidate.root,
+            expected_revision=record.candidate_revision,
+            expected_hash=record.candidate_hash,
+        ).outcome
+        is CandidateStartOutcome.PROCESS_TIMEOUT
+    )
+
+    monkeypatch.setattr(subprocess, "Popen", lambda *a, **k: (_ for _ in ()).throw(OSError()))
+    assert (
+        verifier.start_candidate(
+            installation_root=candidate.root,
+            expected_revision=record.candidate_revision,
+            expected_hash=record.candidate_hash,
+        ).outcome
+        is CandidateStartOutcome.NONZERO_EXIT
+    )
+
+
 def test_candidate_host_entrypoint_is_bounded_and_typed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     class ReadyRuntime:
         status = RuntimeStatus.READY
+
+        async def aclose(self) -> None:
+            return None
 
     class FailedRuntime:
         status = RuntimeStatus.ERROR
@@ -1019,14 +1384,22 @@ def test_authenticated_boot_can_fall_back_to_production_root(tmp_path: Path) -> 
 async def test_production_golden_workflow_uses_trusted_executor(tmp_path: Path) -> None:
     store = GoldenWorkflowStore(tmp_path / "golden.sqlite3")
     workflow = register_production_self_development_golden(store)
-    owner = GoldenWorkflowOwner(GoldenWorkflowService(store), ProductionGoldenExecutor())
+    owner = GoldenWorkflowOwner(
+        GoldenWorkflowService(store), ProductionGoldenExecutor()
+    ).for_candidate(
+        root=Path(__file__).resolve().parents[1],
+        proposal_fingerprint="a" * 64,
+    )
     assert workflow.workflow_id == "jarvis-production-self-development"
     assert await owner() is True
 
 
 def test_production_candidate_is_complete_and_recovery_selects_only_authenticated_root(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    monkeypatch.setenv("PYTEST_CURRENT_TEST", "polluted-parent-test")
+    monkeypatch.setenv("JARVIS_ENVIRONMENT", "test")
+    monkeypatch.setenv("PYTHONPATH", str(tmp_path / "wrong-source-root"))
     service, proposal, installation, _approval, _broker = _activator(tmp_path)
     record = service.prepare(
         proposal,
@@ -1064,7 +1437,10 @@ def test_production_candidate_is_complete_and_recovery_selects_only_authenticate
             expected_revision=record.candidate_revision,
             expected_hash=record.candidate_hash,
         )
-        assert evidence.started
+        assert evidence.started, (
+            f"candidate start failed: outcome={evidence.outcome} "
+            f"detail={evidence.detail} digest={evidence.evidence_digest}"
+        )
 
     def health() -> bool:
         return (
@@ -1081,7 +1457,7 @@ def test_production_candidate_is_complete_and_recovery_selects_only_authenticate
         candidate.snapshot_id,
         start=start,
         health_check=health,
-        lkg_health_check=lambda: True,
+        lkg_health_check=lambda: verifier.observe_lkg_health(installation_root=source).passed,
     )
     assert result == candidate.snapshot_id
     assert selector.select() == candidate.root

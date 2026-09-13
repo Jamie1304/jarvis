@@ -272,6 +272,7 @@ from jarvis.self_development import (
     GateVerifier,
     GoldenWorkflowOwner,
     ProductionCandidateInstaller,
+    ProductionCurrentGateExecutor,
     ProductionGoldenExecutor,
     ProductionSelfDevelopmentGateVerifier,
     ProductionSelfDevelopmentRuntimeVerifier,
@@ -1347,6 +1348,9 @@ class ApplicationRuntime:
                 identity_root=paths.config,
                 legacy_identity_root=paths.backups,
             )
+            # Existing in-process test hosts retain their deterministic backend.
+            # Production candidate processes receive an explicit qualification
+            # backend and the sanitized child environment never contains PYTEST_*.
             if settings.environment == "test" or "PYTEST_CURRENT_TEST" in os.environ:
                 recovery_backend = (
                     test_fixture.recovery_key_backend
@@ -1776,7 +1780,9 @@ class ApplicationRuntime:
                         recovery_coordinator,
                     )
                     self_development_boot_selector = boot_selector
-                    gate_verifier: GateVerifier = ProductionSelfDevelopmentGateVerifier()
+                    gate_verifier: GateVerifier = ProductionSelfDevelopmentGateVerifier(
+                        ProductionCurrentGateExecutor()
+                    )
                     golden_runner: Callable[[], object | Awaitable[object]] = GoldenWorkflowOwner(
                         golden_workflows, ProductionGoldenExecutor()
                     )

@@ -63,7 +63,12 @@ from jarvis.permissions.models import (
     SafeArgument,
     SafetyClass,
 )
-from jarvis.recovery import RecoveryCoordinator, RecoveryError, compute_application_build_hash
+from jarvis.recovery import (
+    RecoveryCoordinator,
+    RecoveryError,
+    RecoveryManifest,
+    compute_application_build_hash,
+)
 from jarvis.security.modification_policy import (
     ModificationTrustClassification,
     ModificationTrustClassifier,
@@ -320,10 +325,32 @@ class GoldenWorkflowOwner:
         )
         return result.passed
 
+    def for_candidate(self, *, root: Path, proposal_fingerprint: str) -> GoldenWorkflowOwner:
+        bind = getattr(self._executor, "for_candidate", None)
+        if not callable(bind):
+            return self
+        return GoldenWorkflowOwner(
+            self._service,
+            bind(root=root, proposal_fingerprint=proposal_fingerprint),
+        )
+
 
 GoldenRunner = Callable[[], object | Awaitable[object]]
 
 _APPROVAL_BINDING_NAMESPACE = UUID("7b6eb5c1-5fd3-5ae6-a1ab-15b4e5a98eaf")
+
+
+class CandidateStartOutcome(StrEnum):
+    STARTED = "STARTED"
+    PROCESS_TIMEOUT = "PROCESS_TIMEOUT"
+    NONZERO_EXIT = "NONZERO_EXIT"
+    MALFORMED_PAYLOAD = "MALFORMED_PAYLOAD"
+    NOT_READY = "NOT_READY"
+    ROOT_MISMATCH = "ROOT_MISMATCH"
+    TREE_HASH_MISMATCH = "TREE_HASH_MISMATCH"
+    RECOVERY_AUTH_MISMATCH = "RECOVERY_AUTH_MISMATCH"
+    UNSAFE_ENVIRONMENT = "UNSAFE_ENVIRONMENT"
+    STARTUP_DEADLINE_EXCEEDED = "STARTUP_DEADLINE_EXCEEDED"
 
 
 @dataclass(frozen=True, slots=True)
@@ -334,6 +361,10 @@ class CandidateStartEvidence:
     observed_revision: str
     observed_hash: str
     evidence_digest: str
+    outcome: CandidateStartOutcome = CandidateStartOutcome.STARTED
+    observed_root: str = ""
+    snapshot_id: str = ""
+    detail: str = ""
 
     def __post_init__(self) -> None:
         if type(self.started) is not bool or len(self.observed_hash) != 64:
@@ -342,6 +373,10 @@ class CandidateStartEvidence:
         if len(self.evidence_digest) != 64:
             raise ValueError("Candidate start evidence digest is malformed")
         int(self.evidence_digest, 16)
+        if not isinstance(self.outcome, CandidateStartOutcome):
+            raise ValueError("Candidate start outcome is malformed")
+        if len(self.observed_root) > 1_024 or len(self.snapshot_id) > 128 or len(self.detail) > 512:
+            raise ValueError("Candidate start detail is malformed")
 
 
 @dataclass(frozen=True, slots=True)
@@ -385,7 +420,14 @@ class UnavailableSelfDevelopmentRuntimeVerifier:
         self, *, installation_root: Path, expected_revision: str, expected_hash: str
     ) -> CandidateStartEvidence:
         del installation_root, expected_revision
-        return CandidateStartEvidence(False, "unavailable", expected_hash, self._DIGEST)
+        return CandidateStartEvidence(
+            False,
+            "unavailable",
+            expected_hash,
+            self._DIGEST,
+            CandidateStartOutcome.RECOVERY_AUTH_MISMATCH,
+            detail="candidate runtime observer unavailable",
+        )
 
     def observe_candidate_health(
         self, *, installation_root: Path, expected_hash: str
@@ -604,8 +646,134 @@ class ProductionCandidateInstaller:
                 raise ActivationError("candidate source contains a non-regular file")
 
 
+class ProductionCurrentGateExecutor:
+    """Run host-owned current gates and return only observed typed outcomes."""
+
+    _DANGEROUS = (
+        "-----BEGIN ",
+        "os.system(",
+        "eval(",
+        "exec(",
+        "password =",
+        "api_key =",
+        "token =",
+    )
+    _COMMANDS = {
+        "sandbox_tests": (sys.executable, "-m", "compileall", "-q", "jarvis"),
+        "quality": (sys.executable, "scripts/quality.py"),
+        "integration_tests": (sys.executable, "-m", "pytest", "-q"),
+        "protected_regression": (sys.executable, "-m", "pytest", "-q", "tests/trusted_core"),
+    }
+    _POST_START = frozenset({"startup_health", "post_start_security", "runtime_integrity"})
+    _NON_GATE_FACTS = frozenset(
+        {"trusted_approval", "recovery_point", "change_control_record", "dual_control_approval"}
+    )
+
+    def __init__(self, *, timeout_seconds: float = 900.0) -> None:
+        self.timeout_seconds = timeout_seconds
+
+    def __call__(
+        self, proposal: MergeDeploymentProposal, classification: ModificationTrustClassification
+    ) -> Mapping[str, GateEvidence]:
+        workspace = _candidate_workspace(proposal)
+        evidence: dict[str, GateEvidence] = {}
+        for name in classification.required_gates:
+            if name in self._POST_START:
+                continue
+            if name in self._NON_GATE_FACTS:
+                continue
+            if name in {"static_security", "security_review", "trusted_core_security"}:
+                passed, detail = self._static_security(workspace, proposal)
+            elif name == "package_certification":
+                passed, detail = self._package_certification(workspace)
+            else:
+                command = self._COMMANDS.get(name)
+                if command is None:
+                    raise ActivationError(f"current trusted gate owner unavailable: {name}")
+                passed, detail = self._run_command(workspace, command)
+            digest = hashlib.sha256(
+                "\x1f".join(
+                    (
+                        proposal.proposal_fingerprint,
+                        proposal.workspace.base_revision,
+                        proposal.modification.tree_digest,
+                        name,
+                        str(passed),
+                        detail,
+                    )
+                ).encode("utf-8")
+            ).hexdigest()
+            evidence[name] = GateEvidence(name, passed, digest)
+            if not passed:
+                break
+            if _tree_digest(workspace) != proposal.modification.tree_digest:
+                raise ActivationError("candidate changed during current gate execution")
+        return evidence
+
+    def _static_security(
+        self, workspace: Path, proposal: MergeDeploymentProposal
+    ) -> tuple[bool, str]:
+        for relative in proposal.modification.changed_paths:
+            path = workspace / Path(relative)
+            if not path.is_file() or path.is_symlink() or path.is_junction():
+                return False, "changed path is unavailable or non-regular"
+            text = path.read_text(encoding="utf-8", errors="replace").casefold()
+            if any(marker.casefold() in text for marker in self._DANGEROUS):
+                return False, "static security scanner rejected candidate content"
+        return True, "trusted static security scanner completed"
+
+    @staticmethod
+    def _package_certification(workspace: Path) -> tuple[bool, str]:
+        try:
+            digest = compute_application_build_hash(workspace)
+        except (OSError, RecoveryError):
+            return False, "candidate application package is not certifiable"
+        return bool(digest), "candidate application package was independently hashed"
+
+    def _run_command(self, workspace: Path, command: tuple[str, ...]) -> tuple[bool, str]:
+        environment = _sanitized_candidate_environment(workspace)
+        coverage_file: Path | None = None
+        if command[:2] == (sys.executable, "scripts/quality.py"):
+            descriptor, filename = tempfile.mkstemp(prefix="jarvis-quality-", suffix=".coverage")
+            os.close(descriptor)
+            coverage_file = Path(filename)
+            environment["COVERAGE_FILE"] = str(coverage_file)
+        try:
+            result = subprocess.run(
+                command,
+                cwd=workspace,
+                env=environment,
+                capture_output=True,
+                text=True,
+                timeout=self.timeout_seconds,
+                check=False,
+            )
+        except subprocess.TimeoutExpired:
+            return False, "trusted gate process timed out"
+        except OSError:
+            return False, "trusted gate process was unavailable"
+        finally:
+            if coverage_file is not None:
+                coverage_file.unlink(missing_ok=True)
+        return result.returncode == 0, (
+            "trusted gate process passed"
+            if result.returncode == 0
+            else "trusted gate process returned nonzero"
+        )
+
+
 class ProductionSelfDevelopmentGateVerifier:
-    """Fresh current gate owner bound to one exact proposal and current policy."""
+    """Fresh structural verifier followed by an independently owned gate run."""
+
+    def __init__(
+        self,
+        executor: Callable[
+            [MergeDeploymentProposal, ModificationTrustClassification],
+            Mapping[str, GateEvidence],
+        ]
+        | None = None,
+    ) -> None:
+        self._executor = executor or ProductionCurrentGateExecutor()
 
     def __call__(
         self, proposal: MergeDeploymentProposal, classification: ModificationTrustClassification
@@ -633,17 +801,7 @@ class ProductionSelfDevelopmentGateVerifier:
             raise ActivationError("current candidate diff gate failed")
         if proposal.dependency_assessment.changes:
             raise ActivationError("dependency-changing candidate gate failed")
-        material = "\x1f".join(
-            (
-                proposal.proposal_fingerprint,
-                proposal.modification.tree_digest,
-                proposal.modification.diff_digest,
-                str(classification.level),
-                ",".join(classification.required_gates),
-            )
-        )
-        digest = hashlib.sha256(material.encode("utf-8")).hexdigest()
-        return {name: GateEvidence(name, True, digest) for name in classification.required_gates}
+        return self._executor(proposal, classification)
 
 
 def register_production_self_development_golden(store: object) -> GoldenWorkflow:
@@ -669,7 +827,18 @@ def register_production_self_development_golden(store: object) -> GoldenWorkflow
 
 
 class ProductionGoldenExecutor:
-    """Application-owned Golden executor; generated code cannot register or waive it."""
+    """Application-owned Golden executor backed by an observed candidate process."""
+
+    def __init__(
+        self, *, root: Path | None = None, proposal_fingerprint: str | None = None
+    ) -> None:
+        self._root = root.resolve() if root is not None else None
+        self._proposal_fingerprint = proposal_fingerprint
+
+    def for_candidate(self, *, root: Path, proposal_fingerprint: str) -> ProductionGoldenExecutor:
+        if len(proposal_fingerprint) != 64:
+            raise GoldenGateError("Golden candidate binding is malformed")
+        return ProductionGoldenExecutor(root=root, proposal_fingerprint=proposal_fingerprint)
 
     def __call__(self, workflow: GoldenWorkflow, fixture: Fixture) -> Sequence[EvidenceRecord]:
         if (
@@ -677,16 +846,70 @@ class ProductionGoldenExecutor:
             or fixture.fixture_id != "candidate-ready"
         ):
             raise GoldenGateError("production self-development Golden workflow is unknown")
+        root = self._root
+        if root is None or self._proposal_fingerprint is None:
+            raise GoldenGateError("production Golden candidate context is unavailable")
+        try:
+            expected_hash = compute_application_build_hash(root)
+            app_data = Path(tempfile.mkdtemp(prefix="jarvis-golden-data-"))
+            command = [sys.executable, "-m", "jarvis.self_development_host", str(app_data)]
+            environment = _sanitized_candidate_environment(root)
+            child = subprocess.Popen(
+                command,
+                cwd=root,
+                env=environment,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            try:
+                stdout, _stderr = child.communicate(timeout=45)
+            except subprocess.TimeoutExpired:
+                child.kill()
+                child.communicate()
+                raise GoldenGateError("production Golden candidate timed out") from None
+            payload = _candidate_host_payload(stdout)
+            observed = (
+                child.returncode == 0
+                and payload is not None
+                and payload.get("status") == "ready"
+                and payload.get("root") == str(root)
+                and payload.get("environment_isolated") is True
+                and payload.get("application_hash") == expected_hash
+            )
+            observation_digest = hashlib.sha256(
+                json.dumps(
+                    {
+                        "proposal_fingerprint": self._proposal_fingerprint,
+                        "root": str(root),
+                        "returncode": child.returncode,
+                        "application_hash": payload.get("application_hash")
+                        if payload is not None
+                        else None,
+                        "status": payload.get("status") if payload is not None else None,
+                        "environment_isolated": payload.get("environment_isolated")
+                        if payload is not None
+                        else None,
+                    },
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            ).hexdigest()
+        except (OSError, RecoveryError) as error:
+            raise GoldenGateError("production Golden candidate was unavailable") from error
+        finally:
+            if "app_data" in locals():
+                shutil.rmtree(app_data, ignore_errors=True)
         now = datetime.now(UTC)
         return (
             EvidenceRecord(
                 EvidenceType.CUSTOM,
-                "trusted.production-self-development-golden",
+                f"trusted.production-self-development-golden:{observation_digest}",
                 now,
                 timedelta(minutes=5),
-                1.0,
+                1.0 if observed else 0.0,
                 "candidate_ready",
-                "candidate_ready",
+                "candidate_ready" if observed else "candidate_not_ready",
                 level=VerificationLevel.AUTOMATED_TESTED,
             ),
         )
@@ -722,21 +945,61 @@ class ProductionSelfDevelopmentRuntimeVerifier:
     """Trusted bounded Windows process observer for complete candidate roots."""
 
     def __init__(
-        self, production_root: Path, boot_selector: TrustedSelfDevelopmentBootSelector
+        self,
+        production_root: Path,
+        boot_selector: TrustedSelfDevelopmentBootSelector,
+        *,
+        startup_deadline_seconds: float = 60.0,
+        safety_margin_seconds: float = 5.0,
     ) -> None:
+        if startup_deadline_seconds <= safety_margin_seconds or safety_margin_seconds <= 0:
+            raise ValueError("candidate startup deadline margin is invalid")
         self.production_root = _directory(production_root, "production root")
         self.boot_selector = boot_selector
-        self._observations: dict[Path, tuple[int, str, str]] = {}
+        self._host_timeout_seconds = startup_deadline_seconds - safety_margin_seconds
+        self._safety_margin_seconds = safety_margin_seconds
+        self._observations: dict[Path, tuple[int, Mapping[str, object] | None, str]] = {}
 
     def start_candidate(
         self, *, installation_root: Path, expected_revision: str, expected_hash: str
     ) -> CandidateStartEvidence:
         root = _directory(installation_root, "candidate installation root")
         tree_digest = compute_application_build_hash(root)
+        manifest = self._authenticated_manifest(root)
+        if manifest is None:
+            return self._evidence(
+                root,
+                CandidateStartOutcome.RECOVERY_AUTH_MISMATCH,
+                "authenticated candidate manifest unavailable",
+                tree_digest,
+            )
+        if manifest.app_revision != expected_revision or manifest.application_hash != tree_digest:
+            return self._evidence(
+                root,
+                CandidateStartOutcome.RECOVERY_AUTH_MISMATCH,
+                "authenticated candidate manifest does not match the request",
+                tree_digest,
+                observed_revision=manifest.app_revision,
+                snapshot_id=manifest.snapshot_id,
+            )
+        timeout = self._remaining_host_timeout()
+        if timeout <= 0:
+            return self._evidence(
+                root,
+                CandidateStartOutcome.STARTUP_DEADLINE_EXCEEDED,
+                "Recovery startup deadline already expired",
+                tree_digest,
+                observed_revision=manifest.app_revision,
+                snapshot_id=manifest.snapshot_id,
+            )
         app_data = Path(tempfile.mkdtemp(prefix="jarvis-candidate-data-"))
-        env = os.environ.copy()
-        env["PYTHONPATH"] = os.pathsep.join((str(root), env.get("PYTHONPATH", "")))
+        env = _sanitized_candidate_environment(root)
         command = [sys.executable, "-m", "jarvis.self_development_host", str(app_data)]
+        returncode = -1
+        stdout = ""
+        stderr = ""
+        outcome = CandidateStartOutcome.NONZERO_EXIT
+        detail = "candidate host returned nonzero"
         try:
             child = subprocess.Popen(
                 command,
@@ -747,29 +1010,66 @@ class ProductionSelfDevelopmentRuntimeVerifier:
                 text=True,
             )
             try:
-                stdout, _stderr = child.communicate(timeout=90)
+                stdout, stderr = child.communicate(timeout=timeout)
             except subprocess.TimeoutExpired:
                 child.kill()
-                stdout, _stderr = child.communicate()
+                stdout, stderr = child.communicate()
+                outcome = CandidateStartOutcome.PROCESS_TIMEOUT
+                detail = "candidate host exceeded the bounded Recovery startup budget"
             returncode = child.returncode
-            self._observations[root] = (returncode, stdout, tree_digest)
+            if len(stdout) > 16_384:
+                outcome = CandidateStartOutcome.MALFORMED_PAYLOAD
+                detail = "candidate host payload exceeded its bound"
             payload = _candidate_host_payload(stdout)
-            started = (
-                returncode == 0
-                and payload is not None
-                and payload.get("status") == "ready"
-                and payload.get("root") == str(root)
-                and payload.get("application_hash") == tree_digest
-                and self._authenticated_tree_digest(root) == tree_digest
+            self._observations[root] = (returncode, payload, tree_digest)
+            if outcome is not CandidateStartOutcome.PROCESS_TIMEOUT:
+                if returncode != 0:
+                    outcome = CandidateStartOutcome.NONZERO_EXIT
+                    detail = "candidate host returned nonzero"
+                elif payload is None:
+                    outcome = CandidateStartOutcome.MALFORMED_PAYLOAD
+                    detail = "candidate host payload was not valid bounded JSON"
+                elif payload.get("root") != str(root):
+                    outcome = CandidateStartOutcome.ROOT_MISMATCH
+                    detail = "candidate host reported a different root"
+                elif payload.get("environment_isolated") is not True:
+                    outcome = CandidateStartOutcome.UNSAFE_ENVIRONMENT
+                    detail = "candidate host environment was not isolated"
+                elif payload.get("application_hash") != tree_digest:
+                    outcome = CandidateStartOutcome.TREE_HASH_MISMATCH
+                    detail = "candidate host reported a different application hash"
+                elif payload.get("status") != "ready":
+                    outcome = CandidateStartOutcome.NOT_READY
+                    detail = "candidate host did not report READY"
+                elif self._authenticated_tree_digest(root) != tree_digest:
+                    outcome = CandidateStartOutcome.RECOVERY_AUTH_MISMATCH
+                    detail = "authenticated candidate tree changed during startup"
+                else:
+                    outcome = CandidateStartOutcome.STARTED
+                    detail = "candidate host and authenticated manifest observed"
+            if outcome is CandidateStartOutcome.STARTED and self._remaining_host_timeout() <= 0:
+                outcome = CandidateStartOutcome.STARTUP_DEADLINE_EXCEEDED
+                detail = "Recovery startup deadline expired before candidate observation completed"
+            return self._evidence(
+                root,
+                outcome,
+                detail,
+                tree_digest,
+                observed_revision=manifest.app_revision,
+                snapshot_id=manifest.snapshot_id,
+                pid=child.pid,
+                returncode=returncode,
+                stderr=stderr,
             )
-            digest = hashlib.sha256(
-                f"{child.pid}:{root}:{returncode}:{tree_digest}".encode()
-            ).hexdigest()
-            return CandidateStartEvidence(
-                started,
-                expected_revision,
-                expected_hash,
-                digest,
+        except OSError:
+            return self._evidence(
+                root,
+                CandidateStartOutcome.NONZERO_EXIT,
+                "candidate host process was unavailable",
+                tree_digest,
+                observed_revision=manifest.app_revision,
+                snapshot_id=manifest.snapshot_id,
+                returncode=returncode,
             )
         finally:
             shutil.rmtree(app_data, ignore_errors=True)
@@ -778,20 +1078,21 @@ class ProductionSelfDevelopmentRuntimeVerifier:
         self, *, installation_root: Path, expected_hash: str
     ) -> RuntimeVerificationEvidence:
         observed = self._observations.get(installation_root.resolve())
-        payload = _candidate_host_payload(observed[1]) if observed is not None else None
+        payload = observed[1] if observed is not None else None
         passed = (
             observed is not None
             and observed[0] == 0
             and payload is not None
             and payload.get("status") == "ready"
             and payload.get("root") == str(installation_root.resolve())
+            and payload.get("environment_isolated") is True
             and payload.get("application_hash") == observed[2]
             and self._authenticated_tree_digest(installation_root.resolve()) == observed[2]
         )
         return RuntimeVerificationEvidence(
             passed,
             hashlib.sha256(
-                f"health:{installation_root}:{expected_hash}:{passed}".encode()
+                f"health:{installation_root}:{observed[2] if observed else ''}:{passed}".encode()
             ).hexdigest(),
             "real candidate ApplicationRuntime startup observed"
             if passed
@@ -807,11 +1108,12 @@ class ProductionSelfDevelopmentRuntimeVerifier:
             observed is not None
             and observed[0] == 0
             and observed[2] == compute_application_build_hash(root)
+            and self._authenticated_tree_digest(root) == observed[2]
         )
         return RuntimeVerificationEvidence(
             passed,
             hashlib.sha256(
-                f"security:{root}:{expected_hash}:{observed[2] if observed else ''}".encode()
+                f"security:{root}:{observed[2] if observed else ''}:{passed}".encode()
             ).hexdigest(),
             "candidate root identity and complete tree are unchanged"
             if passed
@@ -820,10 +1122,17 @@ class ProductionSelfDevelopmentRuntimeVerifier:
 
     def observe_lkg_health(self, *, installation_root: Path) -> RuntimeVerificationEvidence:
         root = self.boot_selector.select()
+        manifest = self._authenticated_manifest(root)
+        if manifest is None:
+            return RuntimeVerificationEvidence(
+                False,
+                hashlib.sha256(f"lkg-missing:{root}".encode()).hexdigest(),
+                "authenticated known-good manifest unavailable",
+            )
         evidence = self.start_candidate(
             installation_root=root,
-            expected_revision="known-good",
-            expected_hash=hashlib.sha256(str(root).encode()).hexdigest(),
+            expected_revision=manifest.app_revision,
+            expected_hash=manifest.application_hash,
         )
         health = self.observe_candidate_health(
             installation_root=root, expected_hash=evidence.observed_hash
@@ -836,19 +1145,63 @@ class ProductionSelfDevelopmentRuntimeVerifier:
             else "known-good runtime health failed",
         )
 
-    def _authenticated_tree_digest(self, root: Path) -> str | None:
+    def _authenticated_manifest(self, root: Path) -> RecoveryManifest | None:
         root = root.resolve()
         if root == self.production_root:
             record = self.boot_selector.recovery.store.last_known_good_record()
             if record is None:
                 return None
-            return self.boot_selector.recovery.store.load(record.snapshot_id).application_hash
+            return self.boot_selector.recovery.store.load(record.snapshot_id)
         if root.parent != self.boot_selector.installation_root:
             return None
         try:
-            return self.boot_selector.recovery.store.load(root.name).application_hash
+            return self.boot_selector.recovery.store.load(root.name)
         except RecoveryError:
             return None
+
+    def _remaining_host_timeout(self) -> float:
+        try:
+            attempt = self.boot_selector.recovery.store.active_start()
+            if attempt.health_deadline is None:
+                return self._host_timeout_seconds
+            deadline = datetime.fromisoformat(attempt.health_deadline)
+            now = self.boot_selector.recovery._clock()
+            remaining = (deadline - now).total_seconds()
+            return min(self._host_timeout_seconds, remaining - self._safety_margin_seconds)
+        except (RecoveryError, ValueError):
+            return self._host_timeout_seconds
+
+    def _evidence(
+        self,
+        root: Path,
+        outcome: CandidateStartOutcome,
+        detail: str,
+        tree_digest: str,
+        *,
+        observed_revision: str = "unobserved",
+        snapshot_id: str = "",
+        pid: int = 0,
+        returncode: int = -1,
+        stderr: str = "",
+    ) -> CandidateStartEvidence:
+        sanitized_stderr = hashlib.sha256(stderr.encode("utf-8", errors="replace")).hexdigest()
+        digest = hashlib.sha256(
+            f"{pid}:{root}:{returncode}:{tree_digest}:{outcome.value}:{sanitized_stderr}".encode()
+        ).hexdigest()
+        return CandidateStartEvidence(
+            outcome is CandidateStartOutcome.STARTED,
+            observed_revision,
+            tree_digest,
+            digest,
+            outcome,
+            str(root),
+            snapshot_id,
+            detail,
+        )
+
+    def _authenticated_tree_digest(self, root: Path) -> str | None:
+        manifest = self._authenticated_manifest(root)
+        return manifest.application_hash if manifest is not None else None
 
 
 class TrustedSelfDevelopmentActivator:
@@ -1015,7 +1368,7 @@ class TrustedSelfDevelopmentActivator:
             record = self._require_approved(record)
             evidence = await _maybe(self._gate_verifier(proposal, self._classification(proposal)))
             self._require_gates(record.required_gates, evidence)
-            golden = await _maybe(self._golden_runner())
+            golden = await self._run_golden(proposal)
             if golden is not True:
                 raise ActivationError("SELF_IMPROVEMENT GoldenWorkflow did not pass")
             record = self._transition(record, ActivationStatus.PREPARING)
@@ -1365,9 +1718,26 @@ class TrustedSelfDevelopmentActivator:
 
     def _require_gates(self, required: Sequence[str], evidence: Mapping[str, GateEvidence]) -> None:
         for name in required:
+            if name in {
+                "trusted_approval",
+                "recovery_point",
+                "startup_health",
+                "runtime_integrity",
+            }:
+                continue
             item = evidence.get(name)
             if item is None or item.name != name or not item.passed:
                 raise ActivationError(f"required gate did not pass: {name}")
+
+    async def _run_golden(self, proposal: MergeDeploymentProposal) -> bool:
+        runner = self._golden_runner
+        bind = getattr(runner, "for_candidate", None)
+        if callable(bind):
+            runner = bind(
+                root=_candidate_workspace(proposal),
+                proposal_fingerprint=proposal.proposal_fingerprint,
+            )
+        return bool(await _maybe(runner()))
 
     async def _authorize_effect(self, record: ActivationRecord) -> AuthorizationResult:
         paths = tuple(
@@ -1756,6 +2126,25 @@ def _directory(path: Path, label: str) -> Path:
     return resolved
 
 
+def _sanitized_candidate_environment(root: Path) -> dict[str, str]:
+    """Build the candidate allowlist without inheriting test or secret state."""
+
+    environment: dict[str, str] = {}
+    for name in ("SystemRoot", "SYSTEMROOT", "WINDIR", "TEMP", "TMP", "PATH"):
+        value = os.environ.get(name)
+        if value:
+            environment[name] = value
+    environment.update(
+        {
+            "PYTHONNOUSERSITE": "1",
+            "PYTHONDONTWRITEBYTECODE": "1",
+            "PYTHONUNBUFFERED": "1",
+            "PYTHONPATH": str(root),
+        }
+    )
+    return environment
+
+
 def _candidate_workspace(proposal: MergeDeploymentProposal) -> Path:
     root = proposal.workspace.root.expanduser().resolve()
     if not root.is_dir() or root.is_symlink() or root.is_junction():
@@ -1777,9 +2166,12 @@ def _contained_regular_target(path: Path, root: Path) -> None:
 
 def _tree_digest(root: Path) -> str:
     digest = hashlib.sha256()
+    transient_directories = frozenset({".mypy_cache", ".pytest_cache", ".ruff_cache"})
     for path in sorted(root.rglob("*"), key=lambda item: item.as_posix().casefold()):
         relative = path.relative_to(root).as_posix()
         if relative == ".git" or relative.startswith(".git/"):
+            continue
+        if any(part in transient_directories for part in path.parts) or path.name == ".coverage":
             continue
         if "__pycache__" in path.parts or path.suffix in {".pyc", ".pyo"}:
             continue
@@ -1947,6 +2339,7 @@ __all__ = [
     "ActivationRecord",
     "ActivationStateStore",
     "ActivationStatus",
+    "CandidateStartOutcome",
     "CandidateStartEvidence",
     "CandidateInstallation",
     "CandidateInstaller",
@@ -1955,6 +2348,7 @@ __all__ = [
     "GoldenWorkflowOwner",
     "RuntimeVerificationEvidence",
     "ProductionCandidateInstaller",
+    "ProductionCurrentGateExecutor",
     "ProductionGoldenExecutor",
     "ProductionSelfDevelopmentGateVerifier",
     "ProductionSelfDevelopmentRuntimeVerifier",

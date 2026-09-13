@@ -283,6 +283,25 @@ class TestOnlyInMemorySecretBackend:
         self._values.pop(target, None)
 
 
+class EphemeralQualificationSecretBackend:
+    """In-memory authority explicitly limited to disposable host qualification."""
+
+    def __init__(self) -> None:
+        self._values: dict[str, bytes] = {}
+
+    def put(self, target: str, secret: bytes) -> None:
+        self._values[target] = bytes(secret)
+
+    def get(self, target: str) -> bytes:
+        try:
+            return bytes(self._values[target])
+        except KeyError as error:
+            raise CredentialNotFound("Credential secret is unavailable") from error
+
+    def delete(self, target: str) -> None:
+        self._values.pop(target, None)
+
+
 class _CREDENTIALW(ctypes.Structure):  # pragma: no cover - exercised by opt-in Windows test
     _fields_ = [
         ("Flags", wintypes.DWORD),
@@ -1212,6 +1231,7 @@ __all__ = [
     "SecretBackend",
     "SecretBackendUnavailable",
     "TestOnlyInMemorySecretBackend",
+    "EphemeralQualificationSecretBackend",
     "UnavailableSecretBackend",
     "WindowsCredentialManagerBackend",
 ]
