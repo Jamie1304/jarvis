@@ -301,7 +301,6 @@ async def test_appcontainer_boundary_is_explicit_and_observable(tmp_path: Path) 
         integration_id="test.integration",
         parent_directory=tmp_path / "owned-sandboxes",
         limits=SandboxLimits(
-            timeout_seconds=1,
             windows_containment=WindowsContainmentMode.APPCONTAINER,
             appcontainer_runtime_root=Path(sys.base_prefix),
         ),

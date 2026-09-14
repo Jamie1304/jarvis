@@ -86,6 +86,8 @@ class _Controller:
         self.tasks: dict[UUID, PlanningTask] = {}
         self.create_kwargs: list[dict[str, object]] = []
         self.release = asyncio.Event()
+        self.completion_target = 0
+        self.completion_event = asyncio.Event()
 
     async def create_task(self, goal: str, **_: object) -> PlanningTask:
         self.create_kwargs.append(dict(_))
@@ -106,6 +108,8 @@ class _Controller:
         task = self.tasks[task_id]
         completed = replace(task, status=PlanningTaskStatus.COMPLETED)
         self.tasks[task_id] = completed
+        if self.completion_target and len(self.ran) >= self.completion_target:
+            self.completion_event.set()
         return completed
 
     def get_task(self, task_id: UUID) -> PlanningTask | None:
@@ -173,6 +177,9 @@ async def _eventually(predicate: object, *, timeout_seconds: float = 1.0) -> Non
             return
         await asyncio.sleep(0.001)
     assert predicate(), "durable automation state did not converge before the bound"
+
+
+_AUTOMATION_COMPLETION_SAFETY_TIMEOUT_SECONDS = 30.0
 
 
 @pytest.mark.asyncio
@@ -499,20 +506,20 @@ async def test_queue_policy_durably_drains_under_repeated_scheduler_interleaving
 ) -> None:
     for iteration in range(50):
         controller = _Controller()
+        controller.completion_target = 3
         definition = _definition(policy=ConcurrencyPolicy.QUEUE)
         service, store, bus = await _service(tmp_path / str(iteration), controller, definition)
         try:
             for message in ("one", "two", "three", "four"):
                 await service.handle_event(_event(f"storm-{iteration}-{message}"))
             controller.release.set()
-            await _eventually(
-                lambda controller=controller, service=service, definition=definition: len(
-                    controller.created
-                )
-                == 3
-                and {run.status for run in service.runs(definition.automation_id)}
-                <= {AutomationRunStatus.COMPLETED, AutomationRunStatus.DROPPED}
+            # The event is the deterministic synchronization primitive; this bound only
+            # prevents a real deadlock from hanging the qualification suite forever.
+            await asyncio.wait_for(
+                controller.completion_event.wait(),
+                timeout=_AUTOMATION_COMPLETION_SAFETY_TIMEOUT_SECONDS,
             )
+            assert len(controller.created) == 3
             statuses = {run.status for run in service.runs(definition.automation_id)}
             assert statuses == {AutomationRunStatus.COMPLETED, AutomationRunStatus.DROPPED}
         finally:
