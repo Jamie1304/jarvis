@@ -14,20 +14,15 @@ from pathlib import Path
 from typing import Any
 
 from scripts.acceptance.audit_test_strength import audit_test_strength
-from tests.test_v1_h_burn_in import (
-    BurnInOutcome,
-    run_actual_local_provider_campaign,
-    run_deterministic_burn_in,
-)
 
 ROOT = Path(__file__).resolve().parents[2]
-STARTING_SHA = "e71e20812bbe8130b4e81290df6acbd5c81d256f"
-STARTING_PARENT = "83e4bf6603cf0c0bac2f8c2de5513378443954e1"
-STARTING_TREE = "c67f4e3600103f8bd2ed21e2c1e05a0e9fe55f67"
+STARTING_SHA = "a8a79ac6a5c403d5e4915c8481189a09949a298d"
+STARTING_PARENT = "e71e20812bbe8130b4e81290df6acbd5c81d256f"
+STARTING_TREE = "cff1481328617b3df71b91e61b2484d562113e90"
 STARTING_SOURCE_IDENTITY = {
     "schema": "source-identity-1",
-    "sha256": "b0deba00e24e399b53c7b33aa5dbe77384164228017cc1372548cbea182811e0",
-    "bound_file_count": 390,
+    "sha256": "5bebee5b3baa91d157611c19194c6d155f3a3eb7be5eefe5338006fd660a8c09",
+    "bound_file_count": 392,
 }
 
 
@@ -69,7 +64,7 @@ def _source_identity() -> dict[str, object]:
     return value
 
 
-def _outcome_json(outcome: BurnInOutcome) -> dict[str, object]:
+def _outcome_json(outcome: Any) -> dict[str, object]:
     return {
         "name": outcome.name,
         "qualification": outcome.qualification,
@@ -205,14 +200,45 @@ def _coverage_at_least_90(value: dict[str, object]) -> bool:
     return isinstance(percent, int | float) and percent >= 90.0
 
 
+def actual_local_campaign_satisfies_h_gate(actual: dict[str, object]) -> bool:
+    """Return whether the current H gate considers the local campaign complete."""
+
+    return (
+        actual.get("terminal_state") == "VERIFIED_REPAIRED"
+        and actual.get("provider") == "ollama"
+        and actual.get("provider_reachable") is True
+        and actual.get("local_only") is True
+        and actual.get("cloud_disabled") is True
+        and actual.get("campaigns_attempted") == 3
+        and actual.get("campaigns_verified_repaired") == 3
+        and actual.get("consecutive_successes") == 3
+        and actual.get("real_defect_reproduced") is True
+        and actual.get("model_causality") is True
+        and actual.get("accepted_by_trusted_gates") == 3
+        and actual.get("effect_calls") == 3
+        and actual.get("independent_verification") is True
+        and actual.get("cloud_call_count") == 0
+        and actual.get("remote_fallback") is False
+        and actual.get("remote_provider_eligible") is False
+        and actual.get("source_transmitted_remote") is False
+        and actual.get("cleanup_pass") is True
+        and bool(actual.get("model_patch_hashes"))
+    )
+
+
 async def _run_campaigns(
     root: Path,
     *,
     model_id: str,
     endpoint: str,
-) -> tuple[tuple[BurnInOutcome, ...], dict[str, object]]:
+) -> tuple[tuple[Any, ...], dict[str, object]]:
+    from tests.test_v1_h_burn_in import (
+        run_actual_local_provider_campaigns,
+        run_deterministic_burn_in,
+    )
+
     deterministic = await run_deterministic_burn_in(root / "deterministic")
-    actual = await run_actual_local_provider_campaign(
+    actual = await run_actual_local_provider_campaigns(
         root / "actual-local",
         model_id=model_id,
         endpoint=endpoint,
@@ -238,7 +264,7 @@ def main() -> int:
     output = (
         Path(arguments.output)
         if arguments.output
-        else ROOT / (f"artifacts/acceptance/v1-h-autonomous-repair-burn-in-{timestamp}.json")
+        else ROOT / (f"artifacts/acceptance/v1-h-r1-real-weak-local-convergence-{timestamp}.json")
     )
     output.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="jarvis-v1-h-") as temporary:
@@ -274,7 +300,7 @@ def main() -> int:
         blockers.append("deterministic_burn_in")
     if transition_count < 100:
         blockers.append("transition_count")
-    if actual.get("status") != "PASS":
+    if not actual_local_campaign_satisfies_h_gate(actual):
         blockers.append("actual_local_provider")
     if cloud_count != 0:
         blockers.append("cloud_call_count")
@@ -295,15 +321,32 @@ def main() -> int:
     if remote_sha != ending_sha:
         blockers.append("remote_source_identity")
     artifact: dict[str, Any] = {
-        "schema": "v1-h-autonomous-repair-burn-in-1",
-        "phase": "V1-H",
+        "schema": "v1-h-r1-autonomous-repair-burn-in-1",
+        "phase": "V1-H-R1",
         "status": "COMPLETE" if not blockers else "STILL_BLOCKING",
         "first_blocker": blockers[0] if blockers else None,
         "blockers": blockers,
-        "starting_g_sha": STARTING_SHA,
-        "starting_g_parent": STARTING_PARENT,
-        "starting_g_tree": STARTING_TREE,
+        "starting_h_sha": STARTING_SHA,
+        "starting_h_parent": STARTING_PARENT,
+        "starting_h_tree": STARTING_TREE,
+        "r1_diff_scope": [
+            "scripts/acceptance/v1_h_burn_in.py",
+            "tests/test_v1_h_burn_in.py",
+        ],
         "starting_source_identity": STARTING_SOURCE_IDENTITY,
+        "historical_h_ci": "34881644452",
+        "historical_false_positive_reproduction": {
+            "accepted_by_trusted_gates": 0,
+            "effect_calls": 0,
+            "campaign_observed": "malformed_model_output",
+            "old_gate_result": "PASS",
+            "new_regression_result": "PASS",
+        },
+        "semantic_gate_repair": {
+            "provider_response_is_not_repair_success": True,
+            "required_terminal_state": "VERIFIED_REPAIRED",
+            "deterministic_harness_not_counted_as_actual_model": True,
+        },
         "burn_in_architecture_reused": [
             "ComponentDoctor",
             "SQLiteRepairStore",
@@ -347,12 +390,12 @@ def main() -> int:
             "cloud_adapter_call_count": cloud_count,
             "local_failure_state": "paused_or_degraded_without_remote_fallback",
         },
+        "actual_weak_local_repair": actual,
         "successful_weak_local_repair": {
-            "scenario": "valid_small_repair_1",
-            "trusted_post_effect": True,
+            "source": "actual_weak_local_repair",
+            "terminal_state": actual.get("terminal_state"),
+            "campaigns_verified_repaired": actual.get("campaigns_verified_repaired"),
             "model_assertion_used_as_authority": False,
-            "effect_calls": 1,
-            "verification": "independent trusted fixture observation",
         },
         "invalid_proposal_rejection_cases": [
             item["name"]
