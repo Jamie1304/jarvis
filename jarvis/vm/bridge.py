@@ -1,10 +1,19 @@
 """Scoped host bridge contracts. Guest input is never trusted as authority."""
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
 from uuid import UUID
+
+from jarvis.permissions.broker import PermissionBroker
+from jarvis.permissions.models import (
+    ActionDescriptor,
+    AuthorizationReceipt,
+    PermissionRequest,
+    Risk,
+    SafeArgument,
+)
 
 
 class HostBridgeOperation(StrEnum):
@@ -35,6 +44,11 @@ class HostBridgeRequest:
     scope: str
     risk: str = "medium"
     expires_at: datetime | None = None
+    tool_id: str | None = None
+    action: str | None = None
+    argument_fingerprint: str | None = None
+    action_fingerprint: str | None = None
+    approval_identity: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -53,6 +67,7 @@ class HostBridge:
     ) -> None:
         self.requests: list[HostBridgeRequest] = []
         self._permission_verifier = permission_verifier or (lambda request: False)
+        self._consumed_request_ids: set[UUID] = set()
 
     def authorize(self, request: HostBridgeRequest) -> HostBridgeResult:
         self.requests.append(request)
@@ -65,8 +80,8 @@ class HostBridge:
         if (
             not request.resource
             or not request.scope
-            or request.resource == "*"
-            or request.scope == "*"
+            or _contains_wildcard(request.resource)
+            or _contains_wildcard(request.scope)
         ):
             return HostBridgeResult(
                 False, "resource and scope must be narrow", request.operation, request.request_id
@@ -74,3 +89,142 @@ class HostBridge:
         return HostBridgeResult(
             True, "brokered scope approved", request.operation, request.request_id
         )
+
+    def authorize_with_receipt(
+        self,
+        request: HostBridgeRequest,
+        *,
+        receipt: AuthorizationReceipt | None,
+        broker: PermissionBroker,
+        normalized_arguments: Mapping[str, object],
+        expected_instance_id: UUID,
+    ) -> HostBridgeResult:
+        """Authorize one exact host request against an active broker receipt.
+
+        This is deliberately separate from ``authorize`` so the legacy
+        deny-by-default contract remains intact.  The trusted application
+        service constructs the request; guest data never supplies a receipt,
+        verifier, or scope authority.
+        """
+
+        self.requests.append(request)
+        if request.expires_at is not None and request.expires_at <= datetime.now(UTC):
+            return HostBridgeResult(False, "request expired", request.operation, request.request_id)
+        if request.request_id in self._consumed_request_ids:
+            return HostBridgeResult(
+                False, "request replayed", request.operation, request.request_id
+            )
+        if (
+            not request.resource
+            or not request.scope
+            or _contains_wildcard(request.resource)
+            or _contains_wildcard(request.scope)
+        ):
+            return HostBridgeResult(
+                False, "resource and scope must be narrow", request.operation, request.request_id
+            )
+        if receipt is None or type(receipt) is not AuthorizationReceipt:
+            return HostBridgeResult(
+                False, "trusted broker receipt required", request.operation, request.request_id
+            )
+        if request.instance_id != expected_instance_id:
+            return HostBridgeResult(
+                False,
+                "request is bound to a different instance",
+                request.operation,
+                request.request_id,
+            )
+        if (
+            request.task_id != receipt.task_id
+            or request.tool_id != receipt.tool_id
+            or request.action != receipt.action
+            or request.expires_at != receipt.expires_at
+        ):
+            return HostBridgeResult(
+                False,
+                "request does not match the authorized task",
+                request.operation,
+                request.request_id,
+            )
+        if (
+            request.argument_fingerprint != receipt.argument_fingerprint
+            or broker.fingerprint(normalized_arguments) != receipt.argument_fingerprint
+            or request.action_fingerprint != receipt.action_fingerprint
+        ):
+            return HostBridgeResult(
+                False, "authorization fingerprint mismatch", request.operation, request.request_id
+            )
+        if not broker.is_active_receipt(receipt):
+            return HostBridgeResult(
+                False, "broker receipt is not active", request.operation, request.request_id
+            )
+        identities = {
+            item.approval_identity
+            for item in receipt.approval_requests
+            if item.approval_identity is not None
+        }
+        identities.update(item.identity_id for item in receipt.remembered_grants)
+        if request.approval_identity is None or request.approval_identity not in identities:
+            return HostBridgeResult(
+                False,
+                "authenticated approval identity is missing",
+                request.operation,
+                request.request_id,
+            )
+        expected_action_fingerprint = _request_action_fingerprint(request, broker)
+        if (
+            expected_action_fingerprint is None
+            or expected_action_fingerprint != receipt.action_fingerprint
+        ):
+            return HostBridgeResult(
+                False, "request action binding mismatch", request.operation, request.request_id
+            )
+        self._consumed_request_ids.add(request.request_id)
+        return HostBridgeResult(
+            True, "brokered scope approved", request.operation, request.request_id
+        )
+
+
+def _contains_wildcard(value: object) -> bool:
+    return not isinstance(value, str) or any(character in value for character in ("*", "?"))
+
+
+def _request_action_fingerprint(request: HostBridgeRequest, broker: PermissionBroker) -> str | None:
+    if request.action is None:
+        return None
+    try:
+        descriptor = build_host_bridge_action_descriptor(
+            action=request.action,
+            operation=request.operation,
+            resource=request.resource,
+            scope=request.scope,
+            risk=request.risk,
+        )
+    except (TypeError, ValueError):
+        return None
+    return broker.action_fingerprint(descriptor)
+
+
+def build_host_bridge_action_descriptor(
+    *,
+    action: str,
+    operation: HostBridgeOperation,
+    resource: str,
+    scope: str,
+    risk: str | Risk,
+    permissions: tuple[PermissionRequest, ...] = (),
+) -> ActionDescriptor:
+    """Build the canonical trusted action shape used for bridge binding."""
+
+    normalized_risk = risk if isinstance(risk, Risk) else Risk(risk)
+    return ActionDescriptor(
+        action=action,
+        arguments_summary=(
+            SafeArgument("resource", resource),
+            SafeArgument("scope", scope),
+            SafeArgument("operation", operation.value),
+            SafeArgument("risk", normalized_risk.value),
+        ),
+        risk=normalized_risk,
+        permissions=permissions,
+    )

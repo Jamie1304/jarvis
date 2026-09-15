@@ -1,6 +1,19 @@
 """VM-first execution contracts and deterministic virtualization substrate."""
 
-from jarvis.vm.bridge import HostBridge, HostBridgeOperation, HostBridgeRequest, HostBridgeResult
+from jarvis.vm.bridge import (
+    HostBridge,
+    HostBridgeOperation,
+    HostBridgeRequest,
+    HostBridgeResult,
+    build_host_bridge_action_descriptor,
+)
+from jarvis.vm.execution import (
+    HostWriteEvidence,
+    VMExecutionError,
+    VMExecutionEvidence,
+    VMExecutionService,
+    VMExecutionUnavailable,
+)
 from jarvis.vm.fabric import ExecutionFabric, ResourcePolicy
 from jarvis.vm.models import (
     EnvironmentKind,
@@ -37,6 +50,7 @@ __all__ = [
     "HostBridgeOperation",
     "HostBridgeRequest",
     "HostBridgeResult",
+    "HostWriteEvidence",
     "InMemoryVirtualizationProvider",
     "ProviderRegistry",
     "Instance",
@@ -50,5 +64,10 @@ __all__ = [
     "Template",
     "VirtualizationAvailability",
     "VirtualizationProvider",
+    "VMExecutionError",
+    "VMExecutionEvidence",
+    "VMExecutionService",
+    "VMExecutionUnavailable",
     "WSL2VirtualizationProvider",
+    "build_host_bridge_action_descriptor",
 ]

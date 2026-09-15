@@ -876,6 +876,20 @@ class PermissionBroker:
             self._active_receipts[receipt.receipt_id] = receipt
             return None
 
+    def is_active_receipt(self, receipt: AuthorizationReceipt) -> bool:
+        """Return whether this exact broker-issued receipt is in execution.
+
+        This read-only observation is used by the scoped HostBridge while the
+        normal Tool boundary is executing.  It does not mint, extend, or
+        consume authority; the owning tool still records the final outcome
+        through :meth:`record_execution_outcome`.
+        """
+
+        if type(receipt) is not AuthorizationReceipt:
+            return False
+        active = self._active_receipts.get(receipt.receipt_id)
+        return active == receipt and receipt.expires_at > self._now()
+
     async def _issue_receipt(self, receipt: AuthorizationReceipt) -> bool:
         """Durably record intent before making an execution receipt usable."""
 

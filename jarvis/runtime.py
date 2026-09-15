@@ -314,6 +314,10 @@ from jarvis.ui_simulation import UISimulationHarness
 from jarvis.update_preview import ControlledSelfUpdate
 from jarvis.user_model import UserModelMigrationError, UserModelStore
 from jarvis.verification import EvidenceRecord, VerificationEngine
+from jarvis.vm.execution import VMExecutionService
+from jarvis.vm.provider import VirtualizationProvider
+from jarvis.vm.tools import default_vm_tools
+from jarvis.vm.wsl import WSL2VirtualizationProvider
 from jarvis.windows_sandbox import SandboxSecurityStatus
 from jarvis.workflows import (
     ProcedureBank,
@@ -701,6 +705,7 @@ class RuntimeContainer:
     planning_store: SQLitePlanningStore
     planning_engine: PlanningEngine
     task_controller: TaskController
+    vm_execution_service: VMExecutionService
     memory_store: SQLiteMemoryStore
     user_model_store: UserModelStore
     actor_context_service: ActorContextService
@@ -1010,6 +1015,7 @@ class RuntimeContainer:
                 self.production_sandbox,
                 self.opportunity_store,
                 self.attention_store,
+                self.vm_execution_service,
                 self.planning_store,
                 self.memory_store,
                 self.user_model_store,
@@ -1197,6 +1203,7 @@ class ApplicationRuntime:
         test_fixture: RuntimeTestFixture | None = None,
         provider_registry: ProviderRegistry | None = None,
         recovery_key_backend: SecretBackend | None = None,
+        virtualization_provider: VirtualizationProvider | None = None,
         permission_policy: PolicyEngine | None = None,
         trusted_application_tools: tuple[Tool[Any, Any], ...] = (),
         trusted_compensation_observers: Mapping[str, EffectStateObserverProvider] | None = None,
@@ -1446,6 +1453,10 @@ class ApplicationRuntime:
             )
             if not isinstance(policy, PolicyEngine):
                 raise ConfigurationError("Trusted permission policy is malformed")
+            vm_state_root = paths.root / "vm"
+            host_bridge_root = (paths.temporary / "host-bridge").resolve()
+            vm_state_root.mkdir(parents=True, exist_ok=True)
+            host_bridge_root.mkdir(parents=True, exist_ok=True)
             policy = policy.with_additional_rules(
                 PolicyRule(
                     "jarvis.repair.authority",
@@ -1460,6 +1471,16 @@ class ApplicationRuntime:
                     Decision.REQUIRE_APPROVAL,
                     ScopeConstraint(),
                     frozenset({"repair.execute"}),
+                ),
+                PolicyRule(
+                    "jarvis.vm.host-file-write",
+                    Permission.FILESYSTEM_WRITE,
+                    Decision.REQUIRE_APPROVAL,
+                    ScopeConstraint(
+                        paths=(str(host_bridge_root),),
+                        tools=frozenset({"vm.host_file.write"}),
+                    ),
+                    frozenset({"host.file.write"}),
                 ),
             )
             desktop_approval_authenticator = TrustedApprovalAuthenticator(ApprovalSource.TRUSTED_UI)
@@ -1488,10 +1509,21 @@ class ApplicationRuntime:
                 "sandbox.generated.operation",
                 generated_operation_identity,
             )
+            vm_provider = virtualization_provider or WSL2VirtualizationProvider(
+                state_path=vm_state_root / "wsl2.json"
+            )
+            vm_execution_service = VMExecutionService(
+                vm_provider,
+                broker,
+                state_root=vm_state_root,
+                host_root=host_bridge_root,
+            )
             registry = ToolRegistry(
                 (CalculatorTool(), LocalTimeTool(), UnavailableWeatherTool()),
                 permission_broker=broker,
             )
+            for vm_tool in default_vm_tools(vm_execution_service):
+                registry.register(vm_tool)
             if test_fixture is not None:
                 for additional_tool in test_fixture.additional_tools:
                     registry.register(additional_tool)
@@ -2758,6 +2790,7 @@ class ApplicationRuntime:
                 planning_store=planning_store,
                 planning_engine=engine,
                 task_controller=task_controller,
+                vm_execution_service=vm_execution_service,
                 memory_store=memory_store,
                 user_model_store=user_model_store,
                 actor_context_service=actor_context_service,
