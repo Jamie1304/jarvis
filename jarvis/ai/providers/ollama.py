@@ -59,7 +59,7 @@ class OllamaProvider(AIProvider):
             raise ProviderTimeoutError("Ollama generation timed out") from error
         except httpx.ConnectError as error:
             raise ProviderUnavailableError("Ollama server is unavailable") from error
-        return GenerationResult(content=content, model=self._model)
+        return GenerationResult(content=content, model=request.model)
 
     async def stream(self, request: GenerationRequest) -> AsyncIterator[GenerationChunk]:
         payload = self._payload(request, stream=True)

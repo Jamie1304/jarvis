@@ -8,7 +8,7 @@ from collections.abc import AsyncIterator, Mapping
 from dataclasses import dataclass, replace
 from datetime import datetime
 from enum import StrEnum
-from typing import Any
+from typing import Any, Protocol
 
 from jarvis.ai.knowledge import (
     CookbookObservation,
@@ -98,6 +98,7 @@ class RouteBenchmark:
     input_cost_per_million: float | None = None
     output_cost_per_million: float | None = None
     throughput: float | None = None
+    load_latency_ms: float | None = None
 
     def __post_init__(self) -> None:
         for value in (self.provider_id, self.model_id):
@@ -111,6 +112,7 @@ class RouteBenchmark:
             ("input cost", self.input_cost_per_million),
             ("output cost", self.output_cost_per_million),
             ("throughput", self.throughput),
+            ("load latency", self.load_latency_ms),
         ):
             if metric_value is not None and (
                 type(metric_value) not in {int, float}
@@ -149,6 +151,9 @@ class RouteRequest:
     concurrency: int = 1
     policy: RoutingPolicy = RoutingPolicy.BALANCED
     preferred_provider_id: str | None = None
+    preferred_model_id: str | None = None
+    pinned_provider_id: str | None = None
+    pinned_model_id: str | None = None
     allow_no_llm: bool = False
     no_llm: bool = False
     benchmarks: tuple[RouteBenchmark, ...] = ()
@@ -162,6 +167,11 @@ class RouteRequest:
     max_cost_per_million: float | None = None
     previous_failure: RouteFailureClass | None = None
     excluded_identities: tuple[ModelIdentity, ...] = ()
+    current_identity: ModelIdentity | None = None
+    warm_identities: tuple[ModelIdentity, ...] = ()
+    current_quality: float | None = None
+    switching_cost_budget_ms: float | None = None
+    minimum_quality_gain_to_switch: float = 0.05
 
     def __post_init__(self) -> None:
         for name, value, limit in (
@@ -203,6 +213,18 @@ class RouteRequest:
             type(self.preferred_provider_id) is not str or not self.preferred_provider_id.strip()
         ):
             raise ValueError("Preferred provider is invalid")
+        if self.preferred_model_id is not None and (
+            type(self.preferred_model_id) is not str or not self.preferred_model_id.strip()
+        ):
+            raise ValueError("Preferred model is invalid")
+        if self.pinned_provider_id is not None and (
+            type(self.pinned_provider_id) is not str or not self.pinned_provider_id.strip()
+        ):
+            raise ValueError("Pinned provider is invalid")
+        if self.pinned_model_id is not None and (
+            type(self.pinned_model_id) is not str or not self.pinned_model_id.strip()
+        ):
+            raise ValueError("Pinned model is invalid")
         if type(self.benchmarks) is not tuple or any(
             not isinstance(item, RouteBenchmark) for item in self.benchmarks
         ):
@@ -242,6 +264,32 @@ class RouteRequest:
             not isinstance(item, ModelIdentity) for item in self.excluded_identities
         ):
             raise ValueError("Route exclusions are invalid")
+        if self.current_identity is not None and not isinstance(
+            self.current_identity, ModelIdentity
+        ):
+            raise ValueError("Current route identity is invalid")
+        if type(self.warm_identities) is not tuple or any(
+            not isinstance(item, ModelIdentity) for item in self.warm_identities
+        ):
+            raise ValueError("Warm route identities are invalid")
+        if self.current_quality is not None and (
+            type(self.current_quality) not in {int, float}
+            or not math.isfinite(self.current_quality)
+            or not 0.0 <= self.current_quality <= 1.0
+        ):
+            raise ValueError("Current route quality is invalid")
+        if self.switching_cost_budget_ms is not None and (
+            type(self.switching_cost_budget_ms) not in {int, float}
+            or not math.isfinite(self.switching_cost_budget_ms)
+            or self.switching_cost_budget_ms < 0
+        ):
+            raise ValueError("Route switching budget is invalid")
+        if (
+            type(self.minimum_quality_gain_to_switch) not in {int, float}
+            or not math.isfinite(self.minimum_quality_gain_to_switch)
+            or not 0.0 <= self.minimum_quality_gain_to_switch <= 1.0
+        ):
+            raise ValueError("Route switching quality threshold is invalid")
 
     def effective_privacy_context(self) -> PrivacyContext:
         """Return typed privacy input, adapting only legacy callers."""
@@ -324,6 +372,20 @@ class RouteDecision:
     evidence: tuple[tuple[str, str], ...] = ()
 
 
+class InferenceLifecycle(Protocol):
+    """Optional generic lifecycle bridge used by the dispatcher."""
+
+    async def prepare_for_inference(
+        self, candidate: RouteCandidate, intent: RouteRequest | None = None
+    ) -> object: ...
+
+    def begin_inference(self, candidate: RouteCandidate) -> None: ...
+
+    def end_inference(self, candidate: RouteCandidate) -> None: ...
+
+    async def recover_provider(self, provider_id: str) -> bool: ...
+
+
 class ProviderRouter:
     """Select configured providers without provider-specific conditionals."""
 
@@ -332,10 +394,17 @@ class ProviderRouter:
         registry: ProviderRegistry,
         resource_governor: ResourceGovernor | None = None,
         knowledge: ModelKnowledgeService | None = None,
+        hardware_profile: HardwareProfile | None = None,
     ) -> None:
         self._registry = registry
         self._resource_governor = resource_governor
         self._knowledge = knowledge
+        self._hardware_profile = hardware_profile
+
+    def set_hardware_profile(self, profile: HardwareProfile | None) -> None:
+        if profile is not None and not isinstance(profile, HardwareProfile):
+            raise ValueError("Router hardware profile is malformed")
+        self._hardware_profile = profile
 
     def route(self, request: RouteRequest) -> RouteDecision:
         if not isinstance(request, RouteRequest):
@@ -437,6 +506,8 @@ class ProviderRouter:
         return enriched
 
     def _resource_gate(self, request: RouteRequest) -> tuple[RouteRequest, ResourceDecision | None]:
+        if request.resource_state is None and self._hardware_profile is not None:
+            request = replace(request, resource_state=self._hardware_profile)
         if self._resource_governor is None:
             return request, None
         decision = self._resource_governor.decide(
@@ -566,9 +637,7 @@ class ProviderRouter:
                 RouteStatus.SELECTED,
                 viable[0],
                 tuple(viable[1:]),
-                tuple(
-                    f"selected {viable[0].identity.storage_key}",
-                ),
+                (f"selected {viable[0].identity.storage_key}",),
                 resource_decision,
                 evidence=self._evidence(viable[0]),
             )
@@ -634,6 +703,14 @@ class ProviderRouter:
         health: dict[str, ProviderHealthSnapshot],
     ) -> tuple[str | None, bool]:
         model = _effective_model(candidate)
+        if request.pinned_provider_id is not None and (
+            candidate.provider_id.casefold() != request.pinned_provider_id.casefold()
+        ):
+            return "provider is excluded by the per-step provider pin", False
+        if request.pinned_model_id is not None and (
+            candidate.model_id.casefold() != request.pinned_model_id.casefold()
+        ):
+            return "model is excluded by the per-step model pin", False
         privacy = request.effective_privacy_context()
         if request.policy in {RoutingPolicy.LOCAL_ONLY, RoutingPolicy.PRIVACY_STRICT}:
             if not candidate.local:
@@ -721,6 +798,12 @@ class ProviderRouter:
             and candidate.provider_id.casefold() == request.preferred_provider_id.casefold()
             else 1.0
         )
+        preferred_model = (
+            0.0
+            if request.preferred_model_id
+            and candidate.model_id.casefold() == request.preferred_model_id.casefold()
+            else 1.0
+        )
         local = 0.0 if candidate.local else 1.0
         quality = -(candidate.quality if candidate.quality is not None else -1.0)
         latency = candidate.latency if candidate.latency is not None else math.inf
@@ -738,15 +821,45 @@ class ProviderRouter:
             candidate.identity.quantization,
             candidate.identity.runtime,
         )
+        switch_penalty = ProviderRouter._switch_penalty(candidate, request)
         if request.minimum_expected_reliability is not None:
             if request.policy is RoutingPolicy.LOWEST_COST:
-                return cost, latency, local, reliability, quality, identity
+                return (
+                    switch_penalty,
+                    preferred_model,
+                    cost,
+                    latency,
+                    local,
+                    reliability,
+                    quality,
+                    identity,
+                )
             if request.policy is RoutingPolicy.SPEED_FIRST:
-                return latency, cost, local, reliability, quality, identity
+                return (
+                    switch_penalty,
+                    preferred_model,
+                    latency,
+                    cost,
+                    local,
+                    reliability,
+                    quality,
+                    identity,
+                )
             if request.policy is RoutingPolicy.PREFER_LOCAL:
-                return local, cost, latency, reliability, quality, identity
+                return (
+                    switch_penalty,
+                    preferred_model,
+                    local,
+                    cost,
+                    latency,
+                    reliability,
+                    quality,
+                    identity,
+                )
             if request.policy is RoutingPolicy.BALANCED:
                 return (
+                    switch_penalty,
+                    preferred_model,
                     local,
                     cost,
                     latency,
@@ -755,18 +868,101 @@ class ProviderRouter:
                     identity,
                 )
         if request.policy is RoutingPolicy.QUALITY_FIRST:
-            return reliability_tier, reliability, preferred, quality, local, latency, identity
+            return (
+                reliability_tier,
+                reliability,
+                switch_penalty,
+                preferred_model,
+                preferred,
+                quality,
+                local,
+                latency,
+                identity,
+            )
         if request.policy is RoutingPolicy.SPEED_FIRST:
-            return reliability_tier, reliability, latency, preferred, local, quality, identity
+            return (
+                reliability_tier,
+                reliability,
+                switch_penalty,
+                preferred_model,
+                latency,
+                preferred,
+                local,
+                quality,
+                identity,
+            )
         if request.policy is RoutingPolicy.LOWEST_COST:
-            return reliability_tier, reliability, cost, preferred, local, quality, identity
+            return (
+                reliability_tier,
+                reliability,
+                switch_penalty,
+                preferred_model,
+                cost,
+                preferred,
+                local,
+                quality,
+                identity,
+            )
         if request.policy in {
             RoutingPolicy.LOCAL_ONLY,
             RoutingPolicy.PRIVACY_STRICT,
             RoutingPolicy.PREFER_LOCAL,
         }:
-            return reliability_tier, reliability, local, preferred, quality, latency, identity
-        return reliability_tier, reliability, preferred, local, quality, latency, identity
+            return (
+                reliability_tier,
+                reliability,
+                switch_penalty,
+                preferred_model,
+                local,
+                preferred,
+                quality,
+                latency,
+                identity,
+            )
+        return (
+            reliability_tier,
+            reliability,
+            switch_penalty,
+            preferred_model,
+            preferred,
+            local,
+            quality,
+            latency,
+            identity,
+        )
+
+    @staticmethod
+    def _switch_penalty(candidate: RouteCandidate, request: RouteRequest) -> float:
+        current = request.current_identity
+        if (
+            current is None
+            or candidate.identity == current
+            or candidate.identity in request.warm_identities
+        ):
+            return 0.0
+        if request.switching_cost_budget_ms is None:
+            return 0.0
+        benchmark_load = (
+            candidate.benchmark.load_latency_ms if candidate.benchmark is not None else None
+        )
+        measurement_load = (
+            candidate.measurement.load_seconds * 1000.0
+            if candidate.measurement is not None and candidate.measurement.load_seconds is not None
+            else None
+        )
+        load_latency = benchmark_load if benchmark_load is not None else measurement_load
+        if load_latency is None:
+            load_latency = math.inf
+        quality_gain = (
+            candidate.quality - request.current_quality
+            if candidate.quality is not None and request.current_quality is not None
+            else None
+        )
+        if load_latency > request.switching_cost_budget_ms and (
+            quality_gain is None or quality_gain < request.minimum_quality_gain_to_switch
+        ):
+            return 1.0
+        return 0.0
 
     @staticmethod
     def _no_llm(
@@ -811,6 +1007,7 @@ class InferenceDispatcher:
         *,
         configurations: Mapping[str, Mapping[str, Any]] | None = None,
         providers: Mapping[str, Any] | None = None,
+        lifecycle: InferenceLifecycle | None = None,
         max_attempts: int = 2,
         max_cached_providers: int = 16,
     ) -> None:
@@ -828,6 +1025,7 @@ class InferenceDispatcher:
             str(provider_id).casefold(): provider
             for provider_id, provider in (providers or {}).items()
         }
+        self._lifecycle = lifecycle
         self._owned: dict[str, PrivacyGuardedProvider] = {}
         self._max_attempts = max_attempts
         self._max_cached_providers = max_cached_providers
@@ -847,16 +1045,24 @@ class InferenceDispatcher:
         current_intent = intent
         current_decision = decision or self.route(current_intent)
         rerouted = False
+        recovered_providers: set[str] = set()
         for attempt in range(self._max_attempts):
             candidate = current_decision.primary
             if candidate is None:
                 raise InferenceDispatchError("No eligible inference model", current_decision)
-            current_request = self._request_for(request, candidate)
-            provider = self._provider_for(candidate)
+            in_use = False
             try:
+                if self._lifecycle is not None:
+                    await self._lifecycle.prepare_for_inference(candidate, current_intent)
+                    self._lifecycle.begin_inference(candidate)
+                    in_use = True
+                current_request = self._request_for(request, candidate)
+                provider = self._provider_for(candidate)
                 result = await provider.generate(current_request)
+                if not isinstance(result, GenerationResult) or result.model != candidate.model_id:
+                    raise RuntimeError("provider/model identity mismatch")
                 return DispatchResult(
-                    GenerationResult(result.content, candidate.model_id),
+                    result,
                     current_decision,
                     rerouted,
                 )
@@ -895,6 +1101,13 @@ class InferenceDispatcher:
                     raise InferenceDispatchError(
                         "Inference outcome is unknown; no fallback was attempted", unknown
                     ) from error
+                if (
+                    failure is RouteFailureClass.PROVIDER_UNAVAILABLE
+                    and candidate.provider_id.casefold() not in recovered_providers
+                ):
+                    recovered_providers.add(candidate.provider_id.casefold())
+                    if self._lifecycle is not None:
+                        await self._lifecycle.recover_provider(candidate.provider_id)
                 if attempt + 1 >= self._max_attempts:
                     exhausted = RouteDecision(
                         RouteStatus.ATTEMPTS_EXHAUSTED,
@@ -912,6 +1125,9 @@ class InferenceDispatcher:
                     previous_failure=failure,
                     excluded_identities=(*current_intent.excluded_identities, candidate.identity),
                 )
+            finally:
+                if in_use and self._lifecycle is not None:
+                    self._lifecycle.end_inference(candidate)
             current_decision = self.route(current_intent)
             rerouted = True
         raise AssertionError("bounded inference loop escaped")
@@ -928,13 +1144,19 @@ class InferenceDispatcher:
         current_intent = intent
         current_decision = decision or self.route(current_intent)
         rerouted = False
+        recovered_providers: set[str] = set()
         for attempt in range(self._max_attempts):
             candidate = current_decision.primary
             if candidate is None:
                 raise InferenceDispatchError("No eligible inference model", current_decision)
-            provider = self._provider_for(candidate)
             yielded = False
+            in_use = False
             try:
+                if self._lifecycle is not None:
+                    await self._lifecycle.prepare_for_inference(candidate, current_intent)
+                    self._lifecycle.begin_inference(candidate)
+                    in_use = True
+                provider = self._provider_for(candidate)
                 async for chunk in provider.stream(self._request_for(request, candidate)):
                     yielded = True
                     yield DispatchChunk(chunk, current_decision, rerouted)
@@ -974,6 +1196,13 @@ class InferenceDispatcher:
                     raise InferenceDispatchError(
                         "Streaming outcome is unknown; no fallback was attempted", unknown
                     ) from error
+                if (
+                    failure is RouteFailureClass.PROVIDER_UNAVAILABLE
+                    and candidate.provider_id.casefold() not in recovered_providers
+                ):
+                    recovered_providers.add(candidate.provider_id.casefold())
+                    if self._lifecycle is not None:
+                        await self._lifecycle.recover_provider(candidate.provider_id)
                 if yielded or attempt + 1 >= self._max_attempts:
                     exhausted = RouteDecision(
                         RouteStatus.ATTEMPTS_EXHAUSTED,
@@ -991,6 +1220,9 @@ class InferenceDispatcher:
                     previous_failure=failure,
                     excluded_identities=(*current_intent.excluded_identities, candidate.identity),
                 )
+            finally:
+                if in_use and self._lifecycle is not None:
+                    self._lifecycle.end_inference(candidate)
             current_decision = self.route(current_intent)
             rerouted = True
         raise AssertionError("bounded streaming loop escaped")
@@ -1007,6 +1239,7 @@ class InferenceDispatcher:
             return cached
         raw = self._providers.get(candidate.provider_id.casefold())
         owned = False
+        configured_model: object | None = None
         if raw is None:
             if len(self._owned) >= self._max_cached_providers:
                 raise RuntimeError("bounded provider cache is exhausted")
@@ -1016,6 +1249,26 @@ class InferenceDispatcher:
                     "model": candidate.model_id,
                     "context_limit": candidate.model.context_limit,
                 }
+            )
+            raw = self._registry.create(candidate.provider_id, configuration)
+            owned = True
+        else:
+            configured_model = self._configurations.get(candidate.provider_id.casefold(), {}).get(
+                "model"
+            )
+        if (
+            raw is not None
+            and configured_model is not None
+            and candidate.model_id != configured_model
+            and not isinstance(raw, PrivacyGuardedProvider)
+        ):
+            # A provider instance configured for model A cannot execute a route
+            # claiming model B.  Recreate it through the registry-owned factory.
+            if len(self._owned) >= self._max_cached_providers:
+                raise RuntimeError("bounded provider cache is exhausted")
+            configuration = dict(self._configurations.get(candidate.provider_id.casefold(), {}))
+            configuration.update(
+                {"model": candidate.model_id, "context_limit": candidate.model.context_limit}
             )
             raw = self._registry.create(candidate.provider_id, configuration)
             owned = True
@@ -1093,10 +1346,19 @@ def _failure_aware_reliability(
 
 def _failure_class(error: BaseException) -> RouteFailureClass:
     name = type(error).__name__.casefold()
+    detail = str(error).casefold()
     if "timeout" in name:
         return RouteFailureClass.TIMEOUT
     if "privacy" in name:
         return RouteFailureClass.PRIVACY_BLOCK
+    if "structured" in name or "structured" in detail:
+        return RouteFailureClass.MALFORMED_STRUCTURED_OUTPUT
+    if "tool" in name or "tool" in detail:
+        return RouteFailureClass.INVALID_TOOL_CALL
+    if "oom" in name or "outofmemory" in name or "resource" in detail:
+        return RouteFailureClass.RESOURCE_OOM
+    if "verification" in name or "verification" in detail:
+        return RouteFailureClass.VERIFICATION_FAILURE
     if "unavailable" in name or "connect" in name:
         return RouteFailureClass.PROVIDER_UNAVAILABLE
     return RouteFailureClass.UNKNOWN_OUTCOME

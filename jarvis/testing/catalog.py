@@ -47,7 +47,12 @@ def create_deterministic_suite_catalog() -> TestSuiteCatalog:
                 category=TestCategory.INTEGRATION,
                 command=TestCommand(
                     sys.executable,
-                    ("-m", "pytest", "tests/test_v1_acceptance.py"),
+                    (
+                        "-m",
+                        "pytest",
+                        "tests/test_v1_acceptance.py",
+                        "tests/test_v1_i_r2_local_ai.py",
+                    ),
                 ),
                 # Production-composition package generation, Windows sandbox
                 # certification, staged activation, and restart evidence are

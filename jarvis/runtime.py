@@ -34,9 +34,10 @@ from jarvis.adoption import (
 )
 from jarvis.agent_runtime import AgentLoop
 from jarvis.ai.knowledge import ModelKnowledgeService, ModelKnowledgeStore
+from jarvis.ai.local_ai import LocalAIControlPlane, LocalAIUserPolicy
 from jarvis.ai.model_manager import LocalModelManager
 from jarvis.ai.providers.base import AIProvider
-from jarvis.ai.providers.ollama_runtime import OllamaRuntimeManager
+from jarvis.ai.providers.ollama_runtime import OllamaModelAdapter, OllamaRuntimeManager
 from jarvis.ai.providers.registry import ProviderRegistry
 from jarvis.ai.routing import InferenceDispatcher, ProviderRouter, RoutingFeedbackRecorder
 from jarvis.ai.sessions import AgentSessionStore
@@ -153,6 +154,7 @@ from jarvis.goal_supervisor import (
     PlanningGoalTaskRunner,
     RegistryGoalAnalyzer,
 )
+from jarvis.hardware import HardwareInventoryService, ModelPlanner, SystemHardwareProbe
 from jarvis.integration_package import IntegrationPackage
 from jarvis.interruption import InterruptionIntelligence, context_from_current_context
 from jarvis.knowledge import KnowledgeLibrary, KnowledgeLibraryMigrationError
@@ -686,6 +688,9 @@ class RuntimeContainer:
     inference_dispatcher: InferenceDispatcher
     routing_feedback: RoutingFeedbackRecorder
     model_manager: LocalModelManager
+    hardware_inventory: HardwareInventoryService
+    model_planner: ModelPlanner
+    local_ai: LocalAIControlPlane
     model_knowledge: ModelKnowledgeService
     ollama_runtime: OllamaRuntimeManager
     stt: SpeechToTextService | None
@@ -992,6 +997,7 @@ class RuntimeContainer:
                 self.trace_service,
                 self.automation_service,
                 self.component_doctor,
+                self.repair_store,
                 self.capability_health,
                 self.presence_projection,
                 self.event_bus,
@@ -1616,13 +1622,54 @@ class ApplicationRuntime:
                     f"Unsupported AI provider: {settings.ai_provider}"
                 ) from error
             resource_governor = ResourceGovernor(SystemResourceTelemetry())
+            hardware_inventory = HardwareInventoryService(SystemHardwareProbe(disk_root=paths.root))
             provider_router = ProviderRouter(
-                configured_provider_registry, resource_governor, model_knowledge
+                configured_provider_registry,
+                resource_governor,
+                model_knowledge,
+                hardware_profile=hardware_inventory.inspect(),
             )
             model_knowledge.refresh_registry(
                 configured_provider_registry,
                 observed_at=datetime.now(UTC),
                 source="configured_provider_registry",
+            )
+            ollama_runtime = OllamaRuntimeManager(
+                endpoint=settings.ai_endpoint,
+                model=settings.ai_model,
+                autostart=settings.ollama_autostart,
+                executable=settings.ollama_executable,
+                start_timeout_seconds=settings.ollama_start_timeout_seconds,
+                stop_owned_on_exit=settings.ollama_stop_owned_on_exit,
+            )
+            provider_adapter = (
+                OllamaModelAdapter(
+                    ollama_runtime,
+                    provider_id=settings.ai_provider,
+                    timeout_seconds=settings.ai_timeout_seconds,
+                )
+                if settings.ai_provider.casefold() == "ollama"
+                else None
+            )
+            model_manager = LocalModelManager(
+                paths.models,
+                knowledge=model_knowledge,
+                provider_id=settings.ai_provider,
+                provider_adapter=provider_adapter,
+            )
+            model_planner = ModelPlanner(model_manager.inventory)
+            local_ai = LocalAIControlPlane(
+                configured_provider_registry,
+                model_manager,
+                hardware_inventory,
+                model_planner,
+                resource_governor,
+                model_knowledge,
+                provider_id=settings.ai_provider,
+                policy=LocalAIUserPolicy(
+                    provider_auto_start=settings.ollama_autostart,
+                    model_pin=settings.ai_model,
+                ),
             )
             inference_dispatcher = InferenceDispatcher(
                 provider_router,
@@ -1636,21 +1683,10 @@ class ApplicationRuntime:
                     }
                 },
                 providers={settings.ai_provider: provider},
+                lifecycle=local_ai if provider_adapter is not None else None,
             )
+            local_ai.bind_dispatcher(inference_dispatcher)
             routing_feedback = RoutingFeedbackRecorder(model_knowledge)
-            model_manager = LocalModelManager(
-                paths.models,
-                knowledge=model_knowledge,
-                provider_id=settings.ai_provider,
-            )
-            ollama_runtime = OllamaRuntimeManager(
-                endpoint=settings.ai_endpoint,
-                model=settings.ai_model,
-                autostart=settings.ollama_autostart,
-                executable=settings.ollama_executable,
-                start_timeout_seconds=settings.ollama_start_timeout_seconds,
-                stop_owned_on_exit=settings.ollama_stop_owned_on_exit,
-            )
             stt = (
                 SpeechToTextService(
                     SoundDeviceRecorder(
@@ -2741,6 +2777,7 @@ class ApplicationRuntime:
                 return TestDriveStepResult(TestDriveStatus.PASS, "authoritative stores responded")
 
             async def warmup_provider() -> None:
+                await local_ai.setup()
                 health = await provider.health_check()
                 model_knowledge.observe_provider_health(
                     configured_provider_registry.definition(settings.ai_provider).metadata,
@@ -2771,6 +2808,9 @@ class ApplicationRuntime:
                 inference_dispatcher=inference_dispatcher,
                 routing_feedback=routing_feedback,
                 model_manager=model_manager,
+                hardware_inventory=hardware_inventory,
+                model_planner=model_planner,
+                local_ai=local_ai,
                 model_knowledge=model_knowledge,
                 ollama_runtime=ollama_runtime,
                 stt=stt,

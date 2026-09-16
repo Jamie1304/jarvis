@@ -740,6 +740,8 @@ async def run_actual_local_provider_campaign(
     *,
     model_id: str = "llama3.2:3b",
     endpoint: str = "http://127.0.0.1:11434",
+    context_limit: int = REAL_CONTEXT_LIMIT,
+    timeout_seconds: float = 90.0,
 ) -> dict[str, object]:
     """Run one real local-only procedural repair campaign in a fresh snapshot."""
 
@@ -751,7 +753,7 @@ async def run_actual_local_provider_campaign(
     _copy_real_snapshot(installation)
     _inject_real_defect(installation)
     before = _run_real_focus_test(installation)
-    registry = create_provider_registry(model_id=model_id, context_limit=REAL_CONTEXT_LIMIT)
+    registry = create_provider_registry(model_id=model_id, context_limit=context_limit)
     definition = registry.definition("ollama")
     model_metadata = definition.models[0]
     base: dict[str, object] = {
@@ -807,8 +809,8 @@ async def run_actual_local_provider_campaign(
     provider = OllamaProvider(
         model=model_id,
         endpoint=endpoint,
-        timeout_seconds=90.0,
-        context_limit=REAL_CONTEXT_LIMIT,
+        timeout_seconds=timeout_seconds,
+        context_limit=context_limit,
     )
     try:
         health = await provider.health_check()
@@ -880,7 +882,7 @@ async def run_actual_local_provider_campaign(
                 proposal, proposal_hash = await _real_model_step(
                     dispatcher,
                     model_id,
-                    REAL_CONTEXT_LIMIT,
+                    context_limit,
                     proposal_prompt,
                     "repair_proposal",
                 )
@@ -1039,6 +1041,8 @@ async def run_actual_local_provider_campaigns(
     *,
     model_id: str = "llama3.2:3b",
     endpoint: str = "http://127.0.0.1:11434",
+    context_limit: int = REAL_CONTEXT_LIMIT,
+    timeout_seconds: float = 90.0,
 ) -> dict[str, object]:
     """Run three fresh real local-only repair campaigns with a bounded budget."""
 
@@ -1048,6 +1052,8 @@ async def run_actual_local_provider_campaigns(
             root / f"campaign-{index + 1}",
             model_id=model_id,
             endpoint=endpoint,
+            context_limit=context_limit,
+            timeout_seconds=timeout_seconds,
         )
         campaigns.append(campaign)
         if campaign.get("terminal_state") != "VERIFIED_REPAIRED":
