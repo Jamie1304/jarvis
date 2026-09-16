@@ -29,6 +29,14 @@ from jarvis.vm.models import (
     Template,
     VirtualizationAvailability,
 )
+from jarvis.vm.operations import (
+    GuestOperationRequest,
+    GuestOperationResult,
+    materialize_guest_command,
+    operation_input_digest,
+    operation_spec,
+    verify_operation,
+)
 from jarvis.vm.provider import VirtualizationProvider
 from jarvis.vm.router import ExecutionIntent, ExecutionRouter
 
@@ -111,6 +119,87 @@ class VMExecutionEvidence:
 
 
 @dataclass(frozen=True, slots=True)
+class GuestOperationEvidence:
+    """Trusted semantic evidence for one typed guest operation."""
+
+    task_id: UUID
+    operation_id: str
+    intent: ExecutionIntent
+    route: RouteDecision
+    provider: str
+    instance_id: UUID | None
+    instance_purpose: EnvironmentKind | None
+    guest_request_id: UUID
+    input_digest: str
+    semantic_result_type: str
+    semantic_result_digest: str
+    semantic_status: str
+    exit_code: int | None
+    trusted_verification_passed: bool
+    host_bridge_operations: tuple[str, ...]
+    cleanup_state: str
+    error_code: str | None = None
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "task_id": str(self.task_id),
+            "operation_id": self.operation_id,
+            "trusted_execution_intent": {
+                "task_class": self.intent.task_class,
+                "host_resource_dependency": self.intent.host_resource_dependency,
+                "physical_device_dependency": self.intent.physical_device_dependency,
+                "host_application_required": self.intent.host_application_required,
+                "exact_host_mutation": self.intent.exact_host_mutation,
+                "isolation_required": self.intent.isolation_required,
+                "persistence_required": self.intent.persistence_required,
+                "network_required": self.intent.network_required,
+                "ui_required": self.intent.ui_required,
+                "explicit_host_request": self.intent.explicit_host_request,
+                "risk": self.intent.risk,
+            },
+            "route": {
+                "environment": self.route.environment.value,
+                "reason": self.route.reason,
+                "host_bridges": self.route.host_bridges,
+                "isolation_level": self.route.isolation_level,
+                "fallbacks": tuple(item.value for item in self.route.fallbacks),
+                "approval_required": self.route.approval_required,
+            },
+            "provider": self.provider,
+            "instance_id": str(self.instance_id) if self.instance_id is not None else None,
+            "instance_purpose": (
+                self.instance_purpose.value if self.instance_purpose is not None else None
+            ),
+            "guest_request_id": str(self.guest_request_id),
+            "input_digest": self.input_digest,
+            "semantic_result_type": self.semantic_result_type,
+            "semantic_result_digest": self.semantic_result_digest,
+            "semantic_status": self.semantic_status,
+            "exit_code": self.exit_code,
+            "trusted_verification_passed": self.trusted_verification_passed,
+            "host_bridge_operations": self.host_bridge_operations,
+            "cleanup_state": self.cleanup_state,
+            "error_code": self.error_code,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class GuestOperationExecution:
+    """Result and evidence returned only after trusted semantic verification."""
+
+    evidence: GuestOperationEvidence
+    result: GuestOperationResult
+
+
+class VMOperationSemanticError(VMExecutionError):
+    """The guest returned a result that failed the trusted semantic contract."""
+
+    def __init__(self, execution: GuestOperationExecution) -> None:
+        super().__init__("trusted guest-operation semantic verification failed")
+        self.execution = execution
+
+
+@dataclass(frozen=True, slots=True)
 class HostWriteEvidence:
     """Trusted post-effect observation for the scoped host-file transaction."""
 
@@ -177,6 +266,7 @@ class VMExecutionService:
         self.host_bridge = host_bridge or HostBridge()
         self.host_instance_id = uuid4()
         self._execution_evidence: list[VMExecutionEvidence] = []
+        self._operation_evidence: list[GuestOperationEvidence] = []
         self._host_write_evidence: list[HostWriteEvidence] = []
 
     @property
@@ -186,6 +276,10 @@ class VMExecutionService:
     @property
     def execution_evidence(self) -> tuple[VMExecutionEvidence, ...]:
         return tuple(self._execution_evidence)
+
+    @property
+    def operation_evidence(self) -> tuple[GuestOperationEvidence, ...]:
+        return tuple(self._operation_evidence)
 
     @property
     def host_write_evidence(self) -> tuple[HostWriteEvidence, ...]:
@@ -211,7 +305,17 @@ class VMExecutionService:
         intent: ExecutionIntent,
         command: GuestCommand,
     ) -> VMExecutionEvidence:
-        """Route and execute one bounded typed command with no host fallback."""
+        return await self._execute_guest_command(task_id, intent, command, validate=True)
+
+    async def _execute_guest_command(
+        self,
+        task_id: UUID,
+        intent: ExecutionIntent,
+        command: GuestCommand,
+        *,
+        validate: bool,
+    ) -> VMExecutionEvidence:
+        """Route one lower-level command; operation callers provide trusted materialization."""
 
         route = self.route(intent)
         if route.environment not in {
@@ -220,7 +324,8 @@ class VMExecutionService:
             EnvironmentKind.DISPOSABLE_REPAIR_VM,
         }:
             raise ValueError("guest execution requires a VM route")
-        self._validate_guest_command(command)
+        if validate:
+            self._validate_guest_command(command)
         availability = self.probe()
         if availability is not VirtualizationAvailability.AVAILABLE:
             evidence = self._unavailable_evidence(
@@ -269,6 +374,97 @@ class VMExecutionService:
                 raise VMExecutionError("disposable VM cleanup failed") from None
         self._execution_evidence.append(evidence)
         return evidence
+
+    async def execute_operation(
+        self,
+        task_id: UUID,
+        request: GuestOperationRequest,
+    ) -> GuestOperationExecution:
+        """Materialize and verify one registered typed operation inside its VM route."""
+
+        spec = operation_spec(request)
+        route = self.route(spec.intent)
+        command = materialize_guest_command(request)
+        input_digest = operation_input_digest(request)
+        if route.environment is not spec.expected_environment:
+            evidence = self._operation_failure_evidence(
+                task_id,
+                spec.operation_id,
+                spec.intent,
+                route,
+                command.request_id,
+                input_digest,
+                spec.semantic_result_type,
+                "route_policy_mismatch",
+            )
+            self._operation_evidence.append(evidence)
+            raise VMExecutionError("trusted guest-operation route policy mismatch")
+        self._validate_operation_command(spec.operation_id, command, request)
+        try:
+            guest = await self._execute_guest_command(
+                task_id,
+                spec.intent,
+                command,
+                validate=False,
+            )
+        except VMExecutionUnavailable as error:
+            evidence = self._operation_evidence_from_guest(
+                task_id,
+                spec.operation_id,
+                spec.semantic_result_type,
+                input_digest,
+                error.evidence,
+                semantic_status="unavailable",
+                trusted_verification_passed=False,
+                cleanup_state="not_created",
+                error_code=error.evidence.error_code,
+            )
+            self._operation_evidence.append(evidence)
+            raise
+        except VMExecutionError:
+            guest = self._execution_evidence[-1]
+            evidence = self._operation_evidence_from_guest(
+                task_id,
+                spec.operation_id,
+                spec.semantic_result_type,
+                input_digest,
+                guest,
+                semantic_status="execution_failed",
+                trusted_verification_passed=False,
+                cleanup_state=(
+                    "disposable_cleanup_failed"
+                    if guest.error_code == "disposable_cleanup_failed"
+                    else "disposable_cleanup_attempted"
+                    if route.environment is EnvironmentKind.DISPOSABLE_TEST_VM
+                    else "persistent_workbench_retained"
+                ),
+                error_code=guest.error_code or "vm_execution_failed",
+            )
+            self._operation_evidence.append(evidence)
+            raise
+
+        verification = verify_operation(request, guest.stdout, guest.exit_code)
+        cleanup_state = (
+            "persistent_workbench_retained"
+            if route.environment is EnvironmentKind.WORKBENCH_VM
+            else "disposable_destroyed"
+        )
+        evidence = self._operation_evidence_from_guest(
+            task_id,
+            spec.operation_id,
+            spec.semantic_result_type,
+            input_digest,
+            guest,
+            semantic_status=verification.semantic_status,
+            semantic_result_digest=verification.result_digest,
+            trusted_verification_passed=verification.verification_passed,
+            cleanup_state=cleanup_state,
+        )
+        self._operation_evidence.append(evidence)
+        execution = GuestOperationExecution(evidence, verification)
+        if not verification.verification_passed:
+            raise VMOperationSemanticError(execution)
+        return execution
 
     async def execute_host_write(
         self,
@@ -459,6 +655,88 @@ class VMExecutionService:
             purpose,
             NetworkPolicy.INTERNET_ONLY if is_workbench else NetworkPolicy.NO_NETWORK,
             trusted=True,
+        )
+
+    def _validate_operation_command(
+        self,
+        operation_id: str,
+        command: GuestCommand,
+        request: GuestOperationRequest,
+    ) -> None:
+        spec = operation_spec(request)
+        expected = materialize_guest_command(request)
+        if (
+            operation_id != spec.operation_id
+            or command.executable != "python3"
+            or command.args != expected.args
+            or command.network_policy is not spec.network_policy
+            or command.timeout_seconds != spec.timeout_seconds
+        ):
+            raise VMExecutionError("trusted guest-operation command materialization mismatch")
+
+    def _operation_failure_evidence(
+        self,
+        task_id: UUID,
+        operation_id: str,
+        intent: ExecutionIntent,
+        route: RouteDecision,
+        guest_request_id: UUID,
+        input_digest: str,
+        semantic_result_type: str,
+        error_code: str,
+    ) -> GuestOperationEvidence:
+        return GuestOperationEvidence(
+            task_id,
+            operation_id,
+            intent,
+            route,
+            self.provider.name,
+            None,
+            None,
+            guest_request_id,
+            input_digest,
+            semantic_result_type,
+            "",
+            "execution_failed",
+            None,
+            False,
+            (),
+            "not_created",
+            error_code,
+        )
+
+    def _operation_evidence_from_guest(
+        self,
+        task_id: UUID,
+        operation_id: str,
+        semantic_result_type: str,
+        input_digest: str,
+        guest: VMExecutionEvidence,
+        *,
+        semantic_status: str,
+        trusted_verification_passed: bool,
+        cleanup_state: str,
+        semantic_result_digest: str = "",
+        error_code: str | None = None,
+    ) -> GuestOperationEvidence:
+        return GuestOperationEvidence(
+            task_id,
+            operation_id,
+            guest.intent,
+            guest.route,
+            guest.provider,
+            guest.instance_id,
+            guest.instance_purpose,
+            guest.guest_request_id,
+            input_digest,
+            semantic_result_type,
+            semantic_result_digest,
+            semantic_status,
+            guest.exit_code,
+            trusted_verification_passed,
+            guest.host_bridge_operations,
+            cleanup_state,
+            error_code,
         )
 
     def _result_evidence(

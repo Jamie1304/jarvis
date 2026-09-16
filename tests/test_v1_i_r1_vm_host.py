@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import hashlib
+import json
 import logging
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
@@ -51,6 +54,12 @@ from jarvis.vm import (
     VMExecutionUnavailable,
     WSL2VirtualizationProvider,
 )
+from jarvis.vm.operations import (
+    VMBuildCheckInput,
+    VMResearchInput,
+    expected_build_payload,
+    expected_research_payload,
+)
 from jarvis.vm.router import ExecutionIntent
 from jarvis.vm.tools import (
     GuestCommandInput,
@@ -77,6 +86,97 @@ def _guest_proposal(tool_id: str, marker: str, evidence: str) -> PlanProposal:
             )
         ],
     )
+
+
+def _research_proposal(text: str) -> PlanProposal:
+    return PlanProposal(
+        goal="Analyze bounded research text in the Workbench",
+        required_capabilities=["vm.research"],
+        completion_criteria=["vm_semantic_verification=PASS"],
+        steps=[
+            ProposedStep(
+                key="research",
+                tool_id="vm.research",
+                capability="vm.research",
+                input={"text": text, "requested_analysis": "text_statistics"},
+                expected_output="verified text statistics",
+                verification_rule="evidence_contains_all",
+                expected_evidence=["vm_semantic_verification=PASS"],
+            )
+        ],
+    )
+
+
+def _build_proposal(source: str) -> PlanProposal:
+    return PlanProposal(
+        goal="Check bounded Python source in a disposable VM",
+        required_capabilities=["vm.coding"],
+        completion_criteria=["vm_semantic_verification=PASS"],
+        steps=[
+            ProposedStep(
+                key="build",
+                tool_id="vm.coding",
+                capability="vm.coding",
+                input={
+                    "source": source,
+                    "language": "python",
+                    "profile": "python_syntax",
+                },
+                expected_output="verified Python syntax result",
+                verification_rule="evidence_contains_all",
+                expected_evidence=["vm_semantic_verification=PASS"],
+            )
+        ],
+    )
+
+
+class _SemanticInMemoryProvider(InMemoryVirtualizationProvider):
+    """Deterministic provider double for the typed operation path."""
+
+    async def execute(self, instance_id: UUID, command: GuestCommand) -> GuestResult:
+        result = await super().execute(instance_id, command)
+        if command.executable != "python3" or len(command.args) != 3:
+            return result
+        data = base64.b64decode(command.args[2], validate=True).decode("utf-8")
+        if "normalized=' '.join" in command.args[1]:
+            payload = expected_research_payload(VMResearchInput(text=data))
+            exit_code = 0
+        else:
+            payload = expected_build_payload(VMBuildCheckInput(source=data))
+            exit_code = 0 if payload["valid"] is True else 1
+        stdout = json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n"
+        return replace(
+            result,
+            exit_code=exit_code,
+            stdout=stdout,
+            stderr="",
+            evidence_digest=hashlib.sha256(stdout.encode("utf-8")).hexdigest(),
+        )
+
+
+class _WrongSemanticInMemoryProvider(_SemanticInMemoryProvider):
+    async def execute(self, instance_id: UUID, command: GuestCommand) -> GuestResult:
+        result = await super().execute(instance_id, command)
+        if command.executable != "python3" or "normalized=' '.join" not in command.args[1]:
+            return result
+        payload = json.loads(result.stdout)
+        payload["word_count"] += 1
+        stdout = json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n"
+        return replace(
+            result,
+            stdout=stdout,
+            evidence_digest=hashlib.sha256(stdout.encode("utf-8")).hexdigest(),
+        )
+
+
+class _CleanupFailureSemanticProvider(_SemanticInMemoryProvider):
+    async def destroy(self, instance_id: UUID) -> Instance:
+        raise RuntimeError(f"cleanup failure for {instance_id}")
+
+
+_ALLOWED_WSL_PROVIDER_GUI_PROCESSES = frozenset(
+    {"audiodg.exe", "msrdc.exe", "vmmem", "vmwp.exe", "wslhost.exe", "wslrelay.exe"}
+)
 
 
 def _host_proposal(relative_path: str, content: str) -> PlanProposal:
@@ -330,24 +430,24 @@ async def test_v1_i_r1_service_and_tools_preserve_no_effect_failures(tmp_path: P
 async def test_v1_i_r1_d_vm_first_product_task_routes_all_representative_classes(
     tmp_path: Path,
 ) -> None:
-    provider = InMemoryVirtualizationProvider()
+    provider = _SemanticInMemoryProvider()
     runtime = _runtime(tmp_path, provider)
     container = runtime.container
     assert container is not None
     service = container.vm_execution_service
     try:
-        cases = (
-            ("vm.research", "research-marker", "vm_route=workbench_vm"),
-            ("vm.coding", "coding-marker", "vm_route=disposable_test_vm"),
-            ("vm.test", "test-marker", "vm_route=disposable_test_vm"),
-            ("vm.repair", "repair-marker", "vm_route=disposable_repair_vm"),
+        proposals = (
+            _research_proposal("JARVIS analyzes bounded text in its Workbench."),
+            _build_proposal("value = 1\n"),
+            _guest_proposal("vm.test", "test-marker", "vm_route=disposable_test_vm"),
+            _guest_proposal("vm.repair", "repair-marker", "vm_route=disposable_repair_vm"),
         )
         tasks = [
             await container.task_controller.submit_proposal(
-                _guest_proposal(tool_id, marker, evidence),
+                proposal,
                 provenance=("v1-i-r1-normal-product-path",),
             )
-            for tool_id, marker, evidence in cases
+            for proposal in proposals
         ]
         assert all(task.status is PlanningTaskStatus.COMPLETED for task in tasks)
         evidence = service.execution_evidence
@@ -360,6 +460,15 @@ async def test_v1_i_r1_d_vm_first_product_task_routes_all_representative_classes
         assert all(item.guest_ready and item.exit_code == 0 for item in evidence)
         assert all(item.host_bridge_operations == () for item in evidence)
         assert all(item.provider == "in-memory" for item in evidence)
+        operation_evidence = service.operation_evidence
+        assert tuple(item.operation_id for item in operation_evidence) == (
+            "vm.research.text_statistics",
+            "vm.coding.python_syntax",
+        )
+        assert all(item.trusted_verification_passed for item in operation_evidence)
+        assert all(item.semantic_result_digest for item in operation_evidence)
+        assert operation_evidence[0].cleanup_state == "persistent_workbench_retained"
+        assert operation_evidence[1].cleanup_state == "disposable_destroyed"
         instances = await provider.instances()
         assert sum(item.purpose is EnvironmentKind.WORKBENCH_VM for item in instances) == 1
         assert all(
@@ -368,6 +477,171 @@ async def test_v1_i_r1_d_vm_first_product_task_routes_all_representative_classes
             if item.purpose
             in {EnvironmentKind.DISPOSABLE_TEST_VM, EnvironmentKind.DISPOSABLE_REPAIR_VM}
         )
+    finally:
+        await runtime.aclose()
+
+
+@pytest.mark.asyncio
+async def test_v1_i_r1_r1_baseline_marker_has_no_semantic_proof(tmp_path: Path) -> None:
+    service = VMExecutionService(
+        InMemoryVirtualizationProvider(),
+        PermissionBroker(PolicyEngine()),
+        state_root=tmp_path / "vm",
+        host_root=tmp_path / "host",
+    )
+    tool = GuestCommandTool(
+        service,
+        tool_id="vm.baseline.marker",
+        intent=ExecutionIntent("research"),
+        description="baseline marker-only command",
+    )
+    task_id = uuid4()
+    context = ToolExecutionContext(
+        task_id=task_id,
+        correlation_id=task_id,
+        caller=ToolCaller.AGENT,
+        cancellation=asyncio.Event(),
+        logger=logging.getLogger("v1-i-r1-r1.baseline"),
+    )
+    result = await tool._execute_authorized(  # noqa: SLF001
+        context,
+        GuestCommandInput(executable="printf", args=["marker-only"]),
+    )
+    assert result.status is ToolResultStatus.SUCCESS
+    assert any(item.value == "vm_route=workbench_vm" for item in result.evidence)
+    assert not any(item.kind == "vm_semantic_verification" for item in result.evidence)
+
+
+@pytest.mark.asyncio
+async def test_v1_i_r1_r1_research_wrong_result_fails_despite_exit_zero(tmp_path: Path) -> None:
+    provider = _WrongSemanticInMemoryProvider()
+    runtime = _runtime(tmp_path, provider)
+    container = runtime.container
+    assert container is not None
+    try:
+        task = await container.task_controller.submit_proposal(
+            _research_proposal("semantic verification rejects wrong output"),
+            provenance=("v1-i-r1-r1-wrong-result",),
+        )
+        assert task.status is PlanningTaskStatus.FAILED
+        evidence = container.vm_execution_service.operation_evidence[-1]
+        assert evidence.route.environment is EnvironmentKind.WORKBENCH_VM
+        assert evidence.exit_code == 0
+        assert evidence.semantic_status == "verification_failed"
+        assert not evidence.trusted_verification_passed
+        assert evidence.cleanup_state == "persistent_workbench_retained"
+    finally:
+        await runtime.aclose()
+
+
+@pytest.mark.asyncio
+async def test_v1_i_r1_r1_build_valid_and_invalid_results_are_verified(tmp_path: Path) -> None:
+    provider = _SemanticInMemoryProvider()
+    runtime = _runtime(tmp_path, provider)
+    container = runtime.container
+    assert container is not None
+    try:
+        valid = await container.task_controller.submit_proposal(
+            _build_proposal("value = 1\n"),
+            provenance=("v1-i-r1-r1-build-valid",),
+        )
+        invalid = await container.task_controller.submit_proposal(
+            _build_proposal("if:\n    pass\n"),
+            provenance=("v1-i-r1-r1-build-invalid",),
+        )
+        assert valid.status is PlanningTaskStatus.COMPLETED
+        assert invalid.status is PlanningTaskStatus.COMPLETED
+        evidence = container.vm_execution_service.operation_evidence[-2:]
+        assert tuple(item.semantic_status for item in evidence) == (
+            "verified_valid",
+            "verified_invalid",
+        )
+        assert tuple(item.exit_code for item in evidence) == (0, 1)
+        assert all(item.trusted_verification_passed for item in evidence)
+        assert all(
+            item.route.environment is EnvironmentKind.DISPOSABLE_TEST_VM for item in evidence
+        )
+        assert all(item.cleanup_state == "disposable_destroyed" for item in evidence)
+        invalid_plan = container.planning_store.load_plan(invalid.task_id)
+        assert invalid_plan is not None
+        assert invalid_plan.steps[0].result is not None
+        invalid_output = json.loads(invalid_plan.steps[0].result.output_json)
+        assert invalid_output["valid"] is False
+        assert invalid_output["semantic_status"] == "verified_invalid"
+        operation_commands = [
+            command for _, command in provider.commands if command.executable == "python3"
+        ]
+        assert len(operation_commands) == 2
+        assert all(command.args[0] == "-c" for command in operation_commands)
+        assert all("value = 1\n" not in command.args[1] for command in operation_commands)
+        assert all("if:\n    pass\n" not in command.args[1] for command in operation_commands)
+        assert [
+            base64.b64decode(command.args[2], validate=True).decode("utf-8")
+            for command in operation_commands
+        ] == ["value = 1\n", "if:\n    pass\n"]
+        instances = await provider.instances()
+        assert all(
+            item.state is InstanceState.DESTROYED
+            for item in instances
+            if item.purpose is EnvironmentKind.DISPOSABLE_TEST_VM
+        )
+    finally:
+        await runtime.aclose()
+
+
+@pytest.mark.asyncio
+async def test_v1_i_r1_r1_planner_cannot_select_executable_or_shell(tmp_path: Path) -> None:
+    runtime = _runtime(tmp_path, _SemanticInMemoryProvider())
+    container = runtime.container
+    assert container is not None
+    try:
+        raw_inputs: tuple[dict[str, object], ...] = (
+            {"executable": "printf", "args": ["marker"]},
+            {"executable": "sh", "args": ["-c", "echo forbidden"]},
+        )
+        for raw_input in raw_inputs:
+            proposal = PlanProposal(
+                goal="Attempt an untrusted representative VM command",
+                required_capabilities=["vm.research"],
+                completion_criteria=["vm_semantic_verification=PASS"],
+                steps=[
+                    ProposedStep(
+                        key="research",
+                        tool_id="vm.research",
+                        capability="vm.research",
+                        input=raw_input,
+                        expected_output="never",
+                        verification_rule="evidence_contains_all",
+                        expected_evidence=["vm_semantic_verification=PASS"],
+                    )
+                ],
+            )
+            rejected = await container.planning_engine.create_proposal_task(proposal)
+            assert rejected.status is PlanningTaskStatus.FAILED
+            assert rejected.error is not None
+            assert rejected.error.code == "plan_validation_failed"
+        assert container.vm_execution_service.execution_evidence == ()
+        assert container.vm_execution_service.operation_evidence == ()
+    finally:
+        await runtime.aclose()
+
+
+@pytest.mark.asyncio
+async def test_v1_i_r1_r1_disposable_cleanup_failure_is_not_pass(tmp_path: Path) -> None:
+    runtime = _runtime(tmp_path, _CleanupFailureSemanticProvider())
+    container = runtime.container
+    assert container is not None
+    try:
+        task = await container.task_controller.submit_proposal(
+            _build_proposal("value = 1\n"),
+            provenance=("v1-i-r1-r1-cleanup-failure",),
+        )
+        assert task.status is PlanningTaskStatus.FAILED
+        evidence = container.vm_execution_service.operation_evidence[-1]
+        assert evidence.semantic_status == "execution_failed"
+        assert not evidence.trusted_verification_passed
+        assert evidence.cleanup_state == "disposable_cleanup_failed"
+        assert evidence.error_code == "disposable_cleanup_failed"
     finally:
         await runtime.aclose()
 
@@ -544,14 +818,14 @@ async def test_v1_i_r1_host_bridge_binding_rejects_negative_variants(tmp_path: P
 
 @pytest.mark.asyncio
 async def test_v1_i_r1_restart_reuses_persistent_workbench_without_replay(tmp_path: Path) -> None:
-    provider = InMemoryVirtualizationProvider()
+    provider = _SemanticInMemoryProvider()
     recovery_backend = TestOnlyInMemorySecretBackend()
     first = _runtime(tmp_path, provider, recovery_backend)
     first_container = first.container
     assert first_container is not None
     try:
         completed = await first_container.task_controller.submit_proposal(
-            _guest_proposal("vm.research", "restart-marker", "vm_route=workbench_vm"),
+            _research_proposal("restart persistence is bounded and deterministic"),
             provenance=("v1-i-r1-restart",),
         )
         assert completed.status is PlanningTaskStatus.COMPLETED
@@ -566,7 +840,7 @@ async def test_v1_i_r1_restart_reuses_persistent_workbench_without_replay(tmp_pa
     assert second_container is not None
     try:
         completed = await second_container.task_controller.submit_proposal(
-            _guest_proposal("vm.research", "restart-marker-2", "vm_route=workbench_vm"),
+            _research_proposal("restart reuse avoids replay"),
             provenance=("v1-i-r1-restart",),
         )
         assert completed.status is PlanningTaskStatus.COMPLETED
@@ -587,7 +861,7 @@ async def test_v1_i_r1_vm_unavailable_fails_closed_without_host_fallback(tmp_pat
     service = container.vm_execution_service
     try:
         task = await container.task_controller.submit_proposal(
-            _guest_proposal("vm.research", "unavailable-marker", "vm_route=workbench_vm"),
+            _research_proposal("unavailable workbench must fail closed"),
             provenance=("v1-i-r1-unavailable",),
         )
         assert task.status is PlanningTaskStatus.FAILED
@@ -612,7 +886,7 @@ async def test_v1_i_r1_real_wsl_workbench_product_task(tmp_path: Path) -> None:
     monitor.snapshot()
     try:
         task = await container.task_controller.submit_proposal(
-            _guest_proposal("vm.research", "v1-i-r1-real-wsl", "vm_route=workbench_vm"),
+            _research_proposal("The Workbench computes bounded text statistics."),
             provenance=("v1-i-r1-real-wsl",),
         )
         assert task.status is PlanningTaskStatus.COMPLETED
@@ -624,13 +898,71 @@ async def test_v1_i_r1_real_wsl_workbench_product_task(tmp_path: Path) -> None:
         assert evidence.exit_code == 0
         assert evidence.evidence_digest
         assert evidence.host_bridge_operations == ()
+        operation = service.operation_evidence[-1]
+        assert operation.operation_id == "vm.research.text_statistics"
+        assert operation.provider == "wsl2"
+        assert operation.instance_purpose is EnvironmentKind.WORKBENCH_VM
+        assert operation.semantic_status == "verified_success"
+        assert operation.trusted_verification_passed
+        assert operation.input_digest
+        assert operation.semantic_result_digest
+        assert operation.cleanup_state == "persistent_workbench_retained"
         instances = await provider.instances()
         assert any(item.instance_id == evidence.instance_id for item in instances)
         observed = monitor.compare(monitor.snapshot())
         assert observed["host_filesystem_mutation"] == "NONE"
         assert observed["mouse_movement"] == "NONE"
         assert observed["focus_change"] == "NONE"
-        assert set(observed["new_gui_processes"]).issubset({"msrdc.exe", "wslhost.exe"})
+        assert set(observed["new_gui_processes"]).issubset(_ALLOWED_WSL_PROVIDER_GUI_PROCESSES)
+        assert observed["keyboard_injection"] == "NOT_OBSERVED"
+        assert observed["clipboard_mutation"] != "OBSERVED_CHANGE"
+    finally:
+        await runtime.aclose()
+
+
+@pytest.mark.real_qualification
+@pytest.mark.asyncio
+async def test_v1_i_r1_r1_real_wsl_disposable_build_check_product_task(tmp_path: Path) -> None:
+    provider = WSL2VirtualizationProvider(state_path=tmp_path / "data" / "vm" / "wsl2.json")
+    runtime = _runtime(tmp_path, provider)
+    container = runtime.container
+    assert container is not None
+    service = container.vm_execution_service
+    monitor = HostSideEffectMonitor(tmp_path / "host-observation")
+    monitor.snapshot()
+    try:
+        valid = await container.task_controller.submit_proposal(
+            _build_proposal("def greet():\n    return 'hello'\n"),
+            provenance=("v1-i-r1-r1-real-build-valid",),
+        )
+        invalid = await container.task_controller.submit_proposal(
+            _build_proposal("def broken(:\n    return 1\n"),
+            provenance=("v1-i-r1-r1-real-build-invalid",),
+        )
+        assert valid.status is PlanningTaskStatus.COMPLETED
+        assert invalid.status is PlanningTaskStatus.COMPLETED
+        evidence = service.operation_evidence[-2:]
+        assert all(item.provider == "wsl2" for item in evidence)
+        assert all(item.instance_purpose is EnvironmentKind.DISPOSABLE_TEST_VM for item in evidence)
+        assert tuple(item.semantic_status for item in evidence) == (
+            "verified_valid",
+            "verified_invalid",
+        )
+        assert tuple(item.exit_code for item in evidence) == (0, 1)
+        assert all(item.trusted_verification_passed for item in evidence)
+        assert all(item.host_bridge_operations == () for item in evidence)
+        assert all(item.cleanup_state == "disposable_destroyed" for item in evidence)
+        instances = await provider.instances()
+        by_id = {item.instance_id: item for item in instances}
+        for item in evidence:
+            assert item.instance_id is not None
+            assert by_id[item.instance_id].state is InstanceState.DESTROYED
+        assert any(item.purpose is EnvironmentKind.WORKBENCH_VM for item in instances)
+        observed = monitor.compare(monitor.snapshot())
+        assert observed["host_filesystem_mutation"] == "NONE"
+        assert observed["mouse_movement"] == "NONE"
+        assert observed["focus_change"] == "NONE"
+        assert set(observed["new_gui_processes"]).issubset(_ALLOWED_WSL_PROVIDER_GUI_PROCESSES)
         assert observed["keyboard_injection"] == "NOT_OBSERVED"
         assert observed["clipboard_mutation"] != "OBSERVED_CHANGE"
     finally:
