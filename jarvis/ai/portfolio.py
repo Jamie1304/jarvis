@@ -36,6 +36,11 @@ from jarvis.ai.model_manager import (
     ModelRemovalVerificationError,
 )
 from jarvis.ai.providers.registry import ModelMetadata, ProviderRegistry
+from jarvis.ai.usability import (
+    ModelUsabilityEvidence,
+    ModelUsabilityStatus,
+    UsabilityValidationError,
+)
 from jarvis.permissions.broker import PermissionBroker
 from jarvis.permissions.models import (
     ActionDescriptor,
@@ -48,9 +53,8 @@ from jarvis.permissions.models import (
 )
 from jarvis.resources import ResourceGovernor
 
-
-class PortfolioError(RuntimeError):
-    """A portfolio comparison or retirement transition is unsafe."""
+PortfolioError = UsabilityValidationError
+"""A portfolio comparison or retirement transition is unsafe."""
 
 
 class InsufficientPortfolioEvidence(PortfolioError):
@@ -180,75 +184,6 @@ class ModelPortfolioEvidence:
 
     def summary_for(self, task_class: str) -> CookbookSummary | None:
         return next((item for item in self.task_summaries if item.task_class == task_class), None)
-
-
-class ModelUsabilityStatus(StrEnum):
-    """Provider-neutral usability conclusion for one request context."""
-
-    USABLE = "usable"
-    NOT_USABLE = "not_usable"
-    UNKNOWN = "unknown"
-
-
-@dataclass(frozen=True, slots=True)
-class ModelUsabilityEvidence:
-    """Evidence that distinguishes availability from request-specific usability."""
-
-    configured: bool | None = None
-    connected: bool | None = None
-    reachable: bool | None = None
-    authenticated: bool | None = None
-    entitled: bool | None = None
-    quota_usable: bool | None = None
-    capacity_usable: bool | None = None
-    model_usable: bool | None = None
-    policy_eligible: bool | None = None
-    resource_eligible: bool | None = None
-    request_usable: bool | None = None
-    detail: str = "provider-neutral usability evidence"
-
-    def __post_init__(self) -> None:
-        for value, name in (
-            (self.configured, "configured"),
-            (self.connected, "connected"),
-            (self.reachable, "reachable"),
-            (self.authenticated, "authenticated"),
-            (self.entitled, "entitled"),
-            (self.quota_usable, "quota usability"),
-            (self.capacity_usable, "capacity usability"),
-            (self.model_usable, "model usability"),
-            (self.policy_eligible, "policy eligibility"),
-            (self.resource_eligible, "resource eligibility"),
-            (self.request_usable, "request usability"),
-        ):
-            if value is not None and type(value) is not bool:
-                raise PortfolioError(f"Model usability {name} is malformed")
-        _text(self.detail, "Model usability detail", 2_000)
-
-    @property
-    def status(self) -> ModelUsabilityStatus:
-        values = (
-            self.configured,
-            self.connected,
-            self.reachable,
-            self.authenticated,
-            self.entitled,
-            self.quota_usable,
-            self.capacity_usable,
-            self.model_usable,
-            self.policy_eligible,
-            self.resource_eligible,
-            self.request_usable,
-        )
-        if any(value is False for value in values):
-            return ModelUsabilityStatus.NOT_USABLE
-        if all(value is True for value in values):
-            return ModelUsabilityStatus.USABLE
-        return ModelUsabilityStatus.UNKNOWN
-
-    @property
-    def proven_usable(self) -> bool:
-        return self.status is ModelUsabilityStatus.USABLE
 
 
 def _summary_is_sufficient(item: ModelPortfolioEvidence, task_class: str) -> bool:
@@ -1317,7 +1252,9 @@ class ModelPortfolioOptimizer:
             evidence = self._replacement_usability(identity)
         except Exception:
             return False
-        return isinstance(evidence, ModelUsabilityEvidence) and evidence.proven_usable
+        return isinstance(evidence, ModelUsabilityEvidence) and evidence.proven_usable_at(
+            self._clock()
+        )
 
     def _history_preserved(self, identity: ModelIdentity) -> bool:
         try:

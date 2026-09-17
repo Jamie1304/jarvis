@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import math
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Any
 
 from jarvis.ai.models import EvidenceRecord, ModelInfo, ModelRole, ProviderHealth
 from jarvis.ai.providers.base import AIProvider
+from jarvis.ai.usability import ModelUsabilityEvidence, UsabilityReason
 from jarvis.speech.stt import SttProvider
 from jarvis.speech.tts import TtsProvider
 
@@ -239,6 +241,46 @@ class ProviderRegistry:
     async def health(self, provider_id: str, provider: Provider) -> ProviderHealth:
         self.definition(provider_id)
         return await provider.health_check()
+
+    async def probe_usability(
+        self, provider_id: str, configuration: Mapping[str, Any]
+    ) -> ModelUsabilityEvidence:
+        """Run one adapter-owned, read-only usability observation.
+
+        Providers may expose a native status/model probe.  Otherwise the
+        generic fallback records connectivity only and leaves quota,
+        entitlement, capacity, and request-specific dimensions unknown.
+        """
+
+        definition = self.definition(provider_id)
+        provider = self.create(provider_id, configuration)
+        observed_at = datetime.now(UTC)
+        try:
+            evidence = await provider.probe_usability()
+            if evidence is None:
+                health = await provider.health_check()
+                evidence = ModelUsabilityEvidence(
+                    configured=True,
+                    connected=health.available,
+                    reachable=health.available,
+                    reason=(
+                        UsabilityReason.UNKNOWN
+                        if health.available
+                        else UsabilityReason.PROVIDER_OUTAGE
+                    ),
+                    source="provider.health_check",
+                    observed_at=observed_at,
+                    detail="generic provider health observation",
+                )
+            configured_model = configuration.get("model")
+            model_id = configured_model if isinstance(configured_model, str) else None
+            return replace(
+                evidence,
+                provider_id=evidence.provider_id or definition.metadata.provider_id,
+                model_id=evidence.model_id or model_id,
+            )
+        finally:
+            await provider.aclose()
 
     async def model(self, provider_id: str, provider: Provider) -> ModelMetadata:
         definition = self.definition(provider_id)

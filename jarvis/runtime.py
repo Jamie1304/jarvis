@@ -1716,7 +1716,7 @@ class ApplicationRuntime:
                 lifecycle=local_ai if provider_adapter is not None else None,
             )
             local_ai.bind_dispatcher(inference_dispatcher)
-            routing_feedback = RoutingFeedbackRecorder(model_knowledge)
+            routing_feedback = RoutingFeedbackRecorder(model_knowledge, router=provider_router)
             stt = (
                 SpeechToTextService(
                     SoundDeviceRecorder(
@@ -1872,6 +1872,9 @@ class ApplicationRuntime:
                 retirement_store=retirement_store,
                 removal_authorization=BrokerModelRemovalAuthorizer(broker),
                 resource_governor=resource_governor,
+                replacement_usability=lambda identity: provider_router.usability_for(
+                    identity.provider_id, identity.model_id
+                ),
             )
             verification_engine = VerificationEngine()
             paths.validate_storage_layout()

@@ -3,6 +3,7 @@
 import json
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime
 from typing import Any
 
 import httpx
@@ -15,6 +16,7 @@ from jarvis.ai.models import (
     ProviderHealth,
 )
 from jarvis.ai.providers.base import AIProvider
+from jarvis.ai.usability import ModelUsabilityEvidence, UsabilityReason
 from jarvis.core.errors import (
     ModelUnavailableError,
     ProviderError,
@@ -109,6 +111,117 @@ class OllamaProvider(AIProvider):
         except httpx.ConnectError as error:
             return ProviderHealth(available=False, detail=str(error))
         return ProviderHealth(available=True, detail="Ollama is reachable")
+
+    async def probe_usability(self) -> ModelUsabilityEvidence:
+        """Observe local server/model state without loading or generating."""
+
+        observed_at = datetime.now(UTC)
+        try:
+            async with self._request_client() as client:
+                response = await client.get(f"{self._endpoint}/api/tags")
+        except httpx.TimeoutException:
+            return ModelUsabilityEvidence(
+                configured=True,
+                connected=None,
+                reachable=False,
+                request_usable=False,
+                reason=UsabilityReason.NETWORK_UNAVAILABLE,
+                source="ollama.api.tags",
+                observed_at=observed_at,
+                detail="Ollama status probe timed out",
+                model_id=self._model,
+            )
+        except httpx.ConnectError:
+            return ModelUsabilityEvidence(
+                configured=True,
+                connected=False,
+                reachable=False,
+                request_usable=False,
+                reason=UsabilityReason.NETWORK_UNAVAILABLE,
+                source="ollama.api.tags",
+                observed_at=observed_at,
+                detail="Ollama status endpoint is unreachable",
+                model_id=self._model,
+            )
+        if response.status_code == 401:
+            return ModelUsabilityEvidence(
+                configured=True,
+                connected=True,
+                reachable=True,
+                authenticated=False,
+                request_usable=False,
+                reason=UsabilityReason.INVALID_CREDENTIALS,
+                source="ollama.api.tags",
+                observed_at=observed_at,
+                detail="Ollama status endpoint rejected authentication",
+                model_id=self._model,
+            )
+        if response.status_code >= 500:
+            return ModelUsabilityEvidence(
+                configured=True,
+                connected=False,
+                reachable=True,
+                request_usable=False,
+                reason=UsabilityReason.PROVIDER_OUTAGE,
+                source="ollama.api.tags",
+                observed_at=observed_at,
+                detail="Ollama status endpoint reported provider failure",
+                model_id=self._model,
+            )
+        if response.status_code >= 400:
+            return ModelUsabilityEvidence(
+                configured=True,
+                connected=True,
+                reachable=True,
+                request_usable=False,
+                reason=UsabilityReason.MODEL_UNAVAILABLE,
+                source="ollama.api.tags",
+                observed_at=observed_at,
+                detail="Ollama status endpoint rejected the probe",
+                model_id=self._model,
+            )
+        try:
+            body = response.json()
+        except ValueError:
+            body = None
+        models = body.get("models") if isinstance(body, dict) else None
+        if not isinstance(models, list):
+            return ModelUsabilityEvidence(
+                configured=True,
+                connected=True,
+                reachable=True,
+                authenticated=True,
+                request_usable=False,
+                reason=UsabilityReason.UNKNOWN,
+                source="ollama.api.tags",
+                observed_at=observed_at,
+                detail="Ollama model catalog was not sufficient to prove usability",
+                model_id=self._model,
+            )
+        installed = any(
+            isinstance(item, dict)
+            and (item.get("name") == self._model or item.get("model") == self._model)
+            for item in models
+        )
+        return ModelUsabilityEvidence(
+            configured=True,
+            connected=True,
+            reachable=True,
+            authenticated=True,
+            entitled=True if installed else None,
+            quota_usable=True,
+            model_usable=installed,
+            request_usable=None if installed else False,
+            reason=UsabilityReason.UNKNOWN if installed else UsabilityReason.MODEL_NOT_FOUND,
+            source="ollama.api.tags",
+            observed_at=observed_at,
+            detail=(
+                "Ollama model is installed and provider-native status is healthy"
+                if installed
+                else "Ollama provider is reachable but the requested model is not installed"
+            ),
+            model_id=self._model,
+        )
 
     async def model_info(self) -> ModelInfo:
         request = GenerationRequest(

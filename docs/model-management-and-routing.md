@@ -50,6 +50,23 @@ not make routing or fallback decisions.
 - model and hardware RAM/VRAM/disk/concurrency limits; and
 - local/privacy policy and API/token cost metadata.
 
+Operational availability is not request usability.  The shared
+`jarvis.ai.usability.ModelUsabilityEvidence` contract records tri-state
+configured, connected, reachable, authenticated, entitled, quota/billing,
+capacity, model, policy, resource, and request dimensions.  Provider-level
+evidence uses `model_id=None`; model-level evidence overrides it for one
+provider/model identity.  A known-false dimension is removed before ranking,
+while unknown evidence may support one bounded attempt but is never reported
+as proven usable.  Evidence carries a source, observation timestamp, and
+optional expiry, so stale positive and negative conclusions can be refreshed.
+
+Provider health remains a connectivity projection.  A healthy/authenticated
+provider with exhausted quota stays connected but is not usable, and a
+successful inference updates only justified operational dimensions.  The
+router's feedback state is runtime evidence rather than a second failure
+database; R3A retirement consumes the same contract through
+`ProviderRouter.usability_for`.
+
 P3C makes this an availability-aware per-step decision. The
 `ModelKnowledgeService` supplies descriptive catalog, provider-health,
 machine-measurement, and task-specific cookbook evidence, while

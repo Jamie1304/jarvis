@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import math
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncIterator, Callable, Mapping
 from dataclasses import dataclass, replace
-from datetime import datetime
+from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Any, Protocol
 
@@ -38,6 +38,14 @@ from jarvis.ai.providers.registry import (
     ProviderMetadata,
     ProviderRegistry,
     VoiceProviderKind,
+)
+from jarvis.ai.usability import (
+    ModelUsabilityEvidence,
+    ModelUsabilityStatus,
+    UsabilityReason,
+    evidence_for_failure,
+    evidence_for_success,
+    merge_usability_evidence,
 )
 from jarvis.core.errors import PrivacyBlockedError
 from jarvis.hardware import FitStatus, HardwareProfile
@@ -84,6 +92,15 @@ class RouteFailureClass(StrEnum):
     RESOURCE_OOM = "resource_oom"
     VERIFICATION_FAILURE = "verification_failure"
     PRIVACY_BLOCK = "privacy_block"
+    AUTHENTICATION = "authentication"
+    QUOTA = "quota"
+    BILLING = "billing"
+    RATE_LIMITED = "rate_limited"
+    MODEL_UNAVAILABLE = "model_unavailable"
+    NETWORK_UNAVAILABLE = "network_unavailable"
+    PROVIDER_OUTAGE = "provider_outage"
+    POLICY_BLOCK = "policy_block"
+    RESOURCE_BLOCK = "resource_block"
     CANCELLED = "cancelled"
     UNKNOWN_OUTCOME = "unknown_outcome"
 
@@ -158,6 +175,8 @@ class RouteRequest:
     no_llm: bool = False
     benchmarks: tuple[RouteBenchmark, ...] = ()
     provider_health: tuple[ProviderHealthSnapshot, ...] = ()
+    usability_evidence: tuple[ModelUsabilityEvidence, ...] = ()
+    usability: tuple[ModelUsabilityEvidence, ...] = ()
     priority: ResourcePriority = ResourcePriority.USER_REQUESTED
     task_class: str = "general"
     responsibility: str = "conversation"
@@ -233,6 +252,14 @@ class RouteRequest:
             not isinstance(item, ProviderHealthSnapshot) for item in self.provider_health
         ):
             raise ValueError("Route health snapshots are invalid")
+        for name, values in (
+            ("usability evidence", self.usability_evidence),
+            ("usability", self.usability),
+        ):
+            if type(values) is not tuple or any(
+                not isinstance(item, ModelUsabilityEvidence) for item in values
+            ):
+                raise ValueError(f"Route {name} is invalid")
         if not isinstance(self.priority, ResourcePriority):
             raise ValueError("Route resource priority is invalid")
         if self.privacy_context is not None and not isinstance(
@@ -314,6 +341,7 @@ class RouteCandidate:
     knowledge: ModelKnowledgeView | None = None
     measurement: ModelMeasurementView | None = None
     cookbook: CookbookSummary | None = None
+    usability: ModelUsabilityEvidence | None = None
 
     @property
     def identity(self) -> ModelIdentity:
@@ -361,6 +389,18 @@ class RouteCandidate:
             self.cookbook.evidence_sufficiency is EvidenceSufficiency.SUFFICIENT
         )
 
+    @property
+    def usability_status(self) -> ModelUsabilityStatus:
+        if self.usability is None:
+            return ModelUsabilityStatus.UNKNOWN
+        return self.usability.status
+
+    @property
+    def usability_reason(self) -> UsabilityReason:
+        if self.usability is None:
+            return UsabilityReason.UNKNOWN
+        return self.usability.effective_reason
+
 
 @dataclass(frozen=True, slots=True)
 class RouteDecision:
@@ -395,16 +435,131 @@ class ProviderRouter:
         resource_governor: ResourceGovernor | None = None,
         knowledge: ModelKnowledgeService | None = None,
         hardware_profile: HardwareProfile | None = None,
+        *,
+        usability_evidence: tuple[ModelUsabilityEvidence, ...] = (),
+        clock: Callable[[], datetime] | None = None,
+        failure_cooldown_seconds: float = 300.0,
+        rate_limit_cooldown_seconds: float = 30.0,
     ) -> None:
         self._registry = registry
         self._resource_governor = resource_governor
         self._knowledge = knowledge
         self._hardware_profile = hardware_profile
+        if type(usability_evidence) is not tuple or any(
+            not isinstance(item, ModelUsabilityEvidence) for item in usability_evidence
+        ):
+            raise ValueError("Router usability evidence is malformed")
+        if (
+            type(failure_cooldown_seconds) not in {int, float}
+            or failure_cooldown_seconds < 0
+            or type(rate_limit_cooldown_seconds) not in {int, float}
+            or rate_limit_cooldown_seconds < 0
+        ):
+            raise ValueError("Router usability cooldown is invalid")
+        self._clock = clock or (lambda: datetime.now(UTC))
+        self._failure_cooldown_seconds = float(failure_cooldown_seconds)
+        self._rate_limit_cooldown_seconds = float(rate_limit_cooldown_seconds)
+        self._usability: dict[tuple[str, str | None], ModelUsabilityEvidence] = {}
+        for evidence in usability_evidence:
+            self.set_usability_evidence(evidence)
 
     def set_hardware_profile(self, profile: HardwareProfile | None) -> None:
         if profile is not None and not isinstance(profile, HardwareProfile):
             raise ValueError("Router hardware profile is malformed")
         self._hardware_profile = profile
+
+    def set_usability_evidence(self, evidence: ModelUsabilityEvidence) -> None:
+        """Install one current observation for provider or provider/model."""
+
+        if not isinstance(evidence, ModelUsabilityEvidence):
+            raise ValueError("Router usability evidence is malformed")
+        if evidence.provider_id is None:
+            key = ("*", evidence.model_id.casefold() if evidence.model_id else None)
+        else:
+            key = (
+                evidence.provider_id.casefold(),
+                evidence.model_id.casefold() if evidence.model_id else None,
+            )
+        self._usability[key] = evidence
+
+    def usability_for(
+        self, provider_id: str, model_id: str | None = None
+    ) -> ModelUsabilityEvidence:
+        """Return the canonical current/unknown evidence for a route identity."""
+
+        provider_key = provider_id.casefold()
+        model_key = model_id.casefold() if model_id is not None else None
+        values = [
+            self._usability[key]
+            for key in (
+                ("*", None),
+                ("*", model_key),
+                (provider_key, None),
+                (provider_key, model_key),
+            )
+            if key in self._usability
+        ]
+        return merge_usability_evidence(*values)
+
+    async def refresh_usability(
+        self, provider_id: str, configuration: Mapping[str, Any]
+    ) -> ModelUsabilityEvidence:
+        """Perform one on-demand adapter probe and publish its evidence."""
+
+        evidence = await self._registry.probe_usability(provider_id, configuration)
+        self.set_usability_evidence(evidence)
+        return evidence
+
+    def record_failure(
+        self,
+        identity: ModelIdentity,
+        reason: UsabilityReason,
+        *,
+        detail: str = "trusted provider failure feedback",
+    ) -> ModelUsabilityEvidence:
+        """Update bounded operational evidence without creating a failure DB."""
+
+        if not isinstance(identity, ModelIdentity):
+            raise ValueError("Routing failure identity is malformed")
+        cooldown = (
+            self._rate_limit_cooldown_seconds
+            if reason is UsabilityReason.RATE_LIMITED
+            else self._failure_cooldown_seconds
+        )
+        model_scoped = reason in {
+            UsabilityReason.MODEL_NOT_ENTITLED,
+            UsabilityReason.MODEL_UNAVAILABLE,
+            UsabilityReason.MODEL_NOT_FOUND,
+            UsabilityReason.RATE_LIMITED,
+            UsabilityReason.LOCAL_RESOURCE_BLOCKED,
+        }
+        evidence = evidence_for_failure(
+            identity.provider_id,
+            reason,
+            model_id=identity.model_id if model_scoped else None,
+            observed_at=self._clock(),
+            cooldown_seconds=cooldown,
+            detail=detail,
+        )
+        self.set_usability_evidence(evidence)
+        if model_scoped:
+            return evidence
+        return evidence
+
+    def record_success(self, identity: ModelIdentity) -> ModelUsabilityEvidence:
+        """Record only operational facts justified by a completed inference."""
+
+        if not isinstance(identity, ModelIdentity):
+            raise ValueError("Routing success identity is malformed")
+        evidence = evidence_for_success(
+            identity.provider_id,
+            identity.model_id,
+            observed_at=self._clock(),
+        )
+        current = self.usability_for(identity.provider_id, identity.model_id)
+        merged = merge_usability_evidence(current, evidence)
+        self.set_usability_evidence(merged)
+        return merged
 
     def route(self, request: RouteRequest) -> RouteDecision:
         if not isinstance(request, RouteRequest):
@@ -589,6 +744,7 @@ class ProviderRouter:
         viable: list[RouteCandidate] = []
         unknown: list[str] = []
         rejected: list[str] = []
+        rejected_evidence: list[tuple[str, str]] = []
         benchmarks = {
             (item.provider_id.casefold(), item.model_id): item for item in request.benchmarks
         }
@@ -604,29 +760,44 @@ class ProviderRouter:
                     ),
                 )
         for candidate in candidates:
-            candidate = RouteCandidate(
-                candidate.provider_id,
-                candidate.model_id,
-                candidate.provider,
-                candidate.model,
-                candidate.local,
-                candidate.voice_kind,
-                (
+            candidate = replace(
+                candidate,
+                benchmark=(
                     None
                     if self._knowledge is not None
                     else benchmarks.get((candidate.provider_id.casefold(), candidate.model_id))
                 ),
-                candidate.knowledge,
-                candidate.measurement,
-                candidate.cookbook,
+                usability=self._candidate_usability(candidate, request, health),
             )
             reason, is_unknown = self._eligibility(candidate, request, health)
             if reason is None:
-                viable.append(candidate)
+                viable.append(
+                    replace(
+                        candidate,
+                        usability=(
+                            candidate.usability.with_request_eligibility()
+                            if candidate.usability is not None
+                            else None
+                        ),
+                    )
+                )
             elif is_unknown:
                 unknown.append(f"{candidate.provider_id}/{candidate.model_id}: {reason}")
             else:
                 rejected.append(f"{candidate.provider_id}/{candidate.model_id}: {reason}")
+            if reason is not None and candidate.usability is not None:
+                rejected_evidence.extend(
+                    (
+                        ("rejected_identity", candidate.identity.storage_key),
+                        ("rejected_usability_status", candidate.usability.status.value),
+                        ("rejected_usability_reason", candidate.usability.effective_reason.value),
+                        (
+                            "rejected_usability_source",
+                            _safe_usability_source(candidate.usability.source),
+                        ),
+                        ("rejected_usability_freshness", candidate.usability.freshness.value),
+                    )
+                )
         if viable:
             viable.sort(key=lambda item: self._sort_key(item, request))
             if resource_decision is not None and resource_decision.choose_smaller_model:
@@ -659,11 +830,32 @@ class ProviderRouter:
             (),
             tuple((unknown or rejected or ["no compatible provider"])[:8]),
             resource_decision,
+            evidence=tuple(rejected_evidence[:40]),
         )
 
     @staticmethod
     def _evidence(candidate: RouteCandidate) -> tuple[tuple[str, str], ...]:
         evidence: list[tuple[str, str]] = [("identity", candidate.identity.storage_key)]
+        if candidate.usability is not None:
+            usability = candidate.usability
+            observed_at = (
+                usability.observed_at.isoformat()
+                if usability.observed_at is not None
+                else "unknown"
+            )
+            expires_at = (
+                usability.expires_at.isoformat() if usability.expires_at is not None else "none"
+            )
+            evidence.extend(
+                (
+                    ("usability_status", usability.status.value),
+                    ("usability_reason", usability.effective_reason.value),
+                    ("usability_source", _safe_usability_source(usability.source)),
+                    ("usability_freshness", usability.freshness.value),
+                    ("usability_observed_at", observed_at),
+                    ("usability_expires_at", expires_at),
+                )
+            )
         if candidate.knowledge is not None:
             evidence.extend(
                 (
@@ -687,6 +879,54 @@ class ProviderRouter:
                 )
             )
         return tuple(evidence)
+
+    def _candidate_usability(
+        self,
+        candidate: RouteCandidate,
+        request: RouteRequest,
+        health: dict[str, ProviderHealthSnapshot],
+    ) -> ModelUsabilityEvidence:
+        """Compose provider, model, and request evidence in one contract."""
+
+        provider_id = candidate.provider_id.casefold()
+        model_id = candidate.model_id.casefold()
+        values: list[ModelUsabilityEvidence] = [
+            ModelUsabilityEvidence(
+                configured=True,
+                provider_id=candidate.provider_id,
+                model_id=candidate.model_id,
+                source="provider_registry",
+                detail="registry configuration proves configuration only",
+            )
+        ]
+        status = health.get(provider_id)
+        if status is not None:
+            health_known = status.available or status.detail not in {
+                KnowledgeAvailability.UNKNOWN.value,
+                KnowledgeAvailability.STALE.value,
+            }
+            values.append(
+                ModelUsabilityEvidence(
+                    connected=status.available if health_known else None,
+                    reachable=status.available if health_known else None,
+                    reason=(
+                        UsabilityReason.UNKNOWN
+                        if status.available or not health_known
+                        else UsabilityReason.PROVIDER_OUTAGE
+                    ),
+                    provider_id=candidate.provider_id,
+                    source="provider_health",
+                    detail="provider health observation",
+                )
+            )
+        values.append(self.usability_for(candidate.provider_id, candidate.model_id))
+        for item in (*request.usability_evidence, *request.usability):
+            if item.provider_id is not None and item.provider_id.casefold() != provider_id:
+                continue
+            if item.model_id is not None and item.model_id.casefold() != model_id:
+                continue
+            values.append(item)
+        return merge_usability_evidence(*values)
 
     @staticmethod
     def _resource_size(candidate: RouteCandidate) -> tuple[float, float, float]:
@@ -721,6 +961,15 @@ class ProviderRouter:
             PrivacyClassification.UNKNOWN,
         }:
             return "privacy classification forbids remote inference", False
+        usability = candidate.usability
+        if (
+            usability is not None
+            and usability.status_at(self._clock()) is ModelUsabilityStatus.NOT_USABLE
+        ):
+            return (
+                f"provider/model is not currently usable: {usability.effective_reason.value}",
+                False,
+            )
         status = health.get(candidate.provider_id.casefold())
         if status is not None and not status.available:
             if status.detail in {
@@ -1061,12 +1310,18 @@ class InferenceDispatcher:
                 result = await provider.generate(current_request)
                 if not isinstance(result, GenerationResult) or result.model != candidate.model_id:
                     raise RuntimeError("provider/model identity mismatch")
+                self._router.record_success(candidate.identity)
                 return DispatchResult(
                     result,
                     current_decision,
                     rerouted,
                 )
             except PrivacyBlockedError as error:
+                self._router.record_failure(
+                    candidate.identity,
+                    UsabilityReason.PRIVACY_BLOCKED,
+                    detail="privacy gateway rejected the outbound request",
+                )
                 if attempt + 1 >= self._max_attempts:
                     blocked = RouteDecision(
                         RouteStatus.PRIVACY_BLOCKED,
@@ -1089,6 +1344,9 @@ class InferenceDispatcher:
                 raise
             except Exception as error:
                 failure = _failure_class(error)
+                usability_reason = _usability_reason(error)
+                if usability_reason is not None:
+                    self._router.record_failure(candidate.identity, usability_reason)
                 if failure is RouteFailureClass.UNKNOWN_OUTCOME:
                     unknown = RouteDecision(
                         RouteStatus.UNKNOWN,
@@ -1115,7 +1373,7 @@ class InferenceDispatcher:
                         current_decision.fallbacks,
                         (f"inference attempt failed: {type(error).__name__}",),
                         current_decision.resource_decision,
-                        current_decision.evidence,
+                        _failure_evidence(current_decision, usability_reason),
                     )
                     raise InferenceDispatchError(
                         "Inference attempts exhausted", exhausted
@@ -1160,8 +1418,14 @@ class InferenceDispatcher:
                 async for chunk in provider.stream(self._request_for(request, candidate)):
                     yielded = True
                     yield DispatchChunk(chunk, current_decision, rerouted)
+                self._router.record_success(candidate.identity)
                 return
             except PrivacyBlockedError as error:
+                self._router.record_failure(
+                    candidate.identity,
+                    UsabilityReason.PRIVACY_BLOCKED,
+                    detail="privacy gateway rejected the outbound request",
+                )
                 if yielded or attempt + 1 >= self._max_attempts:
                     blocked = RouteDecision(
                         RouteStatus.PRIVACY_BLOCKED,
@@ -1184,6 +1448,9 @@ class InferenceDispatcher:
                 raise
             except Exception as error:
                 failure = _failure_class(error)
+                usability_reason = _usability_reason(error)
+                if usability_reason is not None:
+                    self._router.record_failure(candidate.identity, usability_reason)
                 if failure is RouteFailureClass.UNKNOWN_OUTCOME:
                     unknown = RouteDecision(
                         RouteStatus.UNKNOWN,
@@ -1210,7 +1477,7 @@ class InferenceDispatcher:
                         current_decision.fallbacks,
                         (f"stream attempt failed: {type(error).__name__}",),
                         current_decision.resource_decision,
-                        current_decision.evidence,
+                        _failure_evidence(current_decision, usability_reason),
                     )
                     raise InferenceDispatchError(
                         "Streaming inference attempts exhausted", exhausted
@@ -1351,6 +1618,16 @@ def _failure_class(error: BaseException) -> RouteFailureClass:
         return RouteFailureClass.TIMEOUT
     if "privacy" in name:
         return RouteFailureClass.PRIVACY_BLOCK
+    if "rate" in name or "429" in detail or "too many requests" in detail:
+        return RouteFailureClass.RATE_LIMITED
+    if "quota" in name or "credit" in detail or "quota" in detail:
+        return RouteFailureClass.QUOTA
+    if "billing" in name or "payment" in detail or "subscription" in detail:
+        return RouteFailureClass.BILLING
+    if "auth" in name or "credential" in detail or "401" in detail:
+        return RouteFailureClass.AUTHENTICATION
+    if "model" in name and "unavailable" in name:
+        return RouteFailureClass.MODEL_UNAVAILABLE
     if "structured" in name or "structured" in detail:
         return RouteFailureClass.MALFORMED_STRUCTURED_OUTPUT
     if "tool" in name or "tool" in detail:
@@ -1362,6 +1639,57 @@ def _failure_class(error: BaseException) -> RouteFailureClass:
     if "unavailable" in name or "connect" in name:
         return RouteFailureClass.PROVIDER_UNAVAILABLE
     return RouteFailureClass.UNKNOWN_OUTCOME
+
+
+def _usability_reason(error: BaseException) -> UsabilityReason | None:
+    """Classify only provider failures supported by trusted typed evidence."""
+
+    name = type(error).__name__.casefold()
+    detail = str(error).casefold()
+    code = str(getattr(error, "code", "")).casefold()
+    combined = f"{name} {detail} {code}"
+    if "privacy" in combined:
+        return UsabilityReason.PRIVACY_BLOCKED
+    if "rate" in combined or "429" in combined or "too many requests" in combined:
+        return UsabilityReason.RATE_LIMITED
+    if "quota" in combined or "credit" in combined or "usage limit" in combined:
+        return UsabilityReason.QUOTA_EXHAUSTED
+    if "billing" in combined or "payment" in combined or "subscription" in combined:
+        return UsabilityReason.BILLING_BLOCKED
+    if "budget" in combined:
+        return UsabilityReason.BUDGET_EXHAUSTED
+    if "credential" in combined or "unauth" in combined or "401" in combined:
+        return UsabilityReason.INVALID_CREDENTIALS
+    if "entitl" in combined or "access denied" in combined or "403" in combined:
+        return UsabilityReason.MODEL_NOT_ENTITLED
+    if "not found" in combined or "modelunavailable" in combined:
+        return UsabilityReason.MODEL_NOT_FOUND
+    if "model" in combined and "unavailable" in combined:
+        return UsabilityReason.MODEL_UNAVAILABLE
+    if "oom" in combined or "outofmemory" in combined or "resource" in combined:
+        return UsabilityReason.LOCAL_RESOURCE_BLOCKED
+    if "timeout" in combined:
+        return UsabilityReason.NETWORK_UNAVAILABLE
+    if "unavailable" in combined or "connect" in combined or "outage" in combined:
+        return UsabilityReason.PROVIDER_OUTAGE
+    return None
+
+
+def _failure_evidence(
+    decision: RouteDecision, reason: UsabilityReason | None
+) -> tuple[tuple[str, str], ...]:
+    if reason is None:
+        return decision.evidence
+    return (("usability_failure_reason", reason.value), *decision.evidence)
+
+
+def _safe_usability_source(source: str) -> str:
+    """Keep route projections descriptive without echoing credential material."""
+
+    lowered = source.casefold()
+    if any(token in lowered for token in ("secret", "token", "password", "credential", "api_key")):
+        return "redacted"
+    return source[:128]
 
 
 class RoutingFeedbackRecorder:
@@ -1376,9 +1704,31 @@ class RoutingFeedbackRecorder:
         knowledge: ModelKnowledgeService,
         *,
         provider_locality: Mapping[str, ProviderLocality] | None = None,
+        router: ProviderRouter | None = None,
     ) -> None:
         self._knowledge = knowledge
         self._locality = {key.casefold(): value for key, value in (provider_locality or {}).items()}
+        self._router = router
+
+    def record_failure(
+        self,
+        identity: ModelIdentity,
+        reason: UsabilityReason,
+        *,
+        detail: str = "trusted provider failure feedback",
+    ) -> ModelUsabilityEvidence | None:
+        """Forward typed operational feedback to the existing router state."""
+
+        if self._router is None:
+            return None
+        return self._router.record_failure(identity, reason, detail=detail)
+
+    def record_success(self, identity: ModelIdentity) -> ModelUsabilityEvidence | None:
+        """Forward positive operational feedback without inventing quota facts."""
+
+        if self._router is None:
+            return None
+        return self._router.record_success(identity)
 
     def record(
         self,

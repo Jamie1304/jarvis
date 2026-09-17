@@ -53,6 +53,7 @@ def create_deterministic_suite_catalog() -> TestSuiteCatalog:
                         "tests/test_v1_acceptance.py",
                         "tests/test_v1_i_r2_local_ai.py",
                         "tests/test_r3a_acquisition_portfolio.py",
+                        "tests/test_v1_i_r3u_routing_usability.py",
                     ),
                 ),
                 # Production-composition package generation, Windows sandbox
