@@ -32,6 +32,14 @@ class ModelLifecycleError(RuntimeError):
     """A model lifecycle transition could not be completed safely."""
 
 
+class ModelRemovalUnknownOutcome(ModelLifecycleError):
+    """A provider removal effect has no trusted terminal evidence."""
+
+
+class ModelRemovalVerificationError(ModelLifecycleError):
+    """Provider truth proves a requested removal did not close."""
+
+
 class ModelLifecycleState(StrEnum):
     DISCOVERED = "discovered"
     AVAILABLE = "available"
@@ -188,6 +196,9 @@ class ProviderModelAdapter(Protocol):
 
     async def unload(self, model_id: str, handle: object | None) -> None:
         """Unload one provider-managed model."""
+
+    async def remove(self, spec: LocalModelSpec) -> None:
+        """Remove one provider-managed model through its typed provider API."""
 
     async def health(self, model_id: str, handle: object | None) -> ModelHealth:
         """Report provider truth for one model."""
@@ -569,6 +580,46 @@ class LocalModelManager:
         if model_dir.exists():
             await asyncio.to_thread(shutil.rmtree, model_dir)
         self._safe_unlink(self._artifact_path(model_id))
+        return self._replace(record, ModelLifecycleState.REMOVED, None)
+
+    async def remove_provider_model(
+        self, model_id: str, *, expected_provider_digest: str | None = None
+    ) -> LocalModelRecord:
+        """Remove a provider-managed model after the caller's trusted TOCTOU check.
+
+        This method deliberately does not decide whether removal is authorized;
+        the portfolio coordinator and PermissionBroker own that boundary.  It
+        only revalidates provider identity, unload state, and provider truth.
+        """
+
+        record = self.inspect(model_id)
+        if not record.spec.provider_managed or self._provider_adapter is None:
+            raise ModelLifecycleError("provider-managed removal requires a provider adapter")
+        if model_id in self._handles or record.state is ModelLifecycleState.IN_USE:
+            raise ModelLifecycleError("Unload the model before provider removal")
+        if expected_provider_digest is not None and (
+            record.spec.provider_digest != expected_provider_digest
+        ):
+            raise ModelLifecycleError("provider model identity changed before removal")
+        remover = getattr(self._provider_adapter, "remove", None)
+        if not callable(remover):
+            raise ModelLifecycleError("provider does not expose a trusted removal operation")
+        try:
+            await remover(record.spec)
+        except ModelRemovalUnknownOutcome:
+            raise
+        except Exception as error:
+            raise ModelRemovalUnknownOutcome(
+                "provider removal effect has no trusted terminal evidence"
+            ) from error
+        try:
+            discovered = await self._provider_adapter.discover()
+        except Exception as error:
+            raise ModelRemovalUnknownOutcome(
+                "provider inventory could not verify removal"
+            ) from error
+        if any(item.model_id == model_id for item in discovered):
+            raise ModelRemovalVerificationError("provider still exposes the removed model")
         return self._replace(record, ModelLifecycleState.REMOVED, None)
 
     async def aclose(self) -> None:

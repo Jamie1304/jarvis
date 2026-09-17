@@ -21,6 +21,7 @@ from jarvis.ai.model_manager import (
     LocalModelSpec,
     ModelArtifact,
     ModelHealth,
+    ModelRemovalUnknownOutcome,
     ProviderModelAdapter,
 )
 from jarvis.ai.models import EvidenceKind, EvidenceRecord, ModelRole
@@ -395,6 +396,16 @@ class OllamaModelAdapter(ProviderModelAdapter):
             {"model": model_id, "prompt": "", "stream": False, "keep_alive": 0},
         )
 
+    async def remove(self, spec: LocalModelSpec) -> None:
+        if not spec.provider_managed:
+            raise ProviderError("Ollama removal received a file-managed model")
+        try:
+            await self._delete("/api/delete", {"model": spec.model_id})
+        except (ProviderTimeoutError, ProviderUnavailableError) as error:
+            raise ModelRemovalUnknownOutcome(
+                "Ollama model removal outcome is ambiguous; reconcile provider inventory"
+            ) from error
+
     async def health(self, model_id: str, handle: object | None) -> ModelHealth:
         del handle
         status = await self._runtime.status()
@@ -467,6 +478,16 @@ class OllamaModelAdapter(ProviderModelAdapter):
                 return _json_object(response)
         except httpx.TimeoutException as error:
             raise ProviderTimeoutError("Ollama model lifecycle operation timed out") from error
+        except httpx.ConnectError as error:
+            raise ProviderUnavailableError("Ollama server is unavailable") from error
+
+    async def _delete(self, path: str, payload: dict[str, object]) -> None:
+        try:
+            async with self._request_client() as client:
+                response = await client.request("DELETE", f"{self._endpoint}{path}", json=payload)
+                self._raise(response)
+        except httpx.TimeoutException as error:
+            raise ProviderTimeoutError("Ollama model removal timed out") from error
         except httpx.ConnectError as error:
             raise ProviderUnavailableError("Ollama server is unavailable") from error
 

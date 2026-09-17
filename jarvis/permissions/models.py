@@ -80,6 +80,11 @@ class Permission(StrEnum):
     CODE_MODIFY = "code.modify"
     SYSTEM_POWER = "system.power"
     REPAIR_EXECUTE = "repair.execute"
+    RESOURCE_DOWNLOAD = "resource.download"
+    RESOURCE_INSTALL = "resource.install"
+    RESOURCE_EXECUTE = "resource.execute"
+    PRIVILEGE_GRANT = "privilege.grant"
+    MODEL_REMOVE = "model.remove"
 
 
 class Decision(StrEnum):

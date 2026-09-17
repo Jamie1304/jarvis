@@ -19,6 +19,13 @@ from uuid import UUID, uuid4
 
 import httpx
 
+from jarvis.acquisition import (
+    AcquisitionBroker,
+    AcquisitionPolicy,
+    BoundedDownloadTransport,
+    BrokerAcquisitionAuthorizer,
+    SQLiteAcquisitionLedger,
+)
 from jarvis.actor_persona import (
     ActorContext,
     ActorContextService,
@@ -36,6 +43,11 @@ from jarvis.agent_runtime import AgentLoop
 from jarvis.ai.knowledge import ModelKnowledgeService, ModelKnowledgeStore
 from jarvis.ai.local_ai import LocalAIControlPlane, LocalAIUserPolicy
 from jarvis.ai.model_manager import LocalModelManager
+from jarvis.ai.portfolio import (
+    BrokerModelRemovalAuthorizer,
+    ModelPortfolioOptimizer,
+    SQLiteRetirementStore,
+)
 from jarvis.ai.providers.base import AIProvider
 from jarvis.ai.providers.ollama_runtime import OllamaModelAdapter, OllamaRuntimeManager
 from jarvis.ai.providers.registry import ProviderRegistry
@@ -432,6 +444,8 @@ class RuntimePaths:
     goal_supervisor_database: Path
     setup_database: Path
     provisioning_database: Path
+    acquisition_database: Path
+    retirement_database: Path
     effect_attestation_database: Path
     compensation_database: Path
     capability_lifecycle_database: Path
@@ -440,6 +454,7 @@ class RuntimePaths:
     credential_database: Path
     audit_database: Path
     artifacts: Path
+    acquisitions: Path
     logs: Path
     config: Path
     cache: Path
@@ -471,6 +486,8 @@ class RuntimePaths:
             base / "goals.sqlite3",
             base / "setup.sqlite3",
             base / "provisioning.sqlite3",
+            base / "acquisition.sqlite3",
+            base / "model-retirement.sqlite3",
             base / "effect-attestations.sqlite3",
             base / "compensation.sqlite3",
             base / "capability-lifecycle.sqlite3",
@@ -479,6 +496,7 @@ class RuntimePaths:
             base / "credentials.sqlite3",
             base / "audit.sqlite3",
             base / "artifacts",
+            base / "acquisitions",
             base / "logs",
             base / "config",
             base / "cache",
@@ -505,6 +523,7 @@ class RuntimePaths:
             self.sandboxes,
             self.self_development_installation,
             self.artifacts,
+            self.acquisitions,
         ):
             path.mkdir(parents=True, exist_ok=True)
         self.validate_storage_layout()
@@ -527,6 +546,7 @@ class RuntimePaths:
             self.packages,
             self.sandboxes,
             self.self_development_installation,
+            self.acquisitions,
         )
         databases = (
             self.state_database,
@@ -544,6 +564,8 @@ class RuntimePaths:
             self.goal_supervisor_database,
             self.setup_database,
             self.provisioning_database,
+            self.acquisition_database,
+            self.retirement_database,
             self.effect_attestation_database,
             self.compensation_database,
             self.capability_lifecycle_database,
@@ -692,6 +714,8 @@ class RuntimeContainer:
     model_planner: ModelPlanner
     local_ai: LocalAIControlPlane
     model_knowledge: ModelKnowledgeService
+    acquisition_broker: AcquisitionBroker
+    portfolio_optimizer: ModelPortfolioOptimizer
     ollama_runtime: OllamaRuntimeManager
     stt: SpeechToTextService | None
     tts: TextToSpeechService | None
@@ -1005,6 +1029,8 @@ class RuntimeContainer:
                 self.control_center,
                 self.inference_dispatcher,
                 self.conversation,
+                self.portfolio_optimizer,
+                self.acquisition_broker,
                 self.model_manager,
                 self.model_knowledge,
                 self.ollama_runtime,
@@ -1292,6 +1318,10 @@ class ApplicationRuntime:
         user_model_store: UserModelStore | None = None
         knowledge_library: KnowledgeLibrary | None = None
         model_knowledge: ModelKnowledgeService | None = None
+        acquisition_broker: AcquisitionBroker | None = None
+        portfolio_optimizer: ModelPortfolioOptimizer | None = None
+        acquisition_ledger: SQLiteAcquisitionLedger | None = None
+        retirement_store: SQLiteRetirementStore | None = None
         automation_store: SQLiteAutomationStore | None = None
         trace_store: TraceStore | None = None
         golden_workflow_store: GoldenWorkflowStore | None = None
@@ -1822,6 +1852,26 @@ class ApplicationRuntime:
                 if test_fixture is not None and test_fixture.provisioning_authorization is not None
                 else BrokerProvisioningAuthorizer(broker),
                 store=provisioning_store,
+            )
+            acquisition_ledger = SQLiteAcquisitionLedger(paths.acquisition_database)
+            acquisition_broker = AcquisitionBroker(
+                BoundedDownloadTransport(paths.acquisitions),
+                AcquisitionPolicy(),
+                acquisition_ledger,
+                permission_authority=BrokerAcquisitionAuthorizer(
+                    broker, target_root=paths.acquisitions
+                ),
+                resource_governor=resource_governor,
+            )
+            retirement_store = SQLiteRetirementStore(paths.retirement_database)
+            portfolio_optimizer = ModelPortfolioOptimizer(
+                model_manager,
+                model_knowledge,
+                configured_provider_registry,
+                provider_id=settings.ai_provider,
+                retirement_store=retirement_store,
+                removal_authorization=BrokerModelRemovalAuthorizer(broker),
+                resource_governor=resource_governor,
             )
             verification_engine = VerificationEngine()
             paths.validate_storage_layout()
@@ -2799,6 +2849,8 @@ class ApplicationRuntime:
             startup_warmup = StartupWarmupRegistry(resource_governor)
             startup_warmup.register(WarmupComponent("default-model", warmup_provider))
             assert backup is not None
+            assert acquisition_broker is not None
+            assert portfolio_optimizer is not None
             container = RuntimeContainer(
                 settings=settings,
                 paths=paths,
@@ -2812,6 +2864,8 @@ class ApplicationRuntime:
                 model_planner=model_planner,
                 local_ai=local_ai,
                 model_knowledge=model_knowledge,
+                acquisition_broker=acquisition_broker,
+                portfolio_optimizer=portfolio_optimizer,
                 ollama_runtime=ollama_runtime,
                 stt=stt,
                 tts=tts,
@@ -3030,6 +3084,8 @@ class ApplicationRuntime:
                 user_model_store,
                 knowledge_library,
                 model_knowledge,
+                retirement_store,
+                acquisition_ledger,
                 planning_store,
                 audit,
                 state_store,
@@ -3076,6 +3132,8 @@ class ApplicationRuntime:
                 user_model_store,
                 knowledge_library,
                 model_knowledge,
+                retirement_store,
+                acquisition_ledger,
                 planning_store,
                 audit,
                 state_store,
