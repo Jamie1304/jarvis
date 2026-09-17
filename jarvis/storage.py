@@ -32,7 +32,6 @@ from jarvis.permissions.models import (
     AuthorizationReceipt,
     PermissionRequest,
     Risk,
-    SafeArgument,
     SafetyClass,
 )
 from jarvis.resources import (
@@ -45,6 +44,7 @@ from jarvis.vm.bridge import (
     HostBridge,
     HostBridgeOperation,
     HostBridgeRequest,
+    build_host_bridge_action_descriptor,
 )
 
 
@@ -197,11 +197,28 @@ class MutationState(StrEnum):
     PLANNED = "planned"
     IN_PROGRESS = "in_progress"
     COMPLETED = "completed"
+    PARTIAL = "partial"
     RESTORED = "restored"
     STALE_PLAN = "stale_plan"
     CONFLICT = "conflict"
     DENIED = "denied"
     UNKNOWN_OUTCOME = "unknown_outcome"
+
+
+class MutationPhase(StrEnum):
+    EFFECT = "effect"
+    RESTORE = "restore"
+
+
+class MutationItemState(StrEnum):
+    NOT_STARTED = "not_started"
+    INTENT_PERSISTED = "effect_intent_persisted"
+    EFFECT_MAY_HAVE_STARTED = "effect_may_have_started"
+    VERIFIED = "effect_verified"
+    FAILED_BEFORE_EFFECT = "failed_before_effect"
+    UNKNOWN_OUTCOME = "outcome_unresolved"
+    RESTORATION_IN_PROGRESS = "restoration_in_progress"
+    RESTORED = "restoration_verified"
 
 
 class Reversibility(StrEnum):
@@ -1289,15 +1306,20 @@ class MutationItem:
     expected: FileIdentity
     classification: FileClassification
     recovery_path: Path | None = None
+    state: MutationItemState = MutationItemState.NOT_STARTED
+    detail: str = ""
 
-    def as_dict(self) -> dict[str, object]:
-        return {
+    def as_dict(self, *, include_runtime: bool = True) -> dict[str, object]:
+        payload: dict[str, object] = {
             "source": str(self.source),
             "destination": str(self.destination) if self.destination else None,
             "expected": self.expected.as_dict(),
             "classification": _classification_dict(self.classification),
             "recovery_path": str(self.recovery_path) if self.recovery_path else None,
         }
+        if include_runtime:
+            payload.update({"state": self.state.value, "detail": self.detail[:2_000]})
+        return payload
 
 
 @dataclass(frozen=True, slots=True)
@@ -1314,6 +1336,7 @@ class MutationManifest:
     reversibility: Reversibility
     recovery_strategy: str
     created_at: datetime
+    phase: MutationPhase = MutationPhase.EFFECT
     approval_binding: str | None = None
     state: MutationState = MutationState.PLANNED
     detail: str = ""
@@ -1324,17 +1347,20 @@ class MutationManifest:
 
     @property
     def fingerprint(self) -> str:
-        payload = self.as_dict(include_integrity=False)
+        payload = self.as_dict(include_integrity=False, include_runtime=False)
         return hashlib.sha256(_json_bytes(payload)).hexdigest()
 
-    def as_dict(self, *, include_integrity: bool = True) -> dict[str, object]:
+    def as_dict(
+        self, *, include_integrity: bool = True, include_runtime: bool = True
+    ) -> dict[str, object]:
         payload: dict[str, object] = {
-            "schema": "jarvis-file-mutation-manifest-1",
+            "schema": "jarvis-file-mutation-manifest-2",
             "plan_id": str(self.plan_id),
             "task_id": str(self.task_id),
             "operation": self.operation.value,
+            "phase": self.phase.value,
             "trusted_root": str(self.trusted_root),
-            "items": [item.as_dict() for item in self.items],
+            "items": [item.as_dict(include_runtime=include_runtime) for item in self.items],
             "volume_ids": list(self.volume_ids),
             "max_affected_bytes": self.max_affected_bytes,
             "exclusions": list(self.exclusions),
@@ -1342,10 +1368,15 @@ class MutationManifest:
             "reversibility": self.reversibility.value,
             "recovery_strategy": self.recovery_strategy,
             "created_at": _utc(self.created_at).isoformat(),
-            "approval_binding": self.approval_binding,
-            "state": self.state.value,
-            "detail": self.detail[:2_000],
         }
+        if include_runtime:
+            payload.update(
+                {
+                    "approval_binding": self.approval_binding,
+                    "state": self.state.value,
+                    "detail": self.detail[:2_000],
+                }
+            )
         if include_integrity:
             payload["integrity"] = hashlib.sha256(_json_bytes(payload)).hexdigest()
         return payload
@@ -1380,7 +1411,11 @@ class MutationManifestStore:
                 value = _manifest_from_dict(json.loads(path.read_text(encoding="utf-8")))
             except (OSError, UnicodeError, ValueError, ManifestIntegrityError):
                 continue
-            if value.state in {MutationState.IN_PROGRESS, MutationState.UNKNOWN_OUTCOME}:
+            if value.state in {
+                MutationState.IN_PROGRESS,
+                MutationState.PARTIAL,
+                MutationState.UNKNOWN_OUTCOME,
+            }:
                 manifests.append(value)
         return tuple(manifests)
 
@@ -1419,6 +1454,8 @@ class FileSteward:
         host_bridge: HostBridge | None = None,
         resource_governor: ResourceGovernor | None = None,
         fault_injector: Callable[[str, MutationItem], None] | None = None,
+        live_protection_probe: Callable[[Path], FileClassification] | None = None,
+        relocation_authority: Callable[[Path, Path, FileClassification], bool] | None = None,
     ) -> None:
         self.root = _safe_root(root)
         self.recovery_root = _safe_root(recovery_root or self.root / ".recovery")
@@ -1429,6 +1466,8 @@ class FileSteward:
         self.host_bridge = host_bridge
         self.resource_governor = resource_governor
         self.fault_injector = fault_injector
+        self.live_protection_probe = live_protection_probe
+        self.relocation_authority = relocation_authority
         self._identity = object()
         if permission_broker is not None and not permission_broker.registration_sealed:
             permission_broker.register_tool(
@@ -1471,10 +1510,10 @@ class FileSteward:
         if (
             classification is not None
             and classification.category is FileCategory.APPLICATION_MANAGED
-            and not classification.relocation_mechanism
+            and (not classification.relocation_mechanism or self.relocation_authority is None)
         ):
             raise MutationDenied(
-                "application-managed data requires an authoritative relocation mechanism"
+                "application-managed data requires an implemented relocation authority"
             )
         return self._plan(
             MutationOperation.MOVE,
@@ -1575,10 +1614,13 @@ class FileSteward:
             elif (
                 operation in {MutationOperation.MOVE, MutationOperation.RENAME}
                 and item_classification.category is FileCategory.APPLICATION_MANAGED
-                and not item_classification.relocation_mechanism
+                and (
+                    not item_classification.relocation_mechanism
+                    or self.relocation_authority is None
+                )
             ):
                 raise MutationDenied(
-                    "application-managed data requires an authoritative relocation mechanism"
+                    "application-managed data requires an implemented relocation authority"
                 )
             owned_source = self._owned(source)
             expected = _file_identity(owned_source)
@@ -1628,7 +1670,15 @@ class FileSteward:
             maximum,
             (str(self.recovery_root),),
             "PermissionBroker -> Protected Host Bridge/trusted file operation",
-            Reversibility.FULLY_REVERSIBLE,
+            (
+                Reversibility.FULLY_REVERSIBLE
+                if operation is MutationOperation.SAFE_DELETE
+                else (
+                    Reversibility.PARTIALLY_REVERSIBLE
+                    if operation is MutationOperation.COPY
+                    else Reversibility.IRREVERSIBLE
+                )
+            ),
             "bounded per-file recovery staging"
             if operation is MutationOperation.SAFE_DELETE
             else "verified exact-scope effects",
@@ -1691,9 +1741,15 @@ class FileSteward:
             maximum,
             (str(self.recovery_root),),
             "PermissionBroker -> Protected Host Bridge/trusted file operation",
-            Reversibility.FULLY_REVERSIBLE
-            if operation is not MutationOperation.COPY
-            else Reversibility.PARTIALLY_REVERSIBLE,
+            (
+                Reversibility.FULLY_REVERSIBLE
+                if operation is MutationOperation.SAFE_DELETE
+                else (
+                    Reversibility.PARTIALLY_REVERSIBLE
+                    if operation is MutationOperation.COPY
+                    else Reversibility.IRREVERSIBLE
+                )
+            ),
             "recovery staging inside the trusted JARVIS root"
             if recovery
             else "verified destination and source evidence",
@@ -1724,31 +1780,42 @@ class FileSteward:
         )
         if current.state is not MutationState.PLANNED:
             raise MutationUnknownOutcome("only a fresh planned manifest may execute")
-        if self.permission_broker is None:
-            updated = replace(
-                current, state=MutationState.DENIED, detail="PermissionBroker is unavailable"
+        if self.permission_broker is None or self.host_bridge is None:
+            denial_reason = (
+                "PermissionBroker is unavailable"
+                if self.permission_broker is None
+                else "HostBridge is required for file effects"
             )
+            updated = replace(current, state=MutationState.DENIED, detail=denial_reason)
             self.manifests.save(updated)
-            raise MutationDenied("PermissionBroker is required for file effects")
+            raise MutationDenied(denial_reason)
         receipt = await self._authorize(current, user_id=user_id)
-        reason = await self.permission_broker.begin_execution(receipt)
-        if reason is not None:
-            raise MutationDenied(reason.value)
+        execution_reason = await self.permission_broker.begin_execution(receipt)
+        if execution_reason is not None:
+            raise MutationDenied(execution_reason.value)
         bound = replace(
             current, approval_binding=f"{receipt.argument_fingerprint}:{receipt.action_fingerprint}"
         )
         self.manifests.save(bound)
         try:
-            result = self._perform(bound)
+            result = self._perform(bound, receipt)
         except (StalePlan, MutationConflict, MutationDenied):
-            await self.permission_broker.record_execution_outcome(receipt, "not_executed")
+            latest = self.manifests.load(bound.plan_id)
+            await self.permission_broker.record_execution_outcome(
+                receipt, self._broker_outcome(latest)
+            )
             raise
         except BaseException as error:
-            unknown = replace(
-                bound, state=MutationState.UNKNOWN_OUTCOME, detail=type(error).__name__
+            latest = self.manifests.load(bound.plan_id)
+            if latest.state in {MutationState.PLANNED, MutationState.IN_PROGRESS}:
+                unknown = replace(
+                    latest, state=MutationState.UNKNOWN_OUTCOME, detail=type(error).__name__
+                )
+                self.manifests.save(unknown)
+                latest = unknown
+            await self.permission_broker.record_execution_outcome(
+                receipt, self._broker_outcome(latest)
             )
-            self.manifests.save(unknown)
-            await self.permission_broker.record_execution_outcome(receipt, "unknown_outcome")
             raise MutationUnknownOutcome("file effect lacks trusted terminal evidence") from error
         await self.permission_broker.record_execution_outcome(
             receipt,
@@ -1770,13 +1837,7 @@ class FileSteward:
             task_id=manifest.task_id,
             user_id=user_id,
             descriptor=descriptor,
-            normalized_arguments={
-                "plan_id": str(manifest.plan_id),
-                "operation": manifest.operation.value,
-                "manifest_fingerprint": manifest.fingerprint,
-                "items": tuple(str(item.source) for item in manifest.items),
-                "max_affected_bytes": manifest.max_affected_bytes,
-            },
+            normalized_arguments=self._authorization_arguments(manifest),
         )
         if not result.authorized or result.receipt is None:
             if result.approval_requests:
@@ -1786,105 +1847,300 @@ class FileSteward:
 
     def _descriptor(self, manifest: MutationManifest) -> ActionDescriptor:
         scope = PermissionScope(paths=(str(self.root),), task_id=manifest.task_id)
-        return ActionDescriptor(
-            f"storage.file.{manifest.operation.value}",
-            (
-                SafeArgument("plan", str(manifest.plan_id)),
-                SafeArgument("operation", manifest.operation.value),
-                SafeArgument("scope", str(self.root)),
+        operation = self._effective_operation(manifest)
+        return build_host_bridge_action_descriptor(
+            action=f"storage.file.{operation.value}",
+            operation=self._bridge_operation(operation),
+            resource=self._bridge_resource(manifest),
+            scope=str(self.root),
+            risk=self._risk(manifest),
+            permissions=(PermissionRequest(Permission.FILESYSTEM_WRITE, scope),),
+            safety_class=self._safety_class(manifest),
+        )
+
+    def _authorization_arguments(self, manifest: MutationManifest) -> dict[str, object]:
+        return {
+            "plan_id": str(manifest.plan_id),
+            "phase": manifest.phase.value,
+            "operation": self._effective_operation(manifest).value,
+            "manifest_fingerprint": manifest.fingerprint,
+            "trusted_root": str(self.root),
+            "items": tuple(
+                {
+                    "source": str(item.source),
+                    "destination": str(item.destination) if item.destination else None,
+                    "recovery_path": str(item.recovery_path) if item.recovery_path else None,
+                    "expected": item.expected.as_dict(),
+                }
+                for item in manifest.items
             ),
-            Risk.HIGH
-            if manifest.operation in {MutationOperation.SAFE_DELETE, MutationOperation.MOVE}
-            else Risk.MEDIUM,
-            (PermissionRequest(Permission.FILESYSTEM_WRITE, scope),),
-            SafetyClass.BULK_DELETION
-            if manifest.operation is MutationOperation.SAFE_DELETE
-            else SafetyClass.ORDINARY,
+            "max_affected_bytes": manifest.max_affected_bytes,
+        }
+
+    @staticmethod
+    def _effective_operation(manifest: MutationManifest) -> MutationOperation:
+        return (
+            MutationOperation.RESTORE
+            if manifest.phase is MutationPhase.RESTORE
+            else manifest.operation
         )
 
-    def _perform(self, manifest: MutationManifest) -> MutationResult:
-        before = _free_bytes(manifest.items[0].source)
-        active = replace(
-            manifest, state=MutationState.IN_PROGRESS, detail="preflight passed; effect in progress"
-        )
-        self.manifests.save(active)
-        if manifest.expected_bytes > manifest.max_affected_bytes:
-            raise MutationDenied("maximum byte scope exceeded")
-        try:
-            for item in manifest.items:
-                self._revalidate_item(item, manifest.operation)
-                self._bridge_check(manifest, item)
-                if manifest.operation is MutationOperation.COPY:
-                    self._copy(item, manifest)
-                elif manifest.operation is MutationOperation.MOVE:
-                    self._move(item, manifest)
-                elif manifest.operation is MutationOperation.RENAME:
-                    self._rename(item, manifest)
-                elif manifest.operation is MutationOperation.SAFE_DELETE:
-                    self._safe_delete(item, manifest)
-                else:
-                    raise MutationDenied("restore is executed through restore(), not a raw plan")
-            completed = replace(
-                manifest, state=MutationState.COMPLETED, detail="post-effect evidence verified"
-            )
-            self.manifests.save(completed)
-            after = _free_bytes(manifest.items[0].source)
-            reclaimed = (
-                max(0, (after or 0) - (before or 0))
-                if manifest.operation is MutationOperation.SAFE_DELETE
-                else 0
-            )
-            moved = (
-                manifest.expected_bytes
-                if manifest.operation in {MutationOperation.MOVE, MutationOperation.RENAME}
-                else 0
-            )
-            return MutationResult(completed, before, after, reclaimed, moved)
-        except StalePlan:
-            stale = replace(
-                manifest, state=MutationState.STALE_PLAN, detail="TOCTOU revalidation failed"
-            )
-            self.manifests.save(stale)
-            raise
-        except MutationConflict:
-            conflict = replace(
-                manifest, state=MutationState.CONFLICT, detail="destination conflict"
-            )
-            self.manifests.save(conflict)
-            raise
-        except MutationDenied:
-            denied = replace(
-                manifest,
-                state=MutationState.DENIED,
-                detail="trusted protection denied the effect",
-            )
-            self.manifests.save(denied)
-            raise
-
-    def _bridge_check(self, manifest: MutationManifest, item: MutationItem) -> None:
-        if self.host_bridge is None:
-            return
-        operation = {
+    @staticmethod
+    def _bridge_operation(operation: MutationOperation) -> HostBridgeOperation:
+        return {
             MutationOperation.COPY: HostBridgeOperation.FILE_COPY,
             MutationOperation.MOVE: HostBridgeOperation.FILE_MOVE,
             MutationOperation.RENAME: HostBridgeOperation.FILE_RENAME,
             MutationOperation.SAFE_DELETE: HostBridgeOperation.FILE_DELETE,
             MutationOperation.RESTORE: HostBridgeOperation.FILE_RESTORE,
-        }[manifest.operation]
-        request = HostBridgeRequest(
-            uuid4(),
-            manifest.task_id,
-            self.host_bridge.instance_id,
-            operation,
-            str(item.source),
-            str(self.root),
-            action=f"storage.file.{manifest.operation.value}",
-            argument_fingerprint=None,
-            action_fingerprint=None,
+        }[operation]
+
+    @staticmethod
+    def _risk(manifest: MutationManifest) -> str:
+        return (
+            Risk.HIGH.value
+            if FileSteward._effective_operation(manifest)
+            in {MutationOperation.SAFE_DELETE, MutationOperation.MOVE}
+            else Risk.MEDIUM.value
         )
-        result = self.host_bridge.authorize(request)
+
+    @staticmethod
+    def _safety_class(manifest: MutationManifest) -> SafetyClass:
+        return (
+            SafetyClass.BULK_DELETION
+            if FileSteward._effective_operation(manifest) is MutationOperation.SAFE_DELETE
+            else SafetyClass.ORDINARY
+        )
+
+    @staticmethod
+    def _bridge_resource(manifest: MutationManifest) -> str:
+        return f"manifest:{manifest.fingerprint}"
+
+    @staticmethod
+    def _approval_identity(receipt: AuthorizationReceipt) -> str | None:
+        identities = {
+            item.approval_identity
+            for item in receipt.approval_requests
+            if item.approval_identity is not None
+        }
+        identities.update(item.identity_id for item in receipt.remembered_grants)
+        return sorted(identities)[0] if identities else None
+
+    @staticmethod
+    def _broker_outcome(manifest: MutationManifest) -> str:
+        states = {item.state for item in manifest.items}
+        if states & {
+            MutationItemState.EFFECT_MAY_HAVE_STARTED,
+            MutationItemState.UNKNOWN_OUTCOME,
+            MutationItemState.INTENT_PERSISTED,
+            MutationItemState.RESTORATION_IN_PROGRESS,
+        }:
+            return "unknown_outcome"
+        if states & {MutationItemState.VERIFIED, MutationItemState.RESTORED}:
+            return (
+                "effect_confirmed"
+                if manifest.state in {MutationState.COMPLETED, MutationState.RESTORED}
+                else "effect_partially_completed"
+            )
+        return "not_executed"
+
+    def _bridge_check(self, manifest: MutationManifest, receipt: AuthorizationReceipt) -> None:
+        if self.host_bridge is None or self.permission_broker is None:
+            raise MutationDenied("receipt-backed HostBridge is required for file effects")
+        operation = self._effective_operation(manifest)
+        request = HostBridgeRequest(
+            request_id=uuid4(),
+            task_id=manifest.task_id,
+            instance_id=self.host_bridge.instance_id,
+            operation=self._bridge_operation(operation),
+            resource=self._bridge_resource(manifest),
+            scope=str(self.root),
+            risk=self._risk(manifest),
+            expires_at=receipt.expires_at,
+            tool_id=self._TOOL_ID,
+            action=f"storage.file.{operation.value}",
+            argument_fingerprint=receipt.argument_fingerprint,
+            action_fingerprint=receipt.action_fingerprint,
+            approval_identity=self._approval_identity(receipt),
+            safety_class=self._safety_class(manifest),
+        )
+        result = self.host_bridge.authorize_with_receipt(
+            request,
+            receipt=receipt,
+            broker=self.permission_broker,
+            normalized_arguments=self._authorization_arguments(manifest),
+            expected_instance_id=self.host_bridge.instance_id,
+        )
         if not result.allowed:
             raise MutationDenied(result.reason)
+
+    def _perform(self, manifest: MutationManifest, receipt: AuthorizationReceipt) -> MutationResult:
+        before = _free_bytes(manifest.items[0].source)
+        current = replace(
+            manifest,
+            phase=MutationPhase.EFFECT,
+            state=MutationState.IN_PROGRESS,
+            detail="preflight passed; effect in progress",
+        )
+        self.manifests.save(current)
+        item_index = -1
+        effect_started = False
+        try:
+            if manifest.expected_bytes > manifest.max_affected_bytes:
+                raise MutationDenied("maximum byte scope exceeded")
+            self._bridge_check(current, receipt)
+            for item_index, item in enumerate(current.items):
+                current = replace(
+                    current,
+                    items=tuple(
+                        replace(
+                            value,
+                            state=(
+                                MutationItemState.INTENT_PERSISTED
+                                if index == item_index
+                                else value.state
+                            ),
+                            detail=(
+                                "effect intent persisted" if index == item_index else value.detail
+                            ),
+                        )
+                        for index, value in enumerate(current.items)
+                    ),
+                )
+                self.manifests.save(current)
+                self._revalidate_item(item, current.operation)
+                current = replace(
+                    current,
+                    items=tuple(
+                        replace(
+                            value,
+                            state=(
+                                MutationItemState.EFFECT_MAY_HAVE_STARTED
+                                if index == item_index
+                                else value.state
+                            ),
+                            detail=(
+                                "effect boundary entered" if index == item_index else value.detail
+                            ),
+                        )
+                        for index, value in enumerate(current.items)
+                    ),
+                )
+                self.manifests.save(current)
+                effect_started = True
+                if current.operation is MutationOperation.COPY:
+                    self._copy(item, current)
+                elif current.operation is MutationOperation.MOVE:
+                    self._move(item, current)
+                elif current.operation is MutationOperation.RENAME:
+                    self._rename(item, current)
+                elif current.operation is MutationOperation.SAFE_DELETE:
+                    self._safe_delete(item, current)
+                else:
+                    raise MutationDenied("restore is executed through restore(), not a raw plan")
+                current = replace(
+                    current,
+                    items=tuple(
+                        replace(
+                            value,
+                            state=(
+                                MutationItemState.VERIFIED if index == item_index else value.state
+                            ),
+                            detail=(
+                                "effect independently verified"
+                                if index == item_index
+                                else value.detail
+                            ),
+                        )
+                        for index, value in enumerate(current.items)
+                    ),
+                )
+                self.manifests.save(current)
+                effect_started = False
+            completed = replace(
+                current, state=MutationState.COMPLETED, detail="all item effects verified"
+            )
+            self.manifests.save(completed)
+            after = _free_bytes(current.items[0].source)
+            reclaimed = (
+                max(0, (after or 0) - (before or 0))
+                if current.operation is MutationOperation.SAFE_DELETE
+                else 0
+            )
+            moved = (
+                current.expected_bytes
+                if current.operation in {MutationOperation.MOVE, MutationOperation.RENAME}
+                else 0
+            )
+            return MutationResult(completed, before, after, reclaimed, moved)
+        except StalePlan as error:
+            self._record_effect_failure(current, item_index, effect_started, error)
+            raise
+        except MutationConflict as error:
+            self._record_effect_failure(current, item_index, effect_started, error)
+            raise
+        except MutationDenied as error:
+            self._record_effect_failure(current, item_index, effect_started, error)
+            raise
+        except BaseException as error:
+            self._record_effect_failure(current, item_index, True, error)
+            raise
+
+    def _record_effect_failure(
+        self,
+        manifest: MutationManifest,
+        item_index: int,
+        effect_started: bool,
+        error: BaseException,
+    ) -> MutationManifest:
+        items = list(manifest.items)
+        if effect_started and 0 <= item_index < len(items) and isinstance(error, StalePlan):
+            item = items[item_index]
+            if item.destination is not None and not item.destination.exists():
+                effect_started = False
+        if 0 <= item_index < len(items):
+            items[item_index] = replace(
+                items[item_index],
+                state=(
+                    MutationItemState.UNKNOWN_OUTCOME
+                    if effect_started
+                    else MutationItemState.FAILED_BEFORE_EFFECT
+                ),
+                detail=(
+                    "effect outcome is unresolved"
+                    if effect_started
+                    else f"failed before effect: {type(error).__name__}"
+                ),
+            )
+        states = {item.state for item in items}
+        if item_index < 0:
+            state = MutationState.DENIED
+        elif states & {
+            MutationItemState.UNKNOWN_OUTCOME,
+            MutationItemState.EFFECT_MAY_HAVE_STARTED,
+            MutationItemState.INTENT_PERSISTED,
+        }:
+            state = MutationState.UNKNOWN_OUTCOME
+        elif MutationItemState.VERIFIED in states:
+            state = MutationState.PARTIAL
+        elif isinstance(error, StalePlan):
+            state = MutationState.STALE_PLAN
+        elif isinstance(error, MutationConflict):
+            state = MutationState.CONFLICT
+        else:
+            state = MutationState.DENIED
+        updated = replace(
+            manifest,
+            items=tuple(items),
+            state=state,
+            detail=(
+                "partial effect retained for reconciliation"
+                if state is MutationState.PARTIAL
+                else type(error).__name__
+            ),
+        )
+        self.manifests.save(updated)
+        return updated
 
     def _revalidate_item(self, item: MutationItem, operation: MutationOperation) -> None:
         current = _file_identity(item.source)
@@ -1898,8 +2154,70 @@ class FileSteward:
                 raise MutationConflict("destination appeared after planning")
             if _has_reparse_ancestor(destination.parent):
                 raise StalePlan("destination parent became a reparse path")
-        if item.classification.active_reference is True:
+        if operation in {
+            MutationOperation.MOVE,
+            MutationOperation.RENAME,
+            MutationOperation.SAFE_DELETE,
+        }:
+            if _under(item.source, self.recovery_root):
+                raise MutationDenied("protected recovery artifact cannot be generic cleanup")
+            classification = item.classification
+            if self.live_protection_probe is not None:
+                classification = self.live_protection_probe(item.source)
+                if type(classification) is not FileClassification:
+                    raise MutationDenied("live protection evidence is malformed")
+            if classification.category is FileCategory.MODEL_STORAGE:
+                raise MutationDenied("DELEGATE_TO_MODEL_RETIREMENT")
+            if classification.category is FileCategory.APPLICATION_MANAGED:
+                if (
+                    operation in {MutationOperation.MOVE, MutationOperation.RENAME}
+                    and self.relocation_authority is not None
+                    and self.relocation_authority(
+                        item.source, item.destination or item.source, classification
+                    )
+                ):
+                    pass
+                else:
+                    raise MutationDenied(
+                        "application-managed relocation is unsupported by an owning authority"
+                    )
+            if classification.active_reference is not False:
+                raise MutationDenied("active-reference protection blocked the effect")
+            if (
+                operation is MutationOperation.SAFE_DELETE
+                and classification.retention is not RetentionState.SAFE_TO_REMOVE
+            ):
+                raise MutationDenied("live retention evidence blocked the effect")
+        elif item.classification.active_reference is True:
             raise MutationDenied("active-reference protection blocked the effect")
+
+    @staticmethod
+    def _link_without_overwrite(source: Path, destination: Path) -> None:
+        try:
+            os.link(source, destination)
+        except FileExistsError as error:
+            raise MutationConflict(
+                "destination appeared during no-overwrite finalization"
+            ) from error
+        except OSError as error:
+            if destination.exists():
+                raise MutationConflict(
+                    "destination appeared during no-overwrite finalization"
+                ) from error
+            raise MutationUnknownOutcome(
+                "trusted no-overwrite finalization is unavailable"
+            ) from error
+
+    @staticmethod
+    def _unlink_expected_source(source: Path, expected: FileIdentity) -> None:
+        try:
+            if _file_identity(source) != expected:
+                raise StalePlan("source changed before final disposition")
+            source.unlink()
+        except FileNotFoundError as error:
+            raise MutationUnknownOutcome("source disposition is unresolved") from error
+        if source.exists():
+            raise MutationUnknownOutcome("source disposition is unresolved")
 
     def _copy(self, item: MutationItem, manifest: MutationManifest) -> None:
         assert item.destination is not None
@@ -1916,9 +2234,11 @@ class FileSteward:
                 self.fault_injector("after_copy_before_finalize", item)
             if _file_identity(temporary).content_hash != item.expected.content_hash:
                 raise StalePlan("copied bytes failed hash verification")
-            if destination.exists():
+            destination = self._owned(destination, allow_missing=True)
+            if destination.exists() or _has_reparse_ancestor(destination.parent):
                 raise MutationConflict("destination appeared before finalize")
-            os.replace(temporary, destination)
+            self._link_without_overwrite(temporary, destination)
+            temporary.unlink()
             if _file_identity(destination).content_hash != item.expected.content_hash:
                 raise StalePlan("finalized copy failed hash verification")
         finally:
@@ -1933,7 +2253,7 @@ class FileSteward:
             raise MutationConflict("destination appeared during move")
         same_volume = _device_identity(item.source) == _device_identity(destination.parent)
         if same_volume:
-            os.rename(item.source, destination)
+            self._link_without_overwrite(item.source, destination)
             if self.fault_injector is not None:
                 self.fault_injector("after_move_finalize", item)
             if (
@@ -1941,25 +2261,34 @@ class FileSteward:
                 or _file_identity(destination).content_hash != item.expected.content_hash
             ):
                 raise MutationUnknownOutcome("renamed destination is not verified")
+            self._unlink_expected_source(item.source, item.expected)
             return
         temporary = destination.with_name(f".{destination.name}.{manifest.plan_id.hex}.partial")
-        shutil.copy2(item.source, temporary)
-        if self.fault_injector is not None:
-            self.fault_injector("after_cross_volume_copy", item)
-        if _file_identity(temporary).content_hash != item.expected.content_hash:
-            raise MutationUnknownOutcome("cross-volume staging hash failed")
-        os.replace(temporary, destination)
-        if _file_identity(destination).content_hash != item.expected.content_hash:
-            raise MutationUnknownOutcome("cross-volume destination hash failed")
-        item.source.unlink()
-        if item.source.exists():
-            raise MutationUnknownOutcome("source disposition is unresolved")
+        try:
+            if temporary.exists():
+                raise MutationConflict("move staging path already exists")
+            shutil.copy2(item.source, temporary)
+            if self.fault_injector is not None:
+                self.fault_injector("after_cross_volume_copy", item)
+            if _file_identity(temporary).content_hash != item.expected.content_hash:
+                raise MutationUnknownOutcome("cross-volume staging hash failed")
+            destination = self._owned(destination, allow_missing=True)
+            if destination.exists() or _has_reparse_ancestor(destination.parent):
+                raise MutationConflict("destination appeared before cross-volume finalize")
+            self._link_without_overwrite(temporary, destination)
+            temporary.unlink()
+            if _file_identity(destination).content_hash != item.expected.content_hash:
+                raise MutationUnknownOutcome("cross-volume destination hash failed")
+            self._unlink_expected_source(item.source, item.expected)
+        finally:
+            if temporary.exists() and self._is_safe_owned(temporary):
+                temporary.unlink()
 
     def _rename(self, item: MutationItem, manifest: MutationManifest) -> None:
         assert item.destination is not None
         if _device_identity(item.source) != _device_identity(item.destination.parent):
             raise MutationDenied("rename cannot cross volumes")
-        os.rename(item.source, item.destination)
+        self._link_without_overwrite(item.source, item.destination)
         if self.fault_injector is not None:
             self.fault_injector("after_rename_finalize", item)
         if (
@@ -1967,6 +2296,7 @@ class FileSteward:
             or _file_identity(item.destination).content_hash != item.expected.content_hash
         ):
             raise MutationUnknownOutcome("renamed file is not verified")
+        self._unlink_expected_source(item.source, item.expected)
 
     def _safe_delete(self, item: MutationItem, manifest: MutationManifest) -> None:
         if item.recovery_path is None:
@@ -1975,7 +2305,7 @@ class FileSteward:
         if recovery.exists():
             raise MutationConflict("recovery staging path already exists")
         recovery.parent.mkdir(parents=True, exist_ok=True)
-        os.rename(item.source, recovery)
+        self._link_without_overwrite(item.source, recovery)
         if self.fault_injector is not None:
             self.fault_injector("after_delete_stage", item)
         if (
@@ -1983,8 +2313,7 @@ class FileSteward:
             or _file_identity(recovery).content_hash != item.expected.content_hash
         ):
             raise MutationUnknownOutcome("recovery staging content is not verified")
-        if item.source.exists():
-            raise MutationUnknownOutcome("source remained after safe delete staging")
+        self._unlink_expected_source(item.source, item.expected)
 
     def restore(
         self, manifest: MutationManifest | UUID, *, user_id: str | None = None
@@ -2006,70 +2335,175 @@ class FileSteward:
         if (
             current.operation is not MutationOperation.SAFE_DELETE
             or current.state is not MutationState.COMPLETED
+            or current.phase is not MutationPhase.EFFECT
         ):
             raise MutationDenied("only a completed safe-delete manifest can be restored")
-        if self.permission_broker is None:
-            raise MutationDenied("PermissionBroker is required for restore")
-        receipt = await self._authorize(
-            replace(current, operation=MutationOperation.RESTORE), user_id=user_id
-        )
+        if self.permission_broker is None or self.host_bridge is None:
+            raise MutationDenied("PermissionBroker and HostBridge are required for restore")
+        restore_manifest = replace(current, phase=MutationPhase.RESTORE)
+        receipt = await self._authorize(restore_manifest, user_id=user_id)
         reason = await self.permission_broker.begin_execution(receipt)
         if reason is not None:
             raise MutationDenied(reason.value)
-        item = current.items[0]
         active = replace(
-            current, state=MutationState.IN_PROGRESS, detail="restore effect in progress"
+            restore_manifest,
+            state=MutationState.IN_PROGRESS,
+            detail="restore intent persisted; effect in progress",
         )
         self.manifests.save(active)
+        current_active = active
+        item_index = -1
+        effect_started = False
+        before = _free_bytes(active.items[0].source)
         try:
-            self._bridge_check(replace(current, operation=MutationOperation.RESTORE), item)
-            if item.recovery_path is None or not item.recovery_path.is_file():
-                raise MutationUnknownOutcome("recovery bytes are unavailable")
-            if item.source.exists():
-                raise MutationConflict("original path already exists")
-            if _file_identity(item.recovery_path).content_hash != item.expected.content_hash:
-                raise MutationUnknownOutcome("recovery staging was altered")
-            before = _free_bytes(item.source)
-            os.rename(item.recovery_path, item.source)
-        except MutationConflict:
-            conflict = replace(
-                active, state=MutationState.CONFLICT, detail="restore destination conflict"
+            self._bridge_check(current_active, receipt)
+            for item_index, item in enumerate(current_active.items):
+                current_active = replace(
+                    current_active,
+                    items=tuple(
+                        replace(
+                            value,
+                            state=(
+                                MutationItemState.RESTORATION_IN_PROGRESS
+                                if index == item_index
+                                else value.state
+                            ),
+                            detail=(
+                                "restore intent persisted" if index == item_index else value.detail
+                            ),
+                        )
+                        for index, value in enumerate(current_active.items)
+                    ),
+                )
+                self.manifests.save(current_active)
+                self._prepare_restore_item(item)
+                effect_started = True
+                self._restore_item(item)
+                current_active = replace(
+                    current_active,
+                    items=tuple(
+                        replace(
+                            value,
+                            state=(
+                                MutationItemState.RESTORED if index == item_index else value.state
+                            ),
+                            detail=(
+                                "original bytes and recovery disposition verified"
+                                if index == item_index
+                                else value.detail
+                            ),
+                        )
+                        for index, value in enumerate(current_active.items)
+                    ),
+                )
+                self.manifests.save(current_active)
+                effect_started = False
+            restored = replace(
+                current_active, state=MutationState.RESTORED, detail="all restore items verified"
             )
-            self.manifests.save(conflict)
-            await self.permission_broker.record_execution_outcome(receipt, "not_executed")
+            self.manifests.save(restored)
+            await self.permission_broker.record_execution_outcome(receipt, "effect_confirmed")
+            return MutationResult(restored, before, _free_bytes(restored.items[0].source), 0, 0)
+        except MutationConflict as error:
+            latest = self._record_restore_failure(current_active, item_index, effect_started, error)
+            await self.permission_broker.record_execution_outcome(
+                receipt, self._broker_outcome(latest)
+            )
             raise
-        except MutationDenied:
-            denied = replace(active, state=MutationState.DENIED, detail="restore authority denied")
-            self.manifests.save(denied)
-            await self.permission_broker.record_execution_outcome(receipt, "not_executed")
+        except MutationDenied as error:
+            latest = self._record_restore_failure(current_active, item_index, effect_started, error)
+            await self.permission_broker.record_execution_outcome(
+                receipt, self._broker_outcome(latest)
+            )
             raise
         except BaseException as error:
-            unknown = replace(
-                active, state=MutationState.UNKNOWN_OUTCOME, detail=type(error).__name__
+            latest = self._record_restore_failure(current_active, item_index, True, error)
+            await self.permission_broker.record_execution_outcome(
+                receipt, self._broker_outcome(latest)
             )
-            self.manifests.save(unknown)
-            await self.permission_broker.record_execution_outcome(receipt, "unknown_outcome")
             if isinstance(error, MutationUnknownOutcome):
                 raise
             raise MutationUnknownOutcome(
                 "restore effect lacks trusted terminal evidence"
             ) from error
-        try:
-            if _file_identity(item.source).content_hash != item.expected.content_hash:
-                raise MutationUnknownOutcome("restored bytes failed verification")
-        except BaseException:
-            unknown = replace(
-                active, state=MutationState.UNKNOWN_OUTCOME, detail="restore verification failed"
+
+    def _prepare_restore_item(self, item: MutationItem) -> None:
+        if item.recovery_path is None:
+            raise MutationUnknownOutcome("recovery bytes are unavailable")
+        recovery = self._owned(item.recovery_path, allow_missing=True)
+        source = self._owned(item.source, allow_missing=True)
+        if not recovery.is_file():
+            raise MutationUnknownOutcome("recovery bytes are unavailable")
+        if source.exists():
+            raise MutationConflict("original path already exists")
+        if _file_identity(recovery).content_hash != item.expected.content_hash:
+            raise MutationUnknownOutcome("recovery staging was altered")
+        if _has_reparse_ancestor(source.parent):
+            raise StalePlan("restore destination parent became a reparse path")
+
+    def _restore_item(self, item: MutationItem) -> None:
+        assert item.recovery_path is not None
+        recovery = self._owned(item.recovery_path)
+        source = self._owned(item.source, allow_missing=True)
+        if self.fault_injector is not None:
+            self.fault_injector("before_restore_finalize", item)
+        self._link_without_overwrite(recovery, source)
+        if _file_identity(source).content_hash != item.expected.content_hash:
+            raise MutationUnknownOutcome("restored bytes failed verification")
+        recovery.unlink()
+        if recovery.exists():
+            raise MutationUnknownOutcome("recovery disposition is unresolved")
+
+    def _record_restore_failure(
+        self,
+        manifest: MutationManifest,
+        item_index: int,
+        effect_started: bool,
+        error: BaseException,
+    ) -> MutationManifest:
+        items = list(manifest.items)
+        if 0 <= item_index < len(items):
+            items[item_index] = replace(
+                items[item_index],
+                state=(
+                    MutationItemState.UNKNOWN_OUTCOME
+                    if effect_started or isinstance(error, MutationUnknownOutcome)
+                    else MutationItemState.FAILED_BEFORE_EFFECT
+                ),
+                detail=(
+                    "restore outcome is unresolved"
+                    if effect_started or isinstance(error, MutationUnknownOutcome)
+                    else f"restore failed before effect: {type(error).__name__}"
+                ),
             )
-            self.manifests.save(unknown)
-            await self.permission_broker.record_execution_outcome(receipt, "unknown_outcome")
-            raise
-        restored = replace(
-            active, state=MutationState.RESTORED, detail="exact recovery bytes restored"
+        states = {item.state for item in items}
+        if item_index < 0:
+            state = MutationState.DENIED
+        elif states & {
+            MutationItemState.UNKNOWN_OUTCOME,
+            MutationItemState.RESTORATION_IN_PROGRESS,
+        }:
+            state = MutationState.UNKNOWN_OUTCOME
+        elif MutationItemState.RESTORED in states:
+            state = MutationState.PARTIAL
+        elif isinstance(error, MutationConflict):
+            state = MutationState.CONFLICT
+        elif isinstance(error, MutationDenied):
+            state = MutationState.DENIED
+        else:
+            state = MutationState.UNKNOWN_OUTCOME
+        updated = replace(
+            manifest,
+            items=tuple(items),
+            state=state,
+            detail=(
+                "partial restore retained for reconciliation"
+                if state is MutationState.PARTIAL
+                else type(error).__name__
+            ),
         )
-        self.manifests.save(restored)
-        await self.permission_broker.record_execution_outcome(receipt, "effect_confirmed")
-        return MutationResult(restored, before, _free_bytes(item.source), 0, 0)
+        self.manifests.save(updated)
+        return updated
 
     def reconcile(self, manifest: MutationManifest | UUID) -> MutationResult:
         current = (
@@ -2077,42 +2511,136 @@ class FileSteward:
             if isinstance(manifest, MutationManifest)
             else self.manifests.load(manifest)
         )
-        if current.state not in {MutationState.IN_PROGRESS, MutationState.UNKNOWN_OUTCOME}:
+        if current.state not in {
+            MutationState.IN_PROGRESS,
+            MutationState.PARTIAL,
+            MutationState.UNKNOWN_OUTCOME,
+        }:
             return MutationResult(current, None, None, 0, 0)
-        item = current.items[0]
-        source = item.source.exists()
-        destination = item.destination is not None and item.destination.exists()
-        source_hash = _hash_if_file(item.source)
-        destination_hash = _hash_if_file(item.destination) if item.destination is not None else None
-        recovery_hash = (
-            _hash_if_file(item.recovery_path) if item.recovery_path is not None else None
-        )
-        complete = False
-        if current.operation is MutationOperation.COPY:
-            complete = destination_hash == item.expected.content_hash
-        elif current.operation in {MutationOperation.MOVE, MutationOperation.RENAME}:
-            complete = destination_hash == item.expected.content_hash and not source
-        elif current.operation is MutationOperation.SAFE_DELETE:
-            complete = recovery_hash == item.expected.content_hash and not source
-        if complete:
-            updated = replace(
-                current, state=MutationState.COMPLETED, detail="reconciled from machine evidence"
+        if current.phase is MutationPhase.RESTORE:
+            return self._reconcile_restore(current)
+        return self._reconcile_effect(current)
+
+    def _reconcile_effect(self, current: MutationManifest) -> MutationResult:
+        dispositions: list[MutationItem] = []
+        observations: list[str] = []
+        for item in current.items:
+            source = item.source.exists()
+            destination = item.destination is not None and item.destination.exists()
+            source_hash = _hash_if_file(item.source)
+            destination_hash = (
+                _hash_if_file(item.destination) if item.destination is not None else None
             )
+            recovery_hash = (
+                _hash_if_file(item.recovery_path) if item.recovery_path is not None else None
+            )
+            if current.operation is MutationOperation.COPY:
+                verified = destination_hash == item.expected.content_hash
+            elif current.operation in {MutationOperation.MOVE, MutationOperation.RENAME}:
+                verified = destination_hash == item.expected.content_hash and not source
+            elif current.operation is MutationOperation.SAFE_DELETE:
+                verified = recovery_hash == item.expected.content_hash and not source
+            else:
+                verified = False
+            if verified:
+                disposition = replace(
+                    item,
+                    state=MutationItemState.VERIFIED,
+                    detail="effect independently verified during reconciliation",
+                )
+            elif item.state is MutationItemState.FAILED_BEFORE_EFFECT:
+                disposition = item
+            else:
+                disposition = replace(
+                    item,
+                    state=MutationItemState.UNKNOWN_OUTCOME,
+                    detail="machine evidence does not prove the item terminal state",
+                )
+            dispositions.append(disposition)
+            observations.append(
+                f"source={source};destination={destination};source_hash={source_hash};"
+                f"destination_hash={destination_hash};recovery_hash={recovery_hash}"
+            )
+        states = {item.state for item in dispositions}
+        if states and states <= {MutationItemState.VERIFIED}:
+            aggregate = MutationState.COMPLETED
+            detail = "all item effects reconciled from machine evidence"
+        elif states & {
+            MutationItemState.UNKNOWN_OUTCOME,
+            MutationItemState.EFFECT_MAY_HAVE_STARTED,
+            MutationItemState.INTENT_PERSISTED,
+        }:
+            aggregate = MutationState.UNKNOWN_OUTCOME
+            detail = "item effect outcome remains unresolved after reconciliation"
+        elif MutationItemState.VERIFIED in states:
+            aggregate = MutationState.PARTIAL
+            detail = "partial item effects retained after reconciliation"
+        else:
+            aggregate = current.state
+            detail = "known pre-effect item failures retained after reconciliation"
+        updated = replace(
+            current,
+            items=tuple(dispositions),
+            state=aggregate,
+            detail=detail,
+        )
+        if updated != current:
             self.manifests.save(updated)
-            return MutationResult(
-                updated,
-                None,
-                None,
-                0,
-                current.expected_bytes if current.operation is MutationOperation.MOVE else 0,
-            )
-        detail = (
-            f"source={source};destination={destination};source_hash={source_hash};"
-            f"destination_hash={destination_hash};recovery_hash={recovery_hash}"
+        unresolved = tuple(observations) if aggregate is not MutationState.COMPLETED else ()
+        moved = (
+            current.expected_bytes
+            if aggregate is MutationState.COMPLETED
+            and current.operation in {MutationOperation.MOVE, MutationOperation.RENAME}
+            else 0
         )
-        updated = replace(current, state=MutationState.UNKNOWN_OUTCOME, detail=detail)
-        self.manifests.save(updated)
-        return MutationResult(updated, None, None, 0, 0, unresolved=(detail,))
+        return MutationResult(updated, None, None, 0, moved, unresolved=unresolved)
+
+    def _reconcile_restore(self, current: MutationManifest) -> MutationResult:
+        dispositions: list[MutationItem] = []
+        observations: list[str] = []
+        for item in current.items:
+            source_hash = _hash_if_file(item.source)
+            recovery_hash = (
+                _hash_if_file(item.recovery_path) if item.recovery_path is not None else None
+            )
+            verified = source_hash == item.expected.content_hash and recovery_hash is None
+            if verified:
+                disposition = replace(
+                    item,
+                    state=MutationItemState.RESTORED,
+                    detail="restore bytes and recovery disposition verified during reconciliation",
+                )
+            elif item.state is MutationItemState.FAILED_BEFORE_EFFECT:
+                disposition = item
+            else:
+                disposition = replace(
+                    item,
+                    state=MutationItemState.UNKNOWN_OUTCOME,
+                    detail="restore evidence is incomplete or conflicting",
+                )
+            dispositions.append(disposition)
+            observations.append(f"source_hash={source_hash};recovery_hash={recovery_hash}")
+        states = {item.state for item in dispositions}
+        if states and states <= {MutationItemState.RESTORED}:
+            aggregate = MutationState.RESTORED
+            detail = "all restore items reconciled from machine evidence"
+        elif states & {
+            MutationItemState.UNKNOWN_OUTCOME,
+            MutationItemState.RESTORATION_IN_PROGRESS,
+        }:
+            aggregate = MutationState.UNKNOWN_OUTCOME
+            detail = "restore outcome remains unresolved after reconciliation"
+        elif MutationItemState.RESTORED in states:
+            aggregate = MutationState.PARTIAL
+            detail = "partial restore retained after reconciliation"
+        else:
+            aggregate = current.state
+            detail = "known restore conflicts retained after reconciliation"
+        updated = replace(current, items=tuple(dispositions), state=aggregate, detail=detail)
+        if updated != current:
+            self.manifests.save(updated)
+        unresolved = tuple(observations) if aggregate is not MutationState.RESTORED else ()
+        return MutationResult(updated, None, None, 0, 0, unresolved=unresolved)
 
     def reconcile_pending(self) -> tuple[MutationResult, ...]:
         return tuple(self.reconcile(item) for item in self.manifests.pending())
@@ -2251,8 +2779,12 @@ def _identity_from_dict(raw: object) -> FileIdentity:
 
 
 def _manifest_from_dict(raw: object) -> MutationManifest:
-    if not isinstance(raw, dict) or raw.get("schema") != "jarvis-file-mutation-manifest-1":
+    if not isinstance(raw, dict) or raw.get("schema") not in {
+        "jarvis-file-mutation-manifest-1",
+        "jarvis-file-mutation-manifest-2",
+    }:
         raise ManifestIntegrityError("manifest schema is unsupported")
+    legacy = raw.get("schema") == "jarvis-file-mutation-manifest-1"
     unsigned = dict(raw)
     integrity = unsigned.pop("integrity", None)
     if type(integrity) is not str or hashlib.sha256(_json_bytes(unsigned)).hexdigest() != integrity:
@@ -2274,8 +2806,40 @@ def _manifest_from_dict(raw: object) -> MutationManifest:
                     _identity_from_dict(item["expected"]),
                     _classification_from_dict(item["classification"]),
                     Path(str(recovery)) if recovery else None,
+                    (
+                        MutationItemState.UNKNOWN_OUTCOME
+                        if legacy
+                        and str(raw.get("state"))
+                        in {
+                            MutationState.IN_PROGRESS.value,
+                            MutationState.COMPLETED.value,
+                            MutationState.RESTORED.value,
+                            MutationState.UNKNOWN_OUTCOME.value,
+                        }
+                        else MutationItemState(str(item.get("state", "not_started")))
+                    ),
+                    (
+                        "legacy manifest lacks per-item durable evidence"
+                        if legacy
+                        and str(raw.get("state"))
+                        in {
+                            MutationState.IN_PROGRESS.value,
+                            MutationState.COMPLETED.value,
+                            MutationState.RESTORED.value,
+                            MutationState.UNKNOWN_OUTCOME.value,
+                        }
+                        else str(item.get("detail", ""))
+                    ),
                 )
             )
+        raw_state = MutationState(str(raw["state"]))
+        if legacy and raw_state in {
+            MutationState.IN_PROGRESS,
+            MutationState.COMPLETED,
+            MutationState.RESTORED,
+            MutationState.UNKNOWN_OUTCOME,
+        }:
+            raw_state = MutationState.UNKNOWN_OUTCOME
         return MutationManifest(
             UUID(str(raw["plan_id"])),
             UUID(str(raw["task_id"])),
@@ -2289,8 +2853,9 @@ def _manifest_from_dict(raw: object) -> MutationManifest:
             Reversibility(str(raw["reversibility"])),
             str(raw["recovery_strategy"]),
             datetime.fromisoformat(str(raw["created_at"])),
+            MutationPhase(str(raw.get("phase", MutationPhase.EFFECT.value))),
             cast(str | None, raw.get("approval_binding")),
-            MutationState(str(raw["state"])),
+            raw_state,
             str(raw.get("detail", "")),
         )
     except ManifestIntegrityError:
@@ -2521,9 +3086,11 @@ __all__ = [
     "MutationDenied",
     "MutationError",
     "MutationItem",
+    "MutationItemState",
     "MutationManifest",
     "MutationManifestStore",
     "MutationOperation",
+    "MutationPhase",
     "MutationResult",
     "MutationState",
     "MutationUnknownOutcome",

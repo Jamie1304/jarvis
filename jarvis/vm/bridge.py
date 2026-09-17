@@ -13,6 +13,7 @@ from jarvis.permissions.models import (
     PermissionRequest,
     Risk,
     SafeArgument,
+    SafetyClass,
 )
 
 
@@ -54,6 +55,7 @@ class HostBridgeRequest:
     argument_fingerprint: str | None = None
     action_fingerprint: str | None = None
     approval_identity: str | None = None
+    safety_class: SafetyClass = SafetyClass.ORDINARY
 
 
 @dataclass(frozen=True, slots=True)
@@ -170,7 +172,9 @@ class HostBridge:
             if item.approval_identity is not None
         }
         identities.update(item.identity_id for item in receipt.remembered_grants)
-        if request.approval_identity is None or request.approval_identity not in identities:
+        if identities and (
+            request.approval_identity is None or request.approval_identity not in identities
+        ):
             return HostBridgeResult(
                 False,
                 "authenticated approval identity is missing",
@@ -205,6 +209,7 @@ def _request_action_fingerprint(request: HostBridgeRequest, broker: PermissionBr
             resource=request.resource,
             scope=request.scope,
             risk=request.risk,
+            safety_class=request.safety_class,
         )
     except (TypeError, ValueError):
         return None
@@ -219,6 +224,7 @@ def build_host_bridge_action_descriptor(
     scope: str,
     risk: str | Risk,
     permissions: tuple[PermissionRequest, ...] = (),
+    safety_class: SafetyClass = SafetyClass.ORDINARY,
 ) -> ActionDescriptor:
     """Build the canonical trusted action shape used for bridge binding."""
 
@@ -233,4 +239,5 @@ def build_host_bridge_action_descriptor(
         ),
         risk=normalized_risk,
         permissions=permissions,
+        safety_class=safety_class,
     )

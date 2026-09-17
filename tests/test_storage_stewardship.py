@@ -6,13 +6,16 @@ import asyncio
 import hashlib
 import json
 import os
+import subprocess
+import sys
+import time
 from collections.abc import Coroutine
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, TypeVar, cast
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import jarvis.storage as storage_module
 import pytest
@@ -36,6 +39,7 @@ from jarvis.permissions import (
     ScopeConstraint,
     TrustedApprovalAuthenticator,
 )
+from jarvis.permissions.audit import InMemoryAuditSink
 from jarvis.storage import (
     CleanupClassifier,
     CleanupState,
@@ -77,7 +81,7 @@ from jarvis.storage import (
     classify_storage_pressure,
     forecast_storage_pressure,
 )
-from jarvis.vm.bridge import HostBridge
+from jarvis.vm.bridge import HostBridge, HostBridgeOperation, HostBridgeRequest
 
 
 def _volume(
@@ -463,7 +467,7 @@ def test_file_steward_real_copy_move_rename_delete_restore_and_manifest_restart(
     source = root / "source.txt"
     source.write_bytes(b"recovery-aware bytes")
     broker, authenticator = _broker(root)
-    steward = FileSteward(root, permission_broker=broker)
+    steward = FileSteward(root, permission_broker=broker, host_bridge=HostBridge())
 
     copied = steward.plan_copy(source, root / "copy.txt")
     copy_result = _run(steward.execute_async(copied))
@@ -501,7 +505,7 @@ def test_file_steward_denies_unknown_model_and_toctou(tmp_path: Path) -> None:
     source = root / "source.txt"
     source.write_bytes(b"original")
     broker, _ = _broker(root)
-    steward = FileSteward(root, permission_broker=broker)
+    steward = FileSteward(root, permission_broker=broker, host_bridge=HostBridge())
     with pytest.raises(MutationDenied):
         steward.plan_delete(source)
     with pytest.raises(MutationDenied, match="MODEL_RETIREMENT"):
@@ -546,7 +550,12 @@ def test_file_steward_interrupted_copy_reconciles_unknown_without_retry(tmp_path
         if boundary == "after_copy_before_finalize":
             raise RuntimeError("fault injection")
 
-    steward = FileSteward(root, permission_broker=broker, fault_injector=interrupt)
+    steward = FileSteward(
+        root,
+        permission_broker=broker,
+        host_bridge=HostBridge(),
+        fault_injector=interrupt,
+    )
     plan = steward.plan_copy(source, root / "copy.txt")
     with pytest.raises(MutationUnknownOutcome):
         _run(steward.execute_async(plan))
@@ -862,7 +871,7 @@ def test_file_steward_batch_scope_conflicts_and_authority_guards(tmp_path: Path)
     source.write_bytes(b"source")
     second.write_bytes(b"second")
     broker, _ = _broker(root)
-    steward = FileSteward(root, permission_broker=broker)
+    steward = FileSteward(root, permission_broker=broker, host_bridge=HostBridge())
 
     with pytest.raises(MutationDenied):
         steward.plan_copy(root, root / "directory-copy")
@@ -885,8 +894,8 @@ def test_file_steward_batch_scope_conflicts_and_authority_guards(tmp_path: Path)
         FileOwnership.APPLICATION,
         relocation_mechanism="trusted.app.relocate",
     )
-    managed_plan = steward.plan_move(source, root / "managed.txt", classification=relocation)
-    assert managed_plan.operation is MutationOperation.MOVE
+    with pytest.raises(MutationDenied):
+        steward.plan_move(source, root / "managed.txt", classification=relocation)
     source.write_bytes(b"source")
 
     with pytest.raises(MutationDenied):
@@ -938,8 +947,7 @@ def test_file_steward_batch_scope_conflicts_and_authority_guards(tmp_path: Path)
     bridge_broker, _ = _broker(root)
     bridge_steward = FileSteward(root, permission_broker=bridge_broker, host_bridge=HostBridge())
     bridge_plan = bridge_steward.plan_copy(source, root / "bridge-denied.txt")
-    with pytest.raises(MutationDenied):
-        _run(bridge_steward.execute_async(bridge_plan))
+    assert _run(bridge_steward.execute_async(bridge_plan)).success
 
 
 def test_file_steward_sync_api_manifest_reconciliation_and_restore_quarantine(
@@ -950,7 +958,7 @@ def test_file_steward_sync_api_manifest_reconciliation_and_restore_quarantine(
     source = root / "source.txt"
     source.write_bytes(b"sync and reconcile")
     broker, authenticator = _broker(root)
-    steward = FileSteward(root, permission_broker=broker)
+    steward = FileSteward(root, permission_broker=broker, host_bridge=HostBridge())
 
     sync_plan = steward.plan_copy(source, root / "sync.txt")
     assert steward.execute(sync_plan).success
@@ -1018,7 +1026,7 @@ def test_file_steward_delete_and_batch_bounds_are_fail_closed(tmp_path: Path) ->
     source = root / "source.txt"
     source.write_bytes(b"bounded")
     broker, _ = _broker(root)
-    steward = FileSteward(root, permission_broker=broker)
+    steward = FileSteward(root, permission_broker=broker, host_bridge=HostBridge())
 
     for category, owner in (
         (FileCategory.SYSTEM_CRITICAL, FileOwnership.SYSTEM),
@@ -1068,7 +1076,7 @@ def test_file_steward_copy_move_and_rename_effect_boundaries(
     source = root / "source.txt"
     source.write_bytes(b"effect boundary")
     broker, _ = _broker(root)
-    steward = FileSteward(root, permission_broker=broker)
+    steward = FileSteward(root, permission_broker=broker, host_bridge=HostBridge())
 
     partial_plan = steward.plan_copy(source, root / "partial.txt")
     partial = root / f".partial.txt.{partial_plan.plan_id.hex}.partial"
@@ -1086,7 +1094,10 @@ def test_file_steward_copy_move_and_rename_effect_boundaries(
 
     copy_plan = steward.plan_copy(source, root / "corrupt.txt")
     corrupt_steward = FileSteward(
-        root, permission_broker=_broker(root)[0], fault_injector=corrupt_copy
+        root,
+        permission_broker=_broker(root)[0],
+        host_bridge=HostBridge(),
+        fault_injector=corrupt_copy,
     )
     with pytest.raises(StalePlan):
         _run(corrupt_steward.execute_async(copy_plan))
@@ -1099,7 +1110,10 @@ def test_file_steward_copy_move_and_rename_effect_boundaries(
 
     race_plan = steward.plan_copy(source, root / "finalize-race.txt")
     race_steward = FileSteward(
-        root, permission_broker=_broker(root)[0], fault_injector=create_destination
+        root,
+        permission_broker=_broker(root)[0],
+        host_bridge=HostBridge(),
+        fault_injector=create_destination,
     )
     with pytest.raises(MutationConflict):
         _run(race_steward.execute_async(race_plan))
@@ -1107,7 +1121,7 @@ def test_file_steward_copy_move_and_rename_effect_boundaries(
     cross_source = root / "cross-source.txt"
     cross_source.write_bytes(b"cross volume")
     cross_broker, _ = _broker(root)
-    cross_steward = FileSteward(root, permission_broker=cross_broker)
+    cross_steward = FileSteward(root, permission_broker=cross_broker, host_bridge=HostBridge())
     cross_plan = cross_steward.plan_move(
         cross_source, root / "cross-destination.txt", classification=_classification()
     )
@@ -1124,7 +1138,7 @@ def test_file_steward_copy_move_and_rename_effect_boundaries(
     rename_source = root / "rename-source.txt"
     rename_source.write_bytes(b"rename boundary")
     rename_broker, _ = _broker(root)
-    rename_steward = FileSteward(root, permission_broker=rename_broker)
+    rename_steward = FileSteward(root, permission_broker=rename_broker, host_bridge=HostBridge())
     rename_plan = rename_steward.plan_rename(
         rename_source, root / "rename-destination.txt", classification=_classification()
     )
@@ -1144,7 +1158,7 @@ def test_file_steward_restore_authority_and_reconcile_terminal_paths(tmp_path: P
     source = root / "source.txt"
     source.write_bytes(b"restore branches")
     broker, authenticator = _broker(root)
-    steward = FileSteward(root, permission_broker=broker)
+    steward = FileSteward(root, permission_broker=broker, host_bridge=HostBridge())
 
     delete_plan = steward.plan_delete(source, classification=_classification())
     with pytest.raises(MutationApprovalRequired):
@@ -1236,3 +1250,573 @@ def test_storage_internal_fallbacks_and_manifest_integrity_are_explicit(
     steward.manifests.path_for(plan.plan_id).write_text(json.dumps(raw), encoding="utf-8")
     with pytest.raises(ManifestIntegrityError):
         steward.manifests.load(plan.plan_id)
+
+
+def test_r1_reproduction_builder_rejects_missing_failed_and_stale_evidence(
+    tmp_path: Path,
+) -> None:
+    head = "standalone-builder-test-source"
+    tree = "standalone-builder-test-tree"
+    system_evidence = tmp_path / "system.json"
+    system_evidence.write_text(
+        json.dumps(
+            {
+                "status": "passed",
+                "exit_code": 0,
+                "revision": head,
+                "suite": "v1-acceptance",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    def run_case(name: str, scenario: dict[str, object] | None) -> dict[str, object]:
+        output = tmp_path / f"{name}.artifact.json"
+        command = [
+            sys.executable,
+            "scripts/acceptance/build_v1_i_r3b_artifact.py",
+            "--output",
+            str(output),
+            "--system-evidence",
+            str(system_evidence),
+            "--exact-coverage",
+            "90.0",
+            "--ending-commit",
+            head,
+            "--ending-parent",
+            "standalone-builder-test-parent",
+            "--ending-tree",
+            tree,
+            "--ending-branch",
+            "standalone-builder-test-branch",
+            "--hosted-ci-run-id",
+            "test-run",
+            "--hosted-ci-head-sha",
+            head,
+        ]
+        if scenario is not None:
+            evidence = tmp_path / f"{name}.scenario.json"
+            evidence.write_text(
+                json.dumps({"revision": head, "tree": tree, "tests": [scenario]}),
+                encoding="utf-8",
+            )
+            command.extend(
+                [
+                    "--scenario-evidence",
+                    str(evidence),
+                    "--scenario-revision",
+                    head,
+                    "--scenario-tree",
+                    tree,
+                ]
+            )
+        result = subprocess.run(command, check=False, capture_output=True, text=True)
+        assert result.returncode == 0, result.stderr
+        return cast(dict[str, object], json.loads(output.read_text(encoding="utf-8")))
+
+    missing = run_case("missing", None)
+    missing_requirement = cast(dict[str, Any], missing["r1_requirements"])["requirements"][0]
+    assert missing_requirement["status"] == "NOT_EXECUTED"
+
+    failed = run_case(
+        "failed",
+        {
+            "test_id": (
+                "tests.test_storage_stewardship::"
+                "test_r1_reproduction_partial_batch_does_not_complete_from_first_item"
+            ),
+            "name": "test_r1_reproduction_partial_batch_does_not_complete_from_first_item",
+            "status": "FAIL",
+            "exit_code": 1,
+        },
+    )
+    failed_requirement = cast(dict[str, Any], failed["r1_requirements"])["requirements"][0]
+    assert failed_requirement["status"] == "FAIL"
+
+    stale = run_case(
+        "stale",
+        {
+            "test_id": (
+                "tests.test_storage_stewardship::"
+                "test_r1_reproduction_partial_batch_does_not_complete_from_first_item"
+            ),
+            "name": "test_r1_reproduction_partial_batch_does_not_complete_from_first_item",
+            "status": "PASS",
+            "revision": "stale-source",
+            "tree": "stale-tree",
+            "exit_code": 0,
+        },
+    )
+    stale_requirement = cast(dict[str, Any], stale["r1_requirements"])["requirements"][0]
+    assert stale_requirement["status"] == "BLOCKING_NOT_PROVEN"
+
+
+def test_r1_reproduction_partial_batch_does_not_complete_from_first_item(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "owned"
+    root.mkdir()
+    sources = tuple(root / f"source-{index}.txt" for index in range(1, 4))
+    for index, source in enumerate(sources, start=1):
+        source.write_bytes(f"item-{index}".encode())
+    broker, _ = _broker(root)
+
+    def interrupt(boundary: str, item: MutationItem) -> None:
+        if boundary == "after_copy_before_finalize" and item.source == sources[1]:
+            raise RuntimeError("interrupt second item")
+
+    steward = FileSteward(
+        root,
+        permission_broker=broker,
+        host_bridge=HostBridge(),
+        fault_injector=interrupt,
+    )
+    plan = steward.plan_batch(
+        MutationOperation.COPY,
+        [(source, root / f"copy-{index}.txt", None) for index, source in enumerate(sources, 1)],
+    )
+    with pytest.raises(MutationUnknownOutcome):
+        _run(steward.execute_async(plan))
+
+    restarted = FileSteward(
+        root,
+        manifest_store=MutationManifestStore(root / ".mutation-state"),
+    )
+    result = restarted.reconcile(plan)
+
+    assert result.state is not MutationState.COMPLETED
+    assert (root / "copy-1.txt").read_bytes() == b"item-1"
+    assert not (root / "copy-3.txt").exists()
+
+
+def test_r1_reproduction_batch_restore_requires_all_items(tmp_path: Path) -> None:
+    root = tmp_path / "owned"
+    root.mkdir()
+    sources = (root / "first.txt", root / "second.txt")
+    sources[0].write_bytes(b"first")
+    sources[1].write_bytes(b"second")
+    broker, authenticator = _broker(root)
+    steward = FileSteward(root, permission_broker=broker, host_bridge=HostBridge())
+    plan = steward.plan_batch(
+        MutationOperation.SAFE_DELETE,
+        [(source, None, _classification()) for source in sources],
+    )
+    with pytest.raises(MutationApprovalRequired):
+        _run(steward.execute_async(plan))
+    _run(_approve_delete(broker, authenticator, plan.task_id))
+    assert steward.execute(plan).success
+
+    restored = _run(steward.restore_async(plan))
+
+    assert restored.state is MutationState.RESTORED
+    assert all(
+        source.exists() and source.read_bytes() == expected
+        for source, expected in zip(sources, (b"first", b"second"), strict=True)
+    )
+
+
+def test_r1_reproduction_partial_effect_is_not_a_not_executed_receipt(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "owned"
+    root.mkdir()
+    first = root / "first.txt"
+    second = root / "second.txt"
+    first.write_bytes(b"first")
+    second.write_bytes(b"second")
+    audit = InMemoryAuditSink()
+    authenticator = TrustedApprovalAuthenticator(source=ApprovalSource.TRUSTED_UI)
+    broker = PermissionBroker(
+        PolicyEngine(
+            (
+                PolicyRule(
+                    "storage.test-root",
+                    Permission.FILESYSTEM_WRITE,
+                    Decision.ALLOW,
+                    ScopeConstraint(
+                        paths=(str(root),),
+                        tools=frozenset({"storage.file_steward"}),
+                    ),
+                    frozenset({"storage.file.copy"}),
+                ),
+            )
+        ),
+        audit_sink=audit,
+        approval_context_verifier=authenticator.verifier(),
+    )
+    steward = FileSteward(root, permission_broker=broker, host_bridge=HostBridge())
+    plan = steward.plan_batch(
+        MutationOperation.COPY,
+        [(first, root / "first-copy.txt", None), (second, root / "second-copy.txt", None)],
+    )
+    second.write_bytes(b"changed after planning")
+
+    with pytest.raises(StalePlan):
+        _run(steward.execute_async(plan))
+
+    records = _run(audit.records())
+    execution_outcomes = tuple(record.execution_outcome for record in records)
+    assert (root / "first-copy.txt").read_bytes() == b"first"
+    assert "not_executed" not in execution_outcomes
+
+
+def test_r1_reproduction_missing_host_bridge_does_not_bypass_host_authority(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "owned"
+    root.mkdir()
+    source = root / "source.txt"
+    destination = root / "destination.txt"
+    source.write_bytes(b"host boundary")
+    broker, _ = _broker(root)
+    steward = FileSteward(root, permission_broker=broker)
+    plan = steward.plan_copy(source, destination)
+
+    with pytest.raises(MutationDenied):
+        _run(steward.execute_async(plan))
+
+    assert not destination.exists()
+
+
+def test_r1_reproduction_cross_volume_finalization_preserves_conflict_and_source(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "owned"
+    root.mkdir()
+    source = root / "source.txt"
+    source.write_bytes(b"original")
+    broker, _ = _broker(root)
+    original_device_identity = storage_module._device_identity
+    source_device = original_device_identity(source)
+
+    monkeypatch.setattr(
+        storage_module,
+        "_device_identity",
+        lambda path: source_device if path == source else "destination-device",
+    )
+    conflict_destination = root / "conflict.txt"
+
+    def create_conflict(boundary: str, _item: MutationItem) -> None:
+        if boundary == "after_cross_volume_copy":
+            conflict_destination.write_bytes(b"sentinel")
+
+    conflict_steward = FileSteward(
+        root,
+        permission_broker=broker,
+        host_bridge=HostBridge(),
+        fault_injector=create_conflict,
+    )
+    conflict_plan = conflict_steward.plan_move(
+        source, conflict_destination, classification=_classification()
+    )
+    with pytest.raises(MutationConflict):
+        _run(conflict_steward.execute_async(conflict_plan))
+    assert conflict_destination.read_bytes() == b"sentinel"
+    assert source.read_bytes() == b"original"
+
+    race_source = root / "race-source.txt"
+    race_source.write_bytes(b"race-original")
+    race_destination = root / "race-destination.txt"
+    monkeypatch.setattr(
+        storage_module,
+        "_device_identity",
+        lambda path: source_device if path == race_source else "destination-device",
+    )
+
+    def change_source(boundary: str, item: MutationItem) -> None:
+        if boundary == "after_cross_volume_copy":
+            item.source.write_bytes(b"changed during finalization")
+
+    race_broker, _ = _broker(root)
+    race_steward = FileSteward(
+        root,
+        permission_broker=race_broker,
+        host_bridge=HostBridge(),
+        fault_injector=change_source,
+    )
+    race_plan = race_steward.plan_move(
+        race_source, race_destination, classification=_classification()
+    )
+    with pytest.raises((StalePlan, MutationUnknownOutcome)):
+        _run(race_steward.execute_async(race_plan))
+    assert race_source.exists()
+    assert race_source.read_bytes() == b"changed during finalization"
+
+
+def test_r1_receipt_bound_host_bridge_covers_exact_batch_and_rejects_replays(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "owned"
+    root.mkdir()
+    source = root / "source.txt"
+    source.write_bytes(b"receipt-bound")
+    broker, _ = _broker(root)
+    bridge = HostBridge()
+    steward = FileSteward(root, permission_broker=broker, host_bridge=bridge)
+    plan = steward.plan_copy(source, root / "destination.txt")
+    receipt = _run(steward._authorize(plan, user_id=None))  # noqa: SLF001
+    assert _run(broker.begin_execution(receipt)) is None
+    operation = steward._effective_operation(plan)  # noqa: SLF001
+    arguments = steward._authorization_arguments(plan)  # noqa: SLF001
+
+    def request(**changes: Any) -> HostBridgeRequest:
+        base = HostBridgeRequest(
+            request_id=UUID(int=0),
+            task_id=plan.task_id,
+            instance_id=bridge.instance_id,
+            operation=steward._bridge_operation(operation),  # noqa: SLF001
+            resource=steward._bridge_resource(plan),  # noqa: SLF001
+            scope=str(root),
+            risk=steward._risk(plan),  # noqa: SLF001
+            expires_at=receipt.expires_at,
+            tool_id=steward._TOOL_ID,  # noqa: SLF001
+            action=f"storage.file.{operation.value}",
+            argument_fingerprint=receipt.argument_fingerprint,
+            action_fingerprint=receipt.action_fingerprint,
+            approval_identity=None,
+            safety_class=steward._safety_class(plan),  # noqa: SLF001
+        )
+        return replace(base, **changes)
+
+    def check(
+        candidate: HostBridgeRequest,
+        supplied_receipt: Any = receipt,
+        supplied_arguments: Any = arguments,
+    ) -> bool:
+        return bridge.authorize_with_receipt(
+            candidate,
+            receipt=supplied_receipt,
+            broker=broker,
+            normalized_arguments=supplied_arguments,
+            expected_instance_id=bridge.instance_id,
+        ).allowed
+
+    assert not check(request(expires_at=datetime.now(UTC) - timedelta(seconds=1)))
+    assert not check(request(task_id=UUID(int=1)))
+    assert not check(request(instance_id=UUID(int=1)))
+    assert not check(request(resource="manifest:changed"))
+    assert not check(request(operation=HostBridgeOperation.FILE_READ))
+    assert not check(request(argument_fingerprint="wrong-fingerprint"))
+    changed_arguments = dict(arguments)
+    changed_arguments["items"] = ("out-of-scope-recovery-path",)
+    assert not check(request(), supplied_arguments=changed_arguments)
+    assert not check(request(), supplied_receipt=None)
+    exact = request(request_id=uuid4())
+    assert check(exact)
+    assert not check(exact)
+    assert _run(broker.record_execution_outcome(receipt, "binding_test")) is None
+    assert not check(request(request_id=uuid4()))
+
+
+def test_r1_restore_interruption_is_not_reconciled_as_delete(tmp_path: Path) -> None:
+    root = tmp_path / "owned"
+    root.mkdir()
+    sources = (root / "first.txt", root / "second.txt")
+    sources[0].write_bytes(b"first")
+    sources[1].write_bytes(b"second")
+    broker, authenticator = _broker(root)
+    delete_steward = FileSteward(root, permission_broker=broker, host_bridge=HostBridge())
+    plan = delete_steward.plan_batch(
+        MutationOperation.SAFE_DELETE,
+        [(source, None, _classification()) for source in sources],
+    )
+    with pytest.raises(MutationApprovalRequired):
+        _run(delete_steward.execute_async(plan))
+    _run(_approve_delete(broker, authenticator, plan.task_id))
+    assert delete_steward.execute(plan).success
+
+    def interrupt_restore(boundary: str, item: MutationItem) -> None:
+        if boundary == "before_restore_finalize" and item.source == sources[1]:
+            raise RuntimeError("restore interrupted")
+
+    delete_steward.fault_injector = interrupt_restore
+    restoring = delete_steward
+    with pytest.raises(MutationUnknownOutcome):
+        _run(restoring.restore_async(plan))
+    interrupted = restoring.manifests.load(plan.plan_id)
+    assert interrupted.phase.value == "restore"
+    assert interrupted.state is MutationState.UNKNOWN_OUTCOME
+    assert sources[0].read_bytes() == b"first"
+    assert not sources[1].exists()
+
+    restarted = FileSteward(
+        root,
+        manifest_store=MutationManifestStore(root / ".mutation-state"),
+    )
+    reconciled = restarted.reconcile(plan)
+    assert reconciled.state is MutationState.UNKNOWN_OUTCOME
+    assert reconciled.manifest.phase.value == "restore"
+
+
+def test_r1_child_process_interruption_reconciles_without_replay(tmp_path: Path) -> None:
+    root = tmp_path / "owned"
+    root.mkdir()
+    source = root / "source.txt"
+    source.write_bytes(b"child interruption")
+    broker, _ = _broker(root)
+    steward = FileSteward(root, permission_broker=broker, host_bridge=HostBridge())
+    plan = steward.plan_copy(source, root / "destination.txt")
+    signal = tmp_path / "child-ready.signal"
+    child = tmp_path / "interrupt_child.py"
+    child.write_text(
+        """
+import asyncio
+import sys
+import time
+from pathlib import Path
+from uuid import UUID
+
+from jarvis.permissions import (
+    Decision,
+    Permission,
+    PermissionBroker,
+    PolicyEngine,
+    PolicyRule,
+    ScopeConstraint,
+)
+from jarvis.storage import FileSteward, MutationItem
+from jarvis.vm.bridge import HostBridge
+
+root = Path(sys.argv[1])
+plan_id = UUID(sys.argv[2])
+signal = Path(sys.argv[3])
+
+broker = PermissionBroker(PolicyEngine((PolicyRule(
+    "child-storage",
+    Permission.FILESYSTEM_WRITE,
+    Decision.ALLOW,
+    ScopeConstraint(paths=(str(root),), tools=frozenset({"storage.file_steward"})),
+    frozenset({"storage.file.copy"}),
+),)))
+
+def pause(boundary: str, _item: MutationItem) -> None:
+    if boundary == "after_copy_before_finalize":
+        signal.write_text("effect boundary entered", encoding="utf-8")
+        while True:
+            time.sleep(0.1)
+
+asyncio.run(FileSteward(
+    root,
+    permission_broker=broker,
+    host_bridge=HostBridge(),
+    fault_injector=pause,
+).execute_async(plan_id))
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+    child_environment = dict(os.environ)
+    child_environment["PYTHONPATH"] = str(Path.cwd())
+    process = subprocess.Popen(
+        [sys.executable, str(child), str(root), str(plan.plan_id), str(signal)],
+        cwd=str(Path.cwd()),
+        env=child_environment,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        deadline = time.monotonic() + 15
+        while not signal.exists() and time.monotonic() < deadline:
+            if process.poll() is not None:
+                stdout, stderr = process.communicate()
+                raise AssertionError(f"child exited before interruption: {stdout}; {stderr}")
+            time.sleep(0.05)
+        assert signal.exists()
+        process.terminate()
+        process.wait(timeout=10)
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.wait(timeout=10)
+
+    restarted = FileSteward(
+        root,
+        manifest_store=MutationManifestStore(root / ".mutation-state"),
+    )
+    result = restarted.reconcile(plan)
+    assert result.state is MutationState.UNKNOWN_OUTCOME
+    assert not (root / "destination.txt").exists()
+
+
+def test_r1_live_protection_revalidation_denies_new_obligations(tmp_path: Path) -> None:
+    root = tmp_path / "owned"
+    root.mkdir()
+    source = root / "source.txt"
+    source.write_bytes(b"live protection")
+    broker, authenticator = _broker(root)
+    live = {"classification": _classification()}
+    steward = FileSteward(
+        root,
+        permission_broker=broker,
+        host_bridge=HostBridge(),
+        live_protection_probe=lambda _path: live["classification"],
+    )
+    plan = steward.plan_delete(source, classification=_classification())
+    live["classification"] = _classification(active=True)
+    with pytest.raises(MutationApprovalRequired):
+        _run(steward.execute_async(plan))
+    _run(_approve_delete(broker, authenticator, plan.task_id))
+    with pytest.raises(MutationDenied):
+        _run(steward.execute_async(plan))
+    assert source.exists()
+
+    evidence_source = root / "evidence.txt"
+    evidence_source.write_bytes(b"evidence")
+    evidence_plan = steward.plan_delete(evidence_source, classification=_classification())
+    live["classification"] = _classification(retention=RetentionState.NEEDED_FOR_EVIDENCE)
+    with pytest.raises(MutationApprovalRequired):
+        _run(steward.execute_async(evidence_plan))
+    _run(_approve_delete(broker, authenticator, evidence_plan.task_id))
+    with pytest.raises(MutationDenied):
+        _run(steward.execute_async(evidence_plan))
+    assert evidence_source.exists()
+
+
+def test_r1_reproduction_builder_cannot_pass_without_scenario_evidence(tmp_path: Path) -> None:
+    head = "standalone-builder-test-source"
+    system_evidence = tmp_path / "system.json"
+    system_evidence.write_text(
+        json.dumps(
+            {
+                "status": "passed",
+                "exit_code": 0,
+                "revision": head,
+                "suite": "v1-acceptance",
+                "results": [{"name": "pytest:passed", "status": "passed", "detail": "1"}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    output = tmp_path / "artifact.json"
+    result = subprocess.run(
+        [
+            sys.executable,
+            "scripts/acceptance/build_v1_i_r3b_artifact.py",
+            "--output",
+            str(output),
+            "--system-evidence",
+            str(system_evidence),
+            "--exact-coverage",
+            "90.0",
+            "--ending-commit",
+            head,
+            "--ending-parent",
+            "standalone-builder-test-parent",
+            "--ending-tree",
+            "standalone-builder-test-tree",
+            "--ending-branch",
+            "standalone-builder-test-branch",
+            "--hosted-ci-run-id",
+            "test-run",
+            "--hosted-ci-head-sha",
+            head,
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    artifact = json.loads(output.read_text(encoding="utf-8"))
+    cases = artifact["acceptance_matrix"]["cases"]
+    assert any(case["status"] != "PASS" for case in cases)
