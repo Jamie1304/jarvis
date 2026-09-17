@@ -252,6 +252,7 @@ class AcquisitionRequest:
     download_size_bytes: int | None = None
     installed_size_bytes: int | None = None
     target_location: str | None = None
+    target_volume_identity: str | None = None
     license_metadata: str | None = None
     purchase_cost: float | None = None
     network_required: bool | None = None
@@ -279,6 +280,7 @@ class AcquisitionRequest:
             (self.source, "Source", 2_048),
             (self.publisher, "Publisher", 512),
             (self.target_location, "Target location", 1_024),
+            (self.target_volume_identity, "Target volume identity", 512),
             (self.license_metadata, "License metadata", 512),
             (self.verification_plan, "Verification plan", 2_000),
             (self.rollback_plan, "Rollback plan", 2_000),
@@ -351,6 +353,7 @@ class AcquisitionRequest:
             "download_size_bytes": self.download_size_bytes,
             "installed_size_bytes": self.installed_size_bytes,
             "target_location": self.target_location,
+            "target_volume_identity": self.target_volume_identity,
             "license_metadata": self.license_metadata,
             "purchase_cost": self.purchase_cost,
             "network_required": self.network_required,

@@ -4,7 +4,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from jarvis.permissions.broker import PermissionBroker
 from jarvis.permissions.models import (
@@ -32,6 +32,11 @@ class HostBridgeOperation(StrEnum):
     CLIPBOARD_WRITE = "HOST_CLIPBOARD_WRITE"
     DEVICE_ACCESS = "HOST_DEVICE_ACCESS"
     MODEL_INFERENCE = "HOST_MODEL_INFERENCE"
+    FILE_COPY = "HOST_FILE_COPY"
+    FILE_MOVE = "HOST_FILE_MOVE"
+    FILE_RENAME = "HOST_FILE_RENAME"
+    FILE_DELETE = "HOST_FILE_DELETE"
+    FILE_RESTORE = "HOST_FILE_RESTORE"
 
 
 @dataclass(frozen=True, slots=True)
@@ -68,6 +73,7 @@ class HostBridge:
         self.requests: list[HostBridgeRequest] = []
         self._permission_verifier = permission_verifier or (lambda request: False)
         self._consumed_request_ids: set[UUID] = set()
+        self.instance_id = uuid4()
 
     def authorize(self, request: HostBridgeRequest) -> HostBridgeResult:
         self.requests.append(request)
