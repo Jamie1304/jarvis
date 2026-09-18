@@ -1308,21 +1308,21 @@ def test_r1_reproduction_builder_rejects_missing_failed_and_stale_evidence(
                 tmp_path / f"{name}.scenario.raw", head, tree, source
             )
             execution["exit_code"] = 1 if scenario.get("status") == "FAIL" else 0
-            evidence.write_text(
-                json.dumps(
-                    {
-                        "revision": head,
-                        "tree": tree,
-                        "execution": execution,
-                        "tests": [scenario],
-                    }
-                ),
-                encoding="utf-8",
-            )
+            payload = {
+                "revision": head,
+                "tree": tree,
+                "tests": [scenario],
+            }
+            evidence.write_text(json.dumps(payload), encoding="utf-8")
+            _bind_result_artifact(execution, evidence, "scenario-json")
+            provenance = tmp_path / f"{name}.scenario-provenance.json"
+            provenance.write_text(json.dumps({"execution": execution}), encoding="utf-8")
             command.extend(
                 [
                     "--scenario-evidence",
                     str(evidence),
+                    "--scenario-provenance",
+                    str(provenance),
                     "--scenario-revision",
                     head,
                     "--scenario-tree",
@@ -1981,13 +1981,20 @@ def test_r1r1_effect_reconciliation_does_not_treat_broken_reparse_as_absence(
 
 
 def _bound_scenario_execution(
-    raw: Path, revision: str, tree: str, source: dict[str, object]
+    raw: Path,
+    revision: str,
+    tree: str,
+    source: dict[str, object],
+    *,
+    raw_contents: bytes = b"raw scenario output",
+    command: list[str] | None = None,
+    selection: str = "real host volume inventory",
 ) -> dict[str, object]:
-    raw.write_bytes(b"raw scenario output")
+    raw.write_bytes(raw_contents)
     return {
         "run_id": "r3b-r1-r1-scenario",
-        "command": [sys.executable, "-m", "pytest", "tests/test_storage_stewardship.py"],
-        "selection": "real host volume inventory",
+        "command": command or [sys.executable, "-m", "pytest", "tests/test_storage_stewardship.py"],
+        "selection": selection,
         "base_revision": revision,
         "tested_tree": tree,
         "tree_before": tree,
@@ -2004,6 +2011,14 @@ def _bound_scenario_execution(
     }
 
 
+def _bind_result_artifact(execution: dict[str, object], path: Path, role: str) -> None:
+    digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    execution["result_artifact"] = {"path": str(path), "sha256": digest, "role": role}
+    raw_evidence = cast(list[dict[str, str]], execution["raw_evidence"])
+    if not any(item.get("path") == str(path) for item in raw_evidence):
+        raw_evidence.append({"path": str(path), "sha256": digest})
+
+
 def test_r1r1_pre_fix_reproduction_parser_to_matrix_keeps_requirement_identity(
     tmp_path: Path,
 ) -> None:
@@ -2013,7 +2028,6 @@ def test_r1r1_pre_fix_reproduction_parser_to_matrix_keeps_requirement_identity(
     payload = {
         "revision": revision,
         "tree": tree,
-        "execution": _bound_scenario_execution(tmp_path / "scenario.raw", revision, tree, source),
         "tests": [
             {
                 "test_id": "tests/test_storage_stewardship.py::test_host_volume",
@@ -2029,8 +2043,17 @@ def test_r1r1_pre_fix_reproduction_parser_to_matrix_keeps_requirement_identity(
     }
     evidence = tmp_path / "scenario.json"
     evidence.write_text(json.dumps(payload), encoding="utf-8")
+    execution = _bound_scenario_execution(tmp_path / "scenario.raw", revision, tree, source)
+    _bind_result_artifact(execution, evidence, "scenario-json")
+    provenance = tmp_path / "scenario-provenance.json"
+    provenance.write_text(json.dumps({"execution": execution}), encoding="utf-8")
 
-    records = r3b_artifact._scenario_tests(evidence, supplied_revision=revision, supplied_tree=tree)
+    records = r3b_artifact._scenario_tests(
+        evidence,
+        supplied_revision=revision,
+        supplied_tree=tree,
+        provenance_path=provenance,
+    )
     matrix = r3b_artifact._acceptance_matrix(records, source, revision, tree)
 
     assert records[0]["requirement_id"] == "R3B-001"
@@ -2091,55 +2114,59 @@ def test_r1r1_mapping_duplicates_and_conflicts_are_not_silently_green(tmp_path: 
     tree = "9" * 40
     source = r3b_artifact._source_identity()
 
-    def record(name: str, status: str, raw_name: str) -> dict[str, object]:
-        raw = tmp_path / raw_name
-        execution = _bound_scenario_execution(raw, revision, tree, source)
-        execution["exit_code"] = 0 if status == "PASS" else 1
+    def record(name: str, status: str) -> dict[str, object]:
         return {
             "test_id": name,
             "requirement_id": "R3B-001",
             "case": "real host volume inventory",
             "status": status,
-            "execution_classification": "EXECUTED_PASS",
-            "evidence_reference": str(raw),
+            "execution_classification": (
+                "EXECUTED_FAILED" if status == "FAIL" else "EXECUTED_PASS"
+            ),
             "observed_outcome": status,
             "exit_code": 0 if status == "PASS" else 1,
-            "execution": execution,
         }
 
     duplicate_path = tmp_path / "duplicate.json"
-    duplicate_path.write_text(
-        json.dumps(
-            {
-                "revision": revision,
-                "tree": tree,
-                "tests": [
-                    record("same-test", "PASS", "duplicate-a.raw"),
-                    record("same-test", "PASS", "duplicate-b.raw"),
-                ],
-            }
-        ),
-        encoding="utf-8",
+    duplicate_payload = {
+        "revision": revision,
+        "tree": tree,
+        "tests": [record("same-test", "PASS"), record("same-test", "PASS")],
+    }
+    duplicate_path.write_text(json.dumps(duplicate_payload), encoding="utf-8")
+    duplicate_execution = _bound_scenario_execution(
+        tmp_path / "duplicate.raw", revision, tree, source
     )
-    duplicate_records = r3b_artifact._scenario_tests(duplicate_path)
+    _bind_result_artifact(duplicate_execution, duplicate_path, "scenario-json")
+    duplicate_provenance = tmp_path / "duplicate-provenance.json"
+    duplicate_provenance.write_text(
+        json.dumps({"execution": duplicate_execution}), encoding="utf-8"
+    )
+    duplicate_records = r3b_artifact._scenario_tests(
+        duplicate_path, provenance_path=duplicate_provenance
+    )
     duplicate_matrix = r3b_artifact._acceptance_matrix(duplicate_records, source, revision, tree)
     assert duplicate_matrix[0]["status"] == "BLOCKING_NOT_PROVEN"
 
     conflict_path = tmp_path / "conflict.json"
-    conflict_path.write_text(
-        json.dumps(
-            {
-                "revision": revision,
-                "tree": tree,
-                "tests": [
-                    record("pass-test", "PASS", "conflict-pass.raw"),
-                    record("fail-test", "FAIL", "conflict-fail.raw"),
-                ],
-            }
-        ),
-        encoding="utf-8",
+    conflict_records_payload = [record("pass-test", "PASS"), record("fail-test", "FAIL")]
+    conflict_records_payload[0]["exit_code"] = 1
+    conflict_payload = {
+        "revision": revision,
+        "tree": tree,
+        "tests": conflict_records_payload,
+    }
+    conflict_path.write_text(json.dumps(conflict_payload), encoding="utf-8")
+    conflict_execution = _bound_scenario_execution(
+        tmp_path / "conflict.raw", revision, tree, source
     )
-    conflict_records = r3b_artifact._scenario_tests(conflict_path)
+    conflict_execution["exit_code"] = 1
+    _bind_result_artifact(conflict_execution, conflict_path, "scenario-json")
+    conflict_provenance = tmp_path / "conflict-provenance.json"
+    conflict_provenance.write_text(json.dumps({"execution": conflict_execution}), encoding="utf-8")
+    conflict_records = r3b_artifact._scenario_tests(
+        conflict_path, provenance_path=conflict_provenance
+    )
     conflict_matrix = r3b_artifact._acceptance_matrix(conflict_records, source, revision, tree)
     assert conflict_matrix[0]["status"] == "FAIL"
 
@@ -2149,7 +2176,22 @@ def test_r1r1_gate_reader_requires_execution_and_raw_digest(tmp_path: Path) -> N
     tree = "b" * 40
     source = r3b_artifact._source_identity()
     raw = tmp_path / "gate.raw"
-    execution = _bound_scenario_execution(raw, revision, tree, source)
+    gate_result = {
+        "schema": "d6-test-strength-audit-1",
+        "diff_check": "PASS",
+        "result": "PASS",
+        **{flag: "NO" for flag in r3b_artifact._TEST_STRENGTH_FLAGS},
+    }
+    execution = _bound_scenario_execution(
+        raw,
+        revision,
+        tree,
+        source,
+        raw_contents=json.dumps(gate_result).encode(),
+        command=[sys.executable, "scripts/acceptance/audit_test_strength.py"],
+        selection="audit_test_strength",
+    )
+    _bind_result_artifact(execution, raw, "gate-result")
     evidence = {
         "status": "PASS",
         "exit_code": 0,
@@ -2193,6 +2235,321 @@ def test_r1r1_gate_reader_requires_execution_and_raw_digest(tmp_path: Path) -> N
         source=source,
     )
     assert missing_provenance["status"] == "BLOCKING_NOT_PROVEN"
+
+
+@pytest.mark.parametrize(
+    ("label", "script", "selection", "result"),
+    (
+        (
+            "test_strength",
+            "scripts/acceptance/audit_test_strength.py",
+            "audit_test_strength",
+            json.dumps(
+                {
+                    "schema": "d6-test-strength-audit-1",
+                    "diff_check": "PASS",
+                    "result": "PASS",
+                    **{flag: "NO" for flag in r3b_artifact._TEST_STRENGTH_FLAGS},
+                }
+            ),
+        ),
+        (
+            "package_smoke",
+            "scripts/package_smoke.py",
+            "package_smoke",
+            "package artifact smoke: PASS\n",
+        ),
+    ),
+)
+def test_r3b_e1_genuine_bound_gate_result_passes(
+    tmp_path: Path,
+    label: str,
+    script: str,
+    selection: str,
+    result: str,
+) -> None:
+    revision = "d" * 40
+    tree = "e" * 40
+    source = r3b_artifact._source_identity()
+    raw = tmp_path / f"{label}.stdout"
+    execution = _bound_scenario_execution(
+        raw,
+        revision,
+        tree,
+        source,
+        raw_contents=result.encode(),
+        command=[sys.executable, script],
+        selection=selection,
+    )
+    _bind_result_artifact(execution, raw, "gate-result")
+    evidence = tmp_path / f"{label}.json"
+    evidence.write_text(
+        json.dumps(
+            {
+                "status": "PASS",
+                "exit_code": 0,
+                "revision": revision,
+                "tree": tree,
+                "execution": execution,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    observed = r3b_artifact._observed_gate(
+        label=label,
+        supplied_status="PASS",
+        evidence_path=evidence,
+        ending=revision,
+        ending_tree=tree,
+        source=source,
+    )
+
+    assert observed["status"] == "PASS"
+
+
+@pytest.mark.parametrize("label", ("test_strength", "package_smoke"))
+def test_r3b_e1_unrelated_successful_command_cannot_impersonate_gate(
+    tmp_path: Path, label: str
+) -> None:
+    revision = "f" * 40
+    tree = "0" * 40
+    source = r3b_artifact._source_identity()
+    result = (
+        json.dumps(
+            {
+                "schema": "d6-test-strength-audit-1",
+                "diff_check": "PASS",
+                "result": "PASS",
+                **{flag: "NO" for flag in r3b_artifact._TEST_STRENGTH_FLAGS},
+            }
+        )
+        if label == "test_strength"
+        else "package artifact smoke: PASS\n"
+    )
+    raw = tmp_path / f"{label}.unrelated.stdout"
+    execution = _bound_scenario_execution(
+        raw,
+        revision,
+        tree,
+        source,
+        raw_contents=result.encode(),
+        command=[sys.executable, "-c", "print(1)"],
+        selection="unrelated probe",
+    )
+    _bind_result_artifact(execution, raw, "gate-result")
+    evidence = tmp_path / f"{label}.unrelated.json"
+    evidence.write_text(
+        json.dumps({"status": "PASS", "exit_code": 0, "execution": execution}),
+        encoding="utf-8",
+    )
+
+    observed = r3b_artifact._observed_gate(
+        label=label,
+        supplied_status="PASS",
+        evidence_path=evidence,
+        ending=revision,
+        ending_tree=tree,
+        source=source,
+    )
+
+    assert observed["status"] == "BLOCKING_NOT_PROVEN"
+    assert "canonical gate command" in observed["disposition"]
+
+
+def test_r3b_e1_explicit_wrapper_child_command_is_allowed(tmp_path: Path) -> None:
+    revision = "a" * 40
+    tree = "b" * 40
+    source = r3b_artifact._source_identity()
+    raw = tmp_path / "wrapped.stdout"
+    result = json.dumps(
+        {
+            "schema": "d6-test-strength-audit-1",
+            "diff_check": "PASS",
+            "result": "PASS",
+            **{flag: "NO" for flag in r3b_artifact._TEST_STRENGTH_FLAGS},
+        }
+    )
+    execution = _bound_scenario_execution(
+        raw,
+        revision,
+        tree,
+        source,
+        raw_contents=result.encode(),
+        command=["trusted-wrapper", "run", "test-strength"],
+        selection="audit_test_strength",
+    )
+    execution["child_command"] = [
+        sys.executable,
+        "scripts/acceptance/audit_test_strength.py",
+    ]
+    _bind_result_artifact(execution, raw, "gate-result")
+    evidence = tmp_path / "wrapped.json"
+    evidence.write_text(
+        json.dumps({"status": "PASS", "exit_code": 0, "execution": execution}),
+        encoding="utf-8",
+    )
+
+    observed = r3b_artifact._observed_gate(
+        label="test_strength",
+        supplied_status="PASS",
+        evidence_path=evidence,
+        ending=revision,
+        ending_tree=tree,
+        source=source,
+    )
+
+    assert observed["status"] == "PASS"
+
+
+def test_r3b_e1_standalone_gate_reads_bound_pytest_result(tmp_path: Path) -> None:
+    revision = "c" * 40
+    tree = "d" * 40
+    source = r3b_artifact._source_identity()
+    raw = tmp_path / "system.stdout"
+    execution = _bound_scenario_execution(
+        raw,
+        revision,
+        tree,
+        source,
+        raw_contents=(
+            b"============================= test session starts =============================\n"
+            b"============================== 153 passed, 2 skipped in 1.00s "
+            b"=============================="
+        ),
+        command=[sys.executable, "scripts/run_system_tests.py", "--suite", "v1-acceptance"],
+        selection="v1-acceptance",
+    )
+    _bind_result_artifact(execution, raw, "system-result")
+    evidence = tmp_path / "system.json"
+    evidence.write_text(
+        json.dumps({"status": "passed", "exit_code": 0, "execution": execution}),
+        encoding="utf-8",
+    )
+
+    observed = r3b_artifact._observed_gate(
+        label="standalone_v1_acceptance",
+        supplied_status="PASS",
+        evidence_path=evidence,
+        ending=revision,
+        ending_tree=tree,
+        source=source,
+    )
+
+    assert observed["status"] == "PASS"
+
+
+def _write_junit(path: Path, *, test_name: str, outcome: str = "pass") -> None:
+    child = (
+        "<failure message='failed'>failure</failure>"
+        if outcome == "fail"
+        else "<skipped/>"
+        if outcome == "skip"
+        else ""
+    )
+    path.write_text(
+        f"<testsuite><testcase classname='tests.test_storage_stewardship' name='{test_name}'>"
+        f"{child}</testcase></testsuite>",
+        encoding="utf-8",
+    )
+
+
+def test_r3b_e1_substituted_junit_is_not_accepted_as_bound_result(tmp_path: Path) -> None:
+    revision = "1" * 40
+    tree = "2" * 40
+    source = r3b_artifact._source_identity()
+    actual = tmp_path / "actual.xml"
+    claimed = tmp_path / "claimed.xml"
+    _write_junit(actual, test_name="actual_test")
+    _write_junit(claimed, test_name="claimed_test")
+    execution = _bound_scenario_execution(tmp_path / "scenario.stdout", revision, tree, source)
+    _bind_result_artifact(execution, actual, "junit")
+    provenance = tmp_path / "provenance.json"
+    provenance.write_text(json.dumps({"execution": execution}), encoding="utf-8")
+
+    records = r3b_artifact._scenario_tests(claimed, provenance_path=provenance)
+
+    assert records[0]["status"] == "BLOCKING_NOT_PROVEN"
+    assert records[0]["execution_classification"] == "UNBOUND_RESULT_ARTIFACT"
+    assert all(record["status"] != "PASS" for record in records)
+
+
+def test_r3b_e1_missing_claimed_testcase_is_not_created_from_bound_junit(tmp_path: Path) -> None:
+    revision = "3" * 40
+    tree = "4" * 40
+    source = r3b_artifact._source_identity()
+    actual = tmp_path / "actual.xml"
+    _write_junit(actual, test_name="only_actual_test")
+    execution = _bound_scenario_execution(tmp_path / "scenario.stdout", revision, tree, source)
+    _bind_result_artifact(execution, actual, "junit")
+    provenance = tmp_path / "provenance.json"
+    provenance.write_text(json.dumps({"execution": execution}), encoding="utf-8")
+
+    records = r3b_artifact._scenario_tests(actual, provenance_path=provenance)
+
+    assert r3b_artifact._find_scenario_test(records, "claimed_but_absent") is None
+    assert r3b_artifact._find_scenario_test(records, "only_actual_test") is not None
+
+
+@pytest.mark.parametrize("outcome", ("fail", "skip"))
+def test_r3b_e1_actual_failed_or_skipped_junit_cannot_become_pass(
+    tmp_path: Path, outcome: str
+) -> None:
+    revision = "5" * 40
+    tree = "6" * 40
+    source = r3b_artifact._source_identity()
+    actual = tmp_path / f"{outcome}.xml"
+    test_name = "test_actual_outcome"
+    _write_junit(actual, test_name=test_name, outcome=outcome)
+    execution = _bound_scenario_execution(tmp_path / f"{outcome}.stdout", revision, tree, source)
+    _bind_result_artifact(execution, actual, "junit")
+    provenance = tmp_path / f"{outcome}-provenance.json"
+    provenance.write_text(json.dumps({"execution": execution}), encoding="utf-8")
+
+    records = r3b_artifact._scenario_tests(actual, provenance_path=provenance)
+    record = r3b_artifact._find_scenario_test(records, test_name)
+
+    assert record is not None
+    assert record["status"] == ("FAIL" if outcome == "fail" else "NOT_EXECUTED")
+    assert r3b_artifact._scenario_status(record, revision, tree, source) != "PASS"
+
+
+def test_r3b_e1_one_bound_test_can_support_multiple_requirements_and_child_tree(
+    tmp_path: Path,
+) -> None:
+    base_revision = "7" * 40
+    ending_revision = "8" * 40
+    tree = "9" * 40
+    source = r3b_artifact._source_identity()
+    actual = tmp_path / "multi.json"
+    actual.write_text(
+        json.dumps(
+            {
+                "revision": base_revision,
+                "tree": tree,
+                "tests": [
+                    {
+                        "test_id": "tests.test_storage_stewardship::shared_test",
+                        "status": "PASS",
+                        "requirement_ids": ["R3B-001", "R3B-002"],
+                        "exit_code": 0,
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    execution = _bound_scenario_execution(tmp_path / "multi.stdout", base_revision, tree, source)
+    _bind_result_artifact(execution, actual, "scenario-json")
+    provenance = tmp_path / "multi-provenance.json"
+    provenance.write_text(json.dumps({"execution": execution}), encoding="utf-8")
+
+    records = r3b_artifact._scenario_tests(actual, provenance_path=provenance)
+    matrix = r3b_artifact._acceptance_matrix(records, source, ending_revision, tree)
+
+    assert records[0]["requirement_ids"] == ["R3B-001", "R3B-002"]
+    assert matrix[0]["status"] == "PASS"
+    assert matrix[1]["status"] == "PASS"
 
 
 def test_r1r1_typed_observation_states_do_not_collapse_to_absence(

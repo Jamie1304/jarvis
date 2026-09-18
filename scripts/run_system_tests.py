@@ -128,9 +128,10 @@ async def _run(suite_id: str, *, allow_hardware: bool = False) -> int:
     payload = run.to_dict()
     payload["tree"] = tree_after
     payload["source_identity"] = source_after
-    payload["execution"] = {
+    execution: dict[str, object] = {
         "run_id": str(run.run_id),
-        "command": [run.suite.command.executable, *run.suite.command.arguments],
+        "command": [sys.executable, "scripts/run_system_tests.py", "--suite", suite_id],
+        "child_command": [run.suite.command.executable, *run.suite.command.arguments],
         "selection": suite_id,
         "base_revision": run.revision,
         "tested_tree": tested_tree_after,
@@ -149,6 +150,14 @@ async def _run(suite_id: str, *, allow_hardware: bool = False) -> int:
         "tested_tree_before": tested_tree_before,
         "tested_tree_after": tested_tree_after,
     }
+    stdout_artifact = next((item for item in run.artifacts if item.kind == "stdout"), None)
+    if stdout_artifact is not None:
+        execution["result_artifact"] = {
+            "path": f"build/system-test-artifacts/{stdout_artifact.relative_path}",
+            "sha256": stdout_artifact.sha256,
+            "role": "system-result",
+        }
+    payload["execution"] = execution
     print(json.dumps(payload, sort_keys=True))
     return 0 if run.status.value in {"passed", "skipped"} else 1
 

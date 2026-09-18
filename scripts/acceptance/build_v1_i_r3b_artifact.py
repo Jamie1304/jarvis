@@ -6,7 +6,9 @@ import argparse
 import hashlib
 import json
 import os
+import posixpath
 import re
+import shlex
 import subprocess
 import sys
 from datetime import UTC, datetime
@@ -212,6 +214,46 @@ def _json(path: Path) -> dict[str, Any]:
 _REVISION_RE = re.compile(r"^[0-9a-fA-F]{40}$")
 _SHA256_RE = re.compile(r"^[0-9a-fA-F]{64}$")
 
+_GATE_EXPECTATIONS: dict[str, tuple[str, str, tuple[str, ...], str]] = {
+    "canonical_quality": (
+        "scripts/quality.py",
+        "canonical_quality",
+        (),
+        "gate-result",
+    ),
+    "test_strength": (
+        "scripts/acceptance/audit_test_strength.py",
+        "audit_test_strength",
+        (),
+        "gate-result",
+    ),
+    "package_smoke": (
+        "scripts/package_smoke.py",
+        "package_smoke",
+        (),
+        "gate-result",
+    ),
+    "standalone_v1_acceptance": (
+        "scripts/run_system_tests.py",
+        "v1-acceptance",
+        ("--suite", "v1-acceptance"),
+        "system-result",
+    ),
+}
+
+_TEST_STRENGTH_FLAGS = (
+    "security_weakening",
+    "assertion_weakening",
+    "coverage_weakening",
+    "hidden_skip",
+    "fake_pass",
+    "qualification_only_bypass",
+    "formal_fixture_substitution",
+    "type_ignore_evasion",
+    "test_selection_weakening",
+    "coverage_policy_weakening",
+)
+
 
 def _valid_revision(value: object) -> bool:
     return isinstance(value, str) and _REVISION_RE.fullmatch(value) is not None
@@ -290,31 +332,185 @@ def _raw_evidence_is_bound(execution: dict[str, Any]) -> tuple[bool, str]:
     return True, "raw evidence digest verified"
 
 
+def _path_key(value: str | Path) -> str:
+    """Return a case-insensitive path identity without relying on display syntax."""
+
+    candidate = _evidence_path(str(value))
+    if candidate is not None:
+        return str(candidate.absolute()).replace("\\", "/").casefold()
+    return posixpath.normpath(str(value).replace("\\", "/")).casefold()
+
+
+def _same_evidence_path(left: object, right: object) -> bool:
+    if not isinstance(left, str | Path) or not isinstance(right, str | Path):
+        return False
+    return _path_key(left) == _path_key(right)
+
+
+def _result_artifact_spec(execution: dict[str, Any]) -> dict[str, str] | None:
+    value = execution.get("result_artifact")
+    if not isinstance(value, dict):
+        return None
+    path = value.get("path")
+    digest = value.get("sha256")
+    role = value.get("role")
+    if (
+        not isinstance(path, str)
+        or not path.strip()
+        or not isinstance(digest, str)
+        or not _valid_sha256(digest)
+        or not isinstance(role, str)
+        or not role.strip()
+    ):
+        return None
+    return {"path": path, "sha256": digest, "role": role}
+
+
+def _result_artifact_is_bound(
+    execution: dict[str, Any],
+    *,
+    expected_path: object = None,
+    expected_role: str | None = None,
+) -> tuple[bool, str]:
+    spec = _result_artifact_spec(execution)
+    if spec is None:
+        return False, "bound result artifact path, role, and digest are required"
+    if expected_role is not None and spec["role"] != expected_role:
+        return False, "bound result artifact role is not the expected role"
+    if expected_path is not None and not _same_evidence_path(spec["path"], expected_path):
+        return False, "supplied result path is not the bound result artifact"
+    path = _evidence_path(spec["path"])
+    if path is None or not path.is_file():
+        return False, "bound result artifact is missing"
+    entries = _raw_evidence_entries(execution)
+    if not any(
+        _same_evidence_path(entry.get("path"), spec["path"])
+        and entry.get("sha256", "").casefold() == spec["sha256"].casefold()
+        for entry in entries
+    ):
+        return False, "bound result artifact is not listed in raw evidence"
+    try:
+        observed = _file_sha256(path)
+    except OSError:
+        return False, "bound result artifact is unreadable"
+    if observed.casefold() != spec["sha256"].casefold():
+        return False, "bound result artifact digest does not match"
+    return True, "bound result artifact digest and role verified"
+
+
+def _command_tokens(value: object) -> tuple[str, ...] | None:
+    if isinstance(value, str):
+        if not value.strip():
+            return None
+        try:
+            tokens = tuple(shlex.split(value, posix=False))
+        except ValueError:
+            return None
+    elif isinstance(value, list | tuple) and all(isinstance(item, str) and item for item in value):
+        tokens = tuple(value)
+    else:
+        return None
+    return tuple(token.strip('"') for token in tokens) if tokens else None
+
+
+def _command_path_key(value: str) -> str:
+    normalized = value.replace("\\", "/")
+    candidate = Path(normalized)
+    if candidate.is_absolute():
+        try:
+            normalized = candidate.resolve(strict=False).relative_to(ROOT.resolve()).as_posix()
+        except ValueError:
+            normalized = str(candidate.absolute()).replace("\\", "/")
+    return posixpath.normpath(normalized).removeprefix("./").casefold()
+
+
+def _is_python_launcher(value: str) -> bool:
+    basename = value.replace("\\", "/").rsplit("/", 1)[-1].casefold()
+    return bool(re.fullmatch(r"python(?:\d+(?:\.\d+)?)?(?:\.exe)?", basename)) or bool(
+        re.fullmatch(r"py(?:\.exe)?", basename)
+    )
+
+
+def _command_matches(
+    value: object, expected_script: str, expected_arguments: tuple[str, ...]
+) -> bool:
+    tokens = _command_tokens(value)
+    if tokens is None:
+        return False
+    expected_key = _command_path_key(expected_script)
+    if _command_path_key(tokens[0]) == expected_key:
+        arguments = tokens[1:]
+    elif len(tokens) >= 2 and _is_python_launcher(tokens[0]):
+        if _command_path_key(tokens[1]) != expected_key:
+            return False
+        arguments = tokens[2:]
+    else:
+        return False
+    return arguments == expected_arguments
+
+
+def _execution_commands(execution: dict[str, Any]) -> tuple[object, ...] | None:
+    values: list[object] = []
+    for key in ("command", "child_command", "wrapped_command"):
+        if key not in execution:
+            continue
+        if _command_tokens(execution[key]) is None:
+            return None
+        values.append(execution[key])
+    return tuple(values) if values else None
+
+
+def _selection_matches(value: object, expected: str) -> bool:
+    if isinstance(value, str):
+        return value == expected
+    return isinstance(value, list | tuple) and tuple(value) == (expected,)
+
+
+def _gate_command_is_expected(execution: dict[str, Any], label: str) -> tuple[bool, str]:
+    expectation = _GATE_EXPECTATIONS.get(label)
+    if expectation is None:
+        return False, "no canonical command expectation exists for the gate"
+    script, selection, arguments, _role = expectation
+    commands = _execution_commands(execution)
+    if commands is None:
+        return False, "execution command is malformed"
+    if not any(_command_matches(command, script, arguments) for command in commands):
+        return False, "execution command is not the canonical gate command"
+    if not _selection_matches(execution.get("selection"), selection):
+        return False, "execution selection is not the canonical gate selection"
+    return True, "canonical gate command and selection verified"
+
+
 def _execution_is_bound(
     evidence: dict[str, Any],
     ending: str,
     ending_tree: str,
     source: dict[str, Any] | None = None,
+    *,
+    expected_gate: str | None = None,
+    expected_result_path: object = None,
+    expected_result_role: str | None = None,
 ) -> tuple[bool, str]:
     execution = evidence.get("execution")
     if not isinstance(execution, dict):
         return False, "execution-time provenance is missing"
     if not isinstance(execution.get("run_id"), str) or not execution["run_id"].strip():
         return False, "execution run identity is missing"
-    command = execution.get("command")
-    if not (isinstance(command, str) and command.strip()) and not (
-        isinstance(command, list)
-        and bool(command)
-        and all(isinstance(value, str) and value for value in command)
-    ):
+    if _command_tokens(execution.get("command")) is None:
         return False, "execution command is missing"
+    if _execution_commands(execution) is None:
+        return False, "execution wrapper or child command is malformed"
     selection = execution.get("selection")
     if not (isinstance(selection, str) and selection.strip()) and not (
-        isinstance(selection, list)
+        isinstance(selection, list | tuple)
         and bool(selection)
         and all(isinstance(value, str) and value for value in selection)
     ):
         return False, "execution test selection is missing"
+    if expected_gate is not None:
+        command_ok, command_detail = _gate_command_is_expected(execution, expected_gate)
+        if not command_ok:
+            return False, command_detail
     exit_code = execution.get("exit_code", evidence.get("exit_code"))
     if type(exit_code) is not int:
         return False, "execution exit status is missing"
@@ -340,9 +536,17 @@ def _execution_is_bound(
     raw_ok, raw_detail = _raw_evidence_is_bound(execution)
     if not raw_ok:
         return False, raw_detail
+    if expected_result_role is not None or expected_result_path is not None:
+        result_ok, result_detail = _result_artifact_is_bound(
+            execution,
+            expected_path=expected_result_path,
+            expected_role=expected_result_role,
+        )
+        if not result_ok:
+            return False, result_detail
     if not _valid_revision(ending) or not _valid_tree(ending_tree):
         return False, "final source labels are malformed"
-    return True, "execution-time source and raw evidence bound"
+    return True, "execution-time source, command, and result evidence bound"
 
 
 def _source_identity() -> dict[str, Any]:
@@ -409,6 +613,37 @@ def _host_observation() -> dict[str, Any]:
     }
 
 
+def _blocked_scenario_record(
+    path: Path,
+    *,
+    detail: str,
+    execution: dict[str, Any] | None = None,
+    test_id: str | None = None,
+    revision: object = None,
+    tree: object = None,
+) -> tuple[dict[str, Any], ...]:
+    result_artifact = _result_artifact_spec(execution) if execution is not None else None
+    identity = test_id or f"unbound-result-artifact::{path.name}"
+    return (
+        {
+            "test_id": identity,
+            "name": identity,
+            "status": "BLOCKING_NOT_PROVEN",
+            "execution_classification": "UNBOUND_RESULT_ARTIFACT",
+            "observed_outcome": detail,
+            "evidence_reference": str(path),
+            "revision": revision,
+            "tree": tree,
+            "requirement_id": None,
+            "requirement_ids": (),
+            "case": None,
+            "execution": execution,
+            "result_artifact": result_artifact,
+            "mapping_error": detail,
+        },
+    )
+
+
 def _scenario_tests(
     path: Path | None,
     *,
@@ -420,11 +655,51 @@ def _scenario_tests(
         return ()
     provenance: dict[str, Any] = {}
     if provenance_path is not None:
-        provenance = _json(provenance_path)
+        try:
+            provenance = _json(provenance_path)
+        except (OSError, UnicodeError, ValueError) as exc:
+            return _blocked_scenario_record(
+                path,
+                detail=f"scenario provenance is unreadable: {type(exc).__name__}",
+                revision=supplied_revision,
+                tree=supplied_tree,
+            )
         if isinstance(provenance.get("execution"), dict):
             provenance = provenance["execution"]
     if path.suffix.casefold() == ".xml":
-        root = ElementTree.parse(path).getroot()
+        if not provenance:
+            return _blocked_scenario_record(
+                path,
+                detail="JUnit result is missing execution provenance",
+                revision=supplied_revision,
+                tree=supplied_tree,
+            )
+        result_ok, result_detail = _result_artifact_is_bound(
+            provenance,
+            expected_path=path,
+            expected_role="junit",
+        )
+        if not result_ok:
+            return _blocked_scenario_record(
+                path,
+                detail=result_detail,
+                execution=provenance,
+                revision=supplied_revision,
+                tree=supplied_tree,
+            )
+        result_artifact = _result_artifact_spec(provenance)
+        result_revision = supplied_revision or provenance.get("base_revision")
+        result_tree = supplied_tree or provenance.get("tested_tree")
+        try:
+            root = ElementTree.parse(path).getroot()
+        except (OSError, ElementTree.ParseError, UnicodeError) as exc:
+            return _blocked_scenario_record(
+                path,
+                detail=f"bound JUnit result is unreadable: {type(exc).__name__}",
+                execution=provenance,
+                revision=supplied_revision,
+                tree=supplied_tree,
+            )
         normalized: list[dict[str, Any]] = []
         for node in root.iter("testcase"):
             classname = str(node.get("classname", ""))
@@ -450,25 +725,116 @@ def _scenario_tests(
                     "execution_classification": classification,
                     "observed_outcome": observed,
                     "evidence_reference": f"{path}::{test_id}",
-                    "revision": supplied_revision,
-                    "tree": supplied_tree,
+                    "revision": result_revision,
+                    "tree": result_tree,
+                    "exit_code": provenance.get("exit_code"),
                     "requirement_id": None,
                     "requirement_ids": (),
                     "case": None,
                     "execution": provenance or None,
+                    "result_artifact": result_artifact,
                 }
             )
         return tuple(normalized)
-    payload = _json(path)
+    try:
+        payload = _json(path)
+    except (OSError, UnicodeError, ValueError) as exc:
+        return _blocked_scenario_record(
+            path,
+            detail=f"scenario result is unreadable: {type(exc).__name__}",
+            revision=supplied_revision,
+            tree=supplied_tree,
+        )
     records = payload.get("tests", payload.get("cases", ()))
     if not isinstance(records, list):
-        raise ValueError("scenario evidence tests must be a list")
+        return _blocked_scenario_record(
+            path,
+            detail="scenario evidence tests must be a list",
+            revision=supplied_revision,
+            tree=supplied_tree,
+        )
     evidence_revision = payload.get("revision", supplied_revision)
     evidence_tree = payload.get("tree", supplied_tree)
-    evidence_exit_code = payload.get("exit_code", 0)
     payload_execution = payload.get("execution")
+    if payload_execution is not None and not isinstance(payload_execution, dict):
+        return _blocked_scenario_record(
+            path,
+            detail="scenario execution provenance is malformed",
+            revision=evidence_revision,
+            tree=evidence_tree,
+        )
+    provenance_execution = provenance or None
+    if (
+        isinstance(provenance_execution, dict)
+        and isinstance(payload_execution, dict)
+        and provenance_execution != payload_execution
+    ):
+        return _blocked_scenario_record(
+            path,
+            detail="scenario result and provenance execution records disagree",
+            execution=provenance_execution,
+            revision=evidence_revision,
+            tree=evidence_tree,
+        )
+    bound_execution = provenance_execution or payload_execution
+    evidence_exit_code = payload.get(
+        "exit_code",
+        bound_execution.get("exit_code", 0) if isinstance(bound_execution, dict) else 0,
+    )
+    if isinstance(bound_execution, dict):
+        result_ok, result_detail = _result_artifact_is_bound(
+            bound_execution,
+            expected_path=path,
+            expected_role="scenario-json",
+        )
+        if not result_ok:
+            return _blocked_scenario_record(
+                path,
+                detail=result_detail,
+                execution=bound_execution,
+                revision=evidence_revision,
+                tree=evidence_tree,
+            )
     normalized = []
     for index, record in enumerate(records):
+        record_execution = record.get("execution") if isinstance(record, dict) else None
+        if record_execution is not None and not isinstance(record_execution, dict):
+            normalized.extend(
+                _blocked_scenario_record(
+                    path,
+                    detail="scenario record execution provenance is malformed",
+                    test_id=f"malformed-record-{index}",
+                    revision=evidence_revision,
+                    tree=evidence_tree,
+                )
+            )
+            continue
+        if isinstance(bound_execution, dict) and isinstance(record_execution, dict):
+            if record_execution != bound_execution:
+                normalized.extend(
+                    _blocked_scenario_record(
+                        path,
+                        detail="record execution provenance disagrees with result provenance",
+                        execution=record_execution,
+                        test_id=(
+                            str(record.get("test_id"))
+                            if isinstance(record, dict) and isinstance(record.get("test_id"), str)
+                            else f"malformed-record-{index}"
+                        ),
+                        revision=evidence_revision,
+                        tree=evidence_tree,
+                    )
+                )
+                continue
+        execution = record_execution or bound_execution
+        if isinstance(execution, dict):
+            result_ok, result_detail = _result_artifact_is_bound(
+                execution,
+                expected_path=path,
+                expected_role="scenario-json",
+            )
+        else:
+            result_ok, result_detail = False, "scenario result execution provenance is missing"
         if not isinstance(record, dict) or not isinstance(record.get("test_id"), str):
             normalized.append(
                 {
@@ -483,9 +849,24 @@ def _scenario_tests(
                     "requirement_id": None,
                     "requirement_ids": (),
                     "case": None,
-                    "execution": payload_execution,
+                    "execution": execution,
+                    "result_artifact": (
+                        _result_artifact_spec(execution) if isinstance(execution, dict) else None
+                    ),
                     "mapping_error": "malformed record",
                 }
+            )
+            continue
+        if not result_ok:
+            normalized.extend(
+                _blocked_scenario_record(
+                    path,
+                    detail=result_detail,
+                    execution=execution,
+                    test_id=record["test_id"],
+                    revision=record.get("revision", evidence_revision),
+                    tree=record.get("tree", evidence_tree),
+                )
             )
             continue
         supplied = str(record.get("status", "NOT_EXECUTED")).upper()
@@ -498,24 +879,34 @@ def _scenario_tests(
             "NOT_EXECUTED": "NOT_EXECUTED",
             "BLOCKING_NOT_PROVEN": "BLOCKING_NOT_PROVEN",
         }.get(supplied, "BLOCKING_NOT_PROVEN")
+        classification = str(record.get("execution_classification", "SUPPLIED_EVIDENCE"))
+        if (
+            (status == "PASS" and classification.casefold() in {"skipped", "not_executed"})
+            or (status == "FAIL" and classification.casefold() in {"skipped", "not_executed"})
+            or (status == "NOT_EXECUTED" and classification.startswith("EXECUTED_"))
+        ):
+            status = "BLOCKING_NOT_PROVEN"
+            classification = "CONTRADICTORY_RESULT_ASSOCIATION"
+        executed = status in {"PASS", "FAIL"}
         normalized.append(
             {
                 "test_id": record["test_id"],
                 "name": str(record.get("name", record["test_id"])),
                 "status": status,
-                "execution_classification": str(
-                    record.get("execution_classification", "SUPPLIED_EVIDENCE")
-                ),
+                "execution_classification": classification,
                 "observed_outcome": str(record.get("observed_outcome", "")),
-                "evidence_reference": str(record.get("evidence_reference", path)),
+                "evidence_reference": f"{path}::{record['test_id']}",
                 "revision": record.get("revision", evidence_revision),
                 "tree": record.get("tree", evidence_tree),
                 "exit_code": record.get("exit_code", evidence_exit_code),
-                "requirement_id": record.get("requirement_id"),
-                "requirement_ids": record.get("requirement_ids", ()),
-                "case": record.get("case"),
+                "requirement_id": record.get("requirement_id") if executed else None,
+                "requirement_ids": record.get("requirement_ids", ()) if executed else (),
+                "case": record.get("case") if executed else None,
                 "source_identity": record.get("source_identity"),
-                "execution": record.get("execution", payload_execution),
+                "execution": execution,
+                "result_artifact": _result_artifact_spec(execution)
+                if isinstance(execution, dict)
+                else None,
             }
         )
     return tuple(normalized)
@@ -538,7 +929,33 @@ def _scenario_is_bound(
     claimed_identity = record.get("source_identity")
     if claimed_identity is not None and claimed_identity != execution.get("source_identity_after"):
         return False
-    bound, _detail = _execution_is_bound(record, ending, tree, source)
+    result_artifact = record.get("result_artifact")
+    if not isinstance(result_artifact, dict):
+        return False
+    result_role = result_artifact.get("role")
+    result_path = result_artifact.get("path")
+    result_digest = result_artifact.get("sha256")
+    if (
+        result_role not in {"junit", "scenario-json"}
+        or not isinstance(result_path, str)
+        or not isinstance(result_digest, str)
+    ):
+        return False
+    execution_result_artifact = _result_artifact_spec(execution)
+    if execution_result_artifact != {
+        "path": result_path,
+        "sha256": result_digest,
+        "role": result_role,
+    }:
+        return False
+    bound, _detail = _execution_is_bound(
+        record,
+        ending,
+        tree,
+        source,
+        expected_result_path=result_path,
+        expected_result_role=result_role,
+    )
     return bound
 
 
@@ -551,7 +968,9 @@ def _scenario_status(
     if not _scenario_is_bound(record, ending, tree, source):
         return "BLOCKING_NOT_PROVEN"
     status = str(record.get("status", "BLOCKING_NOT_PROVEN"))
-    if status == "PASS" and record.get("exit_code", 0) != 0:
+    execution = record.get("execution")
+    execution_exit_code = execution.get("exit_code", 0) if isinstance(execution, dict) else 0
+    if status == "PASS" and (record.get("exit_code", 0) != 0 or execution_exit_code != 0):
         return "BLOCKING_NOT_PROVEN"
     return status
 
@@ -726,6 +1145,59 @@ def _matrix_mapping_diagnostics(records: tuple[dict[str, Any], ...]) -> tuple[st
     return _mapped_matrix_records(records)[2]
 
 
+def _result_artifact_text(execution: dict[str, Any]) -> tuple[str | None, str]:
+    spec = _result_artifact_spec(execution)
+    if spec is None:
+        return None, "bound result artifact is missing"
+    path = _evidence_path(spec["path"])
+    if path is None:
+        return None, "bound result artifact path is malformed"
+    try:
+        return path.read_text(encoding="utf-8"), "bound result artifact was read"
+    except (OSError, UnicodeError) as exc:
+        return None, f"bound result artifact is unreadable: {type(exc).__name__}"
+
+
+def _gate_result_is_pass(label: str, execution: dict[str, Any]) -> tuple[bool, str]:
+    text, detail = _result_artifact_text(execution)
+    if text is None:
+        return False, detail
+    if label == "test_strength":
+        try:
+            result = _json_from_text(text)
+        except ValueError:
+            return False, "test-strength result artifact is not valid JSON"
+        if result.get("schema") != "d6-test-strength-audit-1":
+            return False, "test-strength result schema is not canonical"
+        if result.get("result") != "PASS" or result.get("diff_check") != "PASS":
+            return False, "test-strength result did not pass"
+        if any(result.get(flag) != "NO" for flag in _TEST_STRENGTH_FLAGS):
+            return False, "test-strength result contains a weakening finding"
+        return True, "canonical test-strength result passed"
+    if label == "package_smoke":
+        if re.search(r"(?m)^package artifact smoke: PASS\s*$", text) is None:
+            return False, "package smoke result artifact lacks the terminal PASS line"
+        return True, "canonical package smoke result passed"
+    if label == "canonical_quality":
+        if "All checks passed!" not in text:
+            return False, "quality result artifact lacks the terminal success marker"
+        if re.search(r"Success: no issues found in \d+ source files", text) is None:
+            return False, "quality result artifact lacks the canonical type-check result"
+        return True, "canonical quality result passed"
+    if label == "standalone_v1_acceptance":
+        lines = text.rstrip().splitlines()
+        if not lines or not any("test session starts" in line for line in lines[:-1]):
+            return False, "standalone result artifact lacks the pytest session marker"
+        summary = lines[-1]
+        counts = re.findall(r"\d+\s+(passed|skipped|failed|errors?)\b", summary, re.IGNORECASE)
+        if not counts or any(value.casefold() not in {"passed", "skipped"} for value in counts):
+            return False, "standalone result artifact does not record an all-pass pytest summary"
+        if not any(value.casefold() == "passed" for value in counts):
+            return False, "standalone result artifact lacks a passing pytest summary"
+        return True, "canonical standalone acceptance result passed"
+    return False, "no result parser exists for the gate"
+
+
 def _observed_gate(
     *,
     label: str,
@@ -749,7 +1221,19 @@ def _observed_gate(
     if evidence is not None:
         observed_status = str(evidence.get("status", "")).upper()
         exit_code = evidence.get("exit_code")
-        source_bound, binding_detail = _execution_is_bound(evidence, ending, ending_tree, source)
+        source_bound, binding_detail = _execution_is_bound(
+            evidence,
+            ending,
+            ending_tree,
+            source,
+            expected_gate=label,
+            expected_result_role=_GATE_EXPECTATIONS.get(label, ("", "", (), ""))[3],
+        )
+        result_bound = False
+        result_detail = "gate result was not independently parsed"
+        execution = evidence.get("execution")
+        if isinstance(execution, dict) and source_bound:
+            result_bound, result_detail = _gate_result_is_pass(label, execution)
         coverage_ok = True
         if exact_coverage is not None:
             try:
@@ -774,14 +1258,16 @@ def _observed_gate(
             observed_status in {"PASS", "PASSED", "SUCCESS"}
             and exit_code == 0
             and source_bound
+            and result_bound
             and coverage_ok
             and supplied_status in {None, "PASS", "SUCCESS"}
         ):
             status = "PASS"
         else:
             error = (
-                "status, exit code, execution source binding, raw evidence, "
-                f"or exact coverage did not validate: {binding_detail}"
+                "status, exit code, canonical command, execution/result binding, "
+                f"actual result, raw evidence, or exact coverage did not validate: "
+                f"{binding_detail}; {result_detail}"
             )
     return {
         "name": label,
@@ -1138,7 +1624,17 @@ def main() -> int:
     )
     system_summary = _system_summary(system, arguments.system_evidence)
     system_source_bound, system_binding_detail = _execution_is_bound(
-        system, ending, ending_tree, source
+        system,
+        ending,
+        ending_tree,
+        source,
+        expected_gate="standalone_v1_acceptance",
+        expected_result_role="system-result",
+    )
+    system_result_bound, system_result_detail = (
+        _gate_result_is_pass("standalone_v1_acceptance", system["execution"])
+        if isinstance(system.get("execution"), dict) and system_source_bound
+        else (False, "standalone result was not independently parsed")
     )
     system_gate = {
         **system_summary,
@@ -1147,6 +1643,7 @@ def main() -> int:
             if system.get("status") == "passed"
             and system.get("exit_code") == 0
             and system_source_bound
+            and system_result_bound
             else "BLOCKING_NOT_PROVEN"
         ),
         "disposition": (
@@ -1154,9 +1651,10 @@ def main() -> int:
             if system.get("status") == "passed"
             and system.get("exit_code") == 0
             and system_source_bound
+            and system_result_bound
             else (
-                "status, exit code, or execution source binding did not validate: "
-                f"{system_binding_detail}"
+                "status, exit code, canonical command, execution/result binding, or "
+                f"actual result did not validate: {system_binding_detail}; {system_result_detail}"
             )
         ),
     }
