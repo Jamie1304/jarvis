@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
+import re
 import subprocess
 import sys
 from datetime import UTC, datetime
@@ -33,6 +35,14 @@ BASELINE = {
         "head_sha": "89e8e55c2884ca66580b3623cb0f98895639dba5",
         "conclusion": "NON_TERMINAL",
     },
+}
+
+HISTORICAL_R1_CI = {
+    "run_id": 35274007561,
+    "event": "push",
+    "attempt": 1,
+    "head_sha": "05ad4d91979ccc92d663df259622bcfbc342cc26",
+    "conclusion": "SUCCESS",
 }
 
 MATRIX_CASES = (
@@ -199,6 +209,142 @@ def _json(path: Path) -> dict[str, Any]:
     return _json_from_text(path.read_text(encoding="utf-8"))
 
 
+_REVISION_RE = re.compile(r"^[0-9a-fA-F]{40}$")
+_SHA256_RE = re.compile(r"^[0-9a-fA-F]{64}$")
+
+
+def _valid_revision(value: object) -> bool:
+    return isinstance(value, str) and _REVISION_RE.fullmatch(value) is not None
+
+
+def _valid_sha256(value: object) -> bool:
+    return isinstance(value, str) and _SHA256_RE.fullmatch(value) is not None
+
+
+def _valid_tree(value: object) -> bool:
+    return _valid_revision(value)
+
+
+def _valid_source_identity(value: object) -> bool:
+    if not isinstance(value, dict):
+        return False
+    return (
+        value.get("schema") == "source-identity-1"
+        and _valid_sha256(value.get("sha256"))
+        and type(value.get("bound_file_count")) is int
+        and int(value["bound_file_count"]) > 0
+    )
+
+
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        while chunk := handle.read(1024 * 1024):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _evidence_path(value: object) -> Path | None:
+    if not isinstance(value, str) or not value:
+        return None
+    candidate = Path(value)
+    return candidate if candidate.is_absolute() else ROOT / candidate
+
+
+def _raw_evidence_entries(execution: dict[str, Any]) -> tuple[dict[str, str], ...]:
+    raw = execution.get("raw_evidence")
+    if isinstance(raw, list):
+        entries: list[dict[str, str]] = []
+        for item in raw:
+            if not isinstance(item, dict):
+                return ()
+            path = item.get("path")
+            digest = item.get("sha256")
+            if not isinstance(path, str) or not isinstance(digest, str):
+                return ()
+            entries.append({"path": path, "sha256": digest})
+        return tuple(entries)
+    path = execution.get("raw_evidence_path")
+    digest = execution.get("raw_evidence_sha256", execution.get("evidence_digest"))
+    if isinstance(path, str) and isinstance(digest, str):
+        return ({"path": path, "sha256": digest},)
+    return ()
+
+
+def _raw_evidence_is_bound(execution: dict[str, Any]) -> tuple[bool, str]:
+    entries = _raw_evidence_entries(execution)
+    if not entries:
+        return False, "raw evidence path and digest are required"
+    for entry in entries:
+        if not _valid_sha256(entry["sha256"]):
+            return False, "raw evidence digest is malformed"
+        path = _evidence_path(entry["path"])
+        if path is None or not path.is_file():
+            return False, "raw evidence file is missing"
+        try:
+            observed = _file_sha256(path)
+        except OSError:
+            return False, "raw evidence file is unreadable"
+        if observed.casefold() != entry["sha256"].casefold():
+            return False, "raw evidence digest does not match"
+    return True, "raw evidence digest verified"
+
+
+def _execution_is_bound(
+    evidence: dict[str, Any],
+    ending: str,
+    ending_tree: str,
+    source: dict[str, Any] | None = None,
+) -> tuple[bool, str]:
+    execution = evidence.get("execution")
+    if not isinstance(execution, dict):
+        return False, "execution-time provenance is missing"
+    if not isinstance(execution.get("run_id"), str) or not execution["run_id"].strip():
+        return False, "execution run identity is missing"
+    command = execution.get("command")
+    if not (isinstance(command, str) and command.strip()) and not (
+        isinstance(command, list)
+        and bool(command)
+        and all(isinstance(value, str) and value for value in command)
+    ):
+        return False, "execution command is missing"
+    selection = execution.get("selection")
+    if not (isinstance(selection, str) and selection.strip()) and not (
+        isinstance(selection, list)
+        and bool(selection)
+        and all(isinstance(value, str) and value for value in selection)
+    ):
+        return False, "execution test selection is missing"
+    exit_code = execution.get("exit_code", evidence.get("exit_code"))
+    if type(exit_code) is not int:
+        return False, "execution exit status is missing"
+    if evidence.get("exit_code") is not None and evidence.get("exit_code") != exit_code:
+        return False, "execution and evidence exit statuses disagree"
+    base_revision = execution.get("base_revision")
+    if not _valid_revision(base_revision):
+        return False, "execution base revision is malformed"
+    tested_tree = execution.get("tested_tree")
+    if not _valid_tree(tested_tree) or tested_tree != ending_tree:
+        return False, "execution tested tree is not the final source tree"
+    for key in ("tree_before", "tree_after"):
+        if not _valid_tree(execution.get(key)):
+            return False, f"execution {key} is malformed"
+    before = execution.get("source_identity_before")
+    after = execution.get("source_identity_after")
+    if not _valid_source_identity(before) or not _valid_source_identity(after):
+        return False, "execution source identity seal is incomplete"
+    if before != after:
+        return False, "source identity changed during execution"
+    if source is not None and after != source:
+        return False, "execution source identity does not match the final source"
+    raw_ok, raw_detail = _raw_evidence_is_bound(execution)
+    if not raw_ok:
+        return False, raw_detail
+    if not _valid_revision(ending) or not _valid_tree(ending_tree):
+        return False, "final source labels are malformed"
+    return True, "execution-time source and raw evidence bound"
+
+
 def _source_identity() -> dict[str, Any]:
     environment = dict(os.environ)
     environment["PYTHONPATH"] = str(ROOT)
@@ -268,12 +414,18 @@ def _scenario_tests(
     *,
     supplied_revision: str | None = None,
     supplied_tree: str | None = None,
+    provenance_path: Path | None = None,
 ) -> tuple[dict[str, Any], ...]:
     if path is None:
         return ()
+    provenance: dict[str, Any] = {}
+    if provenance_path is not None:
+        provenance = _json(provenance_path)
+        if isinstance(provenance.get("execution"), dict):
+            provenance = provenance["execution"]
     if path.suffix.casefold() == ".xml":
         root = ElementTree.parse(path).getroot()
-        output: list[dict[str, Any]] = []
+        normalized: list[dict[str, Any]] = []
         for node in root.iter("testcase"):
             classname = str(node.get("classname", ""))
             name = str(node.get("name", ""))
@@ -290,7 +442,7 @@ def _scenario_tests(
                 status = "PASS"
                 observed = "testcase completed without failure"
                 classification = "EXECUTED_PASS"
-            output.append(
+            normalized.append(
                 {
                     "test_id": test_id,
                     "name": name,
@@ -300,9 +452,13 @@ def _scenario_tests(
                     "evidence_reference": f"{path}::{test_id}",
                     "revision": supplied_revision,
                     "tree": supplied_tree,
+                    "requirement_id": None,
+                    "requirement_ids": (),
+                    "case": None,
+                    "execution": provenance or None,
                 }
             )
-        return tuple(output)
+        return tuple(normalized)
     payload = _json(path)
     records = payload.get("tests", payload.get("cases", ()))
     if not isinstance(records, list):
@@ -310,10 +466,28 @@ def _scenario_tests(
     evidence_revision = payload.get("revision", supplied_revision)
     evidence_tree = payload.get("tree", supplied_tree)
     evidence_exit_code = payload.get("exit_code", 0)
-    output = []
-    for record in records:
+    payload_execution = payload.get("execution")
+    normalized = []
+    for index, record in enumerate(records):
         if not isinstance(record, dict) or not isinstance(record.get("test_id"), str):
-            raise ValueError("scenario evidence test identity is malformed")
+            normalized.append(
+                {
+                    "test_id": f"malformed-record-{index}",
+                    "name": f"malformed-record-{index}",
+                    "status": "BLOCKING_NOT_PROVEN",
+                    "execution_classification": "MALFORMED_RECORD",
+                    "observed_outcome": "scenario evidence record identity is malformed",
+                    "evidence_reference": str(path),
+                    "revision": evidence_revision,
+                    "tree": evidence_tree,
+                    "requirement_id": None,
+                    "requirement_ids": (),
+                    "case": None,
+                    "execution": payload_execution,
+                    "mapping_error": "malformed record",
+                }
+            )
+            continue
         supplied = str(record.get("status", "NOT_EXECUTED")).upper()
         status = {
             "PASSED": "PASS",
@@ -324,7 +498,7 @@ def _scenario_tests(
             "NOT_EXECUTED": "NOT_EXECUTED",
             "BLOCKING_NOT_PROVEN": "BLOCKING_NOT_PROVEN",
         }.get(supplied, "BLOCKING_NOT_PROVEN")
-        output.append(
+        normalized.append(
             {
                 "test_id": record["test_id"],
                 "name": str(record.get("name", record["test_id"])),
@@ -337,17 +511,44 @@ def _scenario_tests(
                 "revision": record.get("revision", evidence_revision),
                 "tree": record.get("tree", evidence_tree),
                 "exit_code": record.get("exit_code", evidence_exit_code),
+                "requirement_id": record.get("requirement_id"),
+                "requirement_ids": record.get("requirement_ids", ()),
+                "case": record.get("case"),
+                "source_identity": record.get("source_identity"),
+                "execution": record.get("execution", payload_execution),
             }
         )
-    return tuple(output)
+    return tuple(normalized)
 
 
-def _scenario_is_bound(record: dict[str, Any], ending: str, tree: str) -> bool:
-    return record.get("tree") == tree and record.get("revision") is not None
+def _scenario_is_bound(
+    record: dict[str, Any],
+    ending: str,
+    tree: str,
+    source: dict[str, Any] | None = None,
+) -> bool:
+    if record.get("tree") != tree:
+        return False
+    revision = record.get("revision")
+    if not _valid_revision(revision):
+        return False
+    execution = record.get("execution")
+    if not isinstance(execution, dict) or execution.get("base_revision") != revision:
+        return False
+    claimed_identity = record.get("source_identity")
+    if claimed_identity is not None and claimed_identity != execution.get("source_identity_after"):
+        return False
+    bound, _detail = _execution_is_bound(record, ending, tree, source)
+    return bound
 
 
-def _scenario_status(record: dict[str, Any], ending: str, tree: str) -> str:
-    if not _scenario_is_bound(record, ending, tree):
+def _scenario_status(
+    record: dict[str, Any],
+    ending: str,
+    tree: str,
+    source: dict[str, Any] | None = None,
+) -> str:
+    if not _scenario_is_bound(record, ending, tree, source):
         return "BLOCKING_NOT_PROVEN"
     status = str(record.get("status", "BLOCKING_NOT_PROVEN"))
     if status == "PASS" and record.get("exit_code", 0) != 0:
@@ -377,7 +578,7 @@ def _r1_requirements(
         record = _find_scenario_test(records, test_name)
         status = "NOT_EXECUTED"
         if record is not None:
-            status = _scenario_status(record, ending, tree)
+            status = _scenario_status(record, ending, tree, source)
         output.append(
             {
                 "requirement_id": requirement_id,
@@ -401,28 +602,103 @@ def _r1_requirements(
     return output
 
 
+def _matrix_specs() -> tuple[tuple[str, str, str], ...]:
+    return tuple(
+        (f"R3B-{number:03d}", case, evidence)
+        for number, (case, evidence) in enumerate(MATRIX_CASES, start=1)
+    )
+
+
+def _mapped_matrix_records(
+    records: tuple[dict[str, Any], ...],
+) -> tuple[
+    dict[str, list[tuple[int, dict[str, Any]]]],
+    dict[int, str],
+    tuple[str, ...],
+]:
+    specs = _matrix_specs()
+    known = {requirement_id: (case, evidence) for requirement_id, case, evidence in specs}
+    by_case = {case: requirement_id for requirement_id, (case, _evidence) in known.items()}
+    by_id: dict[str, list[tuple[int, dict[str, Any]]]] = {}
+    errors: dict[int, str] = {}
+    diagnostics: list[str] = []
+    for index, record in enumerate(records):
+        raw_ids = record.get("requirement_ids", ())
+        if isinstance(raw_ids, str):
+            ids = [raw_ids]
+        elif isinstance(raw_ids, list | tuple) and all(isinstance(value, str) for value in raw_ids):
+            ids = list(raw_ids)
+        elif raw_ids is None or raw_ids == ():
+            ids = []
+        else:
+            ids = []
+            errors[index] = "requirement_ids is malformed"
+        requirement_id = record.get("requirement_id")
+        if requirement_id is not None:
+            if isinstance(requirement_id, str):
+                ids.append(requirement_id)
+            else:
+                errors[index] = "requirement_id is malformed"
+        ids = list(dict.fromkeys(ids))
+        case = record.get("case")
+        if not ids:
+            if isinstance(case, str) and case in by_case:
+                ids.append(by_case[case])
+            elif case is not None:
+                errors[index] = "case is unknown or malformed"
+                diagnostics.append(f"record {index}: unknown case mapping")
+        for candidate in ids:
+            if candidate not in known:
+                diagnostics.append(f"record {index}: unknown requirement id {candidate}")
+                errors[index] = f"unknown requirement id: {candidate}"
+                continue
+            by_id.setdefault(candidate, []).append((index, record))
+            expected_case = known[candidate][0]
+            if case is not None and case != expected_case:
+                errors[index] = "requirement id and case disagree"
+                diagnostics.append(f"record {index}: requirement id and case disagree")
+    return by_id, errors, tuple(diagnostics)
+
+
+def _matrix_status(
+    entries: list[tuple[int, dict[str, Any]]],
+    errors: dict[int, str],
+    ending: str,
+    tree: str,
+    source: dict[str, Any],
+) -> str:
+    if not entries:
+        return "NOT_EXECUTED"
+    if any(index in errors for index, _record in entries):
+        return "BLOCKING_NOT_PROVEN"
+    statuses = [_scenario_status(record, ending, tree, source) for _index, record in entries]
+    if any(status == "FAIL" for status in statuses):
+        return "FAIL"
+    if any(status == "BLOCKING_NOT_PROVEN" for status in statuses):
+        return "BLOCKING_NOT_PROVEN"
+    if any(status == "NOT_EXECUTED" for status in statuses):
+        return "NOT_EXECUTED"
+    test_ids = [str(record.get("test_id")) for _index, record in entries]
+    if len(set(test_ids)) != len(test_ids):
+        return "BLOCKING_NOT_PROVEN"
+    return "PASS" if all(status == "PASS" for status in statuses) else "BLOCKING_NOT_PROVEN"
+
+
 def _acceptance_matrix(
     records: tuple[dict[str, Any], ...], source: dict[str, Any], ending: str, tree: str
 ) -> list[dict[str, Any]]:
-    """Return evidence-backed rows; matrix membership is never a pass signal."""
+    """Return evidence-backed rows keyed by stable requirement identity."""
 
-    supplied_by_case = {
-        str(record.get("requirement_id", record.get("case", ""))): record
-        for record in records
-        if record.get("requirement_id") or record.get("case")
-    }
+    supplied_by_id, mapping_errors, _diagnostics = _mapped_matrix_records(records)
     output: list[dict[str, Any]] = []
-    for number, (case, evidence) in enumerate(MATRIX_CASES, start=1):
-        record = supplied_by_case.get(case)
-        status = _scenario_status(record, ending, tree) if record else "NOT_EXECUTED"
-        if status == "PASSED":
-            status = "PASS"
-        if status not in {"PASS", "FAIL", "NOT_EXECUTED", "BLOCKING_NOT_PROVEN"}:
-            status = "BLOCKING_NOT_PROVEN"
+    for requirement_id, case, evidence in _matrix_specs():
+        entries = supplied_by_id.get(requirement_id, [])
+        status = _matrix_status(entries, mapping_errors, ending, tree, source)
+        record = entries[0][1] if entries else None
         output.append(
             {
-                "requirement_id": f"R3B-{number:03d}",
-                "number": number,
+                "requirement_id": requirement_id,
+                "number": int(requirement_id.removeprefix("R3B-")),
                 "case": case,
                 "status": status,
                 "evidence": evidence,
@@ -446,6 +722,10 @@ def _acceptance_matrix(
     return output
 
 
+def _matrix_mapping_diagnostics(records: tuple[dict[str, Any], ...]) -> tuple[str, ...]:
+    return _mapped_matrix_records(records)[2]
+
+
 def _observed_gate(
     *,
     label: str,
@@ -453,6 +733,7 @@ def _observed_gate(
     evidence_path: Path | None,
     ending: str,
     ending_tree: str,
+    source: dict[str, Any] | None = None,
     exact_coverage: float | None = None,
 ) -> dict[str, Any]:
     evidence: dict[str, Any] | None = None
@@ -468,12 +749,25 @@ def _observed_gate(
     if evidence is not None:
         observed_status = str(evidence.get("status", "")).upper()
         exit_code = evidence.get("exit_code")
-        revision = evidence.get("revision", evidence.get("head_sha"))
-        source_bound = revision == ending or evidence.get("tree") == ending_tree
+        source_bound, binding_detail = _execution_is_bound(evidence, ending, ending_tree, source)
         coverage_ok = True
         if exact_coverage is not None:
             try:
-                coverage_ok = float(evidence["exact_coverage_percent"]) == exact_coverage
+                coverage_path = _evidence_path(evidence["coverage_json"])
+                entries = _raw_evidence_entries(evidence["execution"])
+                coverage_entry = next(
+                    (item for item in entries if _evidence_path(item.get("path")) == coverage_path),
+                    None,
+                )
+                coverage_payload = _json(coverage_path) if coverage_path is not None else {}
+                coverage_totals = coverage_payload.get("totals", coverage_payload)
+                coverage_ok = (
+                    coverage_path is not None
+                    and coverage_entry is not None
+                    and _valid_sha256(coverage_entry.get("sha256"))
+                    and float(coverage_totals["percent_covered"]) == exact_coverage
+                    and float(evidence["exact_coverage_percent"]) == exact_coverage
+                )
             except (KeyError, TypeError, ValueError):
                 coverage_ok = False
         if (
@@ -485,7 +779,10 @@ def _observed_gate(
         ):
             status = "PASS"
         else:
-            error = "status, exit code, source binding, or exact coverage did not validate"
+            error = (
+                "status, exit code, execution source binding, raw evidence, "
+                f"or exact coverage did not validate: {binding_detail}"
+            )
     return {
         "name": label,
         "status": status,
@@ -513,6 +810,44 @@ def _hosted_observation(
             evidence = _json(evidence_path)
         except (OSError, UnicodeError, ValueError) as exc:
             error = f"hosted CI evidence is unreadable: {type(exc).__name__}"
+    required_names = (
+        "quality",
+        "deterministic_workflows",
+        "deterministic_permissions",
+        "v1_acceptance",
+        "package_smoke",
+    )
+    observed_stages: dict[str, str] = {}
+    raw_run: dict[str, Any] | None = None
+    raw_detail = "hosted raw run evidence was not validated"
+    if evidence is not None:
+        raw_entries = evidence.get("raw_evidence")
+        if isinstance(raw_entries, list) and len(raw_entries) == 1:
+            raw_entry = raw_entries[0]
+            if isinstance(raw_entry, dict):
+                raw_path = _evidence_path(raw_entry.get("path"))
+                raw_digest = raw_entry.get("sha256")
+                if raw_path is not None and _valid_sha256(raw_digest) and raw_path.is_file():
+                    try:
+                        if _file_sha256(raw_path).casefold() == str(raw_digest).casefold():
+                            raw_run = _json(raw_path)
+                            raw_detail = "hosted raw run digest verified"
+                    except (OSError, UnicodeError, ValueError):
+                        raw_run = None
+        observed_stages = _hosted_stage_statuses(raw_run) if raw_run is not None else {}
+        run_ok = _hosted_run_matches(
+            raw_run,
+            required_names,
+            arguments.hosted_ci_run_id,
+            arguments.hosted_ci_attempt,
+            ending,
+            observed_stages,
+        )
+        if not run_ok:
+            error = (
+                "raw hosted event, attempt, checkout SHA, conclusion, run identity, or "
+                f"stage results did not validate: {raw_detail}"
+            )
     required = {
         "quality": arguments.hosted_quality,
         "deterministic_workflows": arguments.hosted_deterministic_workflows,
@@ -520,40 +855,132 @@ def _hosted_observation(
         "v1_acceptance": arguments.hosted_v1_acceptance,
         "package_smoke": arguments.hosted_package_smoke,
     }
-    observed_stages = evidence.get("required_stages", {}) if evidence else {}
-    if evidence is not None and not isinstance(observed_stages, dict):
-        observed_stages = {}
-    stages_ok = all(observed_stages.get(name) == "SUCCESS" for name in required)
-    if evidence is not None:
-        try:
-            attempt_matches = int(evidence.get("attempt", 0)) == int(
-                arguments.hosted_ci_attempt or 0
-            )
-        except (TypeError, ValueError):
-            attempt_matches = False
-        run_ok = (
-            str(evidence.get("event")) == "push"
-            and str(evidence.get("head_sha")) == ending
-            and str(evidence.get("conclusion")) == "SUCCESS"
-            and attempt_matches
-            and str(evidence.get("run_id")) == str(arguments.hosted_ci_run_id)
-            and stages_ok
-        )
-        if not run_ok:
-            error = (
-                "event, attempt, checkout SHA, conclusion, run identity, or stage results "
-                "did not validate"
-            )
+    if not observed_stages:
+        observed_stages = {name: "NOT_PROVEN" for name in required}
     return {
         "run_id": arguments.hosted_ci_run_id,
         "event": evidence.get("event") if evidence else arguments.hosted_ci_event,
         "attempt": evidence.get("attempt") if evidence else arguments.hosted_ci_attempt,
         "head_sha": evidence.get("head_sha") if evidence else arguments.hosted_ci_head_sha,
         "conclusion": evidence.get("conclusion") if evidence else arguments.hosted_ci_conclusion,
-        "required_stages": observed_stages or required,
+        "required_stages": observed_stages,
         "status": "PASS" if evidence is not None and error is None else "BLOCKING_NOT_PROVEN",
         "evidence_path": str(evidence_path) if evidence_path else None,
         "disposition": error or "exact push checkout and required stages independently validated",
+    }
+
+
+_HOSTED_STEP_NAMES = {
+    "quality": "Run quality gate",
+    "deterministic_workflows": "Run deterministic system self-tests",
+    "deterministic_permissions": "Run deterministic permission self-tests",
+    "v1_acceptance": "Run v1 acceptance suite",
+    "package_smoke": "Run artifact-only package smoke",
+}
+
+
+def _hosted_status(value: object) -> str:
+    normalized = str(value or "").upper()
+    if normalized in {"SUCCESS", "PASSED", "PASS"}:
+        return "SUCCESS"
+    if normalized in {"FAILURE", "FAILED", "CANCELLED", "TIMED_OUT", "ACTION_REQUIRED"}:
+        return normalized
+    if normalized in {"IN_PROGRESS", "RUNNING"}:
+        return "IN_PROGRESS"
+    if normalized in {"QUEUED", "PENDING", "WAITING"}:
+        return "PENDING"
+    return "NOT_PROVEN"
+
+
+def _hosted_stage_statuses(raw: dict[str, Any] | None) -> dict[str, str]:
+    if raw is None or not isinstance(raw.get("jobs"), list):
+        return {}
+    statuses = {name: "NOT_PROVEN" for name in _HOSTED_STEP_NAMES}
+    for job in raw["jobs"]:
+        if not isinstance(job, dict):
+            continue
+        job_status = _hosted_status(job.get("conclusion") or job.get("status"))
+        steps = job.get("steps", [])
+        if not isinstance(steps, list):
+            steps = []
+        for stage, step_name in _HOSTED_STEP_NAMES.items():
+            matches = [
+                step for step in steps if isinstance(step, dict) and step.get("name") == step_name
+            ]
+            if matches:
+                step = matches[-1]
+                statuses[stage] = _hosted_status(step.get("conclusion") or step.get("status"))
+            elif str(job.get("name", "")).casefold() == stage.casefold():
+                statuses[stage] = job_status
+    return statuses
+
+
+def _hosted_run_matches(
+    raw: dict[str, Any] | None,
+    required_names: tuple[str, ...],
+    run_id: str,
+    attempt: int,
+    ending: str,
+    stages: dict[str, str],
+) -> bool:
+    if raw is None:
+        return False
+    try:
+        raw_attempt = int(raw.get("attempt", 0))
+    except (TypeError, ValueError):
+        return False
+    observed_run_id = raw.get("databaseId", raw.get("run_id"))
+    observed_sha = raw.get("headSha", raw.get("head_sha"))
+    return (
+        str(observed_run_id) == str(run_id)
+        and str(raw.get("event")) == "push"
+        and raw_attempt == int(attempt)
+        and str(observed_sha) == ending
+        and str(raw.get("conclusion", "")).upper() == "SUCCESS"
+        and all(stages.get(name) == "SUCCESS" for name in required_names)
+    )
+
+
+def _historical_r1_ci_observation(path: Path | None) -> dict[str, Any]:
+    if path is None:
+        return {
+            "status": "NOT_RECORDED",
+            "evidence_path": None,
+            "disposition": "later terminal disposition was not supplied",
+        }
+    try:
+        raw = _json(path)
+        digest = _file_sha256(path)
+    except (OSError, UnicodeError, ValueError) as error:
+        return {
+            "status": "BLOCKING_NOT_PROVEN",
+            "evidence_path": str(path),
+            "disposition": f"historical terminal evidence is unreadable: {type(error).__name__}",
+        }
+    stages = _hosted_stage_statuses(raw)
+    valid = _hosted_run_matches(
+        raw,
+        tuple(_HOSTED_STEP_NAMES),
+        str(HISTORICAL_R1_CI["run_id"]),
+        int(str(HISTORICAL_R1_CI["attempt"])),
+        str(HISTORICAL_R1_CI["head_sha"]),
+        stages,
+    )
+    return {
+        "status": "SUCCESS" if valid else "BLOCKING_NOT_PROVEN",
+        "run_id": raw.get("databaseId", raw.get("run_id")),
+        "event": raw.get("event"),
+        "attempt": raw.get("attempt"),
+        "head_sha": raw.get("headSha", raw.get("head_sha")),
+        "conclusion": raw.get("conclusion"),
+        "required_stages": stages,
+        "evidence_path": str(path),
+        "evidence_sha256": digest,
+        "disposition": (
+            "historical R1 push checkout and all required stages independently validated"
+            if valid
+            else "historical event, checkout, conclusion, or stage evidence did not validate"
+        ),
     }
 
 
@@ -565,13 +992,13 @@ def _scenario_observation(
     tree: str,
 ) -> dict[str, Any]:
     matched = [record for record in records if record.get("name") in names]
-    bound = [record for record in matched if _scenario_is_bound(record, ending, tree)]
-    if any(_scenario_status(record, ending, tree) == "FAIL" for record in bound):
+    bound = [record for record in matched if _scenario_is_bound(record, ending, tree, source)]
+    if any(_scenario_status(record, ending, tree, source) == "FAIL" for record in bound):
         status = "FAIL"
     elif (
         bound
         and len(bound) == len(matched)
-        and all(_scenario_status(record, ending, tree) == "PASS" for record in bound)
+        and all(_scenario_status(record, ending, tree, source) == "PASS" for record in bound)
     ):
         status = "PASS"
     else:
@@ -604,20 +1031,23 @@ def _pre_fix_reproductions(path: Path | None) -> dict[str, Any]:
         }
     cases = evidence.get("cases")
     baseline = evidence.get("baseline", {})
-    valid_cases = isinstance(cases, list) and bool(cases)
+    case_records = cases if isinstance(cases, list) else []
+    valid_cases = bool(case_records)
     bound = (
         isinstance(baseline, dict)
         and baseline.get("sha") == BASELINE["sha"]
         and baseline.get("tree") == BASELINE["tree"]
     )
     statuses_valid = valid_cases and all(
-        isinstance(case, dict) and case.get("observed_status") in {"FAIL", "PASS"} for case in cases
+        isinstance(case, dict)
+        and case.get("observed_status") in {"FAIL", "PASS", "NOT_EXECUTED", "BLOCKING_NOT_PROVEN"}
+        for case in case_records
     )
     return {
         "status": "RECORDED" if bound and statuses_valid else "BLOCKING_NOT_PROVEN",
         "evidence_path": str(path),
         "baseline": baseline,
-        "cases": cases if isinstance(cases, list) else [],
+        "cases": case_records,
         "disposition": (
             "observed against the exact R3B starting identity"
             if bound and statuses_valid
@@ -637,6 +1067,7 @@ def main() -> int:
     parser.add_argument("--ending-branch")
     parser.add_argument("--pre-fix-evidence", type=Path)
     parser.add_argument("--scenario-evidence", type=Path)
+    parser.add_argument("--scenario-provenance", type=Path)
     parser.add_argument("--scenario-revision")
     parser.add_argument("--scenario-tree")
     parser.add_argument("--test-strength-evidence", type=Path)
@@ -657,6 +1088,7 @@ def main() -> int:
     parser.add_argument("--hosted-v1-acceptance")
     parser.add_argument("--hosted-package-smoke")
     parser.add_argument("--hosted-evidence", type=Path)
+    parser.add_argument("--historical-r1-ci-evidence", type=Path)
     parser.add_argument("--historical-ci-disposition", default="NON_TERMINAL")
     arguments = parser.parse_args()
 
@@ -674,6 +1106,7 @@ def main() -> int:
         arguments.scenario_evidence,
         supplied_revision=arguments.scenario_revision,
         supplied_tree=arguments.scenario_tree,
+        provenance_path=arguments.scenario_provenance,
     )
     matrix = _acceptance_matrix(scenarios, source, ending, ending_tree)
     r1 = _r1_requirements(scenarios, source, ending, ending_tree)
@@ -684,6 +1117,7 @@ def main() -> int:
         evidence_path=arguments.quality_evidence,
         ending=ending,
         ending_tree=ending_tree,
+        source=source,
         exact_coverage=arguments.exact_coverage,
     )
     test_strength = _observed_gate(
@@ -692,6 +1126,7 @@ def main() -> int:
         evidence_path=arguments.test_strength_evidence,
         ending=ending,
         ending_tree=ending_tree,
+        source=source,
     )
     package = _observed_gate(
         label="package_smoke",
@@ -699,9 +1134,12 @@ def main() -> int:
         evidence_path=arguments.package_evidence,
         ending=ending,
         ending_tree=ending_tree,
+        source=source,
     )
     system_summary = _system_summary(system, arguments.system_evidence)
-    system_source_bound = system.get("revision") == ending or system.get("tree") == ending_tree
+    system_source_bound, system_binding_detail = _execution_is_bound(
+        system, ending, ending_tree, source
+    )
     system_gate = {
         **system_summary,
         "status": (
@@ -716,10 +1154,14 @@ def main() -> int:
             if system.get("status") == "passed"
             and system.get("exit_code") == 0
             and system_source_bound
-            else "status, exit code, or source binding did not validate"
+            else (
+                "status, exit code, or execution source binding did not validate: "
+                f"{system_binding_detail}"
+            )
         ),
     }
     hosted = _hosted_observation(arguments, ending, arguments.hosted_evidence)
+    historical_r1_ci = _historical_r1_ci_observation(arguments.historical_r1_ci_evidence)
     all_r1_scenarios_pass = all(item["status"] == "PASS" for item in r1)
     all_gates_pass = all(
         item["status"] == "PASS" for item in (quality, test_strength, package, system_gate, hosted)
@@ -740,6 +1182,7 @@ def main() -> int:
             "historical_ci_disposition": arguments.historical_ci_disposition,
             "historical_ci_run": 35260351999,
         },
+        "historical_r1_ci": historical_r1_ci,
         "pre_fix_reproductions": pre_fix,
         "pre_fix_responsibility_map": {
             "storage_observation": (
@@ -988,6 +1431,7 @@ def main() -> int:
             "semantic_case_count": len(matrix),
             "executable_test_count": len(scenarios),
             "status": "PASS" if r3b_requirements_pass else "STILL_BLOCKING",
+            "mapping_diagnostics": list(_matrix_mapping_diagnostics(scenarios)),
             "cases": matrix,
         },
         "r1_requirements": {
@@ -1021,7 +1465,7 @@ def main() -> int:
             "revision": arguments.scenario_revision,
             "declared_tree": arguments.scenario_tree,
             "source_bound": all(
-                _scenario_is_bound(record, ending, ending_tree) for record in scenarios
+                _scenario_is_bound(record, ending, ending_tree, source) for record in scenarios
             )
             if scenarios
             else False,

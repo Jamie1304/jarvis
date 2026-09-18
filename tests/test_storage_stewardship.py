@@ -6,9 +6,11 @@ import asyncio
 import hashlib
 import json
 import os
+import stat
 import subprocess
 import sys
 import time
+import unittest
 from collections.abc import Coroutine
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
@@ -57,8 +59,10 @@ from jarvis.storage import (
     MutationConflict,
     MutationDenied,
     MutationItem,
+    MutationItemState,
     MutationManifestStore,
     MutationOperation,
+    MutationPhase,
     MutationState,
     MutationUnknownOutcome,
     PlacementClass,
@@ -82,6 +86,7 @@ from jarvis.storage import (
     forecast_storage_pressure,
 )
 from jarvis.vm.bridge import HostBridge, HostBridgeOperation, HostBridgeRequest
+from scripts.acceptance import build_v1_i_r3b_artifact as r3b_artifact
 
 
 def _volume(
@@ -1255,8 +1260,10 @@ def test_storage_internal_fallbacks_and_manifest_integrity_are_explicit(
 def test_r1_reproduction_builder_rejects_missing_failed_and_stale_evidence(
     tmp_path: Path,
 ) -> None:
-    head = "standalone-builder-test-source"
-    tree = "standalone-builder-test-tree"
+    head = "a" * 40
+    tree = "b" * 40
+    parent = "c" * 40
+    source = r3b_artifact._source_identity()
     system_evidence = tmp_path / "system.json"
     system_evidence.write_text(
         json.dumps(
@@ -1264,6 +1271,7 @@ def test_r1_reproduction_builder_rejects_missing_failed_and_stale_evidence(
                 "status": "passed",
                 "exit_code": 0,
                 "revision": head,
+                "tree": tree,
                 "suite": "v1-acceptance",
             }
         ),
@@ -1284,7 +1292,7 @@ def test_r1_reproduction_builder_rejects_missing_failed_and_stale_evidence(
             "--ending-commit",
             head,
             "--ending-parent",
-            "standalone-builder-test-parent",
+            parent,
             "--ending-tree",
             tree,
             "--ending-branch",
@@ -1296,8 +1304,19 @@ def test_r1_reproduction_builder_rejects_missing_failed_and_stale_evidence(
         ]
         if scenario is not None:
             evidence = tmp_path / f"{name}.scenario.json"
+            execution = _bound_scenario_execution(
+                tmp_path / f"{name}.scenario.raw", head, tree, source
+            )
+            execution["exit_code"] = 1 if scenario.get("status") == "FAIL" else 0
             evidence.write_text(
-                json.dumps({"revision": head, "tree": tree, "tests": [scenario]}),
+                json.dumps(
+                    {
+                        "revision": head,
+                        "tree": tree,
+                        "execution": execution,
+                        "tests": [scenario],
+                    }
+                ),
                 encoding="utf-8",
             )
             command.extend(
@@ -1820,3 +1839,477 @@ def test_r1_reproduction_builder_cannot_pass_without_scenario_evidence(tmp_path:
     artifact = json.loads(output.read_text(encoding="utf-8"))
     cases = artifact["acceptance_matrix"]["cases"]
     assert any(case["status"] != "PASS" for case in cases)
+
+
+def _interrupted_restore_manifest(
+    root: Path,
+) -> tuple[FileSteward, MutationManifestStore, MutationItem, Path]:
+    source = root / "restore-source.txt"
+    source.write_bytes(b"restore-observation-bytes")
+    broker, authenticator = _broker(root)
+    steward = FileSteward(root, permission_broker=broker, host_bridge=HostBridge())
+    plan = steward.plan_delete(source, classification=_classification())
+    with pytest.raises(MutationApprovalRequired):
+        _run(steward.execute_async(plan))
+    _run(_approve_delete(broker, authenticator, plan.task_id))
+    assert steward.execute(plan).success
+    manifest = steward.manifests.load(plan.plan_id)
+    item = manifest.items[0]
+    assert item.recovery_path is not None
+    source.write_bytes(b"restore-observation-bytes")
+    interrupted = replace(
+        manifest,
+        phase=MutationPhase.RESTORE,
+        state=MutationState.UNKNOWN_OUTCOME,
+        detail="restore interrupted during acceptance reproduction",
+        items=(replace(item, state=MutationItemState.RESTORATION_IN_PROGRESS),),
+    )
+    steward.manifests.save(interrupted)
+    return steward, steward.manifests, item, source
+
+
+def test_r1r1_pre_fix_reproduction_recovery_directory_is_not_absence(tmp_path: Path) -> None:
+    root = tmp_path / "owned"
+    root.mkdir()
+    steward, manifests, item, source = _interrupted_restore_manifest(root)
+    assert item.recovery_path is not None
+    item.recovery_path.unlink()
+    item.recovery_path.mkdir()
+
+    result = FileSteward(root, manifest_store=manifests).reconcile(
+        manifests.load(next(iter(manifests.pending())).plan_id)
+    )
+
+    assert result.state is MutationState.UNKNOWN_OUTCOME
+    assert result.manifest.items[0].state is MutationItemState.UNKNOWN_OUTCOME
+    assert source.read_bytes() == b"restore-observation-bytes"
+    assert item.recovery_path.is_dir()
+    assert steward.manifests.load(result.manifest.plan_id).state is MutationState.UNKNOWN_OUTCOME
+
+
+def test_r1r1_pre_fix_reproduction_recovery_read_error_is_not_absence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "owned"
+    root.mkdir()
+    _steward, manifests, item, source = _interrupted_restore_manifest(root)
+    assert item.recovery_path is not None
+    original_hash = storage_module._sha256_path
+
+    def unreadable(path: Path) -> str:
+        if path == item.recovery_path:
+            raise PermissionError("acceptance recovery read denied")
+        return original_hash(path)
+
+    monkeypatch.setattr(storage_module, "_sha256_path", unreadable)
+    result = FileSteward(root, manifest_store=manifests).reconcile(
+        manifests.load(next(iter(manifests.pending())).plan_id)
+    )
+
+    assert result.state is MutationState.UNKNOWN_OUTCOME
+    assert result.manifest.items[0].state is MutationItemState.UNKNOWN_OUTCOME
+    assert source.read_bytes() == b"restore-observation-bytes"
+
+
+def test_r1r1_pre_fix_reproduction_native_reparse_is_not_absence(tmp_path: Path) -> None:
+    root = tmp_path / "owned"
+    root.mkdir()
+    _steward, manifests, item, source = _interrupted_restore_manifest(root)
+    assert item.recovery_path is not None
+    item.recovery_path.unlink()
+    try:
+        item.recovery_path.symlink_to(source)
+    except (OSError, NotImplementedError) as error:
+        raise unittest.SkipTest(
+            f"native symlink support unavailable: {type(error).__name__}"
+        ) from error
+
+    result = FileSteward(root, manifest_store=manifests).reconcile(
+        manifests.load(next(iter(manifests.pending())).plan_id)
+    )
+
+    assert result.state is MutationState.UNKNOWN_OUTCOME
+    assert result.manifest.items[0].state is MutationItemState.UNKNOWN_OUTCOME
+
+
+def test_r1r1_positive_restore_reconciliation_requires_verified_absence(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "owned"
+    root.mkdir()
+    _steward, manifests, item, source = _interrupted_restore_manifest(root)
+    assert item.recovery_path is not None
+    item.recovery_path.unlink()
+
+    result = FileSteward(root, manifest_store=manifests).reconcile(
+        manifests.load(next(iter(manifests.pending())).plan_id)
+    )
+
+    assert result.state is MutationState.RESTORED
+    assert result.manifest.items[0].state is MutationItemState.RESTORED
+    assert source.read_bytes() == b"restore-observation-bytes"
+
+
+def test_r1r1_effect_reconciliation_does_not_treat_broken_reparse_as_absence(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "owned"
+    root.mkdir()
+    source = root / "move-source.txt"
+    destination = root / "move-destination.txt"
+    source.write_bytes(b"effect-observation-bytes")
+    broker, _ = _broker(root)
+    plan = FileSteward(root, permission_broker=broker, host_bridge=HostBridge()).plan_move(
+        source, destination, classification=_classification()
+    )
+    source.unlink()
+    try:
+        source.symlink_to(root / "missing-target.txt")
+    except (OSError, NotImplementedError) as error:
+        raise unittest.SkipTest(
+            f"native symlink support unavailable: {type(error).__name__}"
+        ) from error
+    destination.write_bytes(b"effect-observation-bytes")
+    steward = FileSteward(root, manifest_store=MutationManifestStore(root / ".mutation-state"))
+    steward.manifests.save(replace(plan, state=MutationState.UNKNOWN_OUTCOME))
+
+    result = steward.reconcile(plan)
+
+    assert result.state is MutationState.UNKNOWN_OUTCOME
+    assert result.manifest.items[0].state is MutationItemState.UNKNOWN_OUTCOME
+    assert source.is_symlink()
+
+
+def _bound_scenario_execution(
+    raw: Path, revision: str, tree: str, source: dict[str, object]
+) -> dict[str, object]:
+    raw.write_bytes(b"raw scenario output")
+    return {
+        "run_id": "r3b-r1-r1-scenario",
+        "command": [sys.executable, "-m", "pytest", "tests/test_storage_stewardship.py"],
+        "selection": "real host volume inventory",
+        "base_revision": revision,
+        "tested_tree": tree,
+        "tree_before": tree,
+        "tree_after": tree,
+        "exit_code": 0,
+        "source_identity_before": source,
+        "source_identity_after": source,
+        "raw_evidence": [
+            {
+                "path": str(raw),
+                "sha256": hashlib.sha256(raw.read_bytes()).hexdigest(),
+            }
+        ],
+    }
+
+
+def test_r1r1_pre_fix_reproduction_parser_to_matrix_keeps_requirement_identity(
+    tmp_path: Path,
+) -> None:
+    revision = "1" * 40
+    tree = "2" * 40
+    source = {"schema": "source-identity-1", "sha256": "3" * 64, "bound_file_count": 1}
+    payload = {
+        "revision": revision,
+        "tree": tree,
+        "execution": _bound_scenario_execution(tmp_path / "scenario.raw", revision, tree, source),
+        "tests": [
+            {
+                "test_id": "tests/test_storage_stewardship.py::test_host_volume",
+                "requirement_id": "R3B-001",
+                "case": "real host volume inventory",
+                "status": "PASS",
+                "execution_classification": "EXECUTED_PASS",
+                "evidence_reference": "scenario.raw::test_host_volume",
+                "observed_outcome": "trusted host volume inventory completed",
+                "exit_code": 0,
+            }
+        ],
+    }
+    evidence = tmp_path / "scenario.json"
+    evidence.write_text(json.dumps(payload), encoding="utf-8")
+
+    records = r3b_artifact._scenario_tests(evidence, supplied_revision=revision, supplied_tree=tree)
+    matrix = r3b_artifact._acceptance_matrix(records, source, revision, tree)
+
+    assert records[0]["requirement_id"] == "R3B-001"
+    assert records[0]["case"] == "real host volume inventory"
+    assert matrix[0]["status"] == "PASS"
+    assert matrix[0]["test_scenario_identity"] == records[0]["test_id"]
+
+
+def test_r1r1_pre_fix_reproduction_source_labels_are_not_proof(tmp_path: Path) -> None:
+    revision = "4" * 40
+    tree = "5" * 40
+    source = {"schema": "source-identity-1", "sha256": "6" * 64, "bound_file_count": 1}
+
+    malformed = {
+        "revision": "not-a-commit",
+        "tree": tree,
+        "status": "PASS",
+        "exit_code": 0,
+        "execution": _bound_scenario_execution(tmp_path / "malformed.raw", revision, tree, source),
+    }
+    relabeled_junit = {
+        "revision": revision,
+        "tree": tree,
+        "status": "PASS",
+        "exit_code": 0,
+    }
+    contradictory = {
+        "revision": revision,
+        "tree": tree,
+        "status": "PASS",
+        "exit_code": 0,
+        "source_identity": {
+            "schema": "source-identity-1",
+            "sha256": "7" * 64,
+            "bound_file_count": 1,
+        },
+        "execution": _bound_scenario_execution(
+            tmp_path / "contradictory.raw", revision, tree, source
+        ),
+    }
+    digest_path = tmp_path / "digest.raw"
+    execution = _bound_scenario_execution(digest_path, revision, tree, source)
+    digest_path.write_bytes(b"modified after capture")
+    digest_mismatch = {
+        "revision": revision,
+        "tree": tree,
+        "status": "PASS",
+        "exit_code": 0,
+        "execution": execution,
+    }
+
+    for record in (malformed, relabeled_junit, contradictory, digest_mismatch):
+        assert not r3b_artifact._scenario_is_bound(record, revision, tree, source)
+
+
+def test_r1r1_mapping_duplicates_and_conflicts_are_not_silently_green(tmp_path: Path) -> None:
+    revision = "8" * 40
+    tree = "9" * 40
+    source = r3b_artifact._source_identity()
+
+    def record(name: str, status: str, raw_name: str) -> dict[str, object]:
+        raw = tmp_path / raw_name
+        execution = _bound_scenario_execution(raw, revision, tree, source)
+        execution["exit_code"] = 0 if status == "PASS" else 1
+        return {
+            "test_id": name,
+            "requirement_id": "R3B-001",
+            "case": "real host volume inventory",
+            "status": status,
+            "execution_classification": "EXECUTED_PASS",
+            "evidence_reference": str(raw),
+            "observed_outcome": status,
+            "exit_code": 0 if status == "PASS" else 1,
+            "execution": execution,
+        }
+
+    duplicate_path = tmp_path / "duplicate.json"
+    duplicate_path.write_text(
+        json.dumps(
+            {
+                "revision": revision,
+                "tree": tree,
+                "tests": [
+                    record("same-test", "PASS", "duplicate-a.raw"),
+                    record("same-test", "PASS", "duplicate-b.raw"),
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    duplicate_records = r3b_artifact._scenario_tests(duplicate_path)
+    duplicate_matrix = r3b_artifact._acceptance_matrix(duplicate_records, source, revision, tree)
+    assert duplicate_matrix[0]["status"] == "BLOCKING_NOT_PROVEN"
+
+    conflict_path = tmp_path / "conflict.json"
+    conflict_path.write_text(
+        json.dumps(
+            {
+                "revision": revision,
+                "tree": tree,
+                "tests": [
+                    record("pass-test", "PASS", "conflict-pass.raw"),
+                    record("fail-test", "FAIL", "conflict-fail.raw"),
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    conflict_records = r3b_artifact._scenario_tests(conflict_path)
+    conflict_matrix = r3b_artifact._acceptance_matrix(conflict_records, source, revision, tree)
+    assert conflict_matrix[0]["status"] == "FAIL"
+
+
+def test_r1r1_gate_reader_requires_execution_and_raw_digest(tmp_path: Path) -> None:
+    revision = "a" * 40
+    tree = "b" * 40
+    source = r3b_artifact._source_identity()
+    raw = tmp_path / "gate.raw"
+    execution = _bound_scenario_execution(raw, revision, tree, source)
+    evidence = {
+        "status": "PASS",
+        "exit_code": 0,
+        "revision": revision,
+        "tree": tree,
+        "execution": execution,
+    }
+    path = tmp_path / "gate.json"
+    path.write_text(json.dumps(evidence), encoding="utf-8")
+
+    validated = r3b_artifact._observed_gate(
+        label="test_strength",
+        supplied_status="PASS",
+        evidence_path=path,
+        ending=revision,
+        ending_tree=tree,
+        source=source,
+    )
+    assert validated["status"] == "PASS"
+
+    raw.write_bytes(b"tampered after execution")
+    tampered = r3b_artifact._observed_gate(
+        label="test_strength",
+        supplied_status="PASS",
+        evidence_path=path,
+        ending=revision,
+        ending_tree=tree,
+        source=source,
+    )
+    assert tampered["status"] == "BLOCKING_NOT_PROVEN"
+
+    unbound = dict(evidence)
+    unbound.pop("execution")
+    path.write_text(json.dumps(unbound), encoding="utf-8")
+    missing_provenance = r3b_artifact._observed_gate(
+        label="test_strength",
+        supplied_status="PASS",
+        evidence_path=path,
+        ending=revision,
+        ending_tree=tree,
+        source=source,
+    )
+    assert missing_provenance["status"] == "BLOCKING_NOT_PROVEN"
+
+
+def test_r1r1_typed_observation_states_do_not_collapse_to_absence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    regular = tmp_path / "regular.txt"
+    regular.write_bytes(b"observed bytes")
+    expected = hashlib.sha256(b"observed bytes").hexdigest()
+
+    verified = storage_module._observe_path(regular, expected_hash=expected)
+    mismatch = storage_module._observe_path(regular, expected_hash="0" * 64)
+    absent = storage_module._observe_path(tmp_path / "missing.txt")
+    missing_field = storage_module._observe_path(None)
+
+    assert verified.state.value == "present_verified"
+    assert mismatch.state.value == "present_unexpected"
+    assert absent.state.value == "absent"
+    assert missing_field.state.value == "unknown"
+    assert storage_module._hash_if_file(regular) == expected
+    assert verified.as_dict()["state"] == "present_verified"
+    assert verified.as_dict()["exists"] is True
+
+    with monkeypatch.context() as context:
+        context.setattr(storage_module, "_has_reparse_ancestor", lambda _path: True)
+        unsafe = storage_module._observe_path(regular)
+    assert unsafe.state.value == "unsafe_reparse"
+
+    def unreadable(_path: Path) -> object:
+        raise PermissionError("observation denied")
+
+    with monkeypatch.context() as context:
+        context.setattr("jarvis.storage.os.lstat", unreadable)
+        unknown = storage_module._observe_path(regular)
+    assert unknown.state.value == "unknown"
+
+    special_info = SimpleNamespace(st_mode=stat.S_IFIFO, st_dev=1, st_ino=2)
+    with monkeypatch.context() as context:
+        context.setattr(storage_module, "_has_reparse_ancestor", lambda _path: False)
+        context.setattr("jarvis.storage.os.lstat", lambda _path: special_info)
+        special = storage_module._observe_path(regular)
+    assert special.state.value == "present_unexpected"
+    assert special.object_type == "special"
+
+    symlink_info = SimpleNamespace(st_mode=stat.S_IFLNK, st_dev=3, st_ino=4)
+    with monkeypatch.context() as context:
+        context.setattr(storage_module, "_has_reparse_ancestor", lambda _path: False)
+        context.setattr("jarvis.storage.os.lstat", lambda _path: symlink_info)
+        symlink = storage_module._observe_path(regular)
+    assert symlink.state.value == "unsafe_reparse"
+    assert symlink.object_type == "reparse_path"
+
+
+def test_r1r1_effect_reconciliation_preserves_failed_and_partial_states(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "owned"
+    root.mkdir()
+    first_source = root / "first-source.txt"
+    second_source = root / "second-source.txt"
+    first_destination = root / "first-destination.txt"
+    second_destination = root / "second-destination.txt"
+    first_source.write_bytes(b"first effect bytes")
+    second_source.write_bytes(b"second effect bytes")
+    steward = FileSteward(root)
+    planned = steward.plan_batch(
+        MutationOperation.COPY,
+        [
+            (first_source, first_destination, _classification()),
+            (second_source, second_destination, _classification()),
+        ],
+    )
+    first_destination.write_bytes(b"first effect bytes")
+    current = replace(
+        planned,
+        state=MutationState.UNKNOWN_OUTCOME,
+        items=(
+            replace(planned.items[0], state=MutationItemState.NOT_STARTED),
+            replace(planned.items[1], state=MutationItemState.FAILED_BEFORE_EFFECT),
+        ),
+    )
+    steward.manifests.save(current)
+
+    result = steward.reconcile(current)
+
+    assert result.state is MutationState.PARTIAL
+    assert result.manifest.items[0].state is MutationItemState.VERIFIED
+    assert result.manifest.items[1].state is MutationItemState.FAILED_BEFORE_EFFECT
+    assert result.manifest.detail == "partial item effects retained after reconciliation"
+
+
+def test_r1r1_restore_reconciliation_preserves_failed_and_partial_states(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "owned"
+    root.mkdir()
+    first_source = root / "first-restore.txt"
+    second_source = root / "second-restore.txt"
+    first_source.write_bytes(b"first restore bytes")
+    second_source.write_bytes(b"second restore bytes")
+    steward = FileSteward(root)
+    first_plan = steward.plan_delete(first_source, classification=_classification())
+    second_plan = steward.plan_delete(second_source, classification=_classification())
+    second_source.write_bytes(b"conflicting restore bytes")
+    current = replace(
+        first_plan,
+        phase=MutationPhase.RESTORE,
+        state=MutationState.UNKNOWN_OUTCOME,
+        items=(
+            replace(first_plan.items[0], state=MutationItemState.RESTORATION_IN_PROGRESS),
+            replace(second_plan.items[0], state=MutationItemState.FAILED_BEFORE_EFFECT),
+        ),
+    )
+    steward.manifests.save(current)
+
+    result = steward.reconcile(current)
+
+    assert result.state is MutationState.PARTIAL
+    assert result.manifest.items[0].state is MutationItemState.RESTORED
+    assert result.manifest.items[1].state is MutationItemState.FAILED_BEFORE_EFFECT
+    assert result.manifest.detail == "partial restore retained after reconciliation"

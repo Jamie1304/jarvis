@@ -221,6 +221,16 @@ class MutationItemState(StrEnum):
     RESTORED = "restoration_verified"
 
 
+class FilesystemObservationState(StrEnum):
+    """Trusted result categories for one read-only filesystem observation."""
+
+    ABSENT = "absent"
+    PRESENT_VERIFIED = "present_verified"
+    PRESENT_UNEXPECTED = "present_unexpected"
+    UNKNOWN = "unknown"
+    UNSAFE_REPARSE = "unsafe_reparse"
+
+
 class Reversibility(StrEnum):
     FULLY_REVERSIBLE = "fully_reversible"
     REVERSIBLE_WITH_BACKUP = "reversible_with_backup"
@@ -1296,6 +1306,30 @@ class FileIdentity:
             "reparse": self.reparse,
             "is_directory": self.is_directory,
             "modified_ns": self.modified_ns,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class FilesystemObservation:
+    """Separate existence, object type, identity, and content observations."""
+
+    path: Path | None
+    state: FilesystemObservationState
+    exists: bool | None
+    object_type: str
+    identity: str | None
+    content_hash: str | None
+    reason: str
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "path": str(self.path) if self.path is not None else None,
+            "state": self.state.value,
+            "exists": self.exists,
+            "object_type": self.object_type,
+            "identity": self.identity,
+            "content_hash": self.content_hash,
+            "reason": self.reason,
         }
 
 
@@ -2525,21 +2559,26 @@ class FileSteward:
         dispositions: list[MutationItem] = []
         observations: list[str] = []
         for item in current.items:
-            source = item.source.exists()
-            destination = item.destination is not None and item.destination.exists()
-            source_hash = _hash_if_file(item.source)
-            destination_hash = (
-                _hash_if_file(item.destination) if item.destination is not None else None
+            source_observation = _observe_path(item.source)
+            destination_observation = _observe_path(
+                item.destination, expected_hash=item.expected.content_hash
             )
-            recovery_hash = (
-                _hash_if_file(item.recovery_path) if item.recovery_path is not None else None
+            recovery_observation = _observe_path(
+                item.recovery_path, expected_hash=item.expected.content_hash
+            )
+            source_absent = source_observation.state is FilesystemObservationState.ABSENT
+            destination_verified = (
+                destination_observation.state is FilesystemObservationState.PRESENT_VERIFIED
+            )
+            recovery_verified = (
+                recovery_observation.state is FilesystemObservationState.PRESENT_VERIFIED
             )
             if current.operation is MutationOperation.COPY:
-                verified = destination_hash == item.expected.content_hash
+                verified = destination_verified
             elif current.operation in {MutationOperation.MOVE, MutationOperation.RENAME}:
-                verified = destination_hash == item.expected.content_hash and not source
+                verified = destination_verified and source_absent
             elif current.operation is MutationOperation.SAFE_DELETE:
-                verified = recovery_hash == item.expected.content_hash and not source
+                verified = recovery_verified and source_absent
             else:
                 verified = False
             if verified:
@@ -2558,8 +2597,11 @@ class FileSteward:
                 )
             dispositions.append(disposition)
             observations.append(
-                f"source={source};destination={destination};source_hash={source_hash};"
-                f"destination_hash={destination_hash};recovery_hash={recovery_hash}"
+                _observation_text("source", source_observation)
+                + ";"
+                + _observation_text("destination", destination_observation)
+                + ";"
+                + _observation_text("recovery", recovery_observation)
             )
         states = {item.state for item in dispositions}
         if states and states <= {MutationItemState.VERIFIED}:
@@ -2599,11 +2641,14 @@ class FileSteward:
         dispositions: list[MutationItem] = []
         observations: list[str] = []
         for item in current.items:
-            source_hash = _hash_if_file(item.source)
-            recovery_hash = (
-                _hash_if_file(item.recovery_path) if item.recovery_path is not None else None
+            source_observation = _observe_path(
+                item.source, expected_hash=item.expected.content_hash
             )
-            verified = source_hash == item.expected.content_hash and recovery_hash is None
+            recovery_observation = _observe_path(item.recovery_path)
+            verified = (
+                source_observation.state is FilesystemObservationState.PRESENT_VERIFIED
+                and recovery_observation.state is FilesystemObservationState.ABSENT
+            )
             if verified:
                 disposition = replace(
                     item,
@@ -2619,7 +2664,11 @@ class FileSteward:
                     detail="restore evidence is incomplete or conflicting",
                 )
             dispositions.append(disposition)
-            observations.append(f"source_hash={source_hash};recovery_hash={recovery_hash}")
+            observations.append(
+                _observation_text("source", source_observation)
+                + ";"
+                + _observation_text("recovery", recovery_observation)
+            )
         states = {item.state for item in dispositions}
         if states and states <= {MutationItemState.RESTORED}:
             aggregate = MutationState.RESTORED
@@ -2892,13 +2941,134 @@ def _sha256_path(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _hash_if_file(path: Path | None) -> str | None:
-    if path is None or not path.is_file() or _has_reparse_ancestor(path):
-        return None
+def _observe_path(path: Path | None, *, expected_hash: str | None = None) -> FilesystemObservation:
+    """Observe one path without collapsing unsafe or unreadable state to absence."""
+
+    if path is None:
+        return FilesystemObservation(
+            None,
+            FilesystemObservationState.UNKNOWN,
+            None,
+            "path_field_missing",
+            None,
+            None,
+            "manifest path field is missing",
+        )
+    candidate = path.expanduser().absolute()
     try:
-        return _sha256_path(path)
-    except OSError:
-        return None
+        if _has_reparse_ancestor(candidate):
+            return FilesystemObservation(
+                candidate,
+                FilesystemObservationState.UNSAFE_REPARSE,
+                None,
+                "reparse_path",
+                None,
+                None,
+                "path or an ancestor is a symlink or junction",
+            )
+        info = os.lstat(candidate)
+    except FileNotFoundError:
+        return FilesystemObservation(
+            candidate,
+            FilesystemObservationState.ABSENT,
+            False,
+            "missing",
+            None,
+            None,
+            "path is absent",
+        )
+    except OSError as error:
+        return FilesystemObservation(
+            candidate,
+            FilesystemObservationState.UNKNOWN,
+            None,
+            "unreadable",
+            None,
+            None,
+            f"path observation failed: {type(error).__name__}",
+        )
+
+    identity = f"{info.st_dev}:{info.st_ino}"
+    if stat.S_ISLNK(info.st_mode) or _has_reparse_ancestor(candidate):
+        return FilesystemObservation(
+            candidate,
+            FilesystemObservationState.UNSAFE_REPARSE,
+            True,
+            "reparse_path",
+            identity,
+            None,
+            "path is a symlink or junction",
+        )
+    if stat.S_ISDIR(info.st_mode):
+        return FilesystemObservation(
+            candidate,
+            FilesystemObservationState.PRESENT_UNEXPECTED,
+            True,
+            "directory",
+            identity,
+            None,
+            "directory is not an expected regular file",
+        )
+    if not stat.S_ISREG(info.st_mode):
+        return FilesystemObservation(
+            candidate,
+            FilesystemObservationState.PRESENT_UNEXPECTED,
+            True,
+            "special",
+            identity,
+            None,
+            "object is not an expected regular file",
+        )
+    try:
+        content_hash = _sha256_path(candidate)
+    except OSError as error:
+        return FilesystemObservation(
+            candidate,
+            FilesystemObservationState.UNKNOWN,
+            True,
+            "regular_file",
+            identity,
+            None,
+            f"regular file content is unreadable: {type(error).__name__}",
+        )
+    if expected_hash is not None and content_hash != expected_hash:
+        return FilesystemObservation(
+            candidate,
+            FilesystemObservationState.PRESENT_UNEXPECTED,
+            True,
+            "regular_file",
+            identity,
+            content_hash,
+            "regular file content does not match the expected hash",
+        )
+    return FilesystemObservation(
+        candidate,
+        FilesystemObservationState.PRESENT_VERIFIED,
+        True,
+        "regular_file",
+        identity,
+        content_hash,
+        "regular file content was read successfully",
+    )
+
+
+def _observation_text(label: str, observation: FilesystemObservation) -> str:
+    return (
+        f"{label}_state={observation.state.value};"
+        f"{label}_exists={observation.exists};"
+        f"{label}_object_type={observation.object_type};"
+        f"{label}_hash={observation.content_hash};"
+        f"{label}_reason={observation.reason}"
+    )
+
+
+def _hash_if_file(path: Path | None) -> str | None:
+    observation = _observe_path(path)
+    return (
+        observation.content_hash
+        if observation.state is FilesystemObservationState.PRESENT_VERIFIED
+        else None
+    )
 
 
 def _device_identity(path: Path) -> str:
@@ -3079,6 +3249,8 @@ __all__ = [
     "FileIdentity",
     "FileOwnership",
     "FileSteward",
+    "FilesystemObservation",
+    "FilesystemObservationState",
     "ForecastState",
     "ManifestIntegrityError",
     "MutationApprovalRequired",
