@@ -17,7 +17,7 @@ import shutil
 import sqlite3
 import stat
 import tempfile
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
@@ -1453,6 +1453,27 @@ class MutationManifestStore:
                 manifests.append(value)
         return tuple(manifests)
 
+    def find_planned_copy(
+        self, task_id: UUID, source: Path, destination: Path
+    ) -> MutationManifest | None:
+        """Return the durable exact copy plan for one task and path pair."""
+
+        for path in sorted(self.manifest_root.glob("*.json")):
+            try:
+                value = _manifest_from_dict(json.loads(path.read_text(encoding="utf-8")))
+            except (OSError, UnicodeError, ValueError, ManifestIntegrityError):
+                continue
+            if (
+                value.task_id == task_id
+                and value.operation is MutationOperation.COPY
+                and value.state is MutationState.PLANNED
+                and len(value.items) == 1
+                and value.items[0].source == source
+                and value.items[0].destination == destination
+            ):
+                return value
+        return None
+
 
 @dataclass(frozen=True, slots=True)
 class MutationResult:
@@ -1490,6 +1511,7 @@ class FileSteward:
         fault_injector: Callable[[str, MutationItem], None] | None = None,
         live_protection_probe: Callable[[Path], FileClassification] | None = None,
         relocation_authority: Callable[[Path, Path, FileClassification], bool] | None = None,
+        register_tool: bool = True,
     ) -> None:
         self.root = _safe_root(root)
         self.recovery_root = _safe_root(recovery_root or self.root / ".recovery")
@@ -1503,7 +1525,11 @@ class FileSteward:
         self.live_protection_probe = live_protection_probe
         self.relocation_authority = relocation_authority
         self._identity = object()
-        if permission_broker is not None and not permission_broker.registration_sealed:
+        if (
+            register_tool
+            and permission_broker is not None
+            and not permission_broker.registration_sealed
+        ):
             permission_broker.register_tool(
                 self._TOOL_ID,
                 self._identity,
@@ -1857,6 +1883,49 @@ class FileSteward:
         )
         return result
 
+    async def execute_with_receipt_async(
+        self,
+        manifest: MutationManifest | UUID,
+        receipt: AuthorizationReceipt,
+        *,
+        normalized_arguments: Mapping[str, object] | None = None,
+    ) -> MutationResult:
+        """Execute with the receipt already begun by the Tool boundary.
+
+        The normal ``execute_async`` API remains the standalone storage path.
+        This application-composition path deliberately performs no second
+        broker authorization or ``begin_execution`` call; the enclosing
+        registered tool owns that lifecycle and records the final outcome.
+        """
+
+        current = (
+            self.manifests.load(manifest.plan_id)
+            if isinstance(manifest, MutationManifest)
+            else self.manifests.load(manifest)
+        )
+        if current.state is not MutationState.PLANNED:
+            raise MutationUnknownOutcome("only a fresh planned manifest may execute")
+        if self.permission_broker is None or self.host_bridge is None:
+            raise MutationDenied("receipt-backed HostBridge is required for file effects")
+        bound = replace(
+            current, approval_binding=f"{receipt.argument_fingerprint}:{receipt.action_fingerprint}"
+        )
+        self.manifests.save(bound)
+        try:
+            result = self._perform(bound, receipt, normalized_arguments=normalized_arguments)
+        except (StalePlan, MutationConflict, MutationDenied):
+            raise
+        except BaseException as error:
+            latest = self.manifests.load(bound.plan_id)
+            if latest.state in {MutationState.PLANNED, MutationState.IN_PROGRESS}:
+                self.manifests.save(
+                    replace(
+                        latest, state=MutationState.UNKNOWN_OUTCOME, detail=type(error).__name__
+                    )
+                )
+            raise MutationUnknownOutcome("file effect lacks trusted terminal evidence") from error
+        return result
+
     async def _authorize(
         self, manifest: MutationManifest, *, user_id: str | None
     ) -> AuthorizationReceipt:
@@ -1978,7 +2047,13 @@ class FileSteward:
             )
         return "not_executed"
 
-    def _bridge_check(self, manifest: MutationManifest, receipt: AuthorizationReceipt) -> None:
+    def _bridge_check(
+        self,
+        manifest: MutationManifest,
+        receipt: AuthorizationReceipt,
+        *,
+        normalized_arguments: Mapping[str, object] | None = None,
+    ) -> None:
         if self.host_bridge is None or self.permission_broker is None:
             raise MutationDenied("receipt-backed HostBridge is required for file effects")
         operation = self._effective_operation(manifest)
@@ -2002,13 +2077,23 @@ class FileSteward:
             request,
             receipt=receipt,
             broker=self.permission_broker,
-            normalized_arguments=self._authorization_arguments(manifest),
+            normalized_arguments=(
+                normalized_arguments
+                if normalized_arguments is not None
+                else self._authorization_arguments(manifest)
+            ),
             expected_instance_id=self.host_bridge.instance_id,
         )
         if not result.allowed:
             raise MutationDenied(result.reason)
 
-    def _perform(self, manifest: MutationManifest, receipt: AuthorizationReceipt) -> MutationResult:
+    def _perform(
+        self,
+        manifest: MutationManifest,
+        receipt: AuthorizationReceipt,
+        *,
+        normalized_arguments: Mapping[str, object] | None = None,
+    ) -> MutationResult:
         before = _free_bytes(manifest.items[0].source)
         current = replace(
             manifest,
@@ -2022,7 +2107,7 @@ class FileSteward:
         try:
             if manifest.expected_bytes > manifest.max_affected_bytes:
                 raise MutationDenied("maximum byte scope exceeded")
-            self._bridge_check(current, receipt)
+            self._bridge_check(current, receipt, normalized_arguments=normalized_arguments)
             for item_index, item in enumerate(current.items):
                 current = replace(
                     current,

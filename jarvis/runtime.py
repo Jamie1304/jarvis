@@ -310,6 +310,13 @@ from jarvis.skills import SkillRegistry
 from jarvis.speech.stt import FasterWhisperSttProvider, SoundDeviceRecorder, SpeechToTextService
 from jarvis.speech.tts import PiperTtsProvider, Pyttsx3TtsProvider, TextToSpeechService
 from jarvis.state import ApplicationStateMachine, SQLiteStateStore, StateStoreError
+from jarvis.storage import (
+    FileSteward,
+    StorageHistoryStore,
+    StorageInventoryService,
+    StoragePlanner,
+)
+from jarvis.storage_tools import StorageCopyTool, StorageInspectTool, StorageInventoryTool
 from jarvis.task_controller import PlanningTaskController, TaskController
 from jarvis.testing.golden import (
     GoldenExecutor,
@@ -328,6 +335,7 @@ from jarvis.ui_simulation import UISimulationHarness
 from jarvis.update_preview import ControlledSelfUpdate
 from jarvis.user_model import UserModelMigrationError, UserModelStore
 from jarvis.verification import EvidenceRecord, VerificationEngine
+from jarvis.vm.bridge import HostBridge
 from jarvis.vm.execution import VMExecutionService
 from jarvis.vm.provider import VirtualizationProvider
 from jarvis.vm.tools import default_vm_tools
@@ -734,6 +742,10 @@ class RuntimeContainer:
     planning_store: SQLitePlanningStore
     planning_engine: PlanningEngine
     task_controller: TaskController
+    storage_history: StorageHistoryStore
+    storage_inventory: StorageInventoryService
+    storage_planner: StoragePlanner
+    file_steward: FileSteward
     vm_execution_service: VMExecutionService
     memory_store: SQLiteMemoryStore
     user_model_store: UserModelStore
@@ -1049,6 +1061,7 @@ class RuntimeContainer:
                 self.attention_store,
                 self.vm_execution_service,
                 self.planning_store,
+                self.storage_history,
                 self.memory_store,
                 self.user_model_store,
                 self.knowledge_library,
@@ -1491,8 +1504,10 @@ class ApplicationRuntime:
                 raise ConfigurationError("Trusted permission policy is malformed")
             vm_state_root = paths.root / "vm"
             host_bridge_root = (paths.temporary / "host-bridge").resolve()
+            storage_root = (paths.root / "storage").resolve()
             vm_state_root.mkdir(parents=True, exist_ok=True)
             host_bridge_root.mkdir(parents=True, exist_ok=True)
+            storage_root.mkdir(parents=True, exist_ok=True)
             policy = policy.with_additional_rules(
                 PolicyRule(
                     "jarvis.repair.authority",
@@ -1517,6 +1532,34 @@ class ApplicationRuntime:
                         tools=frozenset({"vm.host_file.write"}),
                     ),
                     frozenset({"host.file.write"}),
+                ),
+                PolicyRule(
+                    "jarvis.storage.read",
+                    Permission.FILESYSTEM_READ,
+                    Decision.ALLOW,
+                    ScopeConstraint(
+                        paths=(str(storage_root),), tools=frozenset({"storage.inspect"})
+                    ),
+                    frozenset({"storage.inspect"}),
+                ),
+                PolicyRule(
+                    "jarvis.storage.inventory",
+                    Permission.FILESYSTEM_READ,
+                    Decision.ALLOW,
+                    ScopeConstraint(
+                        paths=(str(storage_root),), tools=frozenset({"storage.inventory"})
+                    ),
+                    frozenset({"storage.inventory"}),
+                ),
+                PolicyRule(
+                    "jarvis.storage.copy",
+                    Permission.FILESYSTEM_WRITE,
+                    Decision.REQUIRE_APPROVAL,
+                    ScopeConstraint(
+                        paths=(str(storage_root),),
+                        tools=frozenset({FileSteward._TOOL_ID}),
+                    ),
+                    frozenset({"storage.file.copy"}),
                 ),
             )
             desktop_approval_authenticator = TrustedApprovalAuthenticator(ApprovalSource.TRUSTED_UI)
@@ -1554,8 +1597,24 @@ class ApplicationRuntime:
                 state_root=vm_state_root,
                 host_root=host_bridge_root,
             )
+            storage_history = StorageHistoryStore(paths.root / "storage-history.sqlite3")
+            storage_inventory = StorageInventoryService(history=storage_history)
+            storage_planner = StoragePlanner(storage_inventory)
+            file_steward = FileSteward(
+                storage_root,
+                permission_broker=broker,
+                host_bridge=HostBridge(),
+                register_tool=False,
+            )
             registry = ToolRegistry(
-                (CalculatorTool(), LocalTimeTool(), UnavailableWeatherTool()),
+                (
+                    CalculatorTool(),
+                    LocalTimeTool(),
+                    UnavailableWeatherTool(),
+                    StorageInspectTool(file_steward),
+                    StorageInventoryTool(storage_inventory, storage_root),
+                    StorageCopyTool(file_steward),
+                ),
                 permission_broker=broker,
             )
             for vm_tool in default_vm_tools(vm_execution_service):
@@ -2887,6 +2946,10 @@ class ApplicationRuntime:
                 planning_store=planning_store,
                 planning_engine=engine,
                 task_controller=task_controller,
+                storage_history=storage_history,
+                storage_inventory=storage_inventory,
+                storage_planner=storage_planner,
+                file_steward=file_steward,
                 vm_execution_service=vm_execution_service,
                 memory_store=memory_store,
                 user_model_store=user_model_store,
