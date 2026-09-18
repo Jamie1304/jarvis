@@ -216,6 +216,20 @@ def test_real_host_inventory_is_read_only_and_unknown_facts_stay_unknown() -> No
     assert all(item.mount_points for item in observations)
 
 
+def test_volume_observation_preserves_explicit_removable_and_network_semantics() -> None:
+    removable = replace(_volume("removable", removable=True), drive_type=VolumeDriveType.REMOVABLE)
+    network = replace(_volume("network", network=True), drive_type=VolumeDriveType.NETWORK)
+
+    assert removable.removable is True
+    assert removable.network is False
+    assert removable.drive_type is VolumeDriveType.REMOVABLE
+    assert network.removable is False
+    assert network.network is True
+    assert network.drive_type is VolumeDriveType.NETWORK
+    assert removable.as_dict()["removable"] is True
+    assert network.as_dict()["network"] is True
+
+
 def test_inventory_history_pressure_and_bounded_forecast(tmp_path: Path) -> None:
     history = StorageHistoryStore(tmp_path / "history.sqlite3", max_snapshots=3)
     first = _volume("volume-a", free=900)
@@ -480,6 +494,31 @@ def test_duplicate_detector_requires_full_hash_and_does_not_count_hardlinks(tmp_
     assert group.reclaimable_bytes == 10
     assert group.safe_reclaimable_bytes == 10
     assert all(item.content_hash for item in group.files)
+
+
+def test_duplicate_detector_reports_exact_reclaimable_bytes_for_physical_objects(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "dataset"
+    root.mkdir()
+    first = root / "first.bin"
+    second = root / "second.bin"
+    hardlink = root / "hardlink.bin"
+    first.write_bytes(b"exact physical bytes")
+    second.write_bytes(b"exact physical bytes")
+    try:
+        os.link(first, hardlink)
+    except OSError as error:
+        pytest.skip(f"hardlinks unavailable for exact physical-object evidence: {error}")
+
+    group = DuplicateDetector().scan(
+        (root,),
+        classifier=lambda _path: _classification(FileCategory.JARVIS_OWNED),
+    )[0]
+
+    assert len(group.files) == 3
+    assert group.reclaimable_bytes == len(b"exact physical bytes")
+    assert group.safe_reclaimable_bytes == len(b"exact physical bytes")
 
 
 def test_duplicate_detector_skips_reparse_paths_and_intentional_copies(tmp_path: Path) -> None:
