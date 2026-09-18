@@ -63,6 +63,10 @@ class AcquisitionApprovalRequired(AcquisitionDenied):
         self.approvals = approvals
 
 
+class AcquisitionPlacementApprovalRequired(AcquisitionApprovalRequired):
+    """Final placement is paused before its filesystem effect begins."""
+
+
 class AcquisitionDeferred(AcquisitionError):
     """The operation must wait for a known resource or security condition."""
 
@@ -152,6 +156,8 @@ class ArtifactState(StrEnum):
     REGISTERED = "registered"
     FAILED = "failed"
     SAFE_TO_REMOVE = "safe_to_remove"
+    VERIFIED_STAGED = "verified_staged"
+    PLACEMENT_PENDING = "placement_pending"
 
 
 class AcquisitionResultStatus(StrEnum):
@@ -160,6 +166,7 @@ class AcquisitionResultStatus(StrEnum):
     FAILED = "failed"
     VERIFICATION_REQUIRED = "verification_required"
     UNKNOWN_OUTCOME = "unknown_outcome"
+    PLACEMENT_PENDING = "placement_pending"
 
 
 class AcquisitionEffectOutcome(StrEnum):
@@ -1064,6 +1071,19 @@ class AcquisitionPermissionAuthority(Protocol):
     async def finish(self, receipt: object, outcome: AcquisitionEffectOutcome) -> None: ...
 
 
+class AcquisitionMaterializer(Protocol):
+    """Trusted final-placement authority; transport never implements this."""
+
+    async def materialize(
+        self,
+        request: AcquisitionRequest,
+        staging_path: Path,
+        *,
+        task_id: UUID,
+        user_id: str | None,
+    ) -> Path: ...
+
+
 class BrokerAcquisitionAuthorizer:
     """Adapt acquisition phases to the one existing PermissionBroker."""
 
@@ -1210,6 +1230,7 @@ class AcquisitionBroker:
         permission_authority: AcquisitionPermissionAuthority | None = None,
         security: SecurityDispositionProvider | None = None,
         qualifier: DisposableQualifier | None = None,
+        materializer: AcquisitionMaterializer | None = None,
         resource_governor: ResourceGovernor | None = None,
         target_revalidator: TargetRevalidator | None = None,
         clock: Callable[[], datetime] | None = None,
@@ -1226,6 +1247,7 @@ class AcquisitionBroker:
         self._permission_authority = permission_authority
         self._security = security or NoSecurityDispositionProvider()
         self._qualifier = qualifier
+        self._materializer = materializer
         self._resource_governor = resource_governor
         self._target_revalidator = target_revalidator
         self._clock = clock or (lambda: datetime.now(UTC))
@@ -1263,6 +1285,69 @@ class AcquisitionBroker:
                         request,
                         existing,
                         materialized_path=path,
+                    )
+            if (
+                self._materializer is not None
+                and existing.state
+                in {ArtifactState.VERIFIED_STAGED, ArtifactState.PLACEMENT_PENDING}
+                and request.target_location is not None
+                and existing.computed_sha256 == request.expected_sha256
+            ):
+                staging = self._staging_path(request)
+                if staging.is_file() and _sha256_file(staging) == request.expected_sha256:
+                    self._ensure_live_target(request)
+                    try:
+                        final = await self._materializer.materialize(
+                            request,
+                            staging,
+                            task_id=task_id or uuid4(),
+                            user_id=user_id,
+                        )
+                    except AcquisitionPlacementApprovalRequired:
+                        self._record(
+                            request,
+                            ArtifactState.PLACEMENT_PENDING,
+                            "verified staging retained while final placement awaits approval",
+                            now,
+                            computed_sha256=existing.computed_sha256,
+                            size_bytes=existing.size_bytes,
+                        )
+                        raise
+                    except AcquisitionUnknownOutcome:
+                        self._record(
+                            request,
+                            ArtifactState.PLACEMENT_PENDING,
+                            "final placement requires reconciliation",
+                            now,
+                            computed_sha256=existing.computed_sha256,
+                            size_bytes=existing.size_bytes,
+                        )
+                        raise
+                    if staging.exists():
+                        try:
+                            staging.unlink()
+                        except OSError as error:
+                            raise AcquisitionUnknownOutcome(
+                                "final placement succeeded but staging disposition is unresolved"
+                            ) from error
+                    updated = self._record(
+                        request,
+                        ArtifactState.REGISTERED,
+                        "verified staged bytes materialized at final target",
+                        now,
+                        computed_sha256=existing.computed_sha256,
+                        size_bytes=existing.size_bytes,
+                    )
+                    return AcquisitionResult(
+                        AcquisitionResultStatus.REGISTERED,
+                        request,
+                        updated,
+                        AcquisitionIntegrityEvidence(
+                            request.expected_sha256,
+                            existing.computed_sha256,
+                            existing.size_bytes,
+                        ),
+                        materialized_path=final,
                     )
             if existing.state in {ArtifactState.ACTIVE, ArtifactState.VERIFICATION_REQUIRED}:
                 raise AcquisitionUnknownOutcome(
@@ -1315,9 +1400,14 @@ class AcquisitionBroker:
             try:
                 if request.target_location is None:
                     raise AcquisitionValidationError("a bounded file acquisition requires a target")
+                destination = (
+                    self._staging_destination(request)
+                    if self._materializer is not None
+                    else request.target_location
+                )
                 evidence = await self._transport.download(
                     request.source or "",
-                    request.target_location,
+                    destination or "",
                     maximum_bytes=request.download_size_bytes,
                     expected_sha256=request.expected_sha256,
                 )
@@ -1438,6 +1528,67 @@ class AcquisitionBroker:
                         decision,
                         evidence.destination,
                     )
+            if self._materializer is not None:
+                staged = self._record(
+                    request,
+                    ArtifactState.VERIFIED_STAGED,
+                    "bytes verified in bounded staging; final placement pending",
+                    now,
+                    computed_sha256=evidence.computed_sha256,
+                    size_bytes=evidence.bytes_written,
+                )
+                try:
+                    self._ensure_live_target(request)
+                    final = await self._materializer.materialize(
+                        request,
+                        evidence.destination,
+                        task_id=task_id or uuid4(),
+                        user_id=user_id,
+                    )
+                except AcquisitionPlacementApprovalRequired:
+                    self._record(
+                        request,
+                        ArtifactState.PLACEMENT_PENDING,
+                        "verified staging retained while final placement awaits approval",
+                        now,
+                        computed_sha256=staged.computed_sha256,
+                        size_bytes=staged.size_bytes,
+                    )
+                    raise
+                except AcquisitionUnknownOutcome:
+                    self._record(
+                        request,
+                        ArtifactState.PLACEMENT_PENDING,
+                        "final placement requires reconciliation",
+                        now,
+                        computed_sha256=staged.computed_sha256,
+                        size_bytes=staged.size_bytes,
+                    )
+                    raise
+                if evidence.destination.exists():
+                    try:
+                        evidence.destination.unlink()
+                    except OSError as error:
+                        raise AcquisitionUnknownOutcome(
+                            "final placement succeeded but staging disposition is unresolved"
+                        ) from error
+                updated = self._record(
+                    request,
+                    ArtifactState.REGISTERED,
+                    "materialized, hash-verified, and registered at final target",
+                    now,
+                    computed_sha256=evidence.computed_sha256,
+                    size_bytes=evidence.bytes_written,
+                )
+                return AcquisitionResult(
+                    AcquisitionResultStatus.REGISTERED,
+                    request,
+                    updated,
+                    integrity,
+                    security,
+                    decision,
+                    final,
+                )
             consumer_result = None
             if consumer is not None:
                 consumer_result = consumer(evidence.destination)
@@ -1509,6 +1660,24 @@ class AcquisitionBroker:
                 )
         raise AcquisitionUnknownOutcome("acquisition remains unresolved; no blind retry is allowed")
 
+    def _staging_destination(self, request: AcquisitionRequest) -> str:
+        return f".staging/{request.fingerprint}.artifact"
+
+    def _staging_path(self, request: AcquisitionRequest) -> Path:
+        return self._transport.root / Path(
+            *PureWindowsPath(self._staging_destination(request)).parts
+        )
+
+    def _ensure_live_target(self, request: AcquisitionRequest) -> None:
+        if self._target_revalidator is None:
+            return
+        try:
+            failure = self._target_revalidator(request)
+        except Exception as error:
+            failure = f"target revalidation is unknown: {type(error).__name__}"
+        if failure is not None:
+            raise AcquisitionStaleTarget(failure)
+
     async def aclose(self) -> None:
         close = getattr(self._ledger, "close", None)
         if callable(close):
@@ -1541,6 +1710,9 @@ class AcquisitionBroker:
     def _path_for(self, target_location: str | None) -> Path | None:
         if target_location is None:
             return None
+        if self._materializer is not None:
+            candidate = Path(target_location).expanduser().absolute().resolve(strict=False)
+            return candidate
         try:
             target = self._transport._target(target_location)  # noqa: SLF001
         except AcquisitionTransportError:
@@ -1564,6 +1736,8 @@ __all__ = [
     "AcquisitionError",
     "AcquisitionDenied",
     "AcquisitionApprovalRequired",
+    "AcquisitionMaterializer",
+    "AcquisitionPlacementApprovalRequired",
     "AcquisitionDeferred",
     "AcquisitionIntegrityEvidence",
     "AcquisitionLedger",

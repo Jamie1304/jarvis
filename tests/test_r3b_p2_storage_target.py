@@ -128,7 +128,9 @@ async def test_p2_application_runtime_wires_live_target_revalidation_to_owned_st
     container = runtime.container
     planner = container.storage_planner
     inventory = container.storage_inventory
-    observed = (_volume("runtime-volume", free=900, capacity=1_000, mount="C:\\"),)
+    mount = tmp_path / "volume"
+    (mount / "JARVIS" / "acquisitions").mkdir(parents=True)
+    observed = (_volume("runtime-volume", free=900, capacity=1_000, mount=str(mount)),)
     calls: list[tuple[object, tuple[VolumeObservation, ...]]] = []
 
     def inspect_owned(service: object) -> tuple[VolumeObservation, ...]:
@@ -144,6 +146,8 @@ async def test_p2_application_runtime_wires_live_target_revalidation_to_owned_st
         assert service is planner
         assert volumes is observed
         calls.append((request, volumes))
+        if request.target_volume_identity != "runtime-volume":
+            return PlacementStatus.STALE_PLAN
         return PlacementStatus.ALREADY_SUITABLE
 
     monkeypatch.setattr(type(inventory), "inspect", inspect_owned)
@@ -159,7 +163,7 @@ async def test_p2_application_runtime_wires_live_target_revalidation_to_owned_st
             source_identity="https://example.test/runtime-bound-resource",
             trusted_source=True,
         ),
-        target_location="C:/JARVIS/acquisitions/runtime-bound-resource",
+        target_location=str(mount / "JARVIS" / "acquisitions" / "runtime-bound-resource"),
         target_volume_identity="runtime-volume",
         download_size_bytes=100,
         installed_size_bytes=100,
@@ -168,6 +172,20 @@ async def test_p2_application_runtime_wires_live_target_revalidation_to_owned_st
 
     assert revalidator(request) is None
     assert calls == [(request, observed)]
+
+    assert revalidator(replace(request, target_volume_identity="missing")) == (
+        "live storage target revalidation failed"
+    )
+    unprovisioned = mount / "JARVIS" / "acquisitions"
+    unprovisioned.rmdir()
+    assert revalidator(request) == "placement root is not provisioned or trusted"
+    (mount / "JARVIS" / "acquisitions").mkdir(parents=True)
+    monkeypatch.setattr(
+        type(container.file_steward),
+        "register_provisioned_root",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("registration")),
+    )
+    assert revalidator(request) == "approved placement root is unsafe: RuntimeError"
     await runtime.aclose()
 
 

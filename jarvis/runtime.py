@@ -22,6 +22,7 @@ import httpx
 from jarvis.acquisition import (
     AcquisitionBroker,
     AcquisitionPolicy,
+    AcquisitionRequest,
     BoundedDownloadTransport,
     BrokerAcquisitionAuthorizer,
     SQLiteAcquisitionLedger,
@@ -312,10 +313,13 @@ from jarvis.speech.tts import PiperTtsProvider, Pyttsx3TtsProvider, TextToSpeech
 from jarvis.state import ApplicationStateMachine, SQLiteStateStore, StateStoreError
 from jarvis.storage import (
     FileSteward,
+    FileStewardAcquisitionMaterializer,
     PlacementStatus,
+    ProvisionedPlacementRootResolver,
     StorageHistoryStore,
     StorageInventoryService,
     StoragePlanner,
+    VolumeObservation,
 )
 from jarvis.storage_tools import StorageCopyTool, StorageInspectTool, StorageInventoryTool
 from jarvis.task_controller import PlanningTaskController, TaskController
@@ -697,6 +701,7 @@ class RuntimeTestFixture:
     additional_tools: tuple[Tool[Any, Any], ...] = ()
     compensation_observation_provider: CompensationObservationProvider | None = None
     compensation_state_provider: CompensationStateProvider | None = None
+    storage_volume_probe: Callable[[], tuple[VolumeObservation, ...]] | None = None
     self_development_runtime_verifier: SelfDevelopmentRuntimeVerifier | None = None
     self_development_gate_verifier: GateVerifier | None = None
     self_development_golden_executor: GoldenExecutor | None = None
@@ -1599,10 +1604,15 @@ class ApplicationRuntime:
                 host_root=host_bridge_root,
             )
             storage_history = StorageHistoryStore(paths.root / "storage-history.sqlite3")
-            storage_inventory = StorageInventoryService(history=storage_history)
+            storage_inventory = StorageInventoryService(
+                history=storage_history,
+                probe=(test_fixture.storage_volume_probe if test_fixture is not None else None),
+            )
             storage_planner = StoragePlanner(storage_inventory)
+            placement_root_resolver = ProvisionedPlacementRootResolver()
             file_steward = FileSteward(
                 storage_root,
+                trusted_roots=(paths.acquisitions,),
                 permission_broker=broker,
                 host_bridge=HostBridge(),
                 register_tool=False,
@@ -1914,22 +1924,37 @@ class ApplicationRuntime:
                 store=provisioning_store,
             )
             acquisition_ledger = SQLiteAcquisitionLedger(paths.acquisition_database)
+
+            def revalidate_acquisition_target(request: AcquisitionRequest) -> str | None:
+                status = storage_planner.validate_acquisition_target(
+                    request, volumes=storage_inventory.inspect()
+                )
+                if status is not PlacementStatus.ALREADY_SUITABLE:
+                    return "live storage target revalidation failed"
+                try:
+                    provisioned = placement_root_resolver.resolve(
+                        volume_id=request.target_volume_identity,
+                        resource_id=request.resource_id,
+                        target_location=request.target_location,
+                        volumes=storage_inventory.inspect(),
+                    )
+                    if provisioned is None:
+                        return "placement root is not provisioned or trusted"
+                    file_steward.register_provisioned_root(provisioned)
+                except (AssertionError, OSError, RuntimeError, ValueError) as error:
+                    return f"approved placement root is unsafe: {type(error).__name__}"
+                return None
+
             acquisition_broker = AcquisitionBroker(
                 BoundedDownloadTransport(paths.acquisitions),
                 AcquisitionPolicy(),
                 acquisition_ledger,
+                materializer=FileStewardAcquisitionMaterializer(file_steward),
                 permission_authority=BrokerAcquisitionAuthorizer(
                     broker, target_root=paths.acquisitions
                 ),
                 resource_governor=resource_governor,
-                target_revalidator=lambda request: (
-                    None
-                    if storage_planner.validate_acquisition_target(
-                        request, volumes=storage_inventory.inspect()
-                    )
-                    is PlacementStatus.ALREADY_SUITABLE
-                    else "live storage target revalidation failed"
-                ),
+                target_revalidator=revalidate_acquisition_target,
             )
             retirement_store = SQLiteRetirementStore(paths.retirement_database)
             portfolio_optimizer = ModelPortfolioOptimizer(

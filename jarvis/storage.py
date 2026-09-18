@@ -25,7 +25,12 @@ from pathlib import Path
 from typing import Protocol, cast
 from uuid import UUID, uuid4
 
-from jarvis.acquisition import AcquisitionRequest, ResourceType
+from jarvis.acquisition import (
+    AcquisitionPlacementApprovalRequired,
+    AcquisitionRequest,
+    AcquisitionUnknownOutcome,
+    ResourceType,
+)
 from jarvis.permissions import Permission, PermissionBroker, PermissionScope
 from jarvis.permissions.models import (
     ActionDescriptor,
@@ -303,6 +308,12 @@ def _under(path: Path, root: Path) -> bool:
     return True
 
 
+def _resource_child_name(resource_id: str) -> str:
+    return "".join(
+        character if character.isalnum() or character in "-_" else "_" for character in resource_id
+    )
+
+
 def _safe_root(root: Path) -> Path:
     candidate = _canonical(root)
     candidate.mkdir(parents=True, exist_ok=True)
@@ -387,6 +398,58 @@ class VolumeObservation:
             "evidence_source": self.evidence_source,
             "stable_identity": self.stable_identity,
         }
+
+
+@dataclass(frozen=True, slots=True)
+class TrustedPlacementRoot:
+    """A resolver-produced, already-provisioned JARVIS placement root."""
+
+    volume_id: str
+    mount: Path
+    root: Path
+
+
+class ProvisionedPlacementRootResolver:
+    """Resolve only pre-provisioned acquisition roots from live volume facts."""
+
+    def resolve(
+        self,
+        *,
+        volume_id: str | None,
+        resource_id: str,
+        target_location: str | None,
+        volumes: Iterable[VolumeObservation],
+    ) -> TrustedPlacementRoot | None:
+        if volume_id is None or target_location is None:
+            return None
+        volume = next((item for item in volumes if item.volume_id == volume_id), None)
+        if volume is None or not self._trusted_volume(volume):
+            return None
+        try:
+            mount = _canonical(Path(volume.mount_points[0]))
+            root = _canonical(mount / "JARVIS" / "acquisitions")
+            target = _canonical(Path(target_location))
+        except (MutationDenied, OSError, RuntimeError, ValueError):
+            return None
+        if (
+            not root.is_dir()
+            or _has_reparse_ancestor(root)
+            or not _under(root, mount)
+            or target != root / _resource_child_name(resource_id)
+        ):
+            return None
+        return TrustedPlacementRoot(volume.volume_id, mount, root)
+
+    @staticmethod
+    def _trusted_volume(volume: VolumeObservation) -> bool:
+        return (
+            volume.drive_type is VolumeDriveType.FIXED
+            and volume.stable_identity
+            and volume.removable is False
+            and volume.network is False
+            and volume.read_only is False
+            and bool(volume.mount_points)
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -737,11 +800,12 @@ class PlacementPlan:
     def target_location(self) -> str | None:
         if self.target_mount_point is None:
             return None
-        safe_id = "".join(
-            character if character.isalnum() or character in "-_" else "_"
-            for character in self.request.resource_id
+        return str(
+            Path(self.target_mount_point)
+            / "JARVIS"
+            / "acquisitions"
+            / _resource_child_name(self.request.resource_id)
         )
-        return str(Path(self.target_mount_point) / "JARVIS" / "acquisitions" / safe_id)
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -963,15 +1027,7 @@ class StoragePlanner:
         try:
             target_path = Path(request.target_location)
             mount = Path(target.mount_points[0])
-            expected = (
-                mount
-                / "JARVIS"
-                / "acquisitions"
-                / "".join(
-                    character if character.isalnum() or character in "-_" else "_"
-                    for character in request.resource_id
-                )
-            )
+            expected = mount / "JARVIS" / "acquisitions" / _resource_child_name(request.resource_id)
             if target_path.resolve(strict=False) != expected.resolve(strict=False):
                 return PlacementStatus.STALE_PLAN
             if not _under(target_path.resolve(strict=False), mount.resolve(strict=False)):
@@ -1507,6 +1563,26 @@ class MutationManifestStore:
                 return value
         return None
 
+    def find_planned_effect(
+        self, task_id: UUID, operation: MutationOperation, source: Path, destination: Path
+    ) -> MutationManifest | None:
+        """Find one durable exact pending effect for restart/resume."""
+        for path in sorted(self.manifest_root.glob("*.json")):
+            try:
+                value = _manifest_from_dict(json.loads(path.read_text(encoding="utf-8")))
+            except (OSError, UnicodeError, ValueError, ManifestIntegrityError):
+                continue
+            if (
+                value.task_id == task_id
+                and value.operation is operation
+                and value.state is MutationState.PLANNED
+                and len(value.items) == 1
+                and value.items[0].source == source
+                and value.items[0].destination == destination
+            ):
+                return value
+        return None
+
 
 @dataclass(frozen=True, slots=True)
 class MutationResult:
@@ -1545,8 +1621,13 @@ class FileSteward:
         live_protection_probe: Callable[[Path], FileClassification] | None = None,
         relocation_authority: Callable[[Path, Path, FileClassification], bool] | None = None,
         register_tool: bool = True,
+        trusted_roots: Iterable[Path] = (),
     ) -> None:
         self.root = _safe_root(root)
+        extra_roots = tuple(_safe_root(item) for item in trusted_roots)
+        if any(_has_reparse_ancestor(item) for item in extra_roots):
+            raise MutationDenied("trusted placement root is unsafe")
+        self.trusted_roots = tuple(dict.fromkeys((self.root, *extra_roots)))
         self.recovery_root = _safe_root(recovery_root or self.root / ".recovery")
         if not _under(self.recovery_root, self.root):
             raise MutationDenied("recovery root must remain inside the trusted root")
@@ -1572,6 +1653,22 @@ class FileSteward:
     def inspect(self, path: Path) -> FileIdentity:
         canonical = self._owned(path)
         return _file_identity(canonical)
+
+    def register_provisioned_root(self, provisioned: TrustedPlacementRoot) -> None:
+        """Register only a resolver-produced, already-existing placement root."""
+        if not isinstance(provisioned, TrustedPlacementRoot):
+            raise MutationDenied("trusted placement evidence is malformed")
+        candidate = _canonical(provisioned.root)
+        mount = _canonical(provisioned.mount)
+        if (
+            not candidate.is_dir()
+            or _has_reparse_ancestor(candidate)
+            or not _under(candidate, mount)
+            or candidate != mount / "JARVIS" / "acquisitions"
+        ):
+            raise MutationDenied("trusted placement root is unavailable or unsafe")
+        if not any(candidate == item for item in self.trusted_roots):
+            self.trusted_roots = (*self.trusted_roots, candidate)
 
     def plan_copy(
         self,
@@ -1982,13 +2079,13 @@ class FileSteward:
         return result.receipt
 
     def _descriptor(self, manifest: MutationManifest) -> ActionDescriptor:
-        scope = PermissionScope(paths=(str(self.root),), task_id=manifest.task_id)
+        scope = PermissionScope(paths=self._scope_paths(manifest), task_id=manifest.task_id)
         operation = self._effective_operation(manifest)
         return build_host_bridge_action_descriptor(
             action=f"storage.file.{operation.value}",
             operation=self._bridge_operation(operation),
             resource=self._bridge_resource(manifest),
-            scope=str(self.root),
+            scope=self._scope_paths(manifest)[-1],
             risk=self._risk(manifest),
             permissions=(PermissionRequest(Permission.FILESYSTEM_WRITE, scope),),
             safety_class=self._safety_class(manifest),
@@ -2000,7 +2097,7 @@ class FileSteward:
             "phase": manifest.phase.value,
             "operation": self._effective_operation(manifest).value,
             "manifest_fingerprint": manifest.fingerprint,
-            "trusted_root": str(self.root),
+            "trusted_roots": self._scope_paths(manifest),
             "items": tuple(
                 {
                     "source": str(item.source),
@@ -2012,6 +2109,14 @@ class FileSteward:
             ),
             "max_affected_bytes": manifest.max_affected_bytes,
         }
+
+    def _scope_paths(self, manifest: MutationManifest) -> tuple[str, ...]:
+        """Return narrow authority paths for primary and registered placement roots."""
+        paths = {str(self.root)}
+        for item in manifest.items:
+            if item.destination is not None and not _under(item.destination, self.root):
+                paths.add(str(item.destination))
+        return tuple(sorted(paths))
 
     @staticmethod
     def _effective_operation(manifest: MutationManifest) -> MutationOperation:
@@ -2096,7 +2201,7 @@ class FileSteward:
             instance_id=self.host_bridge.instance_id,
             operation=self._bridge_operation(operation),
             resource=self._bridge_resource(manifest),
-            scope=str(self.root),
+            scope=self._scope_paths(manifest)[-1],
             risk=self._risk(manifest),
             expires_at=receipt.expires_at,
             tool_id=self._TOOL_ID,
@@ -2816,7 +2921,7 @@ class FileSteward:
         if path is None:
             raise MutationDenied("path is required")
         canonical = _canonical(path)
-        if not _under(canonical, self.root):
+        if not any(_under(canonical, root) for root in self.trusted_roots):
             raise MutationDenied("path is outside the trusted file scope")
         if not allow_missing and not canonical.exists():
             raise MutationDenied("source path is unavailable")
@@ -2824,9 +2929,59 @@ class FileSteward:
 
     def _is_safe_owned(self, path: Path) -> bool:
         try:
-            return _under(_canonical(path), self.root)
+            canonical = _canonical(path)
+            return any(_under(canonical, root) for root in self.trusted_roots)
         except MutationError:
             return False
+
+
+class FileStewardAcquisitionMaterializer:
+    """Adapt verified acquisition staging to the existing FileSteward effect path."""
+
+    def __init__(self, steward: FileSteward) -> None:
+        if not isinstance(steward, FileSteward):
+            raise MutationDenied("FileSteward is required for acquisition placement")
+        self._steward = steward
+
+    async def materialize(
+        self,
+        request: AcquisitionRequest,
+        staging_path: Path,
+        *,
+        task_id: UUID,
+        user_id: str | None,
+    ) -> Path:
+        if request.target_location is None or not request.jarvis_owned:
+            raise MutationDenied("final acquisition placement must be JARVIS-owned")
+        destination = _canonical(Path(request.target_location))
+        classification = FileClassification(
+            FileCategory.JARVIS_OWNED,
+            owner=FileOwnership.JARVIS,
+            confidence="trusted_acquisition_request",
+            active_reference=False,
+            retention=RetentionState.RETENTION,
+            evidence=("verified acquisition staging", "trusted placement binding"),
+        )
+        manifest = self._steward.manifests.find_planned_effect(
+            task_id, MutationOperation.MOVE, _canonical(staging_path), destination
+        )
+        if manifest is None:
+            manifest = self._steward.plan_move(
+                _canonical(staging_path),
+                destination,
+                task_id=task_id,
+                classification=classification,
+                max_affected_bytes=request.installed_size_bytes or request.download_size_bytes,
+            )
+        try:
+            result = await self._steward.execute_async(manifest, user_id=user_id)
+        except MutationApprovalRequired as error:
+            raise AcquisitionPlacementApprovalRequired(error.approvals) from error
+        except MutationUnknownOutcome as error:
+            raise AcquisitionUnknownOutcome("final placement requires reconciliation") from error
+        if not result.success or not destination.is_file():
+            raise AcquisitionUnknownOutcome("final placement was not independently verified")
+        return destination
 
 
 @dataclass(frozen=True, slots=True)
@@ -3367,6 +3522,7 @@ __all__ = [
     "FileIdentity",
     "FileOwnership",
     "FileSteward",
+    "FileStewardAcquisitionMaterializer",
     "FilesystemObservation",
     "FilesystemObservationState",
     "ForecastState",
