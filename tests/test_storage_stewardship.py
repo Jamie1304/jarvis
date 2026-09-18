@@ -779,6 +779,32 @@ def test_file_steward_interrupted_copy_reconciles_unknown_without_retry(tmp_path
     assert (root / "copy.txt").exists() is False
 
 
+def test_file_steward_interrupted_purge_is_unknown_and_not_replayed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "owned"
+    root.mkdir()
+    source = root / "purge-interrupted.bin"
+    source.write_bytes(b"must remain for reconciliation")
+    broker, authenticator = _broker(root)
+    steward = FileSteward(root, permission_broker=broker, host_bridge=HostBridge())
+    plan = steward.plan_purge(source, classification=_classification())
+    with pytest.raises(MutationApprovalRequired):
+        _run(steward.execute_async(plan))
+    _run(_approve_delete(broker, authenticator, plan.task_id))
+
+    def interrupted_unlink(_path: Path) -> None:
+        raise OSError("synthetic purge interruption")
+
+    monkeypatch.setattr(Path, "unlink", interrupted_unlink)
+    with pytest.raises(MutationUnknownOutcome):
+        _run(steward.execute_async(plan))
+    stored = steward.manifests.load(plan.plan_id)
+    assert stored.state is MutationState.UNKNOWN_OUTCOME
+    assert stored.items[0].state is MutationItemState.UNKNOWN_OUTCOME
+    assert source.exists()
+
+
 def test_storage_contracts_reject_malformed_or_untrusted_facts(tmp_path: Path) -> None:
     base = _volume("volume")
     serialized = base.as_dict()
