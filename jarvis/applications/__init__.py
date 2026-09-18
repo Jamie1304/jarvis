@@ -6,6 +6,7 @@ from jarvis.applications.configuration import (
     ConfigurationRegistry,
 )
 from jarvis.applications.manager import ApplicationManager
+from jarvis.applications.models import ApplicationHealthEvidence, ApplicationHealthState
 from jarvis.applications.plans import InstallationPlanStore
 from jarvis.applications.providers import (
     ApplicationInventoryProvider,
@@ -18,6 +19,8 @@ from jarvis.applications.runtime import ApplicationRuntime, WindowsApplicationRu
 __all__ = [
     "ApplicationConfigurationAdapter",
     "ApplicationInventoryProvider",
+    "ApplicationHealthEvidence",
+    "ApplicationHealthState",
     "ApplicationManager",
     "ApplicationRuntime",
     "ConfigurationRegistry",

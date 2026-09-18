@@ -13,6 +13,12 @@ class ApplicationStatus(StrEnum):
     BROKEN = "broken"
 
 
+class ApplicationHealthState(StrEnum):
+    HEALTHY = "healthy"
+    BROKEN = "broken"
+    UNKNOWN = "unknown"
+
+
 class ApplicationMatchStatus(StrEnum):
     FOUND = "found"
     AMBIGUOUS = "ambiguous"
@@ -35,6 +41,22 @@ class ApplicationRecord:
     executable_path: str | None
     installation_source: str
     status: ApplicationStatus
+
+
+@dataclass(frozen=True, slots=True)
+class ApplicationHealthEvidence:
+    """Read-only software health evidence; it grants no lifecycle authority."""
+
+    application_id: str
+    name: str
+    state: ApplicationHealthState
+    detail: str
+
+    def __post_init__(self) -> None:
+        if not self.application_id.strip() or not self.name.strip() or not self.detail.strip():
+            raise ValueError("Application health evidence text is empty")
+        if not isinstance(self.state, ApplicationHealthState):
+            raise ValueError("Application health state is malformed")
 
 
 @dataclass(frozen=True, slots=True)

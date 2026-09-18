@@ -2,6 +2,7 @@
 
 import asyncio
 from collections.abc import Callable, Mapping
+from typing import Any, cast
 from uuid import UUID, uuid4
 
 import pytest
@@ -10,6 +11,8 @@ from jarvis.applications.configuration import ApplicationConfigurationAdapter, C
 from jarvis.applications.manager import ApplicationManager
 from jarvis.applications.models import (
     ApplicationAmbiguousError,
+    ApplicationHealthEvidence,
+    ApplicationHealthState,
     ApplicationManagerError,
     ApplicationRecord,
     ApplicationStatus,
@@ -165,6 +168,12 @@ class FakeRuntime(ApplicationRuntime):
         self.closed.append((application_id, process_id))
 
 
+class FailingRuntime(FakeRuntime):
+    async def can_launch(self, item: ApplicationRecord) -> bool:
+        del item
+        raise RuntimeError("launch probe unavailable")
+
+
 class FakeConfiguration(ApplicationConfigurationAdapter):
     @property
     def application_id(self) -> str:
@@ -250,6 +259,64 @@ async def test_plan_install_is_idempotent_for_existing_valid_application() -> No
     assert plan is None
     assert existing == record()
     assert packages.install_calls == []
+
+
+@pytest.mark.asyncio
+async def test_health_is_read_only_and_classifies_trusted_launch_evidence() -> None:
+    healthy = record()
+    broken = record(name="Broken App")
+    broken = ApplicationRecord(
+        "app:broken",
+        broken.name,
+        broken.version,
+        broken.publisher,
+        broken.executable_path,
+        broken.installation_source,
+        ApplicationStatus.BROKEN,
+    )
+    packages = FakePackages((candidate(),))
+    inventory = FakeInventory((healthy, broken))
+    app_manager = manager(inventory, packages)
+
+    evidence = await app_manager.health()
+
+    assert tuple(item.state for item in evidence) == (
+        ApplicationHealthState.HEALTHY,
+        ApplicationHealthState.BROKEN,
+    )
+    assert packages.install_calls == []
+    assert inventory.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_health_preserves_unknown_provider_and_launch_probe_failures() -> None:
+    inventory = FakeInventory((record(),))
+    app_manager = manager(inventory, FakePackages(), runtime=FailingRuntime())
+    evidence = await app_manager.health()
+    assert evidence[0].state is ApplicationHealthState.UNKNOWN
+    assert "launch verification failed" in evidence[0].detail
+
+    class FailingInventory(FakeInventory):
+        async def enumerate_installed(self) -> tuple[ApplicationRecord, ...]:
+            raise RuntimeError("inventory unavailable")
+
+    failed = manager(FailingInventory(), FakePackages())
+    evidence = await failed.health()
+    assert len(evidence) == 1
+    assert evidence[0].state is ApplicationHealthState.UNKNOWN
+    assert evidence[0].application_id == "application-inventory"
+
+
+def test_health_evidence_rejects_malformed_trusted_fields() -> None:
+    with pytest.raises(ValueError, match="text is empty"):
+        ApplicationHealthEvidence("", "Application", ApplicationHealthState.UNKNOWN, "detail")
+    with pytest.raises(ValueError, match="state is malformed"):
+        ApplicationHealthEvidence(
+            "application",
+            "Application",
+            cast(Any, "healthy"),
+            "detail",
+        )
 
 
 @pytest.mark.asyncio

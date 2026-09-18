@@ -9,6 +9,8 @@ from uuid import UUID
 
 from jarvis.applications.models import (
     ApplicationAmbiguousError,
+    ApplicationHealthEvidence,
+    ApplicationHealthState,
     ApplicationManagerError,
     ApplicationMatchStatus,
     ApplicationNotFoundError,
@@ -46,6 +48,56 @@ class ApplicationManager:
         if len({record.application_id for record in records}) != len(records):
             raise ApplicationManagerError("Application inventory contains duplicate identifiers")
         return records
+
+    async def health(self) -> tuple[ApplicationHealthEvidence, ...]:
+        """Observe installed software health without creating an effect plan."""
+
+        try:
+            records = await self.inventory()
+        except Exception as error:
+            return (
+                ApplicationHealthEvidence(
+                    "application-inventory",
+                    "Installed applications",
+                    ApplicationHealthState.UNKNOWN,
+                    f"inventory observation failed: {type(error).__name__}",
+                ),
+            )
+        evidence: list[ApplicationHealthEvidence] = []
+        for record in records:
+            if record.status is ApplicationStatus.BROKEN:
+                evidence.append(
+                    ApplicationHealthEvidence(
+                        record.application_id,
+                        record.name,
+                        ApplicationHealthState.BROKEN,
+                        "trusted inventory marks the application broken",
+                    )
+                )
+                continue
+            try:
+                launchable = await self.runtime.can_launch(record)
+            except Exception as error:
+                evidence.append(
+                    ApplicationHealthEvidence(
+                        record.application_id,
+                        record.name,
+                        ApplicationHealthState.UNKNOWN,
+                        f"launch verification failed: {type(error).__name__}",
+                    )
+                )
+                continue
+            evidence.append(
+                ApplicationHealthEvidence(
+                    record.application_id,
+                    record.name,
+                    ApplicationHealthState.HEALTHY if launchable else ApplicationHealthState.BROKEN,
+                    "trusted launch verification passed"
+                    if launchable
+                    else "trusted launch verification failed",
+                )
+            )
+        return tuple(evidence)
 
     async def find(self, semantic_name: str) -> ApplicationSearchResult:
         query = _semantic_query(semantic_name)
