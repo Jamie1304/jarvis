@@ -172,6 +172,101 @@ class RetentionState(StrEnum):
     UNKNOWN = "unknown"
 
 
+@dataclass(frozen=True, slots=True)
+class RetentionReference:
+    source: str
+    state: RetentionState
+    reason: str
+
+    def __post_init__(self) -> None:
+        _text(self.source, "Retention reference source", maximum=512)
+        if not isinstance(self.state, RetentionState):
+            raise ValueError("Retention reference state is malformed")
+        _text(self.reason, "Retention reference reason", maximum=2_000)
+
+
+@dataclass(frozen=True, slots=True)
+class RetentionDecision:
+    state: RetentionState
+    references: tuple[RetentionReference, ...]
+
+    @property
+    def safe_to_remove(self) -> bool:
+        return self.state is RetentionState.SAFE_TO_REMOVE
+
+
+class RetentionReferenceProvider(Protocol):
+    def references(self, path: Path) -> Iterable[RetentionReference]: ...
+
+
+class RetentionReferenceAuthority:
+    """Aggregate trusted retention owners conservatively for one exact path."""
+
+    _PRECEDENCE = {
+        RetentionState.SAFE_TO_REMOVE: 0,
+        RetentionState.EXPIRED: 1,
+        RetentionState.UNKNOWN: 2,
+        RetentionState.RETENTION: 3,
+        RetentionState.ROLLBACK_REQUIRED: 4,
+        RetentionState.NEEDED_FOR_EVIDENCE: 5,
+        RetentionState.ACTIVE: 6,
+    }
+
+    def __init__(self, providers: Iterable[RetentionReferenceProvider] = ()) -> None:
+        self._providers: list[RetentionReferenceProvider] = []
+        for provider in providers:
+            self.register(provider)
+
+    def register(self, provider: RetentionReferenceProvider) -> None:
+        if not callable(getattr(provider, "references", None)):
+            raise ValueError("retention provider is malformed")
+        self._providers.append(provider)
+
+    def evaluate(
+        self,
+        path: Path,
+        *,
+        classification: FileClassification | None = None,
+    ) -> RetentionDecision:
+        references: list[RetentionReference] = []
+        if classification is not None:
+            references.append(
+                RetentionReference(
+                    "file-classification",
+                    classification.retention,
+                    "current trusted file classification",
+                )
+            )
+        for provider in self._providers:
+            try:
+                values = tuple(provider.references(path))
+            except Exception as error:
+                values = (
+                    RetentionReference(
+                        type(provider).__name__,
+                        RetentionState.UNKNOWN,
+                        f"provider observation failed: {type(error).__name__}",
+                    ),
+                )
+            for value in values:
+                if isinstance(value, RetentionReference):
+                    references.append(value)
+                else:
+                    references.append(
+                        RetentionReference(
+                            type(provider).__name__,
+                            RetentionState.UNKNOWN,
+                            "provider returned malformed retention evidence",
+                        )
+                    )
+        if not references:
+            references.append(
+                RetentionReference("authority", RetentionState.UNKNOWN, "no retention evidence")
+            )
+        state = max(references, key=lambda item: self._PRECEDENCE[item.state]).state
+        return RetentionDecision(state, tuple(references))
+
+
 class CleanupState(StrEnum):
     ELIGIBLE = "eligible"
     PROTECTED = "protected"
@@ -195,6 +290,7 @@ class MutationOperation(StrEnum):
     MOVE = "move"
     RENAME = "rename"
     SAFE_DELETE = "safe_delete"
+    PURGE = "purge"
     RESTORE = "restore"
 
 
@@ -1602,6 +1698,21 @@ class MutationResult:
     def success(self) -> bool:
         return self.state in {MutationState.COMPLETED, MutationState.RESTORED}
 
+    @property
+    def logical_deleted_bytes(self) -> int:
+        if self.success and self.manifest.operation in {
+            MutationOperation.SAFE_DELETE,
+            MutationOperation.PURGE,
+        }:
+            return self.manifest.expected_bytes
+        return 0
+
+    @property
+    def observed_free_space_delta(self) -> int | None:
+        if self.before_free_bytes is None or self.after_free_bytes is None:
+            return None
+        return self.after_free_bytes - self.before_free_bytes
+
 
 class FileSteward:
     """The single trusted local file-effect path for R3B."""
@@ -1620,6 +1731,7 @@ class FileSteward:
         fault_injector: Callable[[str, MutationItem], None] | None = None,
         live_protection_probe: Callable[[Path], FileClassification] | None = None,
         relocation_authority: Callable[[Path, Path, FileClassification], bool] | None = None,
+        retention_authority: RetentionReferenceAuthority | None = None,
         register_tool: bool = True,
         trusted_roots: Iterable[Path] = (),
     ) -> None:
@@ -1638,6 +1750,7 @@ class FileSteward:
         self.fault_injector = fault_injector
         self.live_protection_probe = live_protection_probe
         self.relocation_authority = relocation_authority
+        self.retention_authority = retention_authority
         self._identity = object()
         if (
             register_tool
@@ -1766,6 +1879,41 @@ class FileSteward:
             max_affected_bytes=max_affected_bytes,
         )
 
+    def plan_purge(
+        self,
+        source: Path,
+        *,
+        task_id: UUID | None = None,
+        classification: FileClassification | None = None,
+        max_affected_bytes: int | None = None,
+    ) -> MutationManifest:
+        """Plan one irreversible purge for a proven JARVIS-owned safe item."""
+        if classification is None:
+            raise MutationDenied("purge requires trusted retention classification")
+        if (
+            classification.owner is not FileOwnership.JARVIS
+            or classification.category
+            not in {FileCategory.JARVIS_OWNED, FileCategory.CACHE, FileCategory.TEMPORARY}
+            or classification.active_reference is not False
+            or classification.retention is not RetentionState.SAFE_TO_REMOVE
+        ):
+            raise MutationDenied("purge requires a proven JARVIS-owned SAFE_TO_REMOVE item")
+        if (
+            self.retention_authority is not None
+            and not self.retention_authority.evaluate(
+                source, classification=classification
+            ).safe_to_remove
+        ):
+            raise MutationDenied("retention authority did not approve purge")
+        return self._plan(
+            MutationOperation.PURGE,
+            source,
+            None,
+            task_id=task_id,
+            classification=classification,
+            max_affected_bytes=max_affected_bytes,
+        )
+
     def plan_batch(
         self,
         operation: MutationOperation,
@@ -1781,7 +1929,7 @@ class FileSteward:
         planned: list[MutationItem] = []
         for source, destination, classification in items:
             item_classification = classification or FileClassification(FileCategory.UNKNOWN)
-            if operation is MutationOperation.SAFE_DELETE:
+            if operation in {MutationOperation.SAFE_DELETE, MutationOperation.PURGE}:
                 if classification is None or item_classification.category in {
                     FileCategory.UNKNOWN,
                     FileCategory.MODEL_STORAGE,
@@ -1791,12 +1939,22 @@ class FileSteward:
                     FileCategory.MOVABLE_USER_DATA,
                     FileCategory.ARCHIVE,
                 }:
-                    raise MutationDenied("batch delete contains a protected or unknown item")
+                    raise MutationDenied("batch purge/delete contains a protected or unknown item")
                 if (
                     item_classification.active_reference is not False
                     or item_classification.retention is not RetentionState.SAFE_TO_REMOVE
                 ):
-                    raise MutationDenied("batch delete contains an active or unretained item")
+                    raise MutationDenied("batch purge/delete contains an active or unretained item")
+                if operation is MutationOperation.PURGE and (
+                    item_classification.owner is not FileOwnership.JARVIS
+                    or item_classification.category
+                    not in {
+                        FileCategory.JARVIS_OWNED,
+                        FileCategory.CACHE,
+                        FileCategory.TEMPORARY,
+                    }
+                ):
+                    raise MutationDenied("batch purge requires JARVIS-owned disposable data")
             elif operation is not MutationOperation.COPY and (
                 item_classification.category is FileCategory.UNKNOWN
             ):
@@ -2114,6 +2272,8 @@ class FileSteward:
         """Return narrow authority paths for primary and registered placement roots."""
         paths = {str(self.root)}
         for item in manifest.items:
+            if not _under(item.source, self.root):
+                paths.add(str(item.source))
             if item.destination is not None and not _under(item.destination, self.root):
                 paths.add(str(item.destination))
         return tuple(sorted(paths))
@@ -2133,6 +2293,7 @@ class FileSteward:
             MutationOperation.MOVE: HostBridgeOperation.FILE_MOVE,
             MutationOperation.RENAME: HostBridgeOperation.FILE_RENAME,
             MutationOperation.SAFE_DELETE: HostBridgeOperation.FILE_DELETE,
+            MutationOperation.PURGE: HostBridgeOperation.FILE_DELETE,
             MutationOperation.RESTORE: HostBridgeOperation.FILE_RESTORE,
         }[operation]
 
@@ -2141,7 +2302,7 @@ class FileSteward:
         return (
             Risk.HIGH.value
             if FileSteward._effective_operation(manifest)
-            in {MutationOperation.SAFE_DELETE, MutationOperation.MOVE}
+            in {MutationOperation.SAFE_DELETE, MutationOperation.PURGE, MutationOperation.MOVE}
             else Risk.MEDIUM.value
         )
 
@@ -2149,7 +2310,8 @@ class FileSteward:
     def _safety_class(manifest: MutationManifest) -> SafetyClass:
         return (
             SafetyClass.BULK_DELETION
-            if FileSteward._effective_operation(manifest) is MutationOperation.SAFE_DELETE
+            if FileSteward._effective_operation(manifest)
+            in {MutationOperation.SAFE_DELETE, MutationOperation.PURGE}
             else SafetyClass.ORDINARY
         )
 
@@ -2232,7 +2394,7 @@ class FileSteward:
         *,
         normalized_arguments: Mapping[str, object] | None = None,
     ) -> MutationResult:
-        before = _free_bytes(manifest.items[0].source)
+        before = _free_bytes(manifest.items[0].source.parent)
         current = replace(
             manifest,
             phase=MutationPhase.EFFECT,
@@ -2293,6 +2455,8 @@ class FileSteward:
                     self._rename(item, current)
                 elif current.operation is MutationOperation.SAFE_DELETE:
                     self._safe_delete(item, current)
+                elif current.operation is MutationOperation.PURGE:
+                    self._purge(item, current)
                 else:
                     raise MutationDenied("restore is executed through restore(), not a raw plan")
                 current = replace(
@@ -2318,10 +2482,10 @@ class FileSteward:
                 current, state=MutationState.COMPLETED, detail="all item effects verified"
             )
             self.manifests.save(completed)
-            after = _free_bytes(current.items[0].source)
+            after = _free_bytes(current.items[0].source.parent)
             reclaimed = (
                 max(0, (after or 0) - (before or 0))
-                if current.operation is MutationOperation.SAFE_DELETE
+                if current.operation in {MutationOperation.SAFE_DELETE, MutationOperation.PURGE}
                 else 0
             )
             moved = (
@@ -2403,7 +2567,10 @@ class FileSteward:
         current = _file_identity(item.source)
         if current != item.expected:
             raise StalePlan("source file identity, content, or reparse state changed")
-        if operation is not MutationOperation.SAFE_DELETE and item.destination is None:
+        if (
+            operation not in {MutationOperation.SAFE_DELETE, MutationOperation.PURGE}
+            and item.destination is None
+        ):
             raise StalePlan("destination is missing from an effect plan")
         if item.destination is not None:
             destination = self._owned(item.destination, allow_missing=True)
@@ -2415,8 +2582,9 @@ class FileSteward:
             MutationOperation.MOVE,
             MutationOperation.RENAME,
             MutationOperation.SAFE_DELETE,
+            MutationOperation.PURGE,
         }:
-            if _under(item.source, self.recovery_root):
+            if operation is not MutationOperation.PURGE and _under(item.source, self.recovery_root):
                 raise MutationDenied("protected recovery artifact cannot be generic cleanup")
             classification = item.classification
             if self.live_protection_probe is not None:
@@ -2441,10 +2609,22 @@ class FileSteward:
             if classification.active_reference is not False:
                 raise MutationDenied("active-reference protection blocked the effect")
             if (
-                operation is MutationOperation.SAFE_DELETE
+                operation in {MutationOperation.SAFE_DELETE, MutationOperation.PURGE}
                 and classification.retention is not RetentionState.SAFE_TO_REMOVE
             ):
                 raise MutationDenied("live retention evidence blocked the effect")
+            if operation is MutationOperation.PURGE and (
+                classification.owner is not FileOwnership.JARVIS
+                or classification.category
+                not in {FileCategory.JARVIS_OWNED, FileCategory.CACHE, FileCategory.TEMPORARY}
+            ):
+                raise MutationDenied("live purge ownership protection blocked the effect")
+            if operation is MutationOperation.PURGE and self.retention_authority is not None:
+                decision = self.retention_authority.evaluate(
+                    item.source, classification=classification
+                )
+                if not decision.safe_to_remove:
+                    raise MutationDenied("live retention authority blocked the purge")
         elif item.classification.active_reference is True:
             raise MutationDenied("active-reference protection blocked the effect")
 
@@ -2571,6 +2751,19 @@ class FileSteward:
         ):
             raise MutationUnknownOutcome("recovery staging content is not verified")
         self._unlink_expected_source(item.source, item.expected)
+
+    def _purge(self, item: MutationItem, _manifest: MutationManifest) -> None:
+        """Irreversibly remove one exact, pre-authorized file and verify absence."""
+        if item.destination is not None or item.recovery_path is not None:
+            raise MutationDenied("purge scope must contain one exact source and no recovery path")
+        try:
+            item.source.unlink()
+        except FileNotFoundError as error:
+            raise MutationUnknownOutcome("purge source disposition is unresolved") from error
+        except OSError as error:
+            raise MutationUnknownOutcome("purge effect outcome is unresolved") from error
+        if item.source.exists():
+            raise MutationUnknownOutcome("purge source disposition is unresolved")
 
     def restore(
         self, manifest: MutationManifest | UUID, *, user_id: str | None = None
@@ -3545,6 +3738,10 @@ __all__ = [
     "PlacementStatus",
     "Reversibility",
     "RetentionState",
+    "RetentionDecision",
+    "RetentionReference",
+    "RetentionReferenceAuthority",
+    "RetentionReferenceProvider",
     "ResourcePlacementRequest",
     "StalePlan",
     "StorageDeferred",

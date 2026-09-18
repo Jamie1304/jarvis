@@ -63,11 +63,14 @@ from jarvis.storage import (
     MutationManifestStore,
     MutationOperation,
     MutationPhase,
+    MutationResult,
     MutationState,
     MutationUnknownOutcome,
     PlacementClass,
     PlacementStatus,
     ResourcePlacementRequest,
+    RetentionReference,
+    RetentionReferenceAuthority,
     RetentionState,
     StalePlan,
     StorageDeferred,
@@ -166,6 +169,7 @@ def _broker(root: Path) -> tuple[PermissionBroker, TrustedApprovalAuthenticator]
                             "storage.file.move",
                             "storage.file.rename",
                             "storage.file.safe_delete",
+                            "storage.file.purge",
                             "storage.file.restore",
                         }
                     ),
@@ -374,6 +378,50 @@ def test_acquisition_target_binding_and_stale_target() -> None:
     )
 
 
+def test_retention_reference_authority_uses_conservative_precedence() -> None:
+    class References:
+        def __init__(self, state: RetentionState) -> None:
+            self.state = state
+
+        def references(self, _path: Path) -> tuple[RetentionReference, ...]:
+            return (RetentionReference("provider", self.state, "test evidence"),)
+
+    safe = References(RetentionState.SAFE_TO_REMOVE)
+    authority = RetentionReferenceAuthority((safe,))
+    classification = _classification()
+    assert authority.evaluate(Path("C:/owned/item"), classification=classification).safe_to_remove
+    safe.state = RetentionState.ACTIVE
+    decision = authority.evaluate(Path("C:/owned/item"), classification=classification)
+    assert decision.state is RetentionState.ACTIVE
+    safe.state = RetentionState.UNKNOWN
+    decision = authority.evaluate(Path("C:/owned/item"), classification=classification)
+    assert decision.state is RetentionState.UNKNOWN
+
+    class Broken:
+        def references(self, _path: Path) -> tuple[RetentionReference, ...]:
+            raise RuntimeError("provider unavailable")
+
+    broken = RetentionReferenceAuthority((Broken(),))
+    assert not broken.evaluate(Path("C:/owned/item")).safe_to_remove
+
+    class Malformed:
+        def references(self, _path: Path) -> tuple[object, ...]:
+            return (object(),)
+
+    assert (
+        RetentionReferenceAuthority((cast(Any, Malformed()),)).evaluate(Path("C:/owned/item")).state
+        is RetentionState.UNKNOWN
+    )
+    assert (
+        RetentionReferenceAuthority().evaluate(Path("C:/owned/item")).state
+        is RetentionState.UNKNOWN
+    )
+    with pytest.raises(ValueError, match="provider is malformed"):
+        RetentionReferenceAuthority().register(cast(Any, object()))
+    with pytest.raises(ValueError, match="state is malformed"):
+        RetentionReference("invalid", cast(RetentionState, "invalid"), "bad")
+
+
 def test_classifier_cleanup_and_download_hygiene_are_conservative(tmp_path: Path) -> None:
     owned = tmp_path / "owned"
     owned.mkdir()
@@ -502,6 +550,168 @@ def test_file_steward_real_copy_move_rename_delete_restore_and_manifest_restart(
     assert restarted.reconcile_pending() == ()
     persisted = restarted.manifests.load(delete.plan_id)
     assert persisted.state is MutationState.RESTORED
+
+
+def test_file_steward_purge_requires_trusted_retention_and_measures_effect(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "owned"
+    root.mkdir()
+    source = root / "purge-me.bin"
+    source.write_bytes(b"irreversible-purge")
+    classification = _classification()
+    broker, authenticator = _broker(root)
+    steward = FileSteward(root, permission_broker=broker, host_bridge=HostBridge())
+
+    with pytest.raises(MutationDenied, match="proven JARVIS-owned"):
+        steward.plan_purge(
+            source,
+            classification=replace(classification, owner=FileOwnership.USER),
+        )
+    plan = steward.plan_purge(source, classification=classification)
+    with pytest.raises(MutationApprovalRequired):
+        _run(steward.execute_async(plan))
+    _run(_approve_delete(broker, authenticator, plan.task_id))
+    result = steward.execute(plan)
+    assert result.success
+    assert result.manifest.reversibility.value == "irreversible"
+    assert result.logical_deleted_bytes == len(b"irreversible-purge")
+    assert result.observed_free_space_delta is not None
+    assert not source.exists()
+
+
+def test_file_steward_purge_rejects_untrusted_batch_and_result_unknowns(tmp_path: Path) -> None:
+    root = tmp_path / "owned"
+    root.mkdir()
+    source = root / "batch-user.bin"
+    source.write_bytes(b"protected")
+    broker, _ = _broker(root)
+    steward = FileSteward(root, permission_broker=broker, host_bridge=HostBridge())
+    with pytest.raises(MutationDenied, match="JARVIS-owned"):
+        steward.plan_purge(source, classification=_classification(owner=FileOwnership.USER))
+    with pytest.raises(MutationDenied, match="trusted retention"):
+        steward.plan_purge(source)
+    with pytest.raises(MutationDenied, match="JARVIS-owned"):
+        steward.plan_batch(
+            MutationOperation.PURGE,
+            [(source, None, _classification(owner=FileOwnership.USER))],
+        )
+    plan = steward.plan_copy(source, root / "copy.bin")
+    result = MutationResult(plan, None, None, 0, 0)
+    assert result.logical_deleted_bytes == 0
+    assert result.observed_free_space_delta is None
+
+
+def test_file_steward_purge_scope_and_external_trusted_root_are_exact(tmp_path: Path) -> None:
+    root = tmp_path / "owned"
+    extra = tmp_path / "extra"
+    root.mkdir()
+    extra.mkdir()
+    source = extra / "external.bin"
+    source.write_bytes(b"external")
+    broker, _ = _broker(root)
+    steward = FileSteward(
+        root,
+        permission_broker=broker,
+        host_bridge=HostBridge(),
+        trusted_roots=(extra,),
+    )
+    plan = steward.plan_purge(source, classification=_classification())
+    assert str(source) in steward._scope_paths(plan)
+    copy_plan = steward.plan_copy(source, root / "copy.bin")
+    with pytest.raises(MutationDenied, match="exact source"):
+        steward._purge(copy_plan.items[0], copy_plan)
+
+
+def test_file_steward_purge_revalidates_retention_authority_before_effect(
+    tmp_path: Path,
+) -> None:
+    class MutableReferences:
+        state = RetentionState.SAFE_TO_REMOVE
+
+        def references(self, _path: Path) -> tuple[RetentionReference, ...]:
+            return (RetentionReference("mutable-owner", self.state, "live test state"),)
+
+    root = tmp_path / "owned"
+    root.mkdir()
+    source = root / "toctou-purge.bin"
+    source.write_bytes(b"must remain protected")
+    mutable = MutableReferences()
+    broker, authenticator = _broker(root)
+    steward = FileSteward(
+        root,
+        permission_broker=broker,
+        host_bridge=HostBridge(),
+        retention_authority=RetentionReferenceAuthority((mutable,)),
+    )
+    classification = _classification()
+    plan = steward.plan_purge(source, classification=classification)
+    mutable.state = RetentionState.ACTIVE
+    with pytest.raises(MutationApprovalRequired):
+        _run(steward.execute_async(plan))
+    _run(_approve_delete(broker, authenticator, plan.task_id))
+    with pytest.raises(MutationDenied, match="retention authority"):
+        _run(steward.execute_async(plan))
+    assert source.exists()
+
+
+def test_file_steward_safe_delete_restore_then_purge_recovery_artifact(tmp_path: Path) -> None:
+    root = tmp_path / "owned"
+    root.mkdir()
+    source = root / "chain.bin"
+    source.write_bytes(b"safe-delete-chain")
+    classification = _classification()
+    broker, authenticator = _broker(root)
+    steward = FileSteward(root, permission_broker=broker, host_bridge=HostBridge())
+
+    safe_delete = steward.plan_delete(source, classification=classification)
+    with pytest.raises(MutationApprovalRequired):
+        _run(steward.execute_async(safe_delete))
+    _run(_approve_delete(broker, authenticator, safe_delete.task_id))
+    deleted = steward.execute(safe_delete)
+    recovery = deleted.manifest.items[0].recovery_path
+    assert recovery is not None and recovery.is_file() and not source.exists()
+    restored = steward.restore(deleted.manifest)
+    assert restored.success and source.read_bytes() == b"safe-delete-chain"
+    assert not recovery.exists()
+
+    second_delete = steward.plan_delete(source, classification=classification)
+    with pytest.raises(MutationApprovalRequired):
+        _run(steward.execute_async(second_delete))
+    _run(_approve_delete(broker, authenticator, second_delete.task_id))
+    deleted_again = steward.execute(second_delete)
+    recovery_again = deleted_again.manifest.items[0].recovery_path
+    assert recovery_again is not None and recovery_again.is_file()
+    purge = steward.plan_purge(recovery_again, classification=classification)
+    with pytest.raises(MutationApprovalRequired):
+        _run(steward.execute_async(purge))
+    _run(_approve_delete(broker, authenticator, purge.task_id))
+    purged = steward.execute(purge)
+    assert purged.success and not recovery_again.exists()
+    with pytest.raises((MutationDenied, MutationUnknownOutcome)):
+        steward.restore(deleted_again.manifest)
+
+
+def test_file_steward_batch_purge_tracks_each_exact_item(tmp_path: Path) -> None:
+    root = tmp_path / "owned"
+    root.mkdir()
+    first = root / "first.purge"
+    second = root / "second.purge"
+    first.write_bytes(b"first")
+    second.write_bytes(b"second")
+    broker, authenticator = _broker(root)
+    steward = FileSteward(root, permission_broker=broker, host_bridge=HostBridge())
+    manifest = steward.plan_batch(
+        MutationOperation.PURGE,
+        [(first, None, _classification()), (second, None, _classification())],
+    )
+    with pytest.raises(MutationApprovalRequired):
+        _run(steward.execute_async(manifest))
+    _run(_approve_delete(broker, authenticator, manifest.task_id))
+    result = steward.execute(manifest)
+    assert result.success
+    assert all(item.state is MutationItemState.VERIFIED for item in result.manifest.items)
+    assert not first.exists() and not second.exists()
 
 
 def test_file_steward_denies_unknown_model_and_toctou(tmp_path: Path) -> None:
