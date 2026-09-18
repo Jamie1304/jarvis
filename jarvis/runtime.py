@@ -312,6 +312,7 @@ from jarvis.speech.tts import PiperTtsProvider, Pyttsx3TtsProvider, TextToSpeech
 from jarvis.state import ApplicationStateMachine, SQLiteStateStore, StateStoreError
 from jarvis.storage import (
     FileSteward,
+    PlacementStatus,
     StorageHistoryStore,
     StorageInventoryService,
     StoragePlanner,
@@ -1921,6 +1922,14 @@ class ApplicationRuntime:
                     broker, target_root=paths.acquisitions
                 ),
                 resource_governor=resource_governor,
+                target_revalidator=lambda request: (
+                    None
+                    if storage_planner.validate_acquisition_target(
+                        request, volumes=storage_inventory.inspect()
+                    )
+                    is PlacementStatus.ALREADY_SUITABLE
+                    else "live storage target revalidation failed"
+                ),
             )
             retirement_store = SQLiteRetirementStore(paths.retirement_database)
             portfolio_optimizer = ModelPortfolioOptimizer(

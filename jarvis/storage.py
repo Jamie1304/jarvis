@@ -927,6 +927,7 @@ class StoragePlanner:
             request,
             target_location=plan.target_location,
             target_volume_identity=plan.target_volume_id,
+            target_required_headroom_bytes=plan.request.required_headroom_bytes,
         )
 
     def validate_acquisition_target(
@@ -943,9 +944,41 @@ class StoragePlanner:
             None,
         )
         required = request.download_size_bytes or request.installed_size_bytes
-        if target is None or target.free_bytes is None or target.read_only is True:
+        if (
+            target is None
+            or target.free_bytes is None
+            or target.read_only is not False
+            or target.network is not False
+            or target.removable is not False
+            or not target.stable_identity
+            or not target.mount_points
+            or request.target_location is None
+        ):
             return PlacementStatus.STALE_PLAN
-        if required is not None and target.free_bytes < required:
+        required_total = (
+            None if required is None else required + request.target_required_headroom_bytes
+        )
+        if required_total is not None and target.free_bytes < required_total:
+            return PlacementStatus.STALE_PLAN
+        try:
+            target_path = Path(request.target_location)
+            mount = Path(target.mount_points[0])
+            expected = (
+                mount
+                / "JARVIS"
+                / "acquisitions"
+                / "".join(
+                    character if character.isalnum() or character in "-_" else "_"
+                    for character in request.resource_id
+                )
+            )
+            if target_path.resolve(strict=False) != expected.resolve(strict=False):
+                return PlacementStatus.STALE_PLAN
+            if not _under(target_path.resolve(strict=False), mount.resolve(strict=False)):
+                return PlacementStatus.STALE_PLAN
+            if _has_reparse_ancestor(target_path):
+                return PlacementStatus.STALE_PLAN
+        except (OSError, RuntimeError, ValueError):
             return PlacementStatus.STALE_PLAN
         return PlacementStatus.ALREADY_SUITABLE
 

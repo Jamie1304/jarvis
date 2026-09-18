@@ -71,6 +71,10 @@ class AcquisitionStaleRequest(AcquisitionDenied):
     """The request or its receipt is no longer current."""
 
 
+class AcquisitionStaleTarget(AcquisitionDeferred):
+    """A previously approved target failed trusted pre-effect revalidation."""
+
+
 class AcquisitionUnknownOutcome(AcquisitionError):
     """An effect lacks trusted terminal evidence and must be reconciled."""
 
@@ -253,6 +257,7 @@ class AcquisitionRequest:
     installed_size_bytes: int | None = None
     target_location: str | None = None
     target_volume_identity: str | None = None
+    target_required_headroom_bytes: int = 0
     license_metadata: str | None = None
     purchase_cost: float | None = None
     network_required: bool | None = None
@@ -290,6 +295,11 @@ class AcquisitionRequest:
             raise AcquisitionValidationError("Provenance is malformed")
         _optional_nonnegative_int(self.download_size_bytes, "Download size")
         _optional_nonnegative_int(self.installed_size_bytes, "Installed size")
+        if (
+            type(self.target_required_headroom_bytes) is not int
+            or self.target_required_headroom_bytes < 0
+        ):
+            raise AcquisitionValidationError("Target headroom is malformed")
         if self.purchase_cost is not None and (
             type(self.purchase_cost) not in {int, float} or self.purchase_cost < 0
         ):
@@ -354,6 +364,7 @@ class AcquisitionRequest:
             "installed_size_bytes": self.installed_size_bytes,
             "target_location": self.target_location,
             "target_volume_identity": self.target_volume_identity,
+            "target_required_headroom_bytes": self.target_required_headroom_bytes,
             "license_metadata": self.license_metadata,
             "purchase_cost": self.purchase_cost,
             "network_required": self.network_required,
@@ -1184,6 +1195,7 @@ class AcquisitionResult:
 
 
 Consumer = Callable[[Path], object | Awaitable[object]]
+TargetRevalidator = Callable[[AcquisitionRequest], str | None]
 
 
 class AcquisitionBroker:
@@ -1199,6 +1211,7 @@ class AcquisitionBroker:
         security: SecurityDispositionProvider | None = None,
         qualifier: DisposableQualifier | None = None,
         resource_governor: ResourceGovernor | None = None,
+        target_revalidator: TargetRevalidator | None = None,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
         if not isinstance(transport, BoundedDownloadTransport) or not isinstance(
@@ -1214,6 +1227,7 @@ class AcquisitionBroker:
         self._security = security or NoSecurityDispositionProvider()
         self._qualifier = qualifier
         self._resource_governor = resource_governor
+        self._target_revalidator = target_revalidator
         self._clock = clock or (lambda: datetime.now(UTC))
 
     @property
@@ -1285,6 +1299,18 @@ class AcquisitionBroker:
                     request, AcquisitionPhase.DOWNLOAD, task_id=task_id, user_id=user_id
                 )
                 await self._permission_authority.begin(receipt)
+            if self._target_revalidator is not None:
+                try:
+                    target_failure = self._target_revalidator(request)
+                except Exception as error:
+                    target_failure = f"target revalidation is unknown: {type(error).__name__}"
+                if target_failure is not None:
+                    self._record(request, ArtifactState.FAILED, target_failure, now)
+                    if receipt is not None and self._permission_authority is not None:
+                        await self._permission_authority.finish(
+                            receipt, AcquisitionEffectOutcome.PRE_EFFECT_FAILURE
+                        )
+                    raise AcquisitionStaleTarget(target_failure)
             self._record(request, ArtifactState.ACTIVE, "bounded acquisition started", now)
             try:
                 if request.target_location is None:
@@ -1552,6 +1578,7 @@ __all__ = [
     "AcquisitionResultStatus",
     "AcquisitionRisk",
     "AcquisitionStaleRequest",
+    "AcquisitionStaleTarget",
     "AcquisitionTransportError",
     "AcquisitionUnknownOutcome",
     "AcquisitionValidationError",
