@@ -1,0 +1,2947 @@
+"""Deterministic and real-bytes R3B storage/file stewardship acceptance."""
+
+from __future__ import annotations
+
+import asyncio
+import hashlib
+import json
+import os
+import stat
+import subprocess
+import sys
+import time
+import unittest
+from collections.abc import Coroutine
+from dataclasses import replace
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
+from types import SimpleNamespace
+from typing import Any, TypeVar, cast
+from uuid import UUID, uuid4
+
+import jarvis.storage as storage_module
+import pytest
+from jarvis.acquisition import (
+    AcquisitionRequest,
+    AcquisitionRisk,
+    PrivacyImpact,
+    ProvenanceMetadata,
+    ResourceType,
+)
+from jarvis.permissions import (
+    ApprovalActorKind,
+    ApprovalChoice,
+    ApprovalIdentity,
+    ApprovalSource,
+    Decision,
+    Permission,
+    PermissionBroker,
+    PolicyEngine,
+    PolicyRule,
+    ScopeConstraint,
+    TrustedApprovalAuthenticator,
+)
+from jarvis.permissions.audit import InMemoryAuditSink
+from jarvis.storage import (
+    CleanupClassifier,
+    CleanupState,
+    DownloadState,
+    DuplicateDetector,
+    EmergencyRecoveryPlanner,
+    FileCategory,
+    FileClassification,
+    FileClassifier,
+    FileOwnership,
+    FileSteward,
+    ForecastState,
+    ManifestIntegrityError,
+    MutationApprovalRequired,
+    MutationConflict,
+    MutationDenied,
+    MutationItem,
+    MutationItemState,
+    MutationManifestStore,
+    MutationOperation,
+    MutationPhase,
+    MutationResult,
+    MutationState,
+    MutationUnknownOutcome,
+    PlacementClass,
+    PlacementStatus,
+    ResourcePlacementRequest,
+    RetentionReference,
+    RetentionReferenceAuthority,
+    RetentionState,
+    StalePlan,
+    StorageDeferred,
+    StorageError,
+    StorageForecast,
+    StorageHistorySnapshot,
+    StorageHistoryStore,
+    StorageInventoryService,
+    StoragePlanner,
+    StoragePressurePolicy,
+    StoragePressureState,
+    StorageResourceType,
+    VolumeDriveType,
+    VolumeObservation,
+    classify_storage_pressure,
+    forecast_storage_pressure,
+)
+from jarvis.vm.bridge import HostBridge, HostBridgeOperation, HostBridgeRequest
+from scripts.acceptance import build_v1_i_r3b_artifact as r3b_artifact
+
+
+def _volume(
+    volume_id: str,
+    *,
+    free: int = 100,
+    capacity: int = 1_000,
+    mount: str = "C:\\",
+    system: bool | None = False,
+    speed: str | None = None,
+    read_only: bool | None = False,
+    removable: bool | None = False,
+    network: bool | None = False,
+) -> VolumeObservation:
+    return VolumeObservation(
+        volume_id,
+        (mount,),
+        "NTFS",
+        capacity,
+        capacity - free,
+        free,
+        VolumeDriveType.FIXED,
+        speed,
+        None,
+        None,
+        removable,
+        system,
+        read_only,
+        network,
+        datetime.now(UTC),
+        "test-trusted-volume-adapter",
+    )
+
+
+def _classification(
+    category: FileCategory = FileCategory.JARVIS_OWNED,
+    *,
+    owner: FileOwnership = FileOwnership.JARVIS,
+    active: bool | None = False,
+    retention: RetentionState = RetentionState.SAFE_TO_REMOVE,
+    mechanism: str | None = "steward.cleanup",
+    recovery: str | None = "recovery-stage",
+    intentional: bool = False,
+) -> FileClassification:
+    return FileClassification(
+        category,
+        owner,
+        "trusted-test-evidence",
+        True,
+        active,
+        datetime.now(UTC),
+        mechanism,
+        "regenerable acceptance-owned bytes",
+        recovery,
+        retention,
+        intentional,
+        ("acceptance-owned",),
+    )
+
+
+def _broker(root: Path) -> tuple[PermissionBroker, TrustedApprovalAuthenticator]:
+    authenticator = TrustedApprovalAuthenticator(source=ApprovalSource.TRUSTED_UI)
+    broker = PermissionBroker(
+        PolicyEngine(
+            (
+                PolicyRule(
+                    "storage.test-root",
+                    Permission.FILESYSTEM_WRITE,
+                    Decision.ALLOW,
+                    ScopeConstraint(
+                        paths=(str(root),),
+                        tools=frozenset({"storage.file_steward"}),
+                    ),
+                    frozenset(
+                        {
+                            "storage.file.copy",
+                            "storage.file.move",
+                            "storage.file.rename",
+                            "storage.file.safe_delete",
+                            "storage.file.purge",
+                            "storage.file.restore",
+                        }
+                    ),
+                ),
+            )
+        ),
+        approval_context_verifier=authenticator.verifier(),
+    )
+    return broker, authenticator
+
+
+async def _approve_delete(
+    broker: PermissionBroker,
+    authenticator: TrustedApprovalAuthenticator,
+    task_id: UUID,
+) -> None:
+    pending = await broker.pending_approvals(task_id)
+    assert len(pending) == 1
+    request = pending[0]
+    context = authenticator.issue_context(
+        request_id=request.request_id,
+        choice=ApprovalChoice.APPROVE_ONCE,
+        identity=ApprovalIdentity("acceptance-user", ApprovalActorKind.TRUSTED_USER),
+    )
+    decision = await broker.decide(context)
+    assert decision.accepted is True
+
+
+_Result = TypeVar("_Result")
+
+
+def _run(coroutine: Coroutine[Any, Any, _Result]) -> _Result:
+    return asyncio.run(coroutine)
+
+
+def test_real_host_inventory_is_read_only_and_unknown_facts_stay_unknown() -> None:
+    observations = StorageInventoryService().inspect()
+    assert observations
+    assert all(item.volume_id for item in observations)
+    assert all(item.capacity_bytes is None or item.capacity_bytes >= 0 for item in observations)
+    assert all(item.speed_class is None for item in observations)
+    assert all(item.health is None for item in observations)
+    assert all(item.encryption is None for item in observations)
+    assert all(item.mount_points for item in observations)
+
+
+def test_volume_observation_preserves_explicit_removable_and_network_semantics() -> None:
+    removable = replace(_volume("removable", removable=True), drive_type=VolumeDriveType.REMOVABLE)
+    network = replace(_volume("network", network=True), drive_type=VolumeDriveType.NETWORK)
+
+    assert removable.removable is True
+    assert removable.network is False
+    assert removable.drive_type is VolumeDriveType.REMOVABLE
+    assert network.removable is False
+    assert network.network is True
+    assert network.drive_type is VolumeDriveType.NETWORK
+    assert removable.as_dict()["removable"] is True
+    assert network.as_dict()["network"] is True
+
+
+def test_inventory_history_pressure_and_bounded_forecast(tmp_path: Path) -> None:
+    history = StorageHistoryStore(tmp_path / "history.sqlite3", max_snapshots=3)
+    first = _volume("volume-a", free=900)
+    service = StorageInventoryService(
+        probe=lambda: (first,),
+        history=history,
+        pressure_policy=StoragePressurePolicy(
+            watch_free_bytes=300,
+            constrained_free_bytes=200,
+            critical_free_bytes=100,
+            watch_free_ratio=0.3,
+            constrained_free_ratio=0.2,
+            critical_free_ratio=0.1,
+        ),
+    )
+    assert service.inspect() == (first,)
+    assert service.pressure("volume-a") is StoragePressureState.HEALTHY
+    assert (
+        classify_storage_pressure(
+            VolumeObservation(
+                "unknown",
+                ("C:\\",),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                datetime.now(UTC),
+                "test",
+            ),
+            StoragePressurePolicy(),
+        )
+        is StoragePressureState.UNKNOWN
+    )
+    now = datetime(2026, 1, 1, tzinfo=UTC)
+    samples = tuple(
+        StorageHistorySnapshot(
+            "volume-a",
+            now + timedelta(days=index),
+            1_000,
+            100 + index * 100,
+            900 - index * 100,
+            StoragePressureState.WATCH,
+        )
+        for index in range(3)
+    )
+    forecast = forecast_storage_pressure(samples, "volume-a", threshold_bytes=500)
+    assert forecast.state is ForecastState.DECLINING
+    assert forecast.threshold_crossing_at is not None
+    assert forecast.evidence_count == 3
+    assert (
+        forecast_storage_pressure(samples[:1], "volume-a").state
+        is ForecastState.INSUFFICIENT_EVIDENCE
+    )
+    assert (
+        forecast_storage_pressure(samples, "new-volume").state
+        is ForecastState.INSUFFICIENT_EVIDENCE
+    )
+    history.close()
+
+
+def test_forecast_reclamation_discontinuity_and_stable_usage() -> None:
+    now = datetime(2026, 1, 1, tzinfo=UTC)
+    samples = (
+        StorageHistorySnapshot("v", now, 1_000, 500, 500, StoragePressureState.WATCH),
+        StorageHistorySnapshot(
+            "v", now + timedelta(days=1), 1_000, 600, 400, StoragePressureState.WATCH
+        ),
+        StorageHistorySnapshot(
+            "v", now + timedelta(days=2), 1_000, 300, 700, StoragePressureState.HEALTHY
+        ),
+        StorageHistorySnapshot(
+            "v", now + timedelta(days=3), 1_000, 300, 700, StoragePressureState.HEALTHY
+        ),
+    )
+    forecast = forecast_storage_pressure(samples, "v")
+    assert forecast.state in {ForecastState.STABLE, ForecastState.DECLINING}
+    assert "discontinuity" in forecast.reason
+
+
+def test_pressure_uses_absolute_ratio_headroom_and_incoming_bytes() -> None:
+    policy = StoragePressurePolicy(
+        watch_free_bytes=300,
+        constrained_free_bytes=200,
+        critical_free_bytes=100,
+        watch_free_ratio=0.3,
+        constrained_free_ratio=0.2,
+        critical_free_ratio=0.1,
+        required_headroom_bytes=20,
+    )
+    assert classify_storage_pressure(_volume("v", free=500), policy) is StoragePressureState.HEALTHY
+    assert classify_storage_pressure(_volume("v", free=250), policy) is StoragePressureState.WATCH
+    assert (
+        classify_storage_pressure(_volume("v", free=180), policy)
+        is StoragePressureState.CONSTRAINED
+    )
+    assert (
+        classify_storage_pressure(_volume("v", free=110), policy, incoming_bytes=20)
+        is StoragePressureState.CRITICAL
+    )
+
+
+def test_storage_planner_selects_capacity_volume_and_preserves_unknown_routes() -> None:
+    system = _volume("system", free=100, capacity=128, mount="C:\\", system=True, speed="fast")
+    capacity = _volume("capacity", free=900, capacity=1_000, mount="E:\\", speed=None)
+    planner = StoragePlanner((system, capacity))
+    request = ResourcePlacementRequest(
+        "archive-1", StorageResourceType.ARCHIVE, 200, PlacementClass.ARCHIVE
+    )
+    plan = planner.plan(request)
+    assert plan.status is PlacementStatus.RECOMMENDED
+    assert plan.target_volume_id == "capacity"
+    assert plan.expected_free_after_bytes == 700
+    hot = planner.plan(
+        ResourcePlacementRequest("vm", StorageResourceType.VM_IMAGE, 10, PlacementClass.HOT, True)
+    )
+    assert hot.status is PlacementStatus.RECOMMENDED
+    assert hot.target_volume_id == "system"
+    app = planner.plan(
+        ResourcePlacementRequest("app", StorageResourceType.GENERIC, 1, application_managed=True)
+    )
+    assert app.status is PlacementStatus.RELOCATION_UNSUPPORTED
+    unknown = planner.plan(ResourcePlacementRequest("unknown", StorageResourceType.DATASET, None))
+    assert unknown.status is PlacementStatus.UNKNOWN_COMPATIBILITY
+
+
+def test_acquisition_target_binding_and_stale_target() -> None:
+    root = Path("C:\\") if os.name == "nt" else Path("/")
+    volume = _volume("capacity", free=10_000, capacity=20_000, mount=str(root))
+    planner = StoragePlanner((volume,))
+    request = AcquisitionRequest(
+        "large-data",
+        ResourceType.DATA,
+        "acceptance acquisition",
+        source="https://example.invalid/data",
+        provenance=ProvenanceMetadata(trusted_source=True),
+        download_size_bytes=100,
+        installed_size_bytes=100,
+        security_risk=AcquisitionRisk.LOW,
+        privacy_impact=PrivacyImpact.LOCAL_ONLY,
+        jarvis_owned=True,
+    )
+    plan = planner.plan_acquisition(request, required_headroom_bytes=100)
+    bound = planner.bind_acquisition(request, plan)
+    assert bound.target_volume_identity == "capacity"
+    assert bound.target_location is not None
+    assert planner.validate_acquisition_target(bound) is PlacementStatus.ALREADY_SUITABLE
+    assert (
+        planner.validate_acquisition_target(
+            bound, volumes=(_volume("replacement", free=10_000, capacity=20_000),)
+        )
+        is PlacementStatus.STALE_PLAN
+    )
+
+
+def test_retention_reference_authority_uses_conservative_precedence() -> None:
+    class References:
+        def __init__(self, state: RetentionState) -> None:
+            self.state = state
+
+        def references(self, _path: Path) -> tuple[RetentionReference, ...]:
+            return (RetentionReference("provider", self.state, "test evidence"),)
+
+    safe = References(RetentionState.SAFE_TO_REMOVE)
+    authority = RetentionReferenceAuthority((safe,))
+    classification = _classification()
+    assert authority.evaluate(Path("C:/owned/item"), classification=classification).safe_to_remove
+    safe.state = RetentionState.ACTIVE
+    decision = authority.evaluate(Path("C:/owned/item"), classification=classification)
+    assert decision.state is RetentionState.ACTIVE
+    safe.state = RetentionState.UNKNOWN
+    decision = authority.evaluate(Path("C:/owned/item"), classification=classification)
+    assert decision.state is RetentionState.UNKNOWN
+
+    class Broken:
+        def references(self, _path: Path) -> tuple[RetentionReference, ...]:
+            raise RuntimeError("provider unavailable")
+
+    broken = RetentionReferenceAuthority((Broken(),))
+    assert not broken.evaluate(Path("C:/owned/item")).safe_to_remove
+
+    class Malformed:
+        def references(self, _path: Path) -> tuple[object, ...]:
+            return (object(),)
+
+    assert (
+        RetentionReferenceAuthority((cast(Any, Malformed()),)).evaluate(Path("C:/owned/item")).state
+        is RetentionState.UNKNOWN
+    )
+    assert (
+        RetentionReferenceAuthority().evaluate(Path("C:/owned/item")).state
+        is RetentionState.UNKNOWN
+    )
+    with pytest.raises(ValueError, match="provider is malformed"):
+        RetentionReferenceAuthority().register(cast(Any, object()))
+    with pytest.raises(ValueError, match="state is malformed"):
+        RetentionReference("invalid", cast(RetentionState, "invalid"), "bad")
+
+
+def test_classifier_cleanup_and_download_hygiene_are_conservative(tmp_path: Path) -> None:
+    owned = tmp_path / "owned"
+    owned.mkdir()
+    file = owned / "temp.bin"
+    file.write_bytes(b"temp")
+    classifier = CleanupClassifier()
+    candidate = classifier.candidate(file, _classification())
+    assert candidate.state is CleanupState.ELIGIBLE
+    assert candidate.expected_reclaimed_bytes == 4
+    assert classifier.candidate(file, _classification(active=None)).state is CleanupState.UNKNOWN
+    assert (
+        classifier.candidate(file, _classification(intentional=True)).state
+        is CleanupState.PROTECTED
+    )
+    assert (
+        classifier.candidate(file, _classification(FileCategory.MODEL_STORAGE)).state
+        is CleanupState.DELEGATE
+    )
+    path_classifier = FileClassifier(jarvis_roots=(owned,))
+    assert path_classifier.classify(file).category is FileCategory.JARVIS_OWNED
+    assert classifier.downloads_state(active=True, age_days=100) is DownloadState.ACTIVE
+    assert classifier.downloads_state(active=False, age_days=1) is DownloadState.RECENT
+    assert classifier.downloads_state(active=False, age_days=40) is DownloadState.STALE
+    assert classifier.downloads_state(active=None, age_days=40) is DownloadState.UNKNOWN
+    assert (
+        classifier.downloads_state(active=False, age_days=2, exact_duplicate=True)
+        is DownloadState.DUPLICATE
+    )
+
+
+def test_duplicate_detector_requires_full_hash_and_does_not_count_hardlinks(tmp_path: Path) -> None:
+    root = tmp_path / "dataset"
+    root.mkdir()
+    first = root / "one.bin"
+    second = root / "two.bin"
+    different = root / "same-name.bin"
+    first.write_bytes(b"same bytes")
+    second.write_bytes(b"same bytes")
+    different.write_bytes(b"other data")
+    hardlink = root / "hardlink.bin"
+    try:
+        os.link(first, hardlink)
+    except OSError:
+        hardlink = first
+    detector = DuplicateDetector(max_files=20, max_bytes=1_000)
+    groups = detector.scan(
+        (root,),
+        classifier=lambda path: _classification(
+            FileCategory.JARVIS_OWNED if path.name != "same-name.bin" else FileCategory.USER_DATA
+        ),
+    )
+    assert len(groups) == 1
+    group = groups[0]
+    assert group.exact is True
+    assert group.content_hash == hashlib.sha256(b"same bytes").hexdigest()
+    assert group.reclaimable_bytes == 10
+    assert group.safe_reclaimable_bytes == 10
+    assert all(item.content_hash for item in group.files)
+
+
+def test_duplicate_detector_reports_exact_reclaimable_bytes_for_physical_objects(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "dataset"
+    root.mkdir()
+    first = root / "first.bin"
+    second = root / "second.bin"
+    hardlink = root / "hardlink.bin"
+    first.write_bytes(b"exact physical bytes")
+    second.write_bytes(b"exact physical bytes")
+    try:
+        os.link(first, hardlink)
+    except OSError as error:
+        pytest.skip(f"hardlinks unavailable for exact physical-object evidence: {error}")
+
+    group = DuplicateDetector().scan(
+        (root,),
+        classifier=lambda _path: _classification(FileCategory.JARVIS_OWNED),
+    )[0]
+
+    assert len(group.files) == 3
+    assert group.reclaimable_bytes == len(b"exact physical bytes")
+    assert group.safe_reclaimable_bytes == len(b"exact physical bytes")
+
+
+def test_duplicate_detector_skips_reparse_paths_and_intentional_copies(tmp_path: Path) -> None:
+    root = tmp_path / "dataset"
+    outside = tmp_path / "outside"
+    root.mkdir()
+    outside.mkdir()
+    (outside / "escape.bin").write_bytes(b"escape")
+    (root / "copy-a").write_bytes(b"bytes")
+    (root / "copy-b").write_bytes(b"bytes")
+    link = root / "link"
+    try:
+        link.symlink_to(outside, target_is_directory=True)
+    except OSError:
+        link = root / "not-created"
+    groups = DuplicateDetector().scan((root,), intentional_copies=(root / "copy-b",))
+    assert all(item.path != outside / "escape.bin" for group in groups for item in group.files)
+    if groups:
+        assert groups[0].safe_reclaimable_bytes == 0
+
+
+def test_emergency_plan_is_bounded_and_reports_shortfall(tmp_path: Path) -> None:
+    path = tmp_path / "safe.tmp"
+    path.write_bytes(b"x" * 10)
+    candidate = CleanupClassifier().candidate(path, _classification(FileCategory.TEMPORARY))
+    system = _volume("system", free=1, capacity=100, system=True)
+    plan = EmergencyRecoveryPlanner().plan(system, (candidate,), target_bytes=100)
+    assert plan.status == "SAFE_SHORTFALL"
+    assert plan.expected_reclaimable_bytes == 10
+    assert plan.shortfall_bytes == 90
+
+
+def test_file_steward_real_copy_move_rename_delete_restore_and_manifest_restart(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "owned"
+    root.mkdir()
+    source = root / "source.txt"
+    source.write_bytes(b"recovery-aware bytes")
+    broker, authenticator = _broker(root)
+    steward = FileSteward(root, permission_broker=broker, host_bridge=HostBridge())
+
+    copied = steward.plan_copy(source, root / "copy.txt")
+    copy_result = _run(steward.execute_async(copied))
+    assert copy_result.success
+    assert (root / "copy.txt").read_bytes() == source.read_bytes()
+
+    movable = _classification(FileCategory.MOVABLE_USER_DATA, owner=FileOwnership.USER)
+    moved = steward.plan_move(source, root / "moved.txt", classification=movable)
+    move_result = _run(steward.execute_async(moved))
+    assert move_result.success
+    renamed = steward.plan_rename(root / "moved.txt", root / "renamed.txt", classification=movable)
+    assert _run(steward.execute_async(renamed)).success
+
+    delete = steward.plan_delete(root / "renamed.txt", classification=_classification())
+    with pytest.raises(MutationApprovalRequired):
+        _run(steward.execute_async(delete))
+    _run(_approve_delete(broker, authenticator, delete.task_id))
+    deleted = _run(steward.execute_async(delete))
+    assert deleted.state is MutationState.COMPLETED
+    assert not (root / "renamed.txt").exists()
+    restored = _run(steward.restore_async(delete))
+    assert restored.state is MutationState.RESTORED
+    assert (root / "renamed.txt").read_bytes() == b"recovery-aware bytes"
+
+    restarted_broker, _ = _broker(root)
+    restarted = FileSteward(root, permission_broker=restarted_broker)
+    assert restarted.reconcile_pending() == ()
+    persisted = restarted.manifests.load(delete.plan_id)
+    assert persisted.state is MutationState.RESTORED
+
+
+def test_file_steward_purge_requires_trusted_retention_and_measures_effect(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "owned"
+    root.mkdir()
+    source = root / "purge-me.bin"
+    source.write_bytes(b"irreversible-purge")
+    classification = _classification()
+    broker, authenticator = _broker(root)
+    steward = FileSteward(root, permission_broker=broker, host_bridge=HostBridge())
+
+    with pytest.raises(MutationDenied, match="proven JARVIS-owned"):
+        steward.plan_purge(
+            source,
+            classification=replace(classification, owner=FileOwnership.USER),
+        )
+    plan = steward.plan_purge(source, classification=classification)
+    with pytest.raises(MutationApprovalRequired):
+        _run(steward.execute_async(plan))
+    _run(_approve_delete(broker, authenticator, plan.task_id))
+    result = steward.execute(plan)
+    assert result.success
+    assert result.manifest.reversibility.value == "irreversible"
+    assert result.logical_deleted_bytes == len(b"irreversible-purge")
+    assert result.observed_free_space_delta is not None
+    assert not source.exists()
+
+
+def test_file_steward_purge_rejects_untrusted_batch_and_result_unknowns(tmp_path: Path) -> None:
+    root = tmp_path / "owned"
+    root.mkdir()
+    source = root / "batch-user.bin"
+    source.write_bytes(b"protected")
+    broker, _ = _broker(root)
+    steward = FileSteward(root, permission_broker=broker, host_bridge=HostBridge())
+    with pytest.raises(MutationDenied, match="JARVIS-owned"):
+        steward.plan_purge(source, classification=_classification(owner=FileOwnership.USER))
+    with pytest.raises(MutationDenied, match="trusted retention"):
+        steward.plan_purge(source)
+    with pytest.raises(MutationDenied, match="JARVIS-owned"):
+        steward.plan_batch(
+            MutationOperation.PURGE,
+            [(source, None, _classification(owner=FileOwnership.USER))],
+        )
+    plan = steward.plan_copy(source, root / "copy.bin")
+    result = MutationResult(plan, None, None, 0, 0)
+    assert result.logical_deleted_bytes == 0
+    assert result.observed_free_space_delta is None
+
+
+def test_file_steward_purge_scope_and_external_trusted_root_are_exact(tmp_path: Path) -> None:
+    root = tmp_path / "owned"
+    extra = tmp_path / "extra"
+    root.mkdir()
+    extra.mkdir()
+    source = extra / "external.bin"
+    source.write_bytes(b"external")
+    broker, _ = _broker(root)
+    steward = FileSteward(
+        root,
+        permission_broker=broker,
+        host_bridge=HostBridge(),
+        trusted_roots=(extra,),
+    )
+    plan = steward.plan_purge(source, classification=_classification())
+    assert str(source) in steward._scope_paths(plan)
+    copy_plan = steward.plan_copy(source, root / "copy.bin")
+    with pytest.raises(MutationDenied, match="exact source"):
+        steward._purge(copy_plan.items[0], copy_plan)
+
+
+def test_file_steward_purge_revalidates_retention_authority_before_effect(
+    tmp_path: Path,
+) -> None:
+    class MutableReferences:
+        state = RetentionState.SAFE_TO_REMOVE
+
+        def references(self, _path: Path) -> tuple[RetentionReference, ...]:
+            return (RetentionReference("mutable-owner", self.state, "live test state"),)
+
+    root = tmp_path / "owned"
+    root.mkdir()
+    source = root / "toctou-purge.bin"
+    source.write_bytes(b"must remain protected")
+    mutable = MutableReferences()
+    broker, authenticator = _broker(root)
+    steward = FileSteward(
+        root,
+        permission_broker=broker,
+        host_bridge=HostBridge(),
+        retention_authority=RetentionReferenceAuthority((mutable,)),
+    )
+    classification = _classification()
+    plan = steward.plan_purge(source, classification=classification)
+    mutable.state = RetentionState.ACTIVE
+    with pytest.raises(MutationApprovalRequired):
+        _run(steward.execute_async(plan))
+    _run(_approve_delete(broker, authenticator, plan.task_id))
+    with pytest.raises(MutationDenied, match="retention authority"):
+        _run(steward.execute_async(plan))
+    assert source.exists()
+
+
+def test_file_steward_safe_delete_restore_then_purge_recovery_artifact(tmp_path: Path) -> None:
+    root = tmp_path / "owned"
+    root.mkdir()
+    source = root / "chain.bin"
+    source.write_bytes(b"safe-delete-chain")
+    classification = _classification()
+    broker, authenticator = _broker(root)
+    steward = FileSteward(root, permission_broker=broker, host_bridge=HostBridge())
+
+    safe_delete = steward.plan_delete(source, classification=classification)
+    with pytest.raises(MutationApprovalRequired):
+        _run(steward.execute_async(safe_delete))
+    _run(_approve_delete(broker, authenticator, safe_delete.task_id))
+    deleted = steward.execute(safe_delete)
+    recovery = deleted.manifest.items[0].recovery_path
+    assert recovery is not None and recovery.is_file() and not source.exists()
+    restored = steward.restore(deleted.manifest)
+    assert restored.success and source.read_bytes() == b"safe-delete-chain"
+    assert not recovery.exists()
+
+    second_delete = steward.plan_delete(source, classification=classification)
+    with pytest.raises(MutationApprovalRequired):
+        _run(steward.execute_async(second_delete))
+    _run(_approve_delete(broker, authenticator, second_delete.task_id))
+    deleted_again = steward.execute(second_delete)
+    recovery_again = deleted_again.manifest.items[0].recovery_path
+    assert recovery_again is not None and recovery_again.is_file()
+    purge = steward.plan_purge(recovery_again, classification=classification)
+    with pytest.raises(MutationApprovalRequired):
+        _run(steward.execute_async(purge))
+    _run(_approve_delete(broker, authenticator, purge.task_id))
+    purged = steward.execute(purge)
+    assert purged.success and not recovery_again.exists()
+    with pytest.raises((MutationDenied, MutationUnknownOutcome)):
+        steward.restore(deleted_again.manifest)
+
+
+def test_file_steward_batch_purge_tracks_each_exact_item(tmp_path: Path) -> None:
+    root = tmp_path / "owned"
+    root.mkdir()
+    first = root / "first.purge"
+    second = root / "second.purge"
+    first.write_bytes(b"first")
+    second.write_bytes(b"second")
+    broker, authenticator = _broker(root)
+    steward = FileSteward(root, permission_broker=broker, host_bridge=HostBridge())
+    manifest = steward.plan_batch(
+        MutationOperation.PURGE,
+        [(first, None, _classification()), (second, None, _classification())],
+    )
+    with pytest.raises(MutationApprovalRequired):
+        _run(steward.execute_async(manifest))
+    _run(_approve_delete(broker, authenticator, manifest.task_id))
+    result = steward.execute(manifest)
+    assert result.success
+    assert all(item.state is MutationItemState.VERIFIED for item in result.manifest.items)
+    assert not first.exists() and not second.exists()
+
+
+def test_file_steward_denies_unknown_model_and_toctou(tmp_path: Path) -> None:
+    root = tmp_path / "owned"
+    root.mkdir()
+    source = root / "source.txt"
+    source.write_bytes(b"original")
+    broker, _ = _broker(root)
+    steward = FileSteward(root, permission_broker=broker, host_bridge=HostBridge())
+    with pytest.raises(MutationDenied):
+        steward.plan_delete(source)
+    with pytest.raises(MutationDenied, match="MODEL_RETIREMENT"):
+        steward.plan_delete(source, classification=_classification(FileCategory.MODEL_STORAGE))
+    application = _classification(
+        FileCategory.APPLICATION_MANAGED, owner=FileOwnership.APPLICATION, recovery=None
+    )
+    with pytest.raises(MutationDenied):
+        steward.plan_move(source, root / "application-moved.txt", classification=application)
+    plan = steward.plan_copy(source, root / "copy.txt")
+    source.write_bytes(b"changed")
+    with pytest.raises(StalePlan):
+        _run(steward.execute_async(plan))
+    assert steward.manifests.load(plan.plan_id).state is MutationState.STALE_PLAN
+
+
+def test_file_steward_manifest_tamper_and_no_broker_fail_closed(tmp_path: Path) -> None:
+    root = tmp_path / "owned"
+    root.mkdir()
+    source = root / "source.txt"
+    source.write_bytes(b"bytes")
+    no_broker = FileSteward(root)
+    plan = no_broker.plan_copy(source, root / "copy.txt")
+    with pytest.raises(MutationDenied):
+        _run(no_broker.execute_async(plan))
+    path = no_broker.manifests.path_for(plan.plan_id)
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    raw["state"] = "completed"
+    path.write_text(json.dumps(raw), encoding="utf-8")
+    with pytest.raises(ManifestIntegrityError):
+        no_broker.manifests.load(plan.plan_id)
+
+
+def test_file_steward_interrupted_copy_reconciles_unknown_without_retry(tmp_path: Path) -> None:
+    root = tmp_path / "owned"
+    root.mkdir()
+    source = root / "source.txt"
+    source.write_bytes(b"interrupt me")
+    broker, _ = _broker(root)
+
+    def interrupt(boundary: str, _item: MutationItem) -> None:
+        if boundary == "after_copy_before_finalize":
+            raise RuntimeError("fault injection")
+
+    steward = FileSteward(
+        root,
+        permission_broker=broker,
+        host_bridge=HostBridge(),
+        fault_injector=interrupt,
+    )
+    plan = steward.plan_copy(source, root / "copy.txt")
+    with pytest.raises(MutationUnknownOutcome):
+        _run(steward.execute_async(plan))
+    result = steward.reconcile(plan)
+    assert result.state is MutationState.UNKNOWN_OUTCOME
+    assert (root / "copy.txt").exists() is False
+
+
+def test_file_steward_interrupted_purge_is_unknown_and_not_replayed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "owned"
+    root.mkdir()
+    source = root / "purge-interrupted.bin"
+    source.write_bytes(b"must remain for reconciliation")
+    broker, authenticator = _broker(root)
+    steward = FileSteward(root, permission_broker=broker, host_bridge=HostBridge())
+    plan = steward.plan_purge(source, classification=_classification())
+    with pytest.raises(MutationApprovalRequired):
+        _run(steward.execute_async(plan))
+    _run(_approve_delete(broker, authenticator, plan.task_id))
+
+    def interrupted_unlink(_path: Path) -> None:
+        raise OSError("synthetic purge interruption")
+
+    monkeypatch.setattr(Path, "unlink", interrupted_unlink)
+    with pytest.raises(MutationUnknownOutcome):
+        _run(steward.execute_async(plan))
+    stored = steward.manifests.load(plan.plan_id)
+    assert stored.state is MutationState.UNKNOWN_OUTCOME
+    assert stored.items[0].state is MutationItemState.UNKNOWN_OUTCOME
+    assert source.exists()
+
+
+def test_storage_contracts_reject_malformed_or_untrusted_facts(tmp_path: Path) -> None:
+    base = _volume("volume")
+    serialized = base.as_dict()
+    assert serialized["volume_id"] == "volume"
+    with pytest.raises(ValueError):
+        replace(base, volume_id="")
+    with pytest.raises(ValueError):
+        replace(base, mount_points=())
+    with pytest.raises(ValueError):
+        replace(base, capacity_bytes=-1)
+    with pytest.raises(ValueError):
+        replace(base, capacity_bytes=10, free_bytes=11)
+    with pytest.raises(ValueError):
+        replace(base, observed_at=datetime.now())
+    with pytest.raises(ValueError):
+        replace(base, stable_identity=cast(Any, 1))
+    assert base.pressure_ratio == 0.1
+    assert replace(base, capacity_bytes=0, free_bytes=0).pressure_ratio is None
+
+    with pytest.raises(ValueError):
+        StoragePressurePolicy(watch_free_bytes=-1)
+    with pytest.raises(ValueError):
+        StoragePressurePolicy(watch_free_ratio=2.0)
+    with pytest.raises(ValueError):
+        StoragePressurePolicy(watch_free_bytes=1, constrained_free_bytes=2)
+    with pytest.raises(ValueError):
+        classify_storage_pressure(cast(Any, object()), StoragePressurePolicy())
+    with pytest.raises(ValueError):
+        classify_storage_pressure(base, StoragePressurePolicy(), incoming_bytes=-1)
+
+    with pytest.raises(ValueError):
+        StorageHistorySnapshot("v", datetime.now(), 1, 1, 1, StoragePressureState.HEALTHY)
+    with pytest.raises(ValueError):
+        StorageHistorySnapshot("v", datetime.now(UTC), -1, 1, 1, StoragePressureState.HEALTHY)
+    with pytest.raises(ValueError):
+        StorageHistorySnapshot("v", datetime.now(UTC), 1, 1, 1, cast(Any, "unknown"))
+    with pytest.raises(ValueError):
+        StorageHistoryStore(tmp_path / "history.sqlite3", max_snapshots=0)
+    with pytest.raises(ValueError):
+        StorageForecast("v", ForecastState.STABLE, None, None, None, -1, 0.0, "bad")
+    with pytest.raises(ValueError):
+        StorageForecast("v", ForecastState.STABLE, None, None, None, 1, 2.0, "bad")
+
+    with pytest.raises(ValueError):
+        ResourcePlacementRequest("bad", cast(Any, "not-a-resource-type"), 1)
+    with pytest.raises(ValueError):
+        ResourcePlacementRequest("bad", StorageResourceType.DATASET, -1)
+    with pytest.raises(ValueError):
+        ResourcePlacementRequest("bad", StorageResourceType.DATASET, 1, required_headroom_bytes=-1)
+    with pytest.raises(ValueError):
+        ResourcePlacementRequest(
+            "bad",
+            StorageResourceType.DATASET,
+            1,
+            performance_sensitive=cast(Any, 1),
+        )
+    with pytest.raises(ValueError):
+        FileClassification(cast(Any, "not-a-category"))
+    with pytest.raises(ValueError):
+        FileClassification(FileCategory.CACHE, intentional_copy=cast(Any, 1))
+    with pytest.raises(ValueError):
+        FileClassification(FileCategory.CACHE, active_reference=cast(Any, "active"))
+
+
+def test_storage_serialization_and_inventory_fallback_are_typed() -> None:
+    observed = _volume("serial", free=500)
+    inventory = StorageInventoryService(probe=lambda: (observed,))
+    planner = StoragePlanner(inventory)
+    selected = planner.plan(ResourcePlacementRequest("serial", StorageResourceType.DATASET, 1))
+    assert selected.status is PlacementStatus.RECOMMENDED
+    assert selected.target_location is not None
+    assert selected.as_dict()["target_location"] == selected.target_location
+
+    unavailable = planner.plan(
+        ResourcePlacementRequest(
+            "unavailable", StorageResourceType.DATASET, 1, compatible_volume_ids=("missing",)
+        )
+    )
+    assert unavailable.target_location is None
+    assert unavailable.as_dict()["target_location"] is None
+
+
+def test_history_forecast_inventory_and_planner_unknown_routes(tmp_path: Path) -> None:
+    now = datetime(2026, 2, 1, tzinfo=UTC)
+    history = StorageHistoryStore(tmp_path / "bounded.sqlite3", max_snapshots=2)
+    for index in range(3):
+        history.record(
+            StorageHistorySnapshot(
+                "v",
+                now + timedelta(days=index),
+                1_000,
+                100 + index,
+                900 - index,
+                StoragePressureState.HEALTHY,
+            )
+        )
+    assert len(history.snapshots()) == 2
+    assert len(history.snapshots("v")) == 2
+    assert history.snapshots("missing") == ()
+    history.close()
+
+    malformed = StorageInventoryService(probe=lambda: (cast(Any, object()),))
+    with pytest.raises(StorageError):
+        malformed.inspect()
+    observed = _volume("observed", free=500)
+    service = StorageInventoryService(probe=lambda: (observed, observed))
+    assert service.observe() == (observed,)
+    assert service.last == (observed,)
+    assert service.pressure("missing") is StoragePressureState.UNKNOWN
+
+    same_time = (
+        StorageHistorySnapshot("same", now, 100, 50, 50, StoragePressureState.HEALTHY),
+        StorageHistorySnapshot("same", now, 100, 50, 50, StoragePressureState.HEALTHY),
+    )
+    assert forecast_storage_pressure(same_time, "same").state is ForecastState.UNKNOWN
+    growing = (
+        StorageHistorySnapshot("grow", now, 100, 20, 80, StoragePressureState.HEALTHY),
+        StorageHistorySnapshot(
+            "grow", now + timedelta(days=1), 100, 10, 90, StoragePressureState.HEALTHY
+        ),
+    )
+    assert forecast_storage_pressure(growing, "grow").state is ForecastState.GROWING
+    at_threshold = (
+        StorageHistorySnapshot("decline", now, 100, 10, 90, StoragePressureState.HEALTHY),
+        StorageHistorySnapshot(
+            "decline", now + timedelta(days=1), 100, 50, 50, StoragePressureState.WATCH
+        ),
+    )
+    assert (
+        forecast_storage_pressure(at_threshold, "decline", threshold_bytes=50).threshold_crossing_at
+        is None
+    )
+
+    system = _volume("system", free=100, capacity=100, system=True, speed="fast")
+    unknown_free = replace(
+        _volume("unknown-free"), capacity_bytes=None, used_bytes=None, free_bytes=None
+    )
+    readonly = _volume("readonly", free=500, read_only=True)
+    network = _volume("network", free=500, network=True)
+    slow = _volume("slow", free=500, speed="hdd")
+    planner = StoragePlanner((system, unknown_free, readonly, network, slow))
+    assert (
+        planner.plan(
+            ResourcePlacementRequest(
+                "missing", StorageResourceType.DATASET, 1, compatible_volume_ids=("no",)
+            )
+        ).status
+        is PlacementStatus.NO_COMPATIBLE_TARGET
+    )
+    assert (
+        planner.plan(
+            ResourcePlacementRequest(
+                "unknown", StorageResourceType.DATASET, 1, performance_sensitive=True
+            ),
+            volumes=(unknown_free,),
+        ).status
+        is PlacementStatus.UNKNOWN_COMPATIBILITY
+    )
+    assert (
+        planner.plan(
+            ResourcePlacementRequest(
+                "slow", StorageResourceType.DATASET, 1, performance_sensitive=True
+            ),
+            volumes=(slow,),
+        ).status
+        is PlacementStatus.NO_COMPATIBLE_TARGET
+    )
+    assert (
+        planner.plan(
+            ResourcePlacementRequest("ro", StorageResourceType.DATASET, 1),
+            volumes=(readonly, network),
+        ).status
+        is PlacementStatus.NO_COMPATIBLE_TARGET
+    )
+    current = planner.plan(
+        ResourcePlacementRequest(
+            "current", StorageResourceType.DATASET, 1, current_volume_id="system"
+        ),
+        volumes=(system,),
+    )
+    assert current.status is PlacementStatus.ALREADY_SUITABLE
+    app = planner.plan(
+        ResourcePlacementRequest(
+            "application",
+            StorageResourceType.GENERIC,
+            1,
+            application_managed=True,
+            relocation_mechanism="trusted.application.move",
+        ),
+        volumes=(system,),
+    )
+    assert app.status is PlacementStatus.RECOMMENDED
+    assert app.target_location is not None
+    with pytest.raises(StorageError):
+        planner.plan(cast(Any, object()), volumes=(system,))
+    with pytest.raises(StalePlan):
+        planner.bind_acquisition(
+            AcquisitionRequest(
+                "bad-plan",
+                ResourceType.DATA,
+                "test",
+                source="https://example.invalid/bad-plan",
+                download_size_bytes=1,
+            ),
+            planner.plan(
+                ResourcePlacementRequest(
+                    "bad-plan", StorageResourceType.DATASET, 1, compatible_volume_ids=("none",)
+                ),
+                volumes=(system,),
+            ),
+        )
+
+
+def test_classification_download_and_duplicate_policy_matrix(tmp_path: Path) -> None:
+    root = tmp_path / "owned"
+    protected = tmp_path / "protected"
+    root.mkdir()
+    protected.mkdir()
+    file = root / "file.bin"
+    file.write_bytes(b"bytes")
+    protected_file = protected / "system.bin"
+    protected_file.write_bytes(b"system")
+
+    classifier = FileClassifier(protected_roots=(protected,), jarvis_roots=(root,))
+    protected_result = classifier.classify(
+        protected_file,
+        active_reference=True,
+        last_use_at=datetime.now(UTC),
+        evidence=("trusted-system-root",),
+    )
+    assert protected_result.category is FileCategory.SYSTEM_CRITICAL
+    assert protected_result.owner is FileOwnership.SYSTEM
+    assert protected_result.retention is RetentionState.NEEDED_FOR_EVIDENCE
+    assert classifier.classify(file).category is FileCategory.JARVIS_OWNED
+    unknown = classifier.classify(
+        tmp_path / "outside.bin", category=FileCategory.USER_DATA, owner=FileOwnership.USER
+    )
+    assert unknown.known
+
+    cleanup = CleanupClassifier()
+    assert (
+        cleanup.candidate(file, _classification(FileCategory.SYSTEM_CRITICAL)).state
+        is CleanupState.PROTECTED
+    )
+    assert (
+        cleanup.candidate(
+            file, _classification(FileCategory.USER_DATA, owner=FileOwnership.USER)
+        ).state
+        is CleanupState.PROTECTED
+    )
+    assert (
+        cleanup.candidate(
+            file, _classification(FileCategory.CACHE, owner=FileOwnership.UNKNOWN)
+        ).state
+        is CleanupState.UNKNOWN
+    )
+    assert (
+        cleanup.candidate(root, _classification(FileCategory.CACHE)).expected_reclaimed_bytes == 0
+    )
+    assert (
+        cleanup.downloads_state(active=False, age_days=2, installer_already_installed=True)
+        is DownloadState.INSTALLER_ALREADY_INSTALLED
+    )
+    assert (
+        cleanup.downloads_state(active=False, age_days=2, trusted_movable=True)
+        is DownloadState.MOVABLE
+    )
+    assert (
+        cleanup.downloads_state(active=False, age_days=2, exact_duplicate=True)
+        is DownloadState.DUPLICATE
+    )
+    assert cleanup.downloads_state(active=False, age_days=10) is DownloadState.ARCHIVABLE
+    assert cleanup.downloads_state(active=False, age_days=-1) is DownloadState.UNKNOWN
+
+    first = root / "first.bin"
+    second = root / "second.bin"
+    first.write_bytes(b"duplicate")
+    second.write_bytes(b"duplicate")
+
+    class DenyingGovernor:
+        def reserve(self, *_args: object, **_kwargs: object) -> object:
+            return SimpleNamespace(allowed=False, reason="resource pressure", reservation_id=None)
+
+    with pytest.raises(StorageDeferred):
+        DuplicateDetector(resource_governor=cast(Any, DenyingGovernor())).scan((root,))
+
+    class AllowingGovernor:
+        def reserve(self, *_args: object, **_kwargs: object) -> object:
+            return SimpleNamespace(allowed=True, reason="admitted", reservation_id=UUID(int=0))
+
+        def release(self, *_args: object, **_kwargs: object) -> object:
+            return SimpleNamespace()
+
+    groups = DuplicateDetector(
+        resource_governor=cast(Any, AllowingGovernor()), max_files=1, max_bytes=1_000
+    ).scan((root,), active_reference=lambda _path: True)
+    assert groups == ()
+
+
+def test_file_steward_batch_scope_conflicts_and_authority_guards(tmp_path: Path) -> None:
+    root = tmp_path / "owned"
+    root.mkdir()
+    source = root / "source.txt"
+    second = root / "second.txt"
+    source.write_bytes(b"source")
+    second.write_bytes(b"second")
+    broker, _ = _broker(root)
+    steward = FileSteward(root, permission_broker=broker, host_bridge=HostBridge())
+
+    with pytest.raises(MutationDenied):
+        steward.plan_copy(root, root / "directory-copy")
+    with pytest.raises(MutationDenied):
+        steward.plan_copy(source, root / "too-small", max_affected_bytes=1)
+    with pytest.raises(MutationConflict):
+        steward.plan_copy(source, second)
+    with pytest.raises(MutationDenied):
+        steward.plan_move(
+            source,
+            root / "managed.txt",
+            classification=FileClassification(
+                FileCategory.APPLICATION_MANAGED,
+                FileOwnership.APPLICATION,
+                recovery_strategy="rollback-only",
+            ),
+        )
+    relocation = FileClassification(
+        FileCategory.APPLICATION_MANAGED,
+        FileOwnership.APPLICATION,
+        relocation_mechanism="trusted.app.relocate",
+    )
+    with pytest.raises(MutationDenied):
+        steward.plan_move(source, root / "managed.txt", classification=relocation)
+    source.write_bytes(b"source")
+
+    with pytest.raises(MutationDenied):
+        steward.plan_batch(
+            MutationOperation.SAFE_DELETE,
+            [
+                (
+                    second,
+                    None,
+                    _classification(FileCategory.MOVABLE_USER_DATA, owner=FileOwnership.USER),
+                )
+            ],
+        )
+    with pytest.raises(MutationDenied):
+        steward.plan_batch(
+            MutationOperation.MOVE,
+            [
+                (
+                    source,
+                    root / "managed-batch.txt",
+                    FileClassification(FileCategory.APPLICATION_MANAGED),
+                )
+            ],
+        )
+    batch = steward.plan_batch(
+        MutationOperation.COPY,
+        [(source, root / "batch-a.txt", None), (second, root / "batch-b.txt", None)],
+    )
+    batch_result = _run(steward.execute_async(batch))
+    assert batch_result.success
+    assert (root / "batch-a.txt").read_bytes() == b"source"
+    assert (root / "batch-b.txt").read_bytes() == b"second"
+
+    active_plan = steward.plan_copy(
+        source,
+        root / "active.txt",
+        classification=_classification(active=True),
+    )
+    with pytest.raises(MutationDenied):
+        _run(steward.execute_async(active_plan))
+    assert steward.manifests.load(active_plan.plan_id).state is MutationState.DENIED
+
+    destination_race = steward.plan_copy(source, root / "race.txt")
+    (root / "race.txt").write_bytes(b"race")
+    with pytest.raises(MutationConflict):
+        _run(steward.execute_async(destination_race))
+    assert steward.manifests.load(destination_race.plan_id).state is MutationState.CONFLICT
+
+    bridge_broker, _ = _broker(root)
+    bridge_steward = FileSteward(root, permission_broker=bridge_broker, host_bridge=HostBridge())
+    bridge_plan = bridge_steward.plan_copy(source, root / "bridge-denied.txt")
+    assert _run(bridge_steward.execute_async(bridge_plan)).success
+
+
+def test_file_steward_sync_api_manifest_reconciliation_and_restore_quarantine(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "owned"
+    root.mkdir()
+    source = root / "source.txt"
+    source.write_bytes(b"sync and reconcile")
+    broker, authenticator = _broker(root)
+    steward = FileSteward(root, permission_broker=broker, host_bridge=HostBridge())
+
+    sync_plan = steward.plan_copy(source, root / "sync.txt")
+    assert steward.execute(sync_plan).success
+    assert (root / "sync.txt").read_bytes() == source.read_bytes()
+
+    async def execute_inside_loop() -> None:
+        nested = steward.plan_copy(source, root / "nested.txt")
+        with pytest.raises(RuntimeError):
+            steward.execute(nested)
+
+    _run(execute_inside_loop())
+
+    copy_plan = steward.plan_copy(source, root / "reconciled-copy.txt")
+    (root / "reconciled-copy.txt").write_bytes(source.read_bytes())
+    steward.manifests.save(replace(copy_plan, state=MutationState.IN_PROGRESS))
+    assert steward.reconcile(copy_plan).state is MutationState.COMPLETED
+
+    move_source = root / "reconcile-move-source.txt"
+    move_source.write_bytes(b"move evidence")
+    move_plan = steward.plan_move(
+        move_source, root / "reconcile-move-dest.txt", classification=_classification()
+    )
+    os.rename(move_source, root / "reconcile-move-dest.txt")
+    steward.manifests.save(replace(move_plan, state=MutationState.IN_PROGRESS))
+    moved = steward.reconcile(move_plan)
+    assert moved.state is MutationState.COMPLETED
+    assert moved.actual_moved_bytes == move_plan.expected_bytes
+
+    delete_source = root / "reconcile-delete.txt"
+    delete_source.write_bytes(b"delete evidence")
+    delete_plan = steward.plan_delete(delete_source, classification=_classification())
+    with pytest.raises(MutationApprovalRequired):
+        _run(steward.execute_async(delete_plan))
+    _run(_approve_delete(broker, authenticator, delete_plan.task_id))
+    assert steward.execute(delete_plan).success
+    in_progress_delete = replace(
+        steward.manifests.load(delete_plan.plan_id), state=MutationState.IN_PROGRESS
+    )
+    steward.manifests.save(in_progress_delete)
+    assert steward.reconcile_pending()[0].state is MutationState.COMPLETED
+
+    tampered = root / "tampered.txt"
+    tampered.write_bytes(b"tampered")
+    tampered_plan = steward.plan_delete(tampered, classification=_classification())
+    with pytest.raises(MutationApprovalRequired):
+        _run(steward.execute_async(tampered_plan))
+    _run(_approve_delete(broker, authenticator, tampered_plan.task_id))
+    assert steward.execute(tampered_plan).success
+    recovery = steward.manifests.load(tampered_plan.plan_id).items[0].recovery_path
+    assert recovery is not None
+    recovery.write_bytes(b"altered recovery")
+    with pytest.raises(MutationUnknownOutcome):
+        _run(steward.restore_async(tampered_plan))
+    assert steward.manifests.load(tampered_plan.plan_id).state is MutationState.UNKNOWN_OUTCOME
+
+    with pytest.raises(MutationDenied):
+        _run(steward.restore_async(sync_plan))
+    with pytest.raises(ManifestIntegrityError):
+        MutationManifestStore(root / "missing-store").load(UUID(int=0))
+
+
+def test_file_steward_delete_and_batch_bounds_are_fail_closed(tmp_path: Path) -> None:
+    root = tmp_path / "owned"
+    root.mkdir()
+    source = root / "source.txt"
+    source.write_bytes(b"bounded")
+    broker, _ = _broker(root)
+    steward = FileSteward(root, permission_broker=broker, host_bridge=HostBridge())
+
+    for category, owner in (
+        (FileCategory.SYSTEM_CRITICAL, FileOwnership.SYSTEM),
+        (FileCategory.USER_DATA, FileOwnership.USER),
+        (FileCategory.APPLICATION_MANAGED, FileOwnership.APPLICATION),
+        (FileCategory.MOVABLE_USER_DATA, FileOwnership.USER),
+        (FileCategory.ARCHIVE, FileOwnership.USER),
+    ):
+        with pytest.raises(MutationDenied):
+            steward.plan_delete(source, classification=_classification(category, owner=owner))
+    with pytest.raises(MutationDenied):
+        steward.plan_delete(source, classification=_classification(active=True))
+    with pytest.raises(MutationDenied):
+        steward.plan_delete(
+            source, classification=_classification(retention=RetentionState.UNKNOWN)
+        )
+    with pytest.raises(MutationDenied):
+        steward.plan_batch(MutationOperation.RESTORE, [(source, None, None)])
+    with pytest.raises(MutationDenied):
+        steward.plan_batch(MutationOperation.COPY, [])
+    with pytest.raises(MutationDenied):
+        steward.plan_batch(MutationOperation.COPY, [(source, None, None)] * 257)
+    with pytest.raises(MutationDenied):
+        steward.plan_batch(
+            MutationOperation.COPY,
+            [(source, root / "bounded.txt", None)],
+            max_affected_bytes=1,
+        )
+    with pytest.raises(MutationDenied):
+        steward.plan_batch(
+            MutationOperation.SAFE_DELETE,
+            [(source, None, _classification(active=True))],
+        )
+    with pytest.raises(MutationDenied):
+        steward.plan_batch(MutationOperation.COPY, [(root, root / "dir.txt", None)])
+    existing = root / "existing.txt"
+    existing.write_bytes(b"existing")
+    with pytest.raises(MutationConflict):
+        steward.plan_batch(MutationOperation.COPY, [(source, existing, None)])
+
+
+def test_file_steward_copy_move_and_rename_effect_boundaries(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "owned"
+    root.mkdir()
+    source = root / "source.txt"
+    source.write_bytes(b"effect boundary")
+    broker, _ = _broker(root)
+    steward = FileSteward(root, permission_broker=broker, host_bridge=HostBridge())
+
+    partial_plan = steward.plan_copy(source, root / "partial.txt")
+    partial = root / f".partial.txt.{partial_plan.plan_id.hex}.partial"
+    partial.write_bytes(b"stale partial")
+    with pytest.raises(MutationConflict):
+        _run(steward.execute_async(partial_plan))
+    partial.unlink(missing_ok=True)
+
+    def corrupt_copy(boundary: str, item: MutationItem) -> None:
+        if boundary == "after_copy_before_finalize":
+            assert item.destination is not None
+            item.destination.with_name(
+                f".{item.destination.name}.{copy_plan.plan_id.hex}.partial"
+            ).write_bytes(b"corrupted")
+
+    copy_plan = steward.plan_copy(source, root / "corrupt.txt")
+    corrupt_steward = FileSteward(
+        root,
+        permission_broker=_broker(root)[0],
+        host_bridge=HostBridge(),
+        fault_injector=corrupt_copy,
+    )
+    with pytest.raises(StalePlan):
+        _run(corrupt_steward.execute_async(copy_plan))
+    assert corrupt_steward.manifests.load(copy_plan.plan_id).state is MutationState.STALE_PLAN
+
+    def create_destination(boundary: str, item: MutationItem) -> None:
+        if boundary == "after_copy_before_finalize":
+            assert item.destination is not None
+            item.destination.write_bytes(b"racing destination")
+
+    race_plan = steward.plan_copy(source, root / "finalize-race.txt")
+    race_steward = FileSteward(
+        root,
+        permission_broker=_broker(root)[0],
+        host_bridge=HostBridge(),
+        fault_injector=create_destination,
+    )
+    with pytest.raises(MutationConflict):
+        _run(race_steward.execute_async(race_plan))
+
+    cross_source = root / "cross-source.txt"
+    cross_source.write_bytes(b"cross volume")
+    cross_broker, _ = _broker(root)
+    cross_steward = FileSteward(root, permission_broker=cross_broker, host_bridge=HostBridge())
+    cross_plan = cross_steward.plan_move(
+        cross_source, root / "cross-destination.txt", classification=_classification()
+    )
+    original_device_identity = storage_module._device_identity
+    cross_source_device = original_device_identity(cross_source)
+
+    def different_devices(path: Path) -> str:
+        return cross_source_device if path == cross_source else "destination-device"
+
+    monkeypatch.setattr(storage_module, "_device_identity", different_devices)
+    assert _run(cross_steward.execute_async(cross_plan)).success
+    monkeypatch.setattr(storage_module, "_device_identity", original_device_identity)
+
+    rename_source = root / "rename-source.txt"
+    rename_source.write_bytes(b"rename boundary")
+    rename_broker, _ = _broker(root)
+    rename_steward = FileSteward(root, permission_broker=rename_broker, host_bridge=HostBridge())
+    rename_plan = rename_steward.plan_rename(
+        rename_source, root / "rename-destination.txt", classification=_classification()
+    )
+    rename_source_device = original_device_identity(rename_source)
+    monkeypatch.setattr(
+        storage_module,
+        "_device_identity",
+        lambda path: rename_source_device if path == rename_source else "rename-destination",
+    )
+    with pytest.raises(MutationDenied):
+        _run(rename_steward.execute_async(rename_plan))
+
+
+def test_file_steward_restore_authority_and_reconcile_terminal_paths(tmp_path: Path) -> None:
+    root = tmp_path / "owned"
+    root.mkdir()
+    source = root / "source.txt"
+    source.write_bytes(b"restore branches")
+    broker, authenticator = _broker(root)
+    steward = FileSteward(root, permission_broker=broker, host_bridge=HostBridge())
+
+    delete_plan = steward.plan_delete(source, classification=_classification())
+    with pytest.raises(MutationApprovalRequired):
+        _run(steward.execute_async(delete_plan))
+    _run(_approve_delete(broker, authenticator, delete_plan.task_id))
+    assert steward.execute(delete_plan).success
+
+    no_broker = FileSteward(root)
+    with pytest.raises(MutationDenied):
+        _run(no_broker.restore_async(delete_plan))
+
+    source.write_bytes(b"conflict")
+    with pytest.raises(MutationConflict):
+        _run(steward.restore_async(delete_plan))
+    assert steward.manifests.load(delete_plan.plan_id).state is MutationState.CONFLICT
+
+    missing_source = root / "missing-source.txt"
+    missing_source.write_bytes(b"missing recovery")
+    missing_plan = steward.plan_delete(missing_source, classification=_classification())
+    with pytest.raises(MutationApprovalRequired):
+        _run(steward.execute_async(missing_plan))
+    _run(_approve_delete(broker, authenticator, missing_plan.task_id))
+    assert steward.execute(missing_plan).success
+    current = steward.manifests.load(missing_plan.plan_id)
+    item = current.items[0]
+    steward.manifests.save(replace(current, items=(replace(item, recovery_path=None),)))
+    with pytest.raises(MutationUnknownOutcome):
+        _run(steward.restore_async(missing_plan))
+    assert steward.manifests.load(missing_plan.plan_id).state is MutationState.UNKNOWN_OUTCOME
+
+    assert steward.reconcile(delete_plan).state is MutationState.CONFLICT
+
+
+def test_storage_internal_fallbacks_and_manifest_integrity_are_explicit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    naive = datetime(2026, 1, 1)
+    assert storage_module._utc(naive).tzinfo is UTC
+    with pytest.raises(MutationDenied):
+        storage_module._canonical(Path("relative.txt"))
+    assert storage_module._safe_root(tmp_path / "safe").is_dir()
+
+    monkeypatch.setattr(storage_module, "_canonical", lambda path: path.absolute())
+    monkeypatch.setattr(storage_module, "_has_reparse_ancestor", lambda _path: True)
+    with pytest.raises(MutationDenied):
+        storage_module._safe_root(tmp_path / "unsafe")
+    monkeypatch.undo()
+
+    assert storage_module._cloud_placeholder(cast(Any, SimpleNamespace(st_file_attributes=0x1000)))
+    storage_any: Any = storage_module
+    original_name = storage_any.os.name
+    monkeypatch.setattr(storage_any.os, "name", "posix")
+    assert storage_module._drive_type(tmp_path) is VolumeDriveType.FIXED
+    assert storage_module._volume_identity(tmp_path)[0].startswith("device:")
+    monkeypatch.setattr(storage_any.os, "name", original_name)
+
+    class BrokenKernel:
+        def GetLogicalDrives(self) -> int:
+            raise OSError("probe failed")
+
+        def GetDriveTypeW(self, _root: str) -> int:
+            raise OSError("probe failed")
+
+        def GetVolumeNameForVolumeMountPointW(self, *_args: object) -> int:
+            raise OSError("probe failed")
+
+        def GetVolumeInformationW(self, *_args: object) -> int:
+            raise OSError("probe failed")
+
+    monkeypatch.setattr(storage_any.ctypes, "windll", SimpleNamespace(kernel32=BrokenKernel()))
+    assert storage_module._windows_mounts() == ()
+    assert storage_module._drive_type(tmp_path) is VolumeDriveType.UNKNOWN
+    assert storage_module._volume_identity(tmp_path)[0].startswith("mount:")
+    monkeypatch.setattr(storage_module, "_windows_mounts", lambda: (tmp_path / "not-mounted",))
+    assert storage_module._host_volumes() == ()
+
+    root = tmp_path / "manifest-root"
+    root.mkdir()
+    source = root / "source.txt"
+    source.write_bytes(b"manifest")
+    broker, _ = _broker(root)
+    steward = FileSteward(root, permission_broker=broker)
+    plan = steward.plan_copy(source, root / "copy.txt")
+    raw = plan.as_dict()
+    raw["items"] = [{}]
+    raw["integrity"] = hashlib.sha256(
+        storage_module._json_bytes({key: value for key, value in raw.items() if key != "integrity"})
+    ).hexdigest()
+    steward.manifests.path_for(plan.plan_id).write_text(json.dumps(raw), encoding="utf-8")
+    with pytest.raises(ManifestIntegrityError):
+        steward.manifests.load(plan.plan_id)
+
+
+def test_r1_reproduction_builder_rejects_missing_failed_and_stale_evidence(
+    tmp_path: Path,
+) -> None:
+    head = "a" * 40
+    tree = "b" * 40
+    parent = "c" * 40
+    source = r3b_artifact._source_identity()
+    system_evidence = tmp_path / "system.json"
+    system_evidence.write_text(
+        json.dumps(
+            {
+                "status": "passed",
+                "exit_code": 0,
+                "revision": head,
+                "tree": tree,
+                "suite": "v1-acceptance",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    def run_case(name: str, scenario: dict[str, object] | None) -> dict[str, object]:
+        output = tmp_path / f"{name}.artifact.json"
+        command = [
+            sys.executable,
+            "scripts/acceptance/build_v1_i_r3b_artifact.py",
+            "--output",
+            str(output),
+            "--system-evidence",
+            str(system_evidence),
+            "--exact-coverage",
+            "90.0",
+            "--ending-commit",
+            head,
+            "--ending-parent",
+            parent,
+            "--ending-tree",
+            tree,
+            "--ending-branch",
+            "standalone-builder-test-branch",
+            "--hosted-ci-run-id",
+            "test-run",
+            "--hosted-ci-head-sha",
+            head,
+        ]
+        if scenario is not None:
+            evidence = tmp_path / f"{name}.scenario.json"
+            execution = _bound_scenario_execution(
+                tmp_path / f"{name}.scenario.raw", head, tree, source
+            )
+            execution["exit_code"] = 1 if scenario.get("status") == "FAIL" else 0
+            payload = {
+                "revision": head,
+                "tree": tree,
+                "tests": [scenario],
+            }
+            evidence.write_text(json.dumps(payload), encoding="utf-8")
+            _bind_result_artifact(execution, evidence, "scenario-json")
+            provenance = tmp_path / f"{name}.scenario-provenance.json"
+            provenance.write_text(json.dumps({"execution": execution}), encoding="utf-8")
+            command.extend(
+                [
+                    "--scenario-evidence",
+                    str(evidence),
+                    "--scenario-provenance",
+                    str(provenance),
+                    "--scenario-revision",
+                    head,
+                    "--scenario-tree",
+                    tree,
+                ]
+            )
+        result = subprocess.run(command, check=False, capture_output=True, text=True)
+        assert result.returncode == 0, result.stderr
+        return cast(dict[str, object], json.loads(output.read_text(encoding="utf-8")))
+
+    missing = run_case("missing", None)
+    missing_requirement = cast(dict[str, Any], missing["r1_requirements"])["requirements"][0]
+    assert missing_requirement["status"] == "NOT_EXECUTED"
+
+    failed = run_case(
+        "failed",
+        {
+            "test_id": (
+                "tests.test_storage_stewardship::"
+                "test_r1_reproduction_partial_batch_does_not_complete_from_first_item"
+            ),
+            "name": "test_r1_reproduction_partial_batch_does_not_complete_from_first_item",
+            "status": "FAIL",
+            "exit_code": 1,
+        },
+    )
+    failed_requirement = cast(dict[str, Any], failed["r1_requirements"])["requirements"][0]
+    assert failed_requirement["status"] == "FAIL"
+
+    stale = run_case(
+        "stale",
+        {
+            "test_id": (
+                "tests.test_storage_stewardship::"
+                "test_r1_reproduction_partial_batch_does_not_complete_from_first_item"
+            ),
+            "name": "test_r1_reproduction_partial_batch_does_not_complete_from_first_item",
+            "status": "PASS",
+            "revision": "stale-source",
+            "tree": "stale-tree",
+            "exit_code": 0,
+        },
+    )
+    stale_requirement = cast(dict[str, Any], stale["r1_requirements"])["requirements"][0]
+    assert stale_requirement["status"] == "BLOCKING_NOT_PROVEN"
+
+
+def test_r1_reproduction_partial_batch_does_not_complete_from_first_item(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "owned"
+    root.mkdir()
+    sources = tuple(root / f"source-{index}.txt" for index in range(1, 4))
+    for index, source in enumerate(sources, start=1):
+        source.write_bytes(f"item-{index}".encode())
+    broker, _ = _broker(root)
+
+    def interrupt(boundary: str, item: MutationItem) -> None:
+        if boundary == "after_copy_before_finalize" and item.source == sources[1]:
+            raise RuntimeError("interrupt second item")
+
+    steward = FileSteward(
+        root,
+        permission_broker=broker,
+        host_bridge=HostBridge(),
+        fault_injector=interrupt,
+    )
+    plan = steward.plan_batch(
+        MutationOperation.COPY,
+        [(source, root / f"copy-{index}.txt", None) for index, source in enumerate(sources, 1)],
+    )
+    with pytest.raises(MutationUnknownOutcome):
+        _run(steward.execute_async(plan))
+
+    restarted = FileSteward(
+        root,
+        manifest_store=MutationManifestStore(root / ".mutation-state"),
+    )
+    result = restarted.reconcile(plan)
+
+    assert result.state is not MutationState.COMPLETED
+    assert (root / "copy-1.txt").read_bytes() == b"item-1"
+    assert not (root / "copy-3.txt").exists()
+
+
+def test_r1_reproduction_batch_restore_requires_all_items(tmp_path: Path) -> None:
+    root = tmp_path / "owned"
+    root.mkdir()
+    sources = (root / "first.txt", root / "second.txt")
+    sources[0].write_bytes(b"first")
+    sources[1].write_bytes(b"second")
+    broker, authenticator = _broker(root)
+    steward = FileSteward(root, permission_broker=broker, host_bridge=HostBridge())
+    plan = steward.plan_batch(
+        MutationOperation.SAFE_DELETE,
+        [(source, None, _classification()) for source in sources],
+    )
+    with pytest.raises(MutationApprovalRequired):
+        _run(steward.execute_async(plan))
+    _run(_approve_delete(broker, authenticator, plan.task_id))
+    assert steward.execute(plan).success
+
+    restored = _run(steward.restore_async(plan))
+
+    assert restored.state is MutationState.RESTORED
+    assert all(
+        source.exists() and source.read_bytes() == expected
+        for source, expected in zip(sources, (b"first", b"second"), strict=True)
+    )
+
+
+def test_r1_reproduction_partial_effect_is_not_a_not_executed_receipt(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "owned"
+    root.mkdir()
+    first = root / "first.txt"
+    second = root / "second.txt"
+    first.write_bytes(b"first")
+    second.write_bytes(b"second")
+    audit = InMemoryAuditSink()
+    authenticator = TrustedApprovalAuthenticator(source=ApprovalSource.TRUSTED_UI)
+    broker = PermissionBroker(
+        PolicyEngine(
+            (
+                PolicyRule(
+                    "storage.test-root",
+                    Permission.FILESYSTEM_WRITE,
+                    Decision.ALLOW,
+                    ScopeConstraint(
+                        paths=(str(root),),
+                        tools=frozenset({"storage.file_steward"}),
+                    ),
+                    frozenset({"storage.file.copy"}),
+                ),
+            )
+        ),
+        audit_sink=audit,
+        approval_context_verifier=authenticator.verifier(),
+    )
+    steward = FileSteward(root, permission_broker=broker, host_bridge=HostBridge())
+    plan = steward.plan_batch(
+        MutationOperation.COPY,
+        [(first, root / "first-copy.txt", None), (second, root / "second-copy.txt", None)],
+    )
+    second.write_bytes(b"changed after planning")
+
+    with pytest.raises(StalePlan):
+        _run(steward.execute_async(plan))
+
+    records = _run(audit.records())
+    execution_outcomes = tuple(record.execution_outcome for record in records)
+    assert (root / "first-copy.txt").read_bytes() == b"first"
+    assert "not_executed" not in execution_outcomes
+
+
+def test_r1_reproduction_missing_host_bridge_does_not_bypass_host_authority(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "owned"
+    root.mkdir()
+    source = root / "source.txt"
+    destination = root / "destination.txt"
+    source.write_bytes(b"host boundary")
+    broker, _ = _broker(root)
+    steward = FileSteward(root, permission_broker=broker)
+    plan = steward.plan_copy(source, destination)
+
+    with pytest.raises(MutationDenied):
+        _run(steward.execute_async(plan))
+
+    assert not destination.exists()
+
+
+def test_r1_reproduction_cross_volume_finalization_preserves_conflict_and_source(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "owned"
+    root.mkdir()
+    source = root / "source.txt"
+    source.write_bytes(b"original")
+    broker, _ = _broker(root)
+    original_device_identity = storage_module._device_identity
+    source_device = original_device_identity(source)
+
+    monkeypatch.setattr(
+        storage_module,
+        "_device_identity",
+        lambda path: source_device if path == source else "destination-device",
+    )
+    conflict_destination = root / "conflict.txt"
+
+    def create_conflict(boundary: str, _item: MutationItem) -> None:
+        if boundary == "after_cross_volume_copy":
+            conflict_destination.write_bytes(b"sentinel")
+
+    conflict_steward = FileSteward(
+        root,
+        permission_broker=broker,
+        host_bridge=HostBridge(),
+        fault_injector=create_conflict,
+    )
+    conflict_plan = conflict_steward.plan_move(
+        source, conflict_destination, classification=_classification()
+    )
+    with pytest.raises(MutationConflict):
+        _run(conflict_steward.execute_async(conflict_plan))
+    assert conflict_destination.read_bytes() == b"sentinel"
+    assert source.read_bytes() == b"original"
+
+    race_source = root / "race-source.txt"
+    race_source.write_bytes(b"race-original")
+    race_destination = root / "race-destination.txt"
+    monkeypatch.setattr(
+        storage_module,
+        "_device_identity",
+        lambda path: source_device if path == race_source else "destination-device",
+    )
+
+    def change_source(boundary: str, item: MutationItem) -> None:
+        if boundary == "after_cross_volume_copy":
+            item.source.write_bytes(b"changed during finalization")
+
+    race_broker, _ = _broker(root)
+    race_steward = FileSteward(
+        root,
+        permission_broker=race_broker,
+        host_bridge=HostBridge(),
+        fault_injector=change_source,
+    )
+    race_plan = race_steward.plan_move(
+        race_source, race_destination, classification=_classification()
+    )
+    with pytest.raises((StalePlan, MutationUnknownOutcome)):
+        _run(race_steward.execute_async(race_plan))
+    assert race_source.exists()
+    assert race_source.read_bytes() == b"changed during finalization"
+
+
+def test_r1_receipt_bound_host_bridge_covers_exact_batch_and_rejects_replays(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "owned"
+    root.mkdir()
+    source = root / "source.txt"
+    source.write_bytes(b"receipt-bound")
+    broker, _ = _broker(root)
+    bridge = HostBridge()
+    steward = FileSteward(root, permission_broker=broker, host_bridge=bridge)
+    plan = steward.plan_copy(source, root / "destination.txt")
+    receipt = _run(steward._authorize(plan, user_id=None))  # noqa: SLF001
+    assert _run(broker.begin_execution(receipt)) is None
+    operation = steward._effective_operation(plan)  # noqa: SLF001
+    arguments = steward._authorization_arguments(plan)  # noqa: SLF001
+
+    def request(**changes: Any) -> HostBridgeRequest:
+        base = HostBridgeRequest(
+            request_id=UUID(int=0),
+            task_id=plan.task_id,
+            instance_id=bridge.instance_id,
+            operation=steward._bridge_operation(operation),  # noqa: SLF001
+            resource=steward._bridge_resource(plan),  # noqa: SLF001
+            scope=str(root),
+            risk=steward._risk(plan),  # noqa: SLF001
+            expires_at=receipt.expires_at,
+            tool_id=steward._TOOL_ID,  # noqa: SLF001
+            action=f"storage.file.{operation.value}",
+            argument_fingerprint=receipt.argument_fingerprint,
+            action_fingerprint=receipt.action_fingerprint,
+            approval_identity=None,
+            safety_class=steward._safety_class(plan),  # noqa: SLF001
+        )
+        return replace(base, **changes)
+
+    def check(
+        candidate: HostBridgeRequest,
+        supplied_receipt: Any = receipt,
+        supplied_arguments: Any = arguments,
+    ) -> bool:
+        return bridge.authorize_with_receipt(
+            candidate,
+            receipt=supplied_receipt,
+            broker=broker,
+            normalized_arguments=supplied_arguments,
+            expected_instance_id=bridge.instance_id,
+        ).allowed
+
+    assert not check(request(expires_at=datetime.now(UTC) - timedelta(seconds=1)))
+    assert not check(request(task_id=UUID(int=1)))
+    assert not check(request(instance_id=UUID(int=1)))
+    assert not check(request(resource="manifest:changed"))
+    assert not check(request(operation=HostBridgeOperation.FILE_READ))
+    assert not check(request(argument_fingerprint="wrong-fingerprint"))
+    changed_arguments = dict(arguments)
+    changed_arguments["items"] = ("out-of-scope-recovery-path",)
+    assert not check(request(), supplied_arguments=changed_arguments)
+    assert not check(request(), supplied_receipt=None)
+    exact = request(request_id=uuid4())
+    assert check(exact)
+    assert not check(exact)
+    assert _run(broker.record_execution_outcome(receipt, "binding_test")) is None
+    assert not check(request(request_id=uuid4()))
+
+
+def test_r1_restore_interruption_is_not_reconciled_as_delete(tmp_path: Path) -> None:
+    root = tmp_path / "owned"
+    root.mkdir()
+    sources = (root / "first.txt", root / "second.txt")
+    sources[0].write_bytes(b"first")
+    sources[1].write_bytes(b"second")
+    broker, authenticator = _broker(root)
+    delete_steward = FileSteward(root, permission_broker=broker, host_bridge=HostBridge())
+    plan = delete_steward.plan_batch(
+        MutationOperation.SAFE_DELETE,
+        [(source, None, _classification()) for source in sources],
+    )
+    with pytest.raises(MutationApprovalRequired):
+        _run(delete_steward.execute_async(plan))
+    _run(_approve_delete(broker, authenticator, plan.task_id))
+    assert delete_steward.execute(plan).success
+
+    def interrupt_restore(boundary: str, item: MutationItem) -> None:
+        if boundary == "before_restore_finalize" and item.source == sources[1]:
+            raise RuntimeError("restore interrupted")
+
+    delete_steward.fault_injector = interrupt_restore
+    restoring = delete_steward
+    with pytest.raises(MutationUnknownOutcome):
+        _run(restoring.restore_async(plan))
+    interrupted = restoring.manifests.load(plan.plan_id)
+    assert interrupted.phase.value == "restore"
+    assert interrupted.state is MutationState.UNKNOWN_OUTCOME
+    assert sources[0].read_bytes() == b"first"
+    assert not sources[1].exists()
+
+    restarted = FileSteward(
+        root,
+        manifest_store=MutationManifestStore(root / ".mutation-state"),
+    )
+    reconciled = restarted.reconcile(plan)
+    assert reconciled.state is MutationState.UNKNOWN_OUTCOME
+    assert reconciled.manifest.phase.value == "restore"
+
+
+def test_r1_child_process_interruption_reconciles_without_replay(tmp_path: Path) -> None:
+    root = tmp_path / "owned"
+    root.mkdir()
+    source = root / "source.txt"
+    source.write_bytes(b"child interruption")
+    broker, _ = _broker(root)
+    steward = FileSteward(root, permission_broker=broker, host_bridge=HostBridge())
+    plan = steward.plan_copy(source, root / "destination.txt")
+    signal = tmp_path / "child-ready.signal"
+    child = tmp_path / "interrupt_child.py"
+    child.write_text(
+        """
+import asyncio
+import sys
+import time
+from pathlib import Path
+from uuid import UUID
+
+from jarvis.permissions import (
+    Decision,
+    Permission,
+    PermissionBroker,
+    PolicyEngine,
+    PolicyRule,
+    ScopeConstraint,
+)
+from jarvis.storage import FileSteward, MutationItem
+from jarvis.vm.bridge import HostBridge
+
+root = Path(sys.argv[1])
+plan_id = UUID(sys.argv[2])
+signal = Path(sys.argv[3])
+
+broker = PermissionBroker(PolicyEngine((PolicyRule(
+    "child-storage",
+    Permission.FILESYSTEM_WRITE,
+    Decision.ALLOW,
+    ScopeConstraint(paths=(str(root),), tools=frozenset({"storage.file_steward"})),
+    frozenset({"storage.file.copy"}),
+),)))
+
+def pause(boundary: str, _item: MutationItem) -> None:
+    if boundary == "after_copy_before_finalize":
+        signal.write_text("effect boundary entered", encoding="utf-8")
+        while True:
+            time.sleep(0.1)
+
+asyncio.run(FileSteward(
+    root,
+    permission_broker=broker,
+    host_bridge=HostBridge(),
+    fault_injector=pause,
+).execute_async(plan_id))
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+    child_environment = dict(os.environ)
+    child_environment["PYTHONPATH"] = str(Path.cwd())
+    process = subprocess.Popen(
+        [sys.executable, str(child), str(root), str(plan.plan_id), str(signal)],
+        cwd=str(Path.cwd()),
+        env=child_environment,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        deadline = time.monotonic() + 15
+        while not signal.exists() and time.monotonic() < deadline:
+            if process.poll() is not None:
+                stdout, stderr = process.communicate()
+                raise AssertionError(f"child exited before interruption: {stdout}; {stderr}")
+            time.sleep(0.05)
+        assert signal.exists()
+        process.terminate()
+        process.wait(timeout=10)
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.wait(timeout=10)
+
+    restarted = FileSteward(
+        root,
+        manifest_store=MutationManifestStore(root / ".mutation-state"),
+    )
+    result = restarted.reconcile(plan)
+    assert result.state is MutationState.UNKNOWN_OUTCOME
+    assert not (root / "destination.txt").exists()
+
+
+def test_r1_live_protection_revalidation_denies_new_obligations(tmp_path: Path) -> None:
+    root = tmp_path / "owned"
+    root.mkdir()
+    source = root / "source.txt"
+    source.write_bytes(b"live protection")
+    broker, authenticator = _broker(root)
+    live = {"classification": _classification()}
+    steward = FileSteward(
+        root,
+        permission_broker=broker,
+        host_bridge=HostBridge(),
+        live_protection_probe=lambda _path: live["classification"],
+    )
+    plan = steward.plan_delete(source, classification=_classification())
+    live["classification"] = _classification(active=True)
+    with pytest.raises(MutationApprovalRequired):
+        _run(steward.execute_async(plan))
+    _run(_approve_delete(broker, authenticator, plan.task_id))
+    with pytest.raises(MutationDenied):
+        _run(steward.execute_async(plan))
+    assert source.exists()
+
+    evidence_source = root / "evidence.txt"
+    evidence_source.write_bytes(b"evidence")
+    evidence_plan = steward.plan_delete(evidence_source, classification=_classification())
+    live["classification"] = _classification(retention=RetentionState.NEEDED_FOR_EVIDENCE)
+    with pytest.raises(MutationApprovalRequired):
+        _run(steward.execute_async(evidence_plan))
+    _run(_approve_delete(broker, authenticator, evidence_plan.task_id))
+    with pytest.raises(MutationDenied):
+        _run(steward.execute_async(evidence_plan))
+    assert evidence_source.exists()
+
+
+def test_r1_reproduction_builder_cannot_pass_without_scenario_evidence(tmp_path: Path) -> None:
+    head = "standalone-builder-test-source"
+    system_evidence = tmp_path / "system.json"
+    system_evidence.write_text(
+        json.dumps(
+            {
+                "status": "passed",
+                "exit_code": 0,
+                "revision": head,
+                "suite": "v1-acceptance",
+                "results": [{"name": "pytest:passed", "status": "passed", "detail": "1"}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    output = tmp_path / "artifact.json"
+    result = subprocess.run(
+        [
+            sys.executable,
+            "scripts/acceptance/build_v1_i_r3b_artifact.py",
+            "--output",
+            str(output),
+            "--system-evidence",
+            str(system_evidence),
+            "--exact-coverage",
+            "90.0",
+            "--ending-commit",
+            head,
+            "--ending-parent",
+            "standalone-builder-test-parent",
+            "--ending-tree",
+            "standalone-builder-test-tree",
+            "--ending-branch",
+            "standalone-builder-test-branch",
+            "--hosted-ci-run-id",
+            "test-run",
+            "--hosted-ci-head-sha",
+            head,
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    artifact = json.loads(output.read_text(encoding="utf-8"))
+    cases = artifact["acceptance_matrix"]["cases"]
+    assert any(case["status"] != "PASS" for case in cases)
+
+
+def _interrupted_restore_manifest(
+    root: Path,
+) -> tuple[FileSteward, MutationManifestStore, MutationItem, Path]:
+    source = root / "restore-source.txt"
+    source.write_bytes(b"restore-observation-bytes")
+    broker, authenticator = _broker(root)
+    steward = FileSteward(root, permission_broker=broker, host_bridge=HostBridge())
+    plan = steward.plan_delete(source, classification=_classification())
+    with pytest.raises(MutationApprovalRequired):
+        _run(steward.execute_async(plan))
+    _run(_approve_delete(broker, authenticator, plan.task_id))
+    assert steward.execute(plan).success
+    manifest = steward.manifests.load(plan.plan_id)
+    item = manifest.items[0]
+    assert item.recovery_path is not None
+    source.write_bytes(b"restore-observation-bytes")
+    interrupted = replace(
+        manifest,
+        phase=MutationPhase.RESTORE,
+        state=MutationState.UNKNOWN_OUTCOME,
+        detail="restore interrupted during acceptance reproduction",
+        items=(replace(item, state=MutationItemState.RESTORATION_IN_PROGRESS),),
+    )
+    steward.manifests.save(interrupted)
+    return steward, steward.manifests, item, source
+
+
+def test_r1r1_pre_fix_reproduction_recovery_directory_is_not_absence(tmp_path: Path) -> None:
+    root = tmp_path / "owned"
+    root.mkdir()
+    steward, manifests, item, source = _interrupted_restore_manifest(root)
+    assert item.recovery_path is not None
+    item.recovery_path.unlink()
+    item.recovery_path.mkdir()
+
+    result = FileSteward(root, manifest_store=manifests).reconcile(
+        manifests.load(next(iter(manifests.pending())).plan_id)
+    )
+
+    assert result.state is MutationState.UNKNOWN_OUTCOME
+    assert result.manifest.items[0].state is MutationItemState.UNKNOWN_OUTCOME
+    assert source.read_bytes() == b"restore-observation-bytes"
+    assert item.recovery_path.is_dir()
+    assert steward.manifests.load(result.manifest.plan_id).state is MutationState.UNKNOWN_OUTCOME
+
+
+def test_r1r1_pre_fix_reproduction_recovery_read_error_is_not_absence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "owned"
+    root.mkdir()
+    _steward, manifests, item, source = _interrupted_restore_manifest(root)
+    assert item.recovery_path is not None
+    original_hash = storage_module._sha256_path
+
+    def unreadable(path: Path) -> str:
+        if path == item.recovery_path:
+            raise PermissionError("acceptance recovery read denied")
+        return original_hash(path)
+
+    monkeypatch.setattr(storage_module, "_sha256_path", unreadable)
+    result = FileSteward(root, manifest_store=manifests).reconcile(
+        manifests.load(next(iter(manifests.pending())).plan_id)
+    )
+
+    assert result.state is MutationState.UNKNOWN_OUTCOME
+    assert result.manifest.items[0].state is MutationItemState.UNKNOWN_OUTCOME
+    assert source.read_bytes() == b"restore-observation-bytes"
+
+
+def test_r1r1_pre_fix_reproduction_native_reparse_is_not_absence(tmp_path: Path) -> None:
+    root = tmp_path / "owned"
+    root.mkdir()
+    _steward, manifests, item, source = _interrupted_restore_manifest(root)
+    assert item.recovery_path is not None
+    item.recovery_path.unlink()
+    try:
+        item.recovery_path.symlink_to(source)
+    except (OSError, NotImplementedError) as error:
+        raise unittest.SkipTest(
+            f"native symlink support unavailable: {type(error).__name__}"
+        ) from error
+
+    result = FileSteward(root, manifest_store=manifests).reconcile(
+        manifests.load(next(iter(manifests.pending())).plan_id)
+    )
+
+    assert result.state is MutationState.UNKNOWN_OUTCOME
+    assert result.manifest.items[0].state is MutationItemState.UNKNOWN_OUTCOME
+
+
+def test_r1r1_positive_restore_reconciliation_requires_verified_absence(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "owned"
+    root.mkdir()
+    _steward, manifests, item, source = _interrupted_restore_manifest(root)
+    assert item.recovery_path is not None
+    item.recovery_path.unlink()
+
+    result = FileSteward(root, manifest_store=manifests).reconcile(
+        manifests.load(next(iter(manifests.pending())).plan_id)
+    )
+
+    assert result.state is MutationState.RESTORED
+    assert result.manifest.items[0].state is MutationItemState.RESTORED
+    assert source.read_bytes() == b"restore-observation-bytes"
+
+
+def test_r1r1_effect_reconciliation_does_not_treat_broken_reparse_as_absence(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "owned"
+    root.mkdir()
+    source = root / "move-source.txt"
+    destination = root / "move-destination.txt"
+    source.write_bytes(b"effect-observation-bytes")
+    broker, _ = _broker(root)
+    plan = FileSteward(root, permission_broker=broker, host_bridge=HostBridge()).plan_move(
+        source, destination, classification=_classification()
+    )
+    source.unlink()
+    try:
+        source.symlink_to(root / "missing-target.txt")
+    except (OSError, NotImplementedError) as error:
+        raise unittest.SkipTest(
+            f"native symlink support unavailable: {type(error).__name__}"
+        ) from error
+    destination.write_bytes(b"effect-observation-bytes")
+    steward = FileSteward(root, manifest_store=MutationManifestStore(root / ".mutation-state"))
+    steward.manifests.save(replace(plan, state=MutationState.UNKNOWN_OUTCOME))
+
+    result = steward.reconcile(plan)
+
+    assert result.state is MutationState.UNKNOWN_OUTCOME
+    assert result.manifest.items[0].state is MutationItemState.UNKNOWN_OUTCOME
+    assert source.is_symlink()
+
+
+def _bound_scenario_execution(
+    raw: Path,
+    revision: str,
+    tree: str,
+    source: dict[str, object],
+    *,
+    raw_contents: bytes = b"raw scenario output",
+    command: list[str] | None = None,
+    selection: str = "real host volume inventory",
+) -> dict[str, object]:
+    raw.write_bytes(raw_contents)
+    return {
+        "run_id": "r3b-r1-r1-scenario",
+        "command": command or [sys.executable, "-m", "pytest", "tests/test_storage_stewardship.py"],
+        "selection": selection,
+        "base_revision": revision,
+        "tested_tree": tree,
+        "tree_before": tree,
+        "tree_after": tree,
+        "exit_code": 0,
+        "source_identity_before": source,
+        "source_identity_after": source,
+        "raw_evidence": [
+            {
+                "path": str(raw),
+                "sha256": hashlib.sha256(raw.read_bytes()).hexdigest(),
+            }
+        ],
+    }
+
+
+def _bind_result_artifact(execution: dict[str, object], path: Path, role: str) -> None:
+    digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    execution["result_artifact"] = {"path": str(path), "sha256": digest, "role": role}
+    raw_evidence = cast(list[dict[str, str]], execution["raw_evidence"])
+    if not any(item.get("path") == str(path) for item in raw_evidence):
+        raw_evidence.append({"path": str(path), "sha256": digest})
+
+
+def test_r1r1_pre_fix_reproduction_parser_to_matrix_keeps_requirement_identity(
+    tmp_path: Path,
+) -> None:
+    revision = "1" * 40
+    tree = "2" * 40
+    source = {"schema": "source-identity-1", "sha256": "3" * 64, "bound_file_count": 1}
+    payload = {
+        "revision": revision,
+        "tree": tree,
+        "tests": [
+            {
+                "test_id": "tests/test_storage_stewardship.py::test_host_volume",
+                "requirement_id": "R3B-001",
+                "case": "real host volume inventory",
+                "status": "PASS",
+                "execution_classification": "EXECUTED_PASS",
+                "evidence_reference": "scenario.raw::test_host_volume",
+                "observed_outcome": "trusted host volume inventory completed",
+                "exit_code": 0,
+            }
+        ],
+    }
+    evidence = tmp_path / "scenario.json"
+    evidence.write_text(json.dumps(payload), encoding="utf-8")
+    execution = _bound_scenario_execution(tmp_path / "scenario.raw", revision, tree, source)
+    _bind_result_artifact(execution, evidence, "scenario-json")
+    provenance = tmp_path / "scenario-provenance.json"
+    provenance.write_text(json.dumps({"execution": execution}), encoding="utf-8")
+
+    records = r3b_artifact._scenario_tests(
+        evidence,
+        supplied_revision=revision,
+        supplied_tree=tree,
+        provenance_path=provenance,
+    )
+    matrix = r3b_artifact._acceptance_matrix(records, source, revision, tree)
+
+    assert records[0]["requirement_id"] == "R3B-001"
+    assert records[0]["case"] == "real host volume inventory"
+    assert matrix[0]["status"] == "PASS"
+    assert matrix[0]["test_scenario_identity"] == records[0]["test_id"]
+
+
+def test_r1r1_pre_fix_reproduction_source_labels_are_not_proof(tmp_path: Path) -> None:
+    revision = "4" * 40
+    tree = "5" * 40
+    source = {"schema": "source-identity-1", "sha256": "6" * 64, "bound_file_count": 1}
+
+    malformed = {
+        "revision": "not-a-commit",
+        "tree": tree,
+        "status": "PASS",
+        "exit_code": 0,
+        "execution": _bound_scenario_execution(tmp_path / "malformed.raw", revision, tree, source),
+    }
+    relabeled_junit = {
+        "revision": revision,
+        "tree": tree,
+        "status": "PASS",
+        "exit_code": 0,
+    }
+    contradictory = {
+        "revision": revision,
+        "tree": tree,
+        "status": "PASS",
+        "exit_code": 0,
+        "source_identity": {
+            "schema": "source-identity-1",
+            "sha256": "7" * 64,
+            "bound_file_count": 1,
+        },
+        "execution": _bound_scenario_execution(
+            tmp_path / "contradictory.raw", revision, tree, source
+        ),
+    }
+    digest_path = tmp_path / "digest.raw"
+    execution = _bound_scenario_execution(digest_path, revision, tree, source)
+    digest_path.write_bytes(b"modified after capture")
+    digest_mismatch = {
+        "revision": revision,
+        "tree": tree,
+        "status": "PASS",
+        "exit_code": 0,
+        "execution": execution,
+    }
+
+    for record in (malformed, relabeled_junit, contradictory, digest_mismatch):
+        assert not r3b_artifact._scenario_is_bound(record, revision, tree, source)
+
+
+def test_r1r1_mapping_duplicates_and_conflicts_are_not_silently_green(tmp_path: Path) -> None:
+    revision = "8" * 40
+    tree = "9" * 40
+    source = r3b_artifact._source_identity()
+
+    def record(name: str, status: str) -> dict[str, object]:
+        return {
+            "test_id": name,
+            "requirement_id": "R3B-001",
+            "case": "real host volume inventory",
+            "status": status,
+            "execution_classification": (
+                "EXECUTED_FAILED" if status == "FAIL" else "EXECUTED_PASS"
+            ),
+            "observed_outcome": status,
+            "exit_code": 0 if status == "PASS" else 1,
+        }
+
+    duplicate_path = tmp_path / "duplicate.json"
+    duplicate_payload = {
+        "revision": revision,
+        "tree": tree,
+        "tests": [record("same-test", "PASS"), record("same-test", "PASS")],
+    }
+    duplicate_path.write_text(json.dumps(duplicate_payload), encoding="utf-8")
+    duplicate_execution = _bound_scenario_execution(
+        tmp_path / "duplicate.raw", revision, tree, source
+    )
+    _bind_result_artifact(duplicate_execution, duplicate_path, "scenario-json")
+    duplicate_provenance = tmp_path / "duplicate-provenance.json"
+    duplicate_provenance.write_text(
+        json.dumps({"execution": duplicate_execution}), encoding="utf-8"
+    )
+    duplicate_records = r3b_artifact._scenario_tests(
+        duplicate_path, provenance_path=duplicate_provenance
+    )
+    duplicate_matrix = r3b_artifact._acceptance_matrix(duplicate_records, source, revision, tree)
+    assert duplicate_matrix[0]["status"] == "BLOCKING_NOT_PROVEN"
+
+    conflict_path = tmp_path / "conflict.json"
+    conflict_records_payload = [record("pass-test", "PASS"), record("fail-test", "FAIL")]
+    conflict_records_payload[0]["exit_code"] = 1
+    conflict_payload = {
+        "revision": revision,
+        "tree": tree,
+        "tests": conflict_records_payload,
+    }
+    conflict_path.write_text(json.dumps(conflict_payload), encoding="utf-8")
+    conflict_execution = _bound_scenario_execution(
+        tmp_path / "conflict.raw", revision, tree, source
+    )
+    conflict_execution["exit_code"] = 1
+    _bind_result_artifact(conflict_execution, conflict_path, "scenario-json")
+    conflict_provenance = tmp_path / "conflict-provenance.json"
+    conflict_provenance.write_text(json.dumps({"execution": conflict_execution}), encoding="utf-8")
+    conflict_records = r3b_artifact._scenario_tests(
+        conflict_path, provenance_path=conflict_provenance
+    )
+    conflict_matrix = r3b_artifact._acceptance_matrix(conflict_records, source, revision, tree)
+    assert conflict_matrix[0]["status"] == "FAIL"
+
+
+def test_r1r1_gate_reader_requires_execution_and_raw_digest(tmp_path: Path) -> None:
+    revision = "a" * 40
+    tree = "b" * 40
+    source = r3b_artifact._source_identity()
+    raw = tmp_path / "gate.raw"
+    gate_result = {
+        "schema": "d6-test-strength-audit-1",
+        "diff_check": "PASS",
+        "result": "PASS",
+        **{flag: "NO" for flag in r3b_artifact._TEST_STRENGTH_FLAGS},
+    }
+    execution = _bound_scenario_execution(
+        raw,
+        revision,
+        tree,
+        source,
+        raw_contents=json.dumps(gate_result).encode(),
+        command=[sys.executable, "scripts/acceptance/audit_test_strength.py"],
+        selection="audit_test_strength",
+    )
+    _bind_result_artifact(execution, raw, "gate-result")
+    evidence = {
+        "status": "PASS",
+        "exit_code": 0,
+        "revision": revision,
+        "tree": tree,
+        "execution": execution,
+    }
+    path = tmp_path / "gate.json"
+    path.write_text(json.dumps(evidence), encoding="utf-8")
+
+    validated = r3b_artifact._observed_gate(
+        label="test_strength",
+        supplied_status="PASS",
+        evidence_path=path,
+        ending=revision,
+        ending_tree=tree,
+        source=source,
+    )
+    assert validated["status"] == "PASS"
+
+    raw.write_bytes(b"tampered after execution")
+    tampered = r3b_artifact._observed_gate(
+        label="test_strength",
+        supplied_status="PASS",
+        evidence_path=path,
+        ending=revision,
+        ending_tree=tree,
+        source=source,
+    )
+    assert tampered["status"] == "BLOCKING_NOT_PROVEN"
+
+    unbound = dict(evidence)
+    unbound.pop("execution")
+    path.write_text(json.dumps(unbound), encoding="utf-8")
+    missing_provenance = r3b_artifact._observed_gate(
+        label="test_strength",
+        supplied_status="PASS",
+        evidence_path=path,
+        ending=revision,
+        ending_tree=tree,
+        source=source,
+    )
+    assert missing_provenance["status"] == "BLOCKING_NOT_PROVEN"
+
+
+@pytest.mark.parametrize(
+    ("label", "script", "selection", "result"),
+    (
+        (
+            "test_strength",
+            "scripts/acceptance/audit_test_strength.py",
+            "audit_test_strength",
+            json.dumps(
+                {
+                    "schema": "d6-test-strength-audit-1",
+                    "diff_check": "PASS",
+                    "result": "PASS",
+                    **{flag: "NO" for flag in r3b_artifact._TEST_STRENGTH_FLAGS},
+                }
+            ),
+        ),
+        (
+            "package_smoke",
+            "scripts/package_smoke.py",
+            "package_smoke",
+            "package artifact smoke: PASS\n",
+        ),
+    ),
+)
+def test_r3b_e1_genuine_bound_gate_result_passes(
+    tmp_path: Path,
+    label: str,
+    script: str,
+    selection: str,
+    result: str,
+) -> None:
+    revision = "d" * 40
+    tree = "e" * 40
+    source = r3b_artifact._source_identity()
+    raw = tmp_path / f"{label}.stdout"
+    execution = _bound_scenario_execution(
+        raw,
+        revision,
+        tree,
+        source,
+        raw_contents=result.encode(),
+        command=[sys.executable, script],
+        selection=selection,
+    )
+    _bind_result_artifact(execution, raw, "gate-result")
+    evidence = tmp_path / f"{label}.json"
+    evidence.write_text(
+        json.dumps(
+            {
+                "status": "PASS",
+                "exit_code": 0,
+                "revision": revision,
+                "tree": tree,
+                "execution": execution,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    observed = r3b_artifact._observed_gate(
+        label=label,
+        supplied_status="PASS",
+        evidence_path=evidence,
+        ending=revision,
+        ending_tree=tree,
+        source=source,
+    )
+
+    assert observed["status"] == "PASS"
+
+
+@pytest.mark.parametrize("label", ("test_strength", "package_smoke"))
+def test_r3b_e1_unrelated_successful_command_cannot_impersonate_gate(
+    tmp_path: Path, label: str
+) -> None:
+    revision = "f" * 40
+    tree = "0" * 40
+    source = r3b_artifact._source_identity()
+    result = (
+        json.dumps(
+            {
+                "schema": "d6-test-strength-audit-1",
+                "diff_check": "PASS",
+                "result": "PASS",
+                **{flag: "NO" for flag in r3b_artifact._TEST_STRENGTH_FLAGS},
+            }
+        )
+        if label == "test_strength"
+        else "package artifact smoke: PASS\n"
+    )
+    raw = tmp_path / f"{label}.unrelated.stdout"
+    execution = _bound_scenario_execution(
+        raw,
+        revision,
+        tree,
+        source,
+        raw_contents=result.encode(),
+        command=[sys.executable, "-c", "print(1)"],
+        selection="unrelated probe",
+    )
+    _bind_result_artifact(execution, raw, "gate-result")
+    evidence = tmp_path / f"{label}.unrelated.json"
+    evidence.write_text(
+        json.dumps({"status": "PASS", "exit_code": 0, "execution": execution}),
+        encoding="utf-8",
+    )
+
+    observed = r3b_artifact._observed_gate(
+        label=label,
+        supplied_status="PASS",
+        evidence_path=evidence,
+        ending=revision,
+        ending_tree=tree,
+        source=source,
+    )
+
+    assert observed["status"] == "BLOCKING_NOT_PROVEN"
+    assert "canonical gate command" in observed["disposition"]
+
+
+def test_r3b_e1_explicit_wrapper_child_command_is_allowed(tmp_path: Path) -> None:
+    revision = "a" * 40
+    tree = "b" * 40
+    source = r3b_artifact._source_identity()
+    raw = tmp_path / "wrapped.stdout"
+    result = json.dumps(
+        {
+            "schema": "d6-test-strength-audit-1",
+            "diff_check": "PASS",
+            "result": "PASS",
+            **{flag: "NO" for flag in r3b_artifact._TEST_STRENGTH_FLAGS},
+        }
+    )
+    execution = _bound_scenario_execution(
+        raw,
+        revision,
+        tree,
+        source,
+        raw_contents=result.encode(),
+        command=["trusted-wrapper", "run", "test-strength"],
+        selection="audit_test_strength",
+    )
+    execution["child_command"] = [
+        sys.executable,
+        "scripts/acceptance/audit_test_strength.py",
+    ]
+    _bind_result_artifact(execution, raw, "gate-result")
+    evidence = tmp_path / "wrapped.json"
+    evidence.write_text(
+        json.dumps({"status": "PASS", "exit_code": 0, "execution": execution}),
+        encoding="utf-8",
+    )
+
+    observed = r3b_artifact._observed_gate(
+        label="test_strength",
+        supplied_status="PASS",
+        evidence_path=evidence,
+        ending=revision,
+        ending_tree=tree,
+        source=source,
+    )
+
+    assert observed["status"] == "PASS"
+
+
+def test_r3b_e1_standalone_gate_reads_bound_pytest_result(tmp_path: Path) -> None:
+    revision = "c" * 40
+    tree = "d" * 40
+    source = r3b_artifact._source_identity()
+    raw = tmp_path / "system.stdout"
+    execution = _bound_scenario_execution(
+        raw,
+        revision,
+        tree,
+        source,
+        raw_contents=(
+            b"============================= test session starts =============================\n"
+            b"============================== 153 passed, 2 skipped in 1.00s "
+            b"=============================="
+        ),
+        command=[sys.executable, "scripts/run_system_tests.py", "--suite", "v1-acceptance"],
+        selection="v1-acceptance",
+    )
+    _bind_result_artifact(execution, raw, "system-result")
+    evidence = tmp_path / "system.json"
+    evidence.write_text(
+        json.dumps({"status": "passed", "exit_code": 0, "execution": execution}),
+        encoding="utf-8",
+    )
+
+    observed = r3b_artifact._observed_gate(
+        label="standalone_v1_acceptance",
+        supplied_status="PASS",
+        evidence_path=evidence,
+        ending=revision,
+        ending_tree=tree,
+        source=source,
+    )
+
+    assert observed["status"] == "PASS"
+
+
+def _write_junit(path: Path, *, test_name: str, outcome: str = "pass") -> None:
+    child = (
+        "<failure message='failed'>failure</failure>"
+        if outcome == "fail"
+        else "<skipped/>"
+        if outcome == "skip"
+        else ""
+    )
+    path.write_text(
+        f"<testsuite><testcase classname='tests.test_storage_stewardship' name='{test_name}'>"
+        f"{child}</testcase></testsuite>",
+        encoding="utf-8",
+    )
+
+
+def test_r3b_e1_substituted_junit_is_not_accepted_as_bound_result(tmp_path: Path) -> None:
+    revision = "1" * 40
+    tree = "2" * 40
+    source = r3b_artifact._source_identity()
+    actual = tmp_path / "actual.xml"
+    claimed = tmp_path / "claimed.xml"
+    _write_junit(actual, test_name="actual_test")
+    _write_junit(claimed, test_name="claimed_test")
+    execution = _bound_scenario_execution(tmp_path / "scenario.stdout", revision, tree, source)
+    _bind_result_artifact(execution, actual, "junit")
+    provenance = tmp_path / "provenance.json"
+    provenance.write_text(json.dumps({"execution": execution}), encoding="utf-8")
+
+    records = r3b_artifact._scenario_tests(claimed, provenance_path=provenance)
+
+    assert records[0]["status"] == "BLOCKING_NOT_PROVEN"
+    assert records[0]["execution_classification"] == "UNBOUND_RESULT_ARTIFACT"
+    assert all(record["status"] != "PASS" for record in records)
+
+
+def test_r3b_e1_missing_claimed_testcase_is_not_created_from_bound_junit(tmp_path: Path) -> None:
+    revision = "3" * 40
+    tree = "4" * 40
+    source = r3b_artifact._source_identity()
+    actual = tmp_path / "actual.xml"
+    _write_junit(actual, test_name="only_actual_test")
+    execution = _bound_scenario_execution(tmp_path / "scenario.stdout", revision, tree, source)
+    _bind_result_artifact(execution, actual, "junit")
+    provenance = tmp_path / "provenance.json"
+    provenance.write_text(json.dumps({"execution": execution}), encoding="utf-8")
+
+    records = r3b_artifact._scenario_tests(actual, provenance_path=provenance)
+
+    assert r3b_artifact._find_scenario_test(records, "claimed_but_absent") is None
+    assert r3b_artifact._find_scenario_test(records, "only_actual_test") is not None
+
+
+@pytest.mark.parametrize("outcome", ("fail", "skip"))
+def test_r3b_e1_actual_failed_or_skipped_junit_cannot_become_pass(
+    tmp_path: Path, outcome: str
+) -> None:
+    revision = "5" * 40
+    tree = "6" * 40
+    source = r3b_artifact._source_identity()
+    actual = tmp_path / f"{outcome}.xml"
+    test_name = "test_actual_outcome"
+    _write_junit(actual, test_name=test_name, outcome=outcome)
+    execution = _bound_scenario_execution(tmp_path / f"{outcome}.stdout", revision, tree, source)
+    _bind_result_artifact(execution, actual, "junit")
+    provenance = tmp_path / f"{outcome}-provenance.json"
+    provenance.write_text(json.dumps({"execution": execution}), encoding="utf-8")
+
+    records = r3b_artifact._scenario_tests(actual, provenance_path=provenance)
+    record = r3b_artifact._find_scenario_test(records, test_name)
+
+    assert record is not None
+    assert record["status"] == ("FAIL" if outcome == "fail" else "NOT_EXECUTED")
+    assert r3b_artifact._scenario_status(record, revision, tree, source) != "PASS"
+
+
+def test_r3b_e1_one_bound_test_can_support_multiple_requirements_and_child_tree(
+    tmp_path: Path,
+) -> None:
+    base_revision = "7" * 40
+    ending_revision = "8" * 40
+    tree = "9" * 40
+    source = r3b_artifact._source_identity()
+    actual = tmp_path / "multi.json"
+    actual.write_text(
+        json.dumps(
+            {
+                "revision": base_revision,
+                "tree": tree,
+                "tests": [
+                    {
+                        "test_id": "tests.test_storage_stewardship::shared_test",
+                        "status": "PASS",
+                        "requirement_ids": ["R3B-001", "R3B-002"],
+                        "exit_code": 0,
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    execution = _bound_scenario_execution(tmp_path / "multi.stdout", base_revision, tree, source)
+    _bind_result_artifact(execution, actual, "scenario-json")
+    provenance = tmp_path / "multi-provenance.json"
+    provenance.write_text(json.dumps({"execution": execution}), encoding="utf-8")
+
+    records = r3b_artifact._scenario_tests(actual, provenance_path=provenance)
+    matrix = r3b_artifact._acceptance_matrix(records, source, ending_revision, tree)
+
+    assert records[0]["requirement_ids"] == ["R3B-001", "R3B-002"]
+    assert matrix[0]["status"] == "PASS"
+    assert matrix[1]["status"] == "PASS"
+
+
+def test_r1r1_typed_observation_states_do_not_collapse_to_absence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    regular = tmp_path / "regular.txt"
+    regular.write_bytes(b"observed bytes")
+    expected = hashlib.sha256(b"observed bytes").hexdigest()
+
+    verified = storage_module._observe_path(regular, expected_hash=expected)
+    mismatch = storage_module._observe_path(regular, expected_hash="0" * 64)
+    absent = storage_module._observe_path(tmp_path / "missing.txt")
+    missing_field = storage_module._observe_path(None)
+
+    assert verified.state.value == "present_verified"
+    assert mismatch.state.value == "present_unexpected"
+    assert absent.state.value == "absent"
+    assert missing_field.state.value == "unknown"
+    assert storage_module._hash_if_file(regular) == expected
+    assert verified.as_dict()["state"] == "present_verified"
+    assert verified.as_dict()["exists"] is True
+
+    with monkeypatch.context() as context:
+        context.setattr(storage_module, "_has_reparse_ancestor", lambda _path: True)
+        unsafe = storage_module._observe_path(regular)
+    assert unsafe.state.value == "unsafe_reparse"
+
+    def unreadable(_path: Path) -> object:
+        raise PermissionError("observation denied")
+
+    with monkeypatch.context() as context:
+        context.setattr("jarvis.storage.os.lstat", unreadable)
+        unknown = storage_module._observe_path(regular)
+    assert unknown.state.value == "unknown"
+
+    special_info = SimpleNamespace(st_mode=stat.S_IFIFO, st_dev=1, st_ino=2)
+    with monkeypatch.context() as context:
+        context.setattr(storage_module, "_has_reparse_ancestor", lambda _path: False)
+        context.setattr("jarvis.storage.os.lstat", lambda _path: special_info)
+        special = storage_module._observe_path(regular)
+    assert special.state.value == "present_unexpected"
+    assert special.object_type == "special"
+
+    symlink_info = SimpleNamespace(st_mode=stat.S_IFLNK, st_dev=3, st_ino=4)
+    with monkeypatch.context() as context:
+        context.setattr(storage_module, "_has_reparse_ancestor", lambda _path: False)
+        context.setattr("jarvis.storage.os.lstat", lambda _path: symlink_info)
+        symlink = storage_module._observe_path(regular)
+    assert symlink.state.value == "unsafe_reparse"
+    assert symlink.object_type == "reparse_path"
+
+
+def test_r1r1_effect_reconciliation_preserves_failed_and_partial_states(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "owned"
+    root.mkdir()
+    first_source = root / "first-source.txt"
+    second_source = root / "second-source.txt"
+    first_destination = root / "first-destination.txt"
+    second_destination = root / "second-destination.txt"
+    first_source.write_bytes(b"first effect bytes")
+    second_source.write_bytes(b"second effect bytes")
+    steward = FileSteward(root)
+    planned = steward.plan_batch(
+        MutationOperation.COPY,
+        [
+            (first_source, first_destination, _classification()),
+            (second_source, second_destination, _classification()),
+        ],
+    )
+    first_destination.write_bytes(b"first effect bytes")
+    current = replace(
+        planned,
+        state=MutationState.UNKNOWN_OUTCOME,
+        items=(
+            replace(planned.items[0], state=MutationItemState.NOT_STARTED),
+            replace(planned.items[1], state=MutationItemState.FAILED_BEFORE_EFFECT),
+        ),
+    )
+    steward.manifests.save(current)
+
+    result = steward.reconcile(current)
+
+    assert result.state is MutationState.PARTIAL
+    assert result.manifest.items[0].state is MutationItemState.VERIFIED
+    assert result.manifest.items[1].state is MutationItemState.FAILED_BEFORE_EFFECT
+    assert result.manifest.detail == "partial item effects retained after reconciliation"
+
+
+def test_r1r1_restore_reconciliation_preserves_failed_and_partial_states(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "owned"
+    root.mkdir()
+    first_source = root / "first-restore.txt"
+    second_source = root / "second-restore.txt"
+    first_source.write_bytes(b"first restore bytes")
+    second_source.write_bytes(b"second restore bytes")
+    steward = FileSteward(root)
+    first_plan = steward.plan_delete(first_source, classification=_classification())
+    second_plan = steward.plan_delete(second_source, classification=_classification())
+    second_source.write_bytes(b"conflicting restore bytes")
+    current = replace(
+        first_plan,
+        phase=MutationPhase.RESTORE,
+        state=MutationState.UNKNOWN_OUTCOME,
+        items=(
+            replace(first_plan.items[0], state=MutationItemState.RESTORATION_IN_PROGRESS),
+            replace(second_plan.items[0], state=MutationItemState.FAILED_BEFORE_EFFECT),
+        ),
+    )
+    steward.manifests.save(current)
+
+    result = steward.reconcile(current)
+
+    assert result.state is MutationState.PARTIAL
+    assert result.manifest.items[0].state is MutationItemState.RESTORED
+    assert result.manifest.items[1].state is MutationItemState.FAILED_BEFORE_EFFECT
+    assert result.manifest.detail == "partial restore retained after reconciliation"

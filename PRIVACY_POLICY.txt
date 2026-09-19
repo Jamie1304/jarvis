@@ -1,0 +1,204 @@
+JARVIS PRIVACY POLICY
+
+Effective status: JARVIS is currently in private-use/pre-commercial
+development and is not currently offered commercially. A geographic
+business/contact address and any additional information legally required for a
+commercial offering will be added to the operative Privacy Policy before
+commercial launch.
+
+1. Controller
+
+The controller for current JARVIS private-use processing is Jamie Kanbier,
+The Netherlands. Contact: jamiekanbier@gmail.com. A geographic address is
+intentionally not published in the public repository during private-use/pre-
+commercial development.
+
+2. Current private-use/pre-commercial status
+
+JARVIS is currently used for private development and is not currently offered
+for sale or under a paid subscription. This policy describes the current
+software and local development state, not a commercial service that does not
+yet exist.
+
+3. Scope
+
+This policy covers first-party JARVIS processing in the current installation,
+including its application services, local data stores, optional hardware
+paths, and user-selected external capabilities. Third-party services have
+their own policies.
+
+4. Local-first architecture
+
+JARVIS is designed for local-first operation. Data normally remains in the
+local installation unless the user selects an external provider, API, website,
+MCP server, device, or integration, or a later first-party service is clearly
+provided and separately documented.
+
+5. Categories of data
+
+Depending on enabled features, JARVIS may process prompts and responses,
+files, task and plan state, artifacts, settings, workspace/profile metadata,
+memory and knowledge indexes, capability/package metadata, diagnostics,
+permissions, audit records, model/provider metadata, and optional microphone,
+camera, screen, or device observations. The application also processes
+credential metadata and protected credential values through the secure
+credential boundary.
+
+6. User Model and memory
+
+The User Model stores selected facts and preferences with provenance,
+confidence, sensitivity, retention, and workspace scope. Episodic or
+conversation memory is bounded and selective; JARVIS does not need to retain
+every utterance. External text does not automatically become a personal fact.
+
+7. Knowledge libraries
+
+User-selected documents may be indexed into workspace-scoped Knowledge
+Libraries. Source files remain under the user’s control; deleting an index
+does not delete the source. Document content is treated as untrusted data,
+including any instructions embedded in it.
+
+8. Credentials and authentication
+
+JARVIS uses trusted credential-management mechanisms and stores credential
+metadata separately from raw secrets. Raw secrets are not intended for
+ordinary model or tool context, logs, events, memory, artifacts, or backups.
+Credential use is scoped; generated packages do not receive unrestricted
+secret access. Machine-bound credentials may require reauthentication.
+
+9. Generated capabilities and integrations
+
+JARVIS may process generated integrations, workflows, procedures, package
+metadata, and UI configurations. Generated code is subject to review,
+sandboxing, certification, and brokered authority. It does not receive
+unrestricted access to user data or credentials.
+
+10. Logs and diagnostics
+
+JARVIS retains bounded, sanitized audit, trace, health, and diagnostic records
+where needed for security, verification, recovery, and operation. Sensitive
+values are redacted or represented by references where applicable.
+
+The current JARVIS version does not include first-party telemetry or analytics
+collection sent to the Licensor. Local resource measurements used for runtime
+decisions are operational data in the installation, not a promise that future
+versions or user-selected third-party services will never collect telemetry.
+
+11. Camera and microphone
+
+Camera and microphone features are optional and separately configured. Captured
+frames, audio, and transcriptions are bounded by the enabled runtime path and
+are not treated as permanent retention by default. Microphone/listening mode
+does not change permission or authority policy.
+
+12. Third-party services selected by the user
+
+User-enabled AI providers, APIs, websites, MCP servers, devices, and other
+external services may receive the data necessary for the selected operation,
+subject to the user’s configuration, classification policy, and the relevant
+third-party terms and privacy policy. JARVIS does not control those services.
+
+13. Purposes
+
+Processing is used to provide local application functionality, execute and
+verify user-directed tasks, maintain selected memory and knowledge indexes,
+securely operate credentials, diagnose failures, recover state, prevent abuse,
+and improve reliability through verified local evidence.
+
+14. Legal bases where applicable
+
+For a future commercial offering, applicable legal bases will be identified in
+the operative commercial Privacy Policy for the relevant processing. In the
+current private-use development state, processing is primarily initiated and
+controlled by the user or developer in the local installation. Nothing here
+removes a legal obligation that applies to a particular processing activity.
+
+15. Local storage
+
+JARVIS stores selected durable state in application-owned local stores and
+external user-owned locations as documented by the relevant feature. Raw
+credentials remain within the CredentialVault boundary. Application removal
+does not by itself promise deletion of all durable local user state.
+
+16. External transmission
+
+Local JARVIS processing is distinct from user-selected external processing.
+Data may leave the device when the user configures an external provider,
+service, MCP server, integration, or other network capability, subject to
+normal classification and permission controls. No claim is made that data can
+never leave the device.
+
+17. Retention
+
+Retention is bounded by feature policy, workspace settings, artifact and
+memory policies, audit/recovery requirements, and applicable law. User-managed
+source documents are not deleted merely because an index or projection is
+removed.
+
+18. User control and deletion
+
+Users may inspect, correct, delete, export, or change retention for supported
+memory and user-state domains, subject to security, integrity, legal, and
+recovery constraints. Credential deletion and revocation use the secure
+credential service. Deleting a derived index does not delete its source.
+
+19. Security
+
+JARVIS separates trusted application authority from untrusted model,
+external, and generated content. PermissionBroker, policy, approval,
+CredentialVault, sandbox, data classification, audit, and recovery controls
+remain separate from commercial entitlement and presentation channels.
+
+20. Data-subject rights
+
+For a future commercial offering, the operative Privacy Policy will describe
+the applicable rights and how to exercise them, including access, correction,
+deletion, restriction, objection, portability, and complaint rights where
+applicable. Current local private-use controls are provided by the relevant
+application services and local data stores.
+
+21. Automated decision-making
+
+JARVIS may route models, rank solutions, detect opportunities, or propose
+actions. Model output and derived recommendations do not create trusted
+approval or authority. High-impact actions remain subject to trusted policy,
+permission, verification, and user controls.
+
+22. Children
+
+JARVIS is not currently offered as a child-directed commercial service. Future
+commercial materials will address applicable age and child-data requirements.
+
+23. Legal and regulatory requests
+
+JARVIS may process or disclose information when required by applicable law or
+valid legal process, subject to the available legal protections.
+
+24. Business transfers
+
+If a future lawful business transfer affects personal data, it will be handled
+under applicable law and the operative Privacy Policy and notices then in
+force.
+
+25. Policy changes
+
+This policy may be updated as JARVIS changes. Material future commercial
+processing will require updated operative notices where applicable.
+
+26. Supervisory authority
+
+The operative commercial Privacy Policy will identify the relevant supervisory
+authority and complaint route for the applicable user and processing. No
+particular authority is inferred here for an as-yet non-commercial product.
+
+27. Contact
+
+Jamie Kanbier
+The Netherlands
+jamiekanbier@gmail.com
+
+28. Final local-first principle
+
+JARVIS keeps processing local where practical and exposes external processing
+as a separate user-selected choice. Local-first is a design principle, not a
+promise that external processing can never occur.

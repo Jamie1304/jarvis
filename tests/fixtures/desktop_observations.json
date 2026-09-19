@@ -1,0 +1,65 @@
+{
+  "notepad": {
+    "dimensions": [800, 600],
+    "active_window": {"window_id": 101, "title": "Notepad", "process_id": 42},
+    "accessibility": [
+      {
+        "window_id": 101,
+        "automation_id": "DocumentText",
+        "name": "Document",
+        "control_type": "Edit",
+        "left": 80,
+        "top": 90,
+        "width": 640,
+        "height": 360,
+        "value_fingerprint": null
+      },
+      {
+        "window_id": 101,
+        "automation_id": "SendButton",
+        "name": "Send",
+        "control_type": "Button",
+        "left": 700,
+        "top": 30,
+        "width": 70,
+        "height": 40,
+        "value_fingerprint": null
+      }
+    ],
+    "vision": {
+      "visible_elements": [
+        {"label": "Send", "role": "Button", "bounds": [0.875, 0.05, 0.0875, 0.0667], "confidence": 0.92}
+      ],
+      "candidate_targets": [
+        {"label": "Send", "role": "Button", "bounds": [0.875, 0.05, 0.0875, 0.0667], "confidence": 0.92}
+      ],
+      "confidence": 0.91
+    }
+  },
+  "resized": {
+    "dimensions": [1200, 900],
+    "active_window": {"window_id": 101, "title": "Notepad", "process_id": 42},
+    "accessibility": [
+      {
+        "window_id": 101,
+        "automation_id": "SendButton",
+        "name": "Send",
+        "control_type": "Button",
+        "left": 1050,
+        "top": 45,
+        "width": 105,
+        "height": 60,
+        "value_fingerprint": null
+      }
+    ],
+    "vision": {
+      "visible_elements": [
+        {"label": "Send", "role": "Button", "bounds": [0.875, 0.05, 0.0875, 0.0667], "confidence": 0.92}
+      ],
+      "candidate_targets": [
+        {"label": "Send", "role": "Button", "bounds": [0.875, 0.05, 0.0875, 0.0667], "confidence": 0.92}
+      ],
+      "confidence": 0.91
+    }
+  }
+}
