@@ -27,6 +27,7 @@ but may not become a competing writer.
 | Domain | Class | Owner and store/schema | Migration owner | Retention | Reconstructible? | Consumers | Forbidden competing writers |
 |---|---|---|---|---|---|---|---|
 | Task/plan/step/budget/retry/idempotency | `AUTHORITATIVE_DURABLE` | `PlanningEngine` over `SQLitePlanningStore`, `planning.sqlite3`; ordered planning migrations | `SQLitePlanningStore` | Task history follows planning policy; active tasks retained | No while correctness depends on it | `TaskController`, `GoalSupervisor`, automation, UI | `ApplicationStateMachine`, events, UI, legacy orchestrators |
+| Routing empirical fitness observations | `AUTHORITATIVE_DURABLE` | `RoutingFitnessProjection` over `SQLiteRoutingFitnessStore`, `routing-fitness.sqlite3`; schema v1; non-model route observations only | `SQLiteRoutingFitnessStore` | Bounded observation retention policy; no raw prompts, payloads, secrets, or reasoning | No: retained observation history is not fully reconstructible from planning snapshots | R3D-C route quality eligibility and empirical views | `PlanningStore`, `TraceStore`, model Cookbook, model/tool claims, UI |
 | Goal intent and supervisor state | `AUTHORITATIVE_DURABLE` | `GoalSupervisorStore`, `goals.sqlite3`; versioned goal-supervisor schema | `GoalSupervisorStore` | Goal history retained by store policy; no approval data | No: original outcome must survive restart | acquisition coordinator, PlanningEngine, UI | model output, task status, UI |
 | Permission policy | `AUTHORITATIVE_DURABLE` | Trusted `PolicyEngine` code/configuration, composed once by `RuntimeContainer` | Trusted application/update gates | Versioned with trusted configuration | Reconstructed from trusted code/config | `PermissionBroker`, provisioning, tools | model, event payload, integration, launch profile |
 | Approval requests/receipts/grants | `AUTHORITATIVE_EPHEMERAL` | `PermissionBroker` in process; no approval database by design | None; restart invalidates pending approvals | TTL, consumption, or process shutdown | Yes: request is reissued from durable task/step state | TaskController, trusted desktop approval | audit, event, voice, model, backup |
@@ -88,8 +89,14 @@ version marker with future-schema refusal. The following stores have explicit
 schema gates in the current tree: planning, state, audit, memory, User Model,
 KnowledgeLibrary, artifacts, AgentSessions, goals, setup, provisioning, effect
  attestations, compensation, capability lifecycle, opportunities, attention, automation, Trace,
-Golden Workflows, and Workflow/Procedure state. Recovery and encrypted Backup use their own versioned
+Golden Workflows, Workflow/Procedure state, and routing fitness. Recovery and encrypted Backup use their own versioned
 manifest formats rather than SQLite migrations.
+
+Routing fitness is authoritative only for its bounded empirical observation
+history. It is not task truth, verification truth, permission truth, audit
+truth, or a whole-system Performance Ledger. The original task outcome remains
+owned by Planning/Verification; model-route evidence remains owned by the
+ModelKnowledge Cookbook. Stale route observations remain stale after restart.
 
 `TrustedRecoveryAuthority` is a trusted authentication component, not a second
 recovery store: `RecoveryStore` owns the record file and snapshot/evidence

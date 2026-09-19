@@ -41,7 +41,7 @@ from jarvis.adoption import (
     WindowsSignerVerifier,
 )
 from jarvis.agent_runtime import AgentLoop
-from jarvis.ai.fitness import RoutingFitnessProjection
+from jarvis.ai.fitness import RoutingFitnessProjection, SQLiteRoutingFitnessStore
 from jarvis.ai.knowledge import ModelKnowledgeService, ModelKnowledgeStore
 from jarvis.ai.local_ai import LocalAIControlPlane, LocalAIUserPolicy
 from jarvis.ai.model_manager import LocalModelManager
@@ -449,6 +449,7 @@ class RuntimePaths:
     user_model_database: Path
     knowledge_library_database: Path
     model_knowledge_database: Path
+    routing_fitness_database: Path
     automation_database: Path
     trace_database: Path
     golden_workflow_database: Path
@@ -491,6 +492,7 @@ class RuntimePaths:
             base / "user-model.sqlite3",
             base / "knowledge-library.sqlite3",
             base / "model-knowledge.sqlite3",
+            base / "routing-fitness.sqlite3",
             base / "automations.sqlite3",
             base / "trace.sqlite3",
             base / "golden-workflows.sqlite3",
@@ -570,6 +572,7 @@ class RuntimePaths:
             self.user_model_database,
             self.knowledge_library_database,
             self.model_knowledge_database,
+            self.routing_fitness_database,
             self.automation_database,
             self.trace_database,
             self.golden_workflow_database,
@@ -730,6 +733,8 @@ class RuntimeContainer:
     model_planner: ModelPlanner
     local_ai: LocalAIControlPlane
     model_knowledge: ModelKnowledgeService
+    routing_fitness_store: SQLiteRoutingFitnessStore
+    routing_fitness: RoutingFitnessProjection
     acquisition_broker: AcquisitionBroker
     portfolio_optimizer: ModelPortfolioOptimizer
     ollama_runtime: OllamaRuntimeManager
@@ -1053,6 +1058,7 @@ class RuntimeContainer:
                 self.acquisition_broker,
                 self.model_manager,
                 self.model_knowledge,
+                self.routing_fitness_store,
                 self.ollama_runtime,
                 self.stt,
                 self.tts,
@@ -1653,7 +1659,8 @@ class ApplicationRuntime:
                     browser_service = None
             mcp_manager = MCPExtensionManager(registry)
             capability_registry = CapabilityRegistry()
-            routing_fitness = RoutingFitnessProjection()
+            routing_fitness_store = SQLiteRoutingFitnessStore(paths.routing_fitness_database)
+            routing_fitness = RoutingFitnessProjection(store=routing_fitness_store)
             execution_route_selector = ExecutionRouteSelector(
                 model_router=None,
                 tool_registry=registry,
@@ -2974,6 +2981,8 @@ class ApplicationRuntime:
                 model_planner=model_planner,
                 local_ai=local_ai,
                 model_knowledge=model_knowledge,
+                routing_fitness_store=routing_fitness_store,
+                routing_fitness=routing_fitness,
                 acquisition_broker=acquisition_broker,
                 portfolio_optimizer=portfolio_optimizer,
                 ollama_runtime=ollama_runtime,
