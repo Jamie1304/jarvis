@@ -36,7 +36,7 @@
   },
   "canonical_quality": {
     "interpreter": "C:/Users/jamie/AppData/Local/Programs/Python/Python312/python.exe",
-    "selected": "2382 passed, 9 skipped, 3 deselected",
+    "selected": "2373 passed, 9 skipped, 3 deselected",
     "exact_coverage": {"covered": 49100, "total": 52970, "percent": 90.08012591214766},
     "durable_stdout": "build/r3c-quality.stdout.log",
     "durable_stderr": "build/r3c-quality.stderr.log",
@@ -64,6 +64,6 @@
   },
   "candidate_15": "NOT_CREATED",
   "final_tree": "a450c803741acf37a321ba83ca43b347612ef60e",
-  "remote_sha": "NOT_PUSHED",
-  "hosted_ci": "NOT_STARTED; requires final exact R3C push SHA"
+  "remote_sha": "795729d33007520517904f141507595eff0d6fa3",
+  "hosted_ci": "PENDING; push run 35426732760 is queued for the qualified implementation source SHA"
 }
