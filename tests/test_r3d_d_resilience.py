@@ -5,6 +5,7 @@ import pytest
 from jarvis.ai.fitness import (
     CircuitState,
     ResiliencePolicy,
+    RouteResilienceKey,
     RoutingFitnessProjection,
     RoutingResilienceService,
     SemanticOutcome,
@@ -42,7 +43,9 @@ class _Clock:
         return self.value
 
 
-def outcome(number: int, semantic: SemanticOutcome = SemanticOutcome.VERIFIED_SUCCESS):
+def outcome(
+    number: int, semantic: SemanticOutcome = SemanticOutcome.VERIFIED_SUCCESS
+) -> VerifiedRouteOutcome:
     return VerifiedRouteOutcome(
         observation_id=f"d-route-{number}",
         route_identity="calculator",
@@ -69,7 +72,7 @@ def service(
     )
 
 
-def key(resilience: RoutingResilienceService):
+def key(resilience: RoutingResilienceService) -> RouteResilienceKey:
     return resilience.key("calculator", "tool", "math", "orchestration")
 
 
@@ -202,6 +205,7 @@ def test_exploration_is_explicit_safe_and_not_for_high_consequence(tmp_path: Pat
     high_decision = selector.route(high)
 
     assert safe_decision.status is ExecutionRouteStatus.SELECTED
+    assert safe_decision.primary is not None
     assert EligibilityCode.EXPLORATION_SELECTED in safe_decision.primary.eligibility.codes
     assert repeated_safe_decision.status is ExecutionRouteStatus.NO_VALID_ROUTE
     assert high_decision.status is ExecutionRouteStatus.NO_VALID_ROUTE
