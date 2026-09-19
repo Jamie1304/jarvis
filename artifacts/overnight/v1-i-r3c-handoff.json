@@ -6,6 +6,10 @@
     "preserved_primary_worktree_changes": [".gitignore", "weppy-project-sync/.gitignore"],
     "reused_local_commit": "bc56db7aeef2254a80d82a96001d108498931e8e",
     "reused_as": "7058c3315e9720bdda2123b05797eeabbf3535ce",
+    "r3c_commits": [
+      "7058c3315e9720bdda2123b05797eeabbf3535ce",
+      "f75a8a643f692e4199590c5980c0d845b78a7638"
+    ],
     "discarded_local_commits": [],
     "already_remote_commit": "580be1279e8c332e6073f44bd970f2c5eaa7b635"
   },
@@ -59,5 +63,7 @@
     "record_tamper_matrix": "PASS"
   },
   "candidate_15": "NOT_CREATED",
+  "final_tree": "a450c803741acf37a321ba83ca43b347612ef60e",
+  "remote_sha": "NOT_PUSHED",
   "hosted_ci": "NOT_STARTED; requires final exact R3C push SHA"
 }
