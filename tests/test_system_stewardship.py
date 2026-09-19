@@ -1,6 +1,8 @@
 """Focused evidence and authority tests for R3C system stewardship."""
 
 import asyncio
+import sys
+import types
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from typing import Any, cast
@@ -17,23 +19,30 @@ from jarvis.applications.plans import InstallationPlanStore
 from jarvis.applications.providers import ApplicationInventoryProvider, PackageProvider
 from jarvis.applications.runtime import ApplicationRuntime
 from jarvis.computer.models import LaunchInfo
+from jarvis.security.startup import IntegrityEvidenceError, IntegrityEvidenceProvider
 from jarvis.system_stewardship import (
     HealthState,
+    IntegritySecurityProvider,
     SecurityFinding,
     SecurityFindingState,
     SecurityHealthReport,
     SecurityHealthService,
     SecurityProvider,
     StaleStewardshipPlan,
+    StartupEffectStatus,
     StartupEntryEvidence,
     StartupEntryState,
     StartupHealthReport,
     StartupHealthService,
     StartupProvider,
+    StartupProviderError,
     StewardshipError,
     SystemHealthProjection,
+    TrustedSecurityProviderRegistry,
     UpdateCoordinator,
     UpdateEvidence,
+    WindowsStartupProvider,
+    create_system_stewardship_composition,
 )
 
 NOW = datetime(2026, 9, 19, 12, 0, tzinfo=UTC)
@@ -78,6 +87,36 @@ class FailingStartup:
 class MalformedStartup:
     async def observe(self) -> object:
         return [startup_entry()]
+
+
+class IntegrityFixture(IntegrityEvidenceProvider):
+    def __init__(self, error: Exception | None = None) -> None:
+        self.error = error
+        self.calls = 0
+
+    def validate(self) -> None:
+        self.calls += 1
+        if self.error is not None:
+            raise self.error
+
+
+class TrustedUnavailable:
+    provider_id = "trusted-unavailable"
+
+    async def observe(self) -> tuple[SecurityFinding, ...]:
+        raise RuntimeError("offline")
+
+
+class ModelProvider:
+    provider_id = "model"
+
+    async def observe(self) -> tuple[SecurityFinding, ...]:
+        return ()
+
+
+class FailingInventory(ApplicationInventoryProvider):
+    async def enumerate_installed(self) -> tuple[ApplicationRecord, ...]:
+        raise RuntimeError("inventory offline")
 
 
 class InventoryFixture(ApplicationInventoryProvider):
@@ -126,6 +165,17 @@ class PackagesFixture(PackageProvider):
 
     async def update(self, candidate: InstallationCandidate, cancellation: asyncio.Event) -> None:
         del candidate, cancellation
+
+
+class ChangingPackages(PackagesFixture):
+    def __init__(self) -> None:
+        super().__init__(candidate())
+        self._calls = 0
+
+    async def find_update(self, record: ApplicationRecord) -> InstallationCandidate | None:
+        del record
+        self._calls += 1
+        return candidate() if self._calls == 1 else candidate("3.0.0")
 
 
 class BadCandidate(InstallationCandidate):
@@ -242,6 +292,32 @@ async def test_security_provider_failure_is_unavailable_not_clean() -> None:
 
 
 @pytest.mark.asyncio
+async def test_security_overall_is_conservative_for_integrity_and_unknown_states() -> None:
+    integrity = await SecurityHealthService(
+        SecurityFixture((finding(SecurityFindingState.INTEGRITY_FAILURE),))
+    ).observe()
+    assert integrity.overall is SecurityFindingState.INTEGRITY_FAILURE
+    unknown = await SecurityHealthService(
+        SecurityFixture((finding(SecurityFindingState.UNKNOWN),))
+    ).observe()
+    assert unknown.overall is SecurityFindingState.UNKNOWN
+
+
+def test_integrity_adapter_rejects_untrusted_authority_and_reports_generic_failure() -> None:
+    with pytest.raises(StewardshipError, match="not trusted"):
+        IntegritySecurityProvider(cast(Any, object()))
+
+
+@pytest.mark.asyncio
+async def test_integrity_adapter_keeps_unexpected_provider_failure_unavailable() -> None:
+    result = await IntegritySecurityProvider(
+        IntegrityFixture(RuntimeError("secret path"))
+    ).observe()
+    assert result[0].state is SecurityFindingState.UNAVAILABLE
+    assert "secret path" not in result[0].detail
+
+
+@pytest.mark.asyncio
 async def test_startup_observation_and_exact_reversible_plan_are_read_only() -> None:
     provider = StartupFixture((startup_entry(),))
     service = StartupHealthService(provider, clock=lambda: NOW)
@@ -278,6 +354,27 @@ async def test_startup_provider_failure_is_unavailable_and_wildcards_are_denied(
     service = StartupHealthService(StartupFixture((startup_entry(),)), clock=lambda: NOW)
     with pytest.raises(StewardshipError, match="Wildcard"):
         await service.plan_set_enabled("startup:*", False)
+
+
+def test_trusted_security_registry_rejects_empty_malformed_and_duplicate_registration() -> None:
+    with pytest.raises(StewardshipError, match="empty"):
+        TrustedSecurityProviderRegistry(cast(Any, ()))
+    with pytest.raises(StewardshipError, match="identity"):
+        TrustedSecurityProviderRegistry((cast(Any, object()),))
+    with pytest.raises(StewardshipError, match="duplicated"):
+        TrustedSecurityProviderRegistry((TrustedUnavailable(), TrustedUnavailable()))
+
+
+@pytest.mark.asyncio
+async def test_trusted_security_registry_quarantines_malformed_provider_result() -> None:
+    class MalformedTrusted:
+        provider_id = "trusted-malformed"
+
+        async def observe(self) -> object:
+            return [finding()]
+
+    result = await TrustedSecurityProviderRegistry(cast(Any, (MalformedTrusted(),))).observe()
+    assert result[0].state is SecurityFindingState.UNAVAILABLE
 
 
 @pytest.mark.asyncio
@@ -338,6 +435,49 @@ async def test_update_candidate_change_is_stale_and_invalid_inventory_is_unknown
         clock=lambda: NOW,
     ).observe()
     assert invalid[0].state is HealthState.UNKNOWN
+
+
+@pytest.mark.asyncio
+async def test_update_inventory_failure_is_unavailable_and_application_bridge_is_stale() -> None:
+    failed_manager = ApplicationManager(
+        FailingInventory(), PackagesFixture(), RuntimeFixture(), InstallationPlanStore()
+    )
+    unavailable = await UpdateCoordinator(failed_manager, clock=lambda: NOW).observe()
+    assert unavailable[0].state is HealthState.UNAVAILABLE
+    changing = ChangingPackages()
+    with pytest.raises(StaleStewardshipPlan, match="changed"):
+        await UpdateCoordinator(app_manager(changing), clock=lambda: NOW).plan_application_update(
+            "app:sample"
+        )
+    with pytest.raises(StewardshipError, match="No trusted update"):
+        await UpdateCoordinator(
+            app_manager(PackagesFixture()), clock=lambda: NOW
+        ).plan_application_update("app:sample")
+
+    class FailsAfterObservation(PackagesFixture):
+        def __init__(self) -> None:
+            super().__init__(candidate())
+            self._calls = 0
+
+        async def find_update(self, record: ApplicationRecord) -> InstallationCandidate | None:
+            del record
+            self._calls += 1
+            if self._calls == 1:
+                return candidate()
+            raise RuntimeError("provider changed")
+
+    with pytest.raises(StaleStewardshipPlan, match="changed"):
+        await UpdateCoordinator(
+            app_manager(FailsAfterObservation()), clock=lambda: NOW
+        ).plan_application_update("app:sample")
+
+    revalidation_packages = PackagesFixture(candidate())
+    coordinator = UpdateCoordinator(app_manager(revalidation_packages), clock=lambda: NOW)
+    plan = await coordinator.plan("app:sample")
+    assert plan.candidate.version == "2.0.0"
+    revalidation_packages.candidate = None
+    with pytest.raises(StaleStewardshipPlan, match="no longer"):
+        await coordinator.revalidate(plan)
 
 
 @pytest.mark.asyncio
@@ -537,3 +677,171 @@ def test_projection_is_read_only_typed_composition() -> None:
         updates=(),
     )
     assert projection.updates == ()
+
+
+@pytest.mark.asyncio
+async def test_integrity_security_adapter_delegates_and_preserves_truthful_failure() -> None:
+    passing = IntegrityFixture()
+    healthy = await IntegritySecurityProvider(passing).observe()
+    assert passing.calls == 1
+    assert healthy[0].state is SecurityFindingState.HEALTHY
+    assert healthy[0].target == "jarvis-distribution-integrity"
+    assert healthy[0].provider == "jarvis-integrity"
+
+    failed = await IntegritySecurityProvider(
+        IntegrityFixture(IntegrityEvidenceError("record mismatch"))
+    ).observe()
+    assert failed[0].state is SecurityFindingState.INTEGRITY_FAILURE
+    assert "record mismatch" not in failed[0].detail
+    assert failed[0].target == "jarvis-distribution-integrity"
+
+
+@pytest.mark.asyncio
+async def test_trusted_security_registry_preserves_provider_failure_and_rejects_model() -> None:
+    registry = TrustedSecurityProviderRegistry(
+        (IntegritySecurityProvider(IntegrityFixture()), TrustedUnavailable())
+    )
+    findings = await registry.observe()
+    assert [item.provider for item in findings] == ["jarvis-integrity", "trusted-unavailable"]
+    assert findings[1].state is SecurityFindingState.UNAVAILABLE
+    with pytest.raises(StewardshipError, match="Model-only"):
+        TrustedSecurityProviderRegistry((ModelProvider(),))
+
+
+def test_windows_startup_provider_uses_a_finite_stable_source_identity() -> None:
+    assert len(WindowsStartupProvider.TRUSTED_REGISTRY_SOURCES) == 4
+    first = WindowsStartupProvider.entry_id(
+        "current-user", WindowsStartupProvider.TRUSTED_REGISTRY_SOURCES[0][1], "JARVIS"
+    )
+    second = WindowsStartupProvider.entry_id(
+        "current-user", WindowsStartupProvider.TRUSTED_REGISTRY_SOURCES[0][1], "JARVIS"
+    )
+    different_source = WindowsStartupProvider.entry_id(
+        "machine", WindowsStartupProvider.TRUSTED_REGISTRY_SOURCES[0][1], "JARVIS"
+    )
+    assert first == second
+    assert first != different_source
+    assert "JARVIS" not in first
+
+
+@pytest.mark.asyncio
+async def test_windows_startup_provider_reads_only_bounded_registry_values(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeKey:
+        def __enter__(self) -> "FakeKey":
+            return self
+
+        def __exit__(self, *_: object) -> None:
+            return None
+
+    def enum_value(_key: FakeKey, index: int) -> tuple[str, str, int]:
+        if index == 0:
+            return "JARVIS", "do-not-execute", 1
+        raise OSError("end")
+
+    fake_winreg = types.SimpleNamespace(
+        HKEY_CURRENT_USER=1,
+        HKEY_LOCAL_MACHINE=2,
+        KEY_READ=4,
+        REG_SZ=1,
+        REG_EXPAND_SZ=2,
+        OpenKey=lambda *_args: FakeKey(),
+        EnumValue=enum_value,
+    )
+    monkeypatch.setitem(sys.modules, "winreg", fake_winreg)
+    monkeypatch.setattr(
+        WindowsStartupProvider,
+        "TRUSTED_REGISTRY_SOURCES",
+        (WindowsStartupProvider.TRUSTED_REGISTRY_SOURCES[0],),
+    )
+    entries = await WindowsStartupProvider().observe()
+    assert len(entries) == 1
+    assert entries[0].target_command == "do-not-execute"
+    assert entries[0].target_exists is None
+
+
+def test_windows_startup_provider_rejects_malformed_and_ambiguous_registry_values(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeKey:
+        def __enter__(self) -> "FakeKey":
+            return self
+
+        def __exit__(self, *_: object) -> None:
+            return None
+
+    fake_winreg = types.SimpleNamespace(
+        HKEY_CURRENT_USER=1,
+        HKEY_LOCAL_MACHINE=2,
+        KEY_READ=4,
+        REG_SZ=1,
+        REG_EXPAND_SZ=2,
+        OpenKey=lambda *_args: FakeKey(),
+    )
+    monkeypatch.setitem(sys.modules, "winreg", fake_winreg)
+    monkeypatch.setattr(
+        WindowsStartupProvider,
+        "TRUSTED_REGISTRY_SOURCES",
+        (WindowsStartupProvider.TRUSTED_REGISTRY_SOURCES[0],),
+    )
+
+    fake_winreg.EnumValue = lambda _key, _index: ("bad", 7, 1)
+    with pytest.raises(StartupProviderError, match="malformed"):
+        WindowsStartupProvider._observe_registry()
+
+    def duplicate(_key: FakeKey, index: int) -> tuple[str, str, int]:
+        if index < 2:
+            return "same", "command", 1
+        raise OSError("end")
+
+    fake_winreg.EnumValue = duplicate
+    with pytest.raises(StartupProviderError, match="ambiguous"):
+        WindowsStartupProvider._observe_registry()
+
+    fake_winreg.OpenKey = lambda *_args: (_ for _ in ()).throw(FileNotFoundError("missing"))
+    assert WindowsStartupProvider._observe_registry() == ()
+    fake_winreg.OpenKey = lambda *_args: (_ for _ in ()).throw(OSError("denied"))
+    with pytest.raises(StartupProviderError, match="unavailable"):
+        WindowsStartupProvider._observe_registry()
+
+
+def test_real_composition_factory_uses_explicit_trusted_owners() -> None:
+    from jarvis.system_stewardship import create_real_windows_system_stewardship
+
+    composition = create_real_windows_system_stewardship(
+        integrity_evidence=IntegrityFixture(),
+    )
+    assert composition.startup_effect is StartupEffectStatus.NOT_YET_TRUSTED
+
+
+@pytest.mark.asyncio
+async def test_composition_refresh_is_read_only_and_update_plan_uses_app_manager_boundary() -> None:
+    packages = PackagesFixture(candidate())
+    composition = create_system_stewardship_composition(
+        app_manager(packages),
+        integrity_evidence=IntegrityFixture(),
+        startup_provider=StartupFixture((startup_entry(),)),
+        clock=lambda: NOW,
+    )
+    projection = await composition.refresh()
+    assert projection.software.applications[0].state.value == "healthy"
+    assert projection.security.findings[0].provider == "jarvis-integrity"
+    assert projection.security.findings[-1].state is SecurityFindingState.UNAVAILABLE
+    assert projection.startup.entries[0].entry_id == "startup:current-user:sample"
+    assert composition.startup_effect is StartupEffectStatus.NOT_YET_TRUSTED
+
+    application_plan = await composition.plan_application_update("app:sample")
+    assert application_plan.kind.value == "update"
+    assert application_plan.candidate == candidate()
+    assert packages.update_calls == 3
+
+
+@pytest.mark.asyncio
+async def test_startup_provider_unavailable_is_not_a_mutation_capability(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = WindowsStartupProvider()
+    monkeypatch.setattr(sys, "platform", "linux")
+    with pytest.raises(StartupProviderError, match="unavailable"):
+        await provider.observe()

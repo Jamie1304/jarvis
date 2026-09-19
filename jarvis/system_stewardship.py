@@ -8,12 +8,15 @@ PermissionBroker, HostBridge, acquisition, and provisioning paths.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
+import sys
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
+from pathlib import Path
 from typing import Final, Protocol
 
 from jarvis.applications.manager import ApplicationManager
@@ -22,8 +25,20 @@ from jarvis.applications.models import (
     ApplicationRecord,
     ApplicationStatus,
     InstallationCandidate,
+    InstallationPlan,
 )
-from jarvis.applications.providers import PackageProvider
+from jarvis.applications.plans import InstallationPlanStore
+from jarvis.applications.providers import (
+    PackageProvider,
+    WindowsRegistryInventoryProvider,
+    WingetPackageProvider,
+)
+from jarvis.applications.runtime import WindowsApplicationRuntime
+from jarvis.security.startup import (
+    IntegrityEvidenceError,
+    IntegrityEvidenceProvider,
+    SourceCheckoutIntegrityEvidenceProvider,
+)
 
 
 class StewardshipError(ValueError):
@@ -46,6 +61,7 @@ class HealthState(StrEnum):
 class SecurityFindingState(StrEnum):
     HEALTHY = "healthy"
     THREAT_DETECTED = "threat_detected"
+    INTEGRITY_FAILURE = "integrity_failure"
     UNKNOWN = "unknown"
     UNAVAILABLE = "unavailable"
 
@@ -56,6 +72,12 @@ class StartupEntryState(StrEnum):
     BROKEN = "broken"
     UNKNOWN = "unknown"
     UNAVAILABLE = "unavailable"
+
+
+class StartupEffectStatus(StrEnum):
+    """Status of the separate startup mutation authority."""
+
+    NOT_YET_TRUSTED = "STARTUP_EFFECT_PROVIDER_NOT_YET_TRUSTED"
 
 
 class UpdateStage(StrEnum):
@@ -136,6 +158,15 @@ class SecurityProvider(Protocol):
         """Return findings produced by a trusted machine/provider boundary."""
 
 
+class TrustedSecurityProvider(Protocol):
+    """Explicit application-owned security provider registration boundary."""
+
+    provider_id: str
+
+    async def observe(self) -> tuple[SecurityFinding, ...]:
+        """Return evidence from this explicitly composed provider."""
+
+
 @dataclass(frozen=True, slots=True)
 class SecurityHealthReport:
     findings: tuple[SecurityFinding, ...]
@@ -176,11 +207,134 @@ class SecurityHealthService:
             return SecurityFindingState.UNKNOWN
         if any(item.state is SecurityFindingState.THREAT_DETECTED for item in findings):
             return SecurityFindingState.THREAT_DETECTED
+        if any(item.state is SecurityFindingState.INTEGRITY_FAILURE for item in findings):
+            return SecurityFindingState.INTEGRITY_FAILURE
         if any(item.state is SecurityFindingState.UNAVAILABLE for item in findings):
             return SecurityFindingState.UNAVAILABLE
         if any(item.state is SecurityFindingState.UNKNOWN for item in findings):
             return SecurityFindingState.UNKNOWN
         return SecurityFindingState.HEALTHY
+
+
+class IntegritySecurityProvider:
+    """Project the existing trusted JARVIS integrity authority into health evidence."""
+
+    provider_id = "jarvis-integrity"
+
+    def __init__(
+        self,
+        integrity_evidence: IntegrityEvidenceProvider,
+        *,
+        target: str = "jarvis-distribution-integrity",
+    ) -> None:
+        if not isinstance(integrity_evidence, IntegrityEvidenceProvider):
+            raise StewardshipError("Integrity security provider is not trusted")
+        self._integrity_evidence = integrity_evidence
+        self._target = _text(target, "Integrity security target", 256)
+
+    async def observe(self) -> tuple[SecurityFinding, ...]:
+        observed_at = datetime.now(UTC)
+        try:
+            await asyncio.to_thread(self._integrity_evidence.validate)
+        except IntegrityEvidenceError:
+            return (
+                SecurityFinding(
+                    self.provider_id,
+                    self._target,
+                    observed_at,
+                    SecurityFindingState.INTEGRITY_FAILURE,
+                    "jarvis-integrity-failed",
+                    "trusted JARVIS integrity validation failed",
+                    "trusted-integrity-validator",
+                ),
+            )
+        except Exception as error:
+            return (
+                SecurityFinding(
+                    self.provider_id,
+                    self._target,
+                    observed_at,
+                    SecurityFindingState.UNAVAILABLE,
+                    "jarvis-integrity-unavailable",
+                    f"trusted JARVIS integrity provider unavailable: {type(error).__name__}",
+                    "trusted-integrity-validator",
+                ),
+            )
+        return (
+            SecurityFinding(
+                self.provider_id,
+                self._target,
+                observed_at,
+                SecurityFindingState.HEALTHY,
+                "jarvis-integrity-verified",
+                "trusted JARVIS distribution integrity validation passed",
+                "trusted-integrity-validator",
+            ),
+        )
+
+
+class UnavailableSecurityProvider:
+    """Explicitly preserve a security domain for which no trusted provider exists."""
+
+    def __init__(self, provider_id: str, *, target: str) -> None:
+        self.provider_id = _text(provider_id, "Unavailable security provider", 128)
+        self._target = _text(target, "Unavailable security target", 256)
+
+    async def observe(self) -> tuple[SecurityFinding, ...]:
+        return (
+            SecurityFinding(
+                self.provider_id,
+                self._target,
+                datetime.now(UTC),
+                SecurityFindingState.UNAVAILABLE,
+                f"{self.provider_id}-unavailable",
+                "no trusted provider is composed for this security domain",
+                "provider-status",
+            ),
+        )
+
+
+class TrustedSecurityProviderRegistry:
+    """Aggregate only explicit trusted provider instances without hiding failures."""
+
+    def __init__(self, providers: tuple[TrustedSecurityProvider, ...]) -> None:
+        if not isinstance(providers, tuple) or not providers:
+            raise StewardshipError("Trusted security provider registry is empty")
+        identifiers: set[str] = set()
+        for provider in providers:
+            identifier = getattr(provider, "provider_id", None)
+            if type(identifier) is not str or not identifier.strip():
+                raise StewardshipError("Trusted security provider identity is malformed")
+            if identifier.casefold() in _MODEL_SOURCES:
+                raise StewardshipError("Model-only security providers are not trusted")
+            if identifier.casefold() in identifiers:
+                raise StewardshipError("Trusted security provider identity is duplicated")
+            identifiers.add(identifier.casefold())
+        self._providers = providers
+
+    async def observe(self) -> tuple[SecurityFinding, ...]:
+        findings: list[SecurityFinding] = []
+        for provider in self._providers:
+            try:
+                result = await provider.observe()
+                if not isinstance(result, tuple) or any(
+                    not isinstance(item, SecurityFinding) for item in result
+                ):
+                    raise StewardshipError("Trusted security provider returned malformed evidence")
+                findings.extend(result)
+            except Exception as error:
+                findings.append(
+                    SecurityFinding(
+                        provider.provider_id,
+                        "security-provider",
+                        datetime.now(UTC),
+                        SecurityFindingState.UNAVAILABLE,
+                        f"{provider.provider_id}-unavailable",
+                        f"security provider unavailable: {type(error).__name__}",
+                        "provider-status",
+                    )
+                )
+        return tuple(findings)
 
 
 @dataclass(frozen=True, slots=True)
@@ -215,6 +369,88 @@ class StartupEntryEvidence:
 class StartupProvider(Protocol):
     async def observe(self) -> tuple[StartupEntryEvidence, ...]:
         """Return bounded startup inventory evidence."""
+
+
+class StartupProviderError(RuntimeError):
+    """A bounded startup source could not produce safe evidence."""
+
+
+class WindowsStartupProvider:
+    """Read the finite documented Windows Run/RunOnce registry source set."""
+
+    provider_id = "windows-startup-registry"
+    TRUSTED_REGISTRY_SOURCES: Final = (
+        ("current-user", r"Software\Microsoft\Windows\CurrentVersion\Run"),
+        ("current-user", r"Software\Microsoft\Windows\CurrentVersion\RunOnce"),
+        ("machine", r"Software\Microsoft\Windows\CurrentVersion\Run"),
+        ("machine", r"Software\Microsoft\Windows\CurrentVersion\RunOnce"),
+    )
+
+    async def observe(self) -> tuple[StartupEntryEvidence, ...]:
+        if sys.platform != "win32":
+            raise StartupProviderError("Windows startup provider is unavailable on this host")
+        return await asyncio.to_thread(self._observe_registry)
+
+    @classmethod
+    def _observe_registry(cls) -> tuple[StartupEntryEvidence, ...]:
+        import winreg
+
+        entries: list[StartupEntryEvidence] = []
+        identities: set[str] = set()
+        for scope, key_path in cls.TRUSTED_REGISTRY_SOURCES:
+            hive = (
+                winreg.HKEY_CURRENT_USER if scope == "current-user" else winreg.HKEY_LOCAL_MACHINE
+            )
+            try:
+                key = winreg.OpenKey(hive, key_path, 0, winreg.KEY_READ)
+            except FileNotFoundError:
+                continue
+            except OSError as error:
+                raise StartupProviderError(
+                    "Windows startup registry source is unavailable"
+                ) from error
+            with key:
+                index = 0
+                while True:
+                    try:
+                        name, command, value_type = winreg.EnumValue(key, index)
+                    except OSError:
+                        break
+                    index += 1
+                    if (
+                        type(name) is not str
+                        or not name.strip()
+                        or type(command) is not str
+                        or not command.strip()
+                        or value_type not in (winreg.REG_SZ, winreg.REG_EXPAND_SZ)
+                    ):
+                        raise StartupProviderError("Windows startup registry evidence is malformed")
+                    entry_id = cls.entry_id(scope, key_path, name)
+                    if entry_id in identities:
+                        raise StartupProviderError("Windows startup entry identity is ambiguous")
+                    identities.add(entry_id)
+                    entries.append(
+                        StartupEntryEvidence(
+                            entry_id,
+                            name,
+                            cls.provider_id,
+                            True,
+                            command,
+                            None,
+                            datetime.now(UTC),
+                            StartupEntryState.HEALTHY,
+                            "read-only Windows startup registry observation",
+                        )
+                    )
+        return tuple(sorted(entries, key=lambda item: item.entry_id))
+
+    @staticmethod
+    def entry_id(scope: str, key_path: str, value_name: str) -> str:
+        _text(scope, "Windows startup scope", 64)
+        _text(key_path, "Windows startup source", 256)
+        _text(value_name, "Windows startup entry name", 256)
+        digest = _fingerprint((scope, key_path.casefold(), value_name.casefold()))[:32]
+        return f"startup:windows-registry:{scope}:{digest}"
 
 
 @dataclass(frozen=True, slots=True)
@@ -415,7 +651,22 @@ class UpdateCoordinator:
         self._clock = clock or (lambda: datetime.now(UTC))
 
     async def observe(self) -> tuple[UpdateEvidence, ...]:
-        records = await self._manager.inventory()
+        try:
+            records = await self._manager.inventory()
+        except Exception as error:
+            return (
+                UpdateEvidence(
+                    "application-inventory",
+                    "Installed applications",
+                    "unknown",
+                    None,
+                    type(self._manager.package_provider).__name__,
+                    None,
+                    HealthState.UNAVAILABLE,
+                    f"application inventory unavailable: {type(error).__name__}",
+                    _timestamp(self._clock(), "Update observation time"),
+                ),
+            )
         results: list[UpdateEvidence] = []
         for record in records:
             results.append(await self._observe_record(record))
@@ -451,6 +702,30 @@ class UpdateCoordinator:
                 )
             ),
         )
+
+    async def plan_application_update(self, application_id: str) -> InstallationPlan:
+        """Bridge one observed candidate to the existing immutable app plan boundary."""
+
+        evidence = tuple(
+            item for item in await self.observe() if item.application_id == application_id
+        )
+        if len(evidence) != 1 or evidence[0].state is not HealthState.UPDATE_AVAILABLE:
+            raise StewardshipError("No trusted update is available")
+        expected = evidence[0]
+        assert expected.candidate is not None
+        try:
+            application_plan = await self._manager.plan_update(application_id)
+        except Exception as error:
+            raise StaleStewardshipPlan(
+                "Application update evidence changed before planning"
+            ) from error
+        candidate = application_plan.candidate
+        if (
+            application_plan.current_version != expected.current_version
+            or candidate != expected.candidate
+        ):
+            raise StaleStewardshipPlan("Application update candidate changed before planning")
+        return application_plan
 
     async def revalidate(self, plan: UpdateCoordinationPlan) -> UpdateEvidence:
         matches = tuple(
@@ -558,6 +833,83 @@ class SystemHealthProjection:
     updates: tuple[UpdateEvidence, ...]
 
 
+@dataclass(slots=True)
+class SystemStewardshipComposition:
+    """Normal application-owned composition for read-only system stewardship."""
+
+    software: SoftwareHealthService
+    security: SecurityHealthService
+    startup: StartupHealthService
+    updates: UpdateCoordinator
+    startup_effect: StartupEffectStatus = StartupEffectStatus.NOT_YET_TRUSTED
+
+    async def refresh(self) -> SystemHealthProjection:
+        software, security, startup, updates = await asyncio.gather(
+            self.software.observe(),
+            self.security.observe(),
+            self.startup.observe(),
+            self.updates.observe(),
+        )
+        return SystemHealthProjection(software, security, startup, updates)
+
+    async def plan_application_update(self, application_id: str) -> InstallationPlan:
+        """Create an existing ApplicationManager plan; never execute an update."""
+
+        return await self.updates.plan_application_update(application_id)
+
+
+def create_system_stewardship_composition(
+    manager: ApplicationManager,
+    *,
+    integrity_evidence: IntegrityEvidenceProvider | None = None,
+    project_root: Path | None = None,
+    startup_provider: StartupProvider | None = None,
+    additional_security_providers: tuple[TrustedSecurityProvider, ...] = (),
+    clock: Callable[[], datetime] | None = None,
+) -> SystemStewardshipComposition:
+    """Compose trusted provider instances without dynamic provider discovery."""
+
+    evidence = integrity_evidence or SourceCheckoutIntegrityEvidenceProvider(
+        project_root or Path(__file__).resolve().parents[1]
+    )
+    security_providers: tuple[TrustedSecurityProvider, ...] = (
+        IntegritySecurityProvider(evidence),
+        *additional_security_providers,
+        UnavailableSecurityProvider(
+            "host-wide-security",
+            target="host-wide-security",
+        ),
+    )
+    registry = TrustedSecurityProviderRegistry(security_providers)
+    return SystemStewardshipComposition(
+        SoftwareHealthService(manager),
+        SecurityHealthService(registry, clock=clock),
+        StartupHealthService(startup_provider or WindowsStartupProvider(), clock=clock),
+        UpdateCoordinator(manager, clock=clock),
+    )
+
+
+def create_real_windows_system_stewardship(
+    *,
+    project_root: Path | None = None,
+    integrity_evidence: IntegrityEvidenceProvider | None = None,
+    candidates: tuple[InstallationCandidate, ...] = (),
+) -> SystemStewardshipComposition:
+    """Create the bounded real-host composition using explicit trusted owners."""
+
+    manager = ApplicationManager(
+        WindowsRegistryInventoryProvider(),
+        WingetPackageProvider(candidates),
+        WindowsApplicationRuntime(),
+        InstallationPlanStore(),
+    )
+    return create_system_stewardship_composition(
+        manager,
+        integrity_evidence=integrity_evidence,
+        project_root=project_root,
+    )
+
+
 def _version_tuple(value: str) -> tuple[int, ...] | None:
     raw = value.strip().removeprefix("v")
     parts = raw.split(".")
@@ -579,24 +931,34 @@ def _is_newer(candidate: str, current: str) -> bool:
 
 __all__ = [
     "HealthState",
+    "IntegritySecurityProvider",
     "SecurityFinding",
     "SecurityFindingState",
     "SecurityHealthReport",
     "SecurityHealthService",
     "SecurityProvider",
+    "TrustedSecurityProvider",
+    "TrustedSecurityProviderRegistry",
     "SoftwareHealthReport",
     "SoftwareHealthService",
     "StaleStewardshipPlan",
     "StartupEntryEvidence",
     "StartupEntryState",
+    "StartupEffectStatus",
     "StartupHealthReport",
     "StartupHealthService",
     "StartupMutationPlan",
     "StartupProvider",
+    "StartupProviderError",
     "StewardshipError",
     "SystemHealthProjection",
+    "SystemStewardshipComposition",
     "UpdateCoordinationPlan",
     "UpdateCoordinator",
     "UpdateEvidence",
     "UpdateStage",
+    "UnavailableSecurityProvider",
+    "WindowsStartupProvider",
+    "create_real_windows_system_stewardship",
+    "create_system_stewardship_composition",
 ]
