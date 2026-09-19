@@ -112,6 +112,27 @@ No vendor, cloud service, local runtime, model family, or speech engine is a
 mandatory core dependency. Provider definitions and configuration remain the
 composition root's responsibility.
 
+## Typed execution-route boundary
+
+`jarvis.autonomy.routing` projects a trusted `PlanStep` plus typed application
+context into `StepRequirements`. `RoleResolver` accepts only the bounded
+`CONVERSATION`, `ORCHESTRATION`, `WORKER`, and `VERIFICATION` vocabulary; the
+projection is routing metadata, not permission or identity authority.
+
+`ExecutionRouteSelector` composes the existing `ProviderRouter` and
+`ProviderRegistry` for model candidates with the existing `ToolRegistry` for
+registered executable tools. `CapabilityRegistry` remains descriptive: a
+manifest without a trusted executable owner is reported as `NOT_EXECUTABLE`,
+never as a successful route. Eligibility is evaluated before any later
+fitness or cost optimization, and a candidate's `requires_permission` metadata
+does not grant approval; execution still crosses the existing tool,
+`PermissionBroker`, sandbox, and verification boundaries.
+
+The broader route result distinguishes model inference being forbidden from a
+real non-model route being selected. `ProviderRouter`'s `NO_LLM` contract is
+therefore not treated as proof that deterministic or tool execution succeeded;
+an empty candidate set is an explicit `NO_VALID_ROUTE` result.
+
 ## Evidence and limits
 
 CI uses deterministic fake catalogs, downloaders, runtimes, hardware, model
