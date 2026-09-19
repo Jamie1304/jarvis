@@ -50,6 +50,7 @@ from jarvis.ai.usability import (
 from jarvis.core.errors import PrivacyBlockedError
 from jarvis.hardware import FitStatus, HardwareProfile
 from jarvis.resources import (
+    ReservationReleaseReason,
     ResourceBudget,
     ResourceDecision,
     ResourceDecisionStatus,
@@ -770,6 +771,36 @@ class ProviderRouter:
                 usability=self._candidate_usability(candidate, request, health),
             )
             reason, is_unknown = self._eligibility(candidate, request, health)
+            resource_reason: str | None = None
+            resource_unknown = False
+            if reason is None and self._resource_governor is not None:
+                resource_budget = self.resource_budget_for(candidate, request)
+                low_priority = request.priority in {
+                    ResourcePriority.BACKGROUND,
+                    ResourcePriority.MAINTENANCE,
+                    ResourcePriority.BENCHMARK,
+                    ResourcePriority.INDEXING,
+                }
+                if (
+                    candidate.local
+                    and low_priority
+                    and resource_budget.ram_bytes is None
+                    and resource_budget.vram_bytes is None
+                ):
+                    resource_reason = "local model memory requirement is unmeasured"
+                    resource_unknown = True
+                else:
+                    candidate_resource = self._resource_governor.decide(
+                        f"model-candidate.{candidate.identity.storage_key}",
+                        request.priority,
+                        resource_budget,
+                    )
+                    if not candidate_resource.allowed:
+                        resource_reason = candidate_resource.reason
+                        resource_unknown = candidate_resource.status is ResourceDecisionStatus.DEFER
+                if resource_reason is not None:
+                    reason = resource_reason
+                    is_unknown = resource_unknown
             if reason is None:
                 viable.append(
                     replace(
@@ -832,6 +863,42 @@ class ProviderRouter:
             resource_decision,
             evidence=tuple(rejected_evidence[:40]),
         )
+
+    def resource_budget_for(
+        self, candidate: RouteCandidate, request: RouteRequest
+    ) -> ResourceBudget:
+        """Return the trusted candidate-specific execution budget."""
+
+        if not isinstance(candidate, RouteCandidate) or not isinstance(request, RouteRequest):
+            raise ValueError("Resource budget input is malformed")
+        measurement_ram = (
+            candidate.measurement.peak_ram_bytes if candidate.measurement is not None else None
+        )
+        measurement_vram = (
+            candidate.measurement.peak_vram_bytes if candidate.measurement is not None else None
+        )
+        return ResourceBudget(
+            ram_bytes=measurement_ram
+            if measurement_ram is not None
+            else candidate.model.ram_bytes
+            if candidate.local
+            else None,
+            vram_bytes=measurement_vram
+            if measurement_vram is not None
+            else candidate.model.vram_bytes
+            if candidate.local
+            else None,
+            concurrency=(
+                min(request.concurrency, candidate.model.max_concurrency)
+                if candidate.model.max_concurrency is not None
+                else request.concurrency
+            ),
+            duration_seconds=120.0,
+        )
+
+    @property
+    def resource_governor(self) -> ResourceGovernor | None:
+        return self._resource_governor
 
     @staticmethod
     def _evidence(candidate: RouteCandidate) -> tuple[tuple[str, str], ...]:
@@ -1257,6 +1324,7 @@ class InferenceDispatcher:
         configurations: Mapping[str, Mapping[str, Any]] | None = None,
         providers: Mapping[str, Any] | None = None,
         lifecycle: InferenceLifecycle | None = None,
+        resource_governor: ResourceGovernor | None = None,
         max_attempts: int = 2,
         max_cached_providers: int = 16,
     ) -> None:
@@ -1275,6 +1343,11 @@ class InferenceDispatcher:
             for provider_id, provider in (providers or {}).items()
         }
         self._lifecycle = lifecycle
+        self._resource_governor = (
+            resource_governor
+            if resource_governor is not None
+            else getattr(router, "resource_governor", None)
+        )
         self._owned: dict[str, PrivacyGuardedProvider] = {}
         self._max_attempts = max_attempts
         self._max_cached_providers = max_cached_providers
@@ -1300,6 +1373,39 @@ class InferenceDispatcher:
             if candidate is None:
                 raise InferenceDispatchError("No eligible inference model", current_decision)
             in_use = False
+            reservation_id = None
+            release_reason = ReservationReleaseReason.COMPLETE
+            if self._resource_governor is not None:
+                admission = self._resource_governor.reserve(
+                    f"inference.{candidate.identity.storage_key}",
+                    current_intent.priority,
+                    self._router.resource_budget_for(candidate, current_intent),
+                )
+                if not admission.allowed:
+                    if attempt + 1 >= self._max_attempts:
+                        blocked = replace(
+                            current_decision,
+                            status=(
+                                RouteStatus.UNKNOWN
+                                if admission.status is ResourceDecisionStatus.DEFER
+                                else RouteStatus.RESOURCE_UNAVAILABLE
+                            ),
+                            primary=None,
+                            reasons=(admission.reason,),
+                            resource_decision=admission,
+                        )
+                        raise InferenceDispatchError("Inference resource admission failed", blocked)
+                    current_intent = replace(
+                        current_intent,
+                        excluded_identities=(
+                            *current_intent.excluded_identities,
+                            candidate.identity,
+                        ),
+                    )
+                    current_decision = self.route(current_intent)
+                    rerouted = True
+                    continue
+                reservation_id = admission.reservation_id
             try:
                 if self._lifecycle is not None:
                     await self._lifecycle.prepare_for_inference(candidate, current_intent)
@@ -1317,6 +1423,7 @@ class InferenceDispatcher:
                     rerouted,
                 )
             except PrivacyBlockedError as error:
+                release_reason = ReservationReleaseReason.CRASH
                 self._router.record_failure(
                     candidate.identity,
                     UsabilityReason.PRIVACY_BLOCKED,
@@ -1341,9 +1448,15 @@ class InferenceDispatcher:
                     excluded_identities=(*current_intent.excluded_identities, candidate.identity),
                 )
             except asyncio.CancelledError:
+                release_reason = ReservationReleaseReason.CANCEL
                 raise
             except Exception as error:
                 failure = _failure_class(error)
+                release_reason = (
+                    ReservationReleaseReason.TIMEOUT
+                    if failure is RouteFailureClass.TIMEOUT
+                    else ReservationReleaseReason.CRASH
+                )
                 usability_reason = _usability_reason(error)
                 if usability_reason is not None:
                     self._router.record_failure(candidate.identity, usability_reason)
@@ -1386,6 +1499,8 @@ class InferenceDispatcher:
             finally:
                 if in_use and self._lifecycle is not None:
                     self._lifecycle.end_inference(candidate)
+                if reservation_id is not None and self._resource_governor is not None:
+                    self._resource_governor.release(reservation_id, release_reason)
             current_decision = self.route(current_intent)
             rerouted = True
         raise AssertionError("bounded inference loop escaped")
@@ -1409,6 +1524,39 @@ class InferenceDispatcher:
                 raise InferenceDispatchError("No eligible inference model", current_decision)
             yielded = False
             in_use = False
+            reservation_id = None
+            release_reason = ReservationReleaseReason.COMPLETE
+            if self._resource_governor is not None:
+                admission = self._resource_governor.reserve(
+                    f"inference.{candidate.identity.storage_key}",
+                    current_intent.priority,
+                    self._router.resource_budget_for(candidate, current_intent),
+                )
+                if not admission.allowed:
+                    if attempt + 1 >= self._max_attempts:
+                        blocked = replace(
+                            current_decision,
+                            status=(
+                                RouteStatus.UNKNOWN
+                                if admission.status is ResourceDecisionStatus.DEFER
+                                else RouteStatus.RESOURCE_UNAVAILABLE
+                            ),
+                            primary=None,
+                            reasons=(admission.reason,),
+                            resource_decision=admission,
+                        )
+                        raise InferenceDispatchError("Streaming resource admission failed", blocked)
+                    current_intent = replace(
+                        current_intent,
+                        excluded_identities=(
+                            *current_intent.excluded_identities,
+                            candidate.identity,
+                        ),
+                    )
+                    current_decision = self.route(current_intent)
+                    rerouted = True
+                    continue
+                reservation_id = admission.reservation_id
             try:
                 if self._lifecycle is not None:
                     await self._lifecycle.prepare_for_inference(candidate, current_intent)
@@ -1421,6 +1569,7 @@ class InferenceDispatcher:
                 self._router.record_success(candidate.identity)
                 return
             except PrivacyBlockedError as error:
+                release_reason = ReservationReleaseReason.CRASH
                 self._router.record_failure(
                     candidate.identity,
                     UsabilityReason.PRIVACY_BLOCKED,
@@ -1445,9 +1594,15 @@ class InferenceDispatcher:
                     excluded_identities=(*current_intent.excluded_identities, candidate.identity),
                 )
             except asyncio.CancelledError:
+                release_reason = ReservationReleaseReason.CANCEL
                 raise
             except Exception as error:
                 failure = _failure_class(error)
+                release_reason = (
+                    ReservationReleaseReason.TIMEOUT
+                    if failure is RouteFailureClass.TIMEOUT
+                    else ReservationReleaseReason.CRASH
+                )
                 usability_reason = _usability_reason(error)
                 if usability_reason is not None:
                     self._router.record_failure(candidate.identity, usability_reason)
@@ -1490,6 +1645,8 @@ class InferenceDispatcher:
             finally:
                 if in_use and self._lifecycle is not None:
                     self._lifecycle.end_inference(candidate)
+                if reservation_id is not None and self._resource_governor is not None:
+                    self._resource_governor.release(reservation_id, release_reason)
             current_decision = self.route(current_intent)
             rerouted = True
         raise AssertionError("bounded streaming loop escaped")

@@ -147,6 +147,13 @@ class ResourcePolicy:
     unload_cold_models_on_pressure: bool = True
     choose_smaller_model_on_pressure: bool = True
     pause_background_research_under_pressure: bool = True
+    interactive_ram_reserve_bytes: int = 0
+    interactive_ram_reserve_ratio: float = 0.10
+    interactive_vram_reserve_bytes: int = 0
+    interactive_vram_reserve_ratio: float = 0.10
+    interactive_cpu_reserve_cores: int = 1
+    interactive_concurrency_reserve: int = 1
+    concurrency_capacity: int | None = None
 
     def __post_init__(self) -> None:
         for value, field in (
@@ -154,6 +161,8 @@ class ResourcePolicy:
             (self.memory_pressure_ratio, "Memory pressure ratio"),
             (self.gpu_pressure_ratio, "GPU pressure ratio"),
             (self.low_battery_ratio, "Low battery ratio"),
+            (self.interactive_ram_reserve_ratio, "Interactive RAM reserve ratio"),
+            (self.interactive_vram_reserve_ratio, "Interactive VRAM reserve ratio"),
         ):
             _ratio_optional(value, field)
         for value, field in (
@@ -165,9 +174,29 @@ class ResourcePolicy:
         for value, field in (
             (self.max_background_concurrency, "Background concurrency"),
             (self.pressure_concurrency, "Pressure concurrency"),
+            (self.interactive_ram_reserve_bytes, "Interactive RAM reserve"),
+            (self.interactive_vram_reserve_bytes, "Interactive VRAM reserve"),
+            (self.interactive_cpu_reserve_cores, "Interactive CPU reserve"),
+            (self.interactive_concurrency_reserve, "Interactive concurrency reserve"),
         ):
-            if type(value) is not int or value < 1:
+            if (
+                type(value) is not int
+                or value < 0
+                or (
+                    field
+                    in {
+                        "Background concurrency",
+                        "Pressure concurrency",
+                        "Interactive concurrency reserve",
+                    }
+                    and value < 1
+                )
+            ):
                 raise ResourceValidationError(f"{field} is invalid")
+        if self.concurrency_capacity is not None and (
+            type(self.concurrency_capacity) is not int or self.concurrency_capacity < 1
+        ):
+            raise ResourceValidationError("Concurrency capacity is invalid")
         for value, field in (
             (self.benchmark_on_battery, "Benchmark battery policy"),
             (self.defer_indexing_under_pressure, "Indexing pressure policy"),
@@ -683,7 +712,13 @@ class ResourceGovernor:
                 ResourceDecisionStatus.DEFER,
                 "required resource capacity is unmeasured",
             )
-        if self._capacity_exceeded(budget, snapshot, active):
+        if self._capacity_exceeded(
+            budget,
+            snapshot,
+            active,
+            policy=self._policy,
+            low_priority=low_priority,
+        ):
             return self._decision(
                 owner,
                 priority,
@@ -792,7 +827,8 @@ class ResourceGovernor:
     @staticmethod
     def _unknown_capacity(budget: ResourceBudget, snapshot: ResourceSnapshot) -> bool:
         return (
-            (budget.ram_bytes is not None and snapshot.ram_available_bytes is None)
+            (budget.cpu_cores is not None and snapshot.cpu_cores is None)
+            or (budget.ram_bytes is not None and snapshot.ram_available_bytes is None)
             or (budget.vram_bytes is not None and snapshot.gpu_vram_available_bytes is None)
             or (budget.disk_bytes is not None and snapshot.disk_free_bytes is None)
         )
@@ -802,26 +838,55 @@ class ResourceGovernor:
         budget: ResourceBudget,
         snapshot: ResourceSnapshot,
         active: tuple[ResourceReservation, ...],
+        *,
+        policy: ResourcePolicy,
+        low_priority: bool,
     ) -> bool:
         reserved_ram = sum(item.budget.ram_bytes or 0 for item in active)
         reserved_vram = sum(item.budget.vram_bytes or 0 for item in active)
         reserved_cpu = sum(item.budget.cpu_cores or 0 for item in active)
+        ram_available = snapshot.ram_available_bytes
+        vram_available = snapshot.gpu_vram_available_bytes
+        cpu_capacity = snapshot.cpu_cores
+        concurrency_capacity = policy.concurrency_capacity
+        if low_priority:
+            if ram_available is not None:
+                ram_available -= max(
+                    policy.interactive_ram_reserve_bytes,
+                    int((snapshot.ram_total_bytes or 0) * policy.interactive_ram_reserve_ratio),
+                )
+            if vram_available is not None:
+                vram_available -= max(
+                    policy.interactive_vram_reserve_bytes,
+                    int(
+                        (snapshot.gpu_vram_total_bytes or 0) * policy.interactive_vram_reserve_ratio
+                    ),
+                )
+            if cpu_capacity is not None:
+                cpu_capacity -= policy.interactive_cpu_reserve_cores
+            if concurrency_capacity is not None:
+                concurrency_capacity -= policy.interactive_concurrency_reserve
         if (
             budget.ram_bytes is not None
-            and snapshot.ram_available_bytes is not None
-            and budget.ram_bytes + reserved_ram > snapshot.ram_available_bytes
+            and ram_available is not None
+            and budget.ram_bytes + reserved_ram > max(0, ram_available)
         ):
             return True
         if (
             budget.vram_bytes is not None
-            and snapshot.gpu_vram_available_bytes is not None
-            and budget.vram_bytes + reserved_vram > snapshot.gpu_vram_available_bytes
+            and vram_available is not None
+            and budget.vram_bytes + reserved_vram > max(0, vram_available)
         ):
             return True
         if (
             budget.cpu_cores is not None
-            and snapshot.cpu_cores is not None
-            and budget.cpu_cores + reserved_cpu > snapshot.cpu_cores
+            and cpu_capacity is not None
+            and budget.cpu_cores + reserved_cpu > max(0, cpu_capacity)
+        ):
+            return True
+        reserved_concurrency = sum(item.budget.concurrency for item in active)
+        if concurrency_capacity is not None and budget.concurrency + reserved_concurrency > max(
+            0, concurrency_capacity
         ):
             return True
         return False

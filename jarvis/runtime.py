@@ -1817,6 +1817,7 @@ class ApplicationRuntime:
                 },
                 providers={settings.ai_provider: provider},
                 lifecycle=local_ai if provider_adapter is not None else None,
+                resource_governor=resource_governor,
             )
             local_ai.bind_dispatcher(inference_dispatcher)
             routing_feedback = RoutingFeedbackRecorder(model_knowledge, router=provider_router)

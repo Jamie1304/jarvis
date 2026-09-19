@@ -158,6 +158,17 @@ low-consequence, verifiable exploration may select insufficiently proven
 eligible routes, but it never bypasses permission, sandbox, Host Bridge, or
 verification and is blocked for high-consequence work and open breakers.
 
+R3D-E keeps `ResourceGovernor` as the sole live admission authority. Background
+work is admitted only after bounded RAM, VRAM, CPU, and concurrency headroom is
+protected for interactive work; unknown capacity remains conservative. Local
+model candidates use trusted metadata or measurements for candidate-specific
+budgets, while remote candidates never consume local VRAM. The dispatcher takes
+the execution-time reservation immediately before model preparation/provider
+execution and releases it on completion, cancellation, crash, or timeout, so a
+reservation race cannot invoke a provider. Current and warm route identities
+remain request-scoped affinity hints; quality eligibility precedes resource-size
+optimization and no scheduler or preemption authority is introduced.
+
 ## Evidence and limits
 
 CI uses deterministic fake catalogs, downloaders, runtimes, hardware, model
