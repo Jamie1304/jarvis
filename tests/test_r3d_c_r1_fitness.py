@@ -134,6 +134,18 @@ def test_future_schema_is_rejected(tmp_path: Path) -> None:
         SQLiteRoutingFitnessStore(path)
 
 
+def test_corrupt_database_translates_and_releases_handle(tmp_path: Path) -> None:
+    path = tmp_path / "routing-fitness.sqlite3"
+    path.write_bytes(b"not a sqlite database")
+
+    with pytest.raises(RoutingFitnessStoreError) as failure:
+        SQLiteRoutingFitnessStore(path)
+
+    assert isinstance(failure.value.__cause__, sqlite3.DatabaseError)
+    path.unlink()
+    assert not path.exists()
+
+
 def test_stale_timestamp_survives_restart_without_rejuvenation(tmp_path: Path) -> None:
     path = tmp_path / "routing-fitness.sqlite3"
     old = NOW - timedelta(days=31)

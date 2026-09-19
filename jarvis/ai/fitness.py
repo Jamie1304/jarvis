@@ -303,20 +303,30 @@ class SQLiteRoutingFitnessStore:
             raise RoutingFitnessStoreError("Routing fitness database path is invalid")
         database_path.parent.mkdir(parents=True, exist_ok=True)
         self._path = database_path
-        self._connection = sqlite3.connect(database_path, timeout=5.0, check_same_thread=False)
-        self._connection.row_factory = sqlite3.Row
-        self._connection.execute("PRAGMA foreign_keys = ON")
-        self._connection.execute("PRAGMA busy_timeout = 5000")
-        self._connection.execute("PRAGMA journal_mode = WAL")
         self._lock = RLock()
+        connection: sqlite3.Connection | None = None
         try:
-            self._integrity_check()
-            self._migrate()
+            connection = sqlite3.connect(database_path, timeout=5.0, check_same_thread=False)
+            connection.row_factory = sqlite3.Row
+            connection.execute("PRAGMA foreign_keys = ON")
+            connection.execute("PRAGMA busy_timeout = 5000")
+            connection.execute("PRAGMA journal_mode = WAL")
+            self._integrity_check(connection)
+            self._migrate(connection)
+            self._connection = connection
         except RoutingFitnessStoreError:
-            self._connection.close()
+            if connection is not None:
+                try:
+                    connection.close()
+                except sqlite3.DatabaseError:
+                    pass
             raise
         except sqlite3.DatabaseError as error:
-            self._connection.close()
+            if connection is not None:
+                try:
+                    connection.close()
+                except sqlite3.DatabaseError:
+                    pass
             raise RoutingFitnessStoreError("Routing fitness database is unavailable") from error
 
     @property
@@ -333,22 +343,22 @@ class SQLiteRoutingFitnessStore:
     def __exit__(self, _type: object, _value: object, _traceback: object) -> None:
         self.close()
 
-    def _integrity_check(self) -> None:
+    def _integrity_check(self, connection: sqlite3.Connection) -> None:
         try:
-            row = self._connection.execute("PRAGMA integrity_check").fetchone()
+            row = connection.execute("PRAGMA integrity_check").fetchone()
         except sqlite3.DatabaseError as error:
             raise RoutingFitnessStoreError("Routing fitness integrity check failed") from error
         if row is None or str(row[0]).casefold() != "ok":
             raise RoutingFitnessStoreError("Routing fitness database is corrupt")
 
-    def _migrate(self) -> None:
+    def _migrate(self, connection: sqlite3.Connection) -> None:
         try:
-            with self._connection:
-                self._connection.execute(
+            with connection:
+                connection.execute(
                     "CREATE TABLE IF NOT EXISTS routing_fitness_schema "
                     "(version INTEGER PRIMARY KEY, name TEXT NOT NULL)"
                 )
-                rows = self._connection.execute(
+                rows = connection.execute(
                     "SELECT version, name FROM routing_fitness_schema"
                 ).fetchall()
                 versions = {int(row[0]): str(row[1]) for row in rows}
@@ -363,7 +373,7 @@ class SQLiteRoutingFitnessStore:
                 if 4 in versions and versions[4] != "add_routing_decisions":
                     raise RoutingFitnessStoreError("Routing fitness migration identity mismatch")
                 if not versions:
-                    self._connection.executescript(
+                    connection.executescript(
                         """
                         CREATE TABLE routing_fitness_observations (
                             observation_id TEXT PRIMARY KEY,
@@ -391,7 +401,7 @@ class SQLiteRoutingFitnessStore:
                     )
                     versions[1] = "create_routing_fitness_observations"
                 if 2 not in versions:
-                    self._connection.executescript(
+                    connection.executescript(
                         """
                         CREATE TABLE routing_fitness_breakers (
                             breaker_key TEXT PRIMARY KEY,
@@ -412,19 +422,19 @@ class SQLiteRoutingFitnessStore:
                     )
                     versions[2] = "add_routing_fitness_breakers"
                 if 3 not in versions:
-                    self._connection.execute(
+                    connection.execute(
                         "ALTER TABLE routing_fitness_breakers ADD COLUMN "
                         "exploration_attempts INTEGER NOT NULL DEFAULT 0"
                     )
-                    self._connection.execute(
+                    connection.execute(
                         "ALTER TABLE routing_fitness_breakers ADD COLUMN exploration_last_at TEXT"
                     )
-                    self._connection.execute(
+                    connection.execute(
                         "INSERT INTO routing_fitness_schema(version, name) "
                         "VALUES (3, 'add_routing_fitness_budget')"
                     )
                 if 4 not in versions:
-                    self._connection.executescript(
+                    connection.executescript(
                         """
                         CREATE TABLE routing_decisions (
                             decision_id TEXT PRIMARY KEY,
