@@ -1,55 +1,83 @@
 {
-  "schema": "v1-i-r3c-acceptance-1",
-  "baseline": "23c0791c739e14d1a7b55610f6cd683bbb98bc0f",
+  "schema": "v1-i-r3c-acceptance-2",
+  "baseline": {
+    "remote_branch": "agent/v1-integration",
+    "commit": "762bd56d04f99e6c0f7340575b07d1ea0bc8cd5f",
+    "parent": "5e8befa3d4b40ba9d38eecfdf8b9d005c18bb7d0",
+    "tree": "a85e42de59290891ee8a4f8c40e075ab08e1de41"
+  },
   "source": {
-    "prospective_tree": "uncommitted-r3c-source",
-    "source_sha256": "2da97e706aedd4c4783eca72399d91f659e1af8612127369a8fbd27dd3e6534c",
-    "bound_file_count": 415,
+    "prospective_tree": "cdb0101f73b02c02327aec0520a1cb0dd30a8e7f",
+    "qualification_source_sha256": "204217dc46c343751f457fa48f781ce91f9dab508cb2af5a0c4d38340405f61b",
+    "qualification_bound_file_count": 419,
+    "acceptance_source_sha256": "204217dc46c343751f457fa48f781ce91f9dab508cb2af5a0c4d38340405f61b",
+    "acceptance_bound_file_count": 419,
     "changed_paths": [
-      "jarvis/applications/__init__.py",
-      "jarvis/applications/manager.py",
-      "jarvis/applications/models.py",
-      "tests/test_applications.py",
+      "jarvis/permissions/models.py",
+      "jarvis/permissions/policy.py",
       "jarvis/system_stewardship.py",
-      "tests/test_system_stewardship.py"
+      "jarvis/startup_mutation.py",
+      "jarvis/vm/bridge.py",
+      "tests/test_startup_mutation.py",
+      "scripts/acceptance/qualify_v1_i_r3c_c.py"
     ]
   },
   "cases": {
-    "software_health": {
-      "status": "PASS",
-      "evidence": "tests/test_applications.py and tests/test_system_stewardship.py",
-      "limitation": "read-only trusted inventory and launch evidence only"
-    },
-    "security_health": {
-      "status": "PASS",
-      "evidence": "tests/test_system_stewardship.py provider provenance, threat, stale, unavailable, and model-claim rejection",
-      "limitation": "no trusted host security provider was composed for the real-host probe"
-    },
+    "software_health": {"status": "PASS", "limitation": "read-only trusted inventory and launch evidence only"},
+    "security_health": {"status": "PASS", "limitation": "no trusted host security provider was composed for the real-host probe"},
     "startup_health": {
       "status": "PASS",
-      "evidence": "tests/test_system_stewardship.py exact reversible plans, stale identity, receipt binding, and wildcard denial",
-      "limitation": "planning and revalidation only; no host startup mutation provider was composed"
+      "supported_effect": "exact current-user Windows Run disable and restore",
+      "read_only_sources": ["current-user RunOnce", "machine Run", "machine RunOnce"],
+      "limitation": "no arbitrary registry path, generic registry editor, or shell mutation"
     },
-    "update_coordination": {
-      "status": "PASS",
-      "evidence": "tests/test_system_stewardship.py trusted candidate identity, provenance, version, plan, and stale-candidate checks",
-      "limitation": "coordination produces no direct install or privilege effect"
-    },
-    "authority_privacy_recovery": {
-      "status": "PASS",
-      "evidence": "41 focused relevant tests, audit_test_strength.py, package smoke tamper matrix",
-      "limitation": "raw host inventory was not emitted; real host probes record counts/status only"
-    }
+    "update_coordination": {"status": "PASS", "limitation": "coordination produces no direct install or privilege effect"},
+    "authority_privacy_recovery": {"status": "PASS", "limitation": "raw host inventory, registry locator, raw startup command, and receipt were omitted"}
   },
-  "real_host_read_only_probes": {
-    "platform": "win32",
-    "application_inventory": {"status": "PASS", "record_count": 172},
-    "update_provider": {"status": "AVAILABLE", "provider": "winget availability check"},
-    "security_provider": {"status": "NOT_PROBED", "reason": "no trusted provider composed"},
-    "startup_provider": {"status": "NOT_PROBED", "reason": "no trusted provider composed"}
+  "focused_verification": {
+    "tests": "184 passed, 3 skipped",
+    "changed_statement_coverage": {"covered": 505, "total": 554, "percent": 91.155235, "method": "coverage.py executable statements on changed production lines"},
+    "mypy": "PASS",
+    "ruff": "PASS",
+    "diff_check": "PASS",
+    "test_strength": "PASS; all weakening flags NO"
   },
-  "limitations": [
-    "known WSL focus_change host signal remains ENVIRONMENT_BLOCKED and was not reopened",
-    "canonical quality wrapper metadata retained child_exit_code=null; native wrapper returned 0 and the durable quality output reached the exact coverage report"
-  ]
+  "real_host_effect_probe": {
+    "status": "PASS",
+    "artifact": "build/r3c-c-real-host-startup.json",
+    "provider": "WindowsStartupMutationProvider",
+    "states": ["DISABLED", "RESTORED"],
+    "bridge_request_count": 2,
+    "cleanup": "PASS",
+    "raw_effect_data": "OMITTED"
+  },
+  "canonical_quality": {
+    "interpreter": "C:/Users/jamie/AppData/Local/Programs/Python/Python312/python.exe",
+    "selected": "2402 passed, 9 skipped, 3 deselected",
+    "exact_coverage": {"covered": 49751, "total": 53664, "percent": 90.08842307474998},
+    "durable_stdout": "build/r3c-c-quality-final.stdout.log",
+    "durable_stderr": "build/r3c-c-quality-final.stderr.log",
+    "status": "PASS"
+  },
+  "standalone_v1_acceptance": {
+    "status": "PASS",
+    "passed": 174,
+    "skipped": 2,
+    "run_id": "6d4d1f28-0822-4e25-b6b1-8a6d669a46cd",
+    "result_artifact": "build/system-test-artifacts/6d4d1f28-0822-4e25-b6b1-8a6d669a46cd/stdout.log",
+    "result_artifact_sha256": "c48f60f4aaa4a2eac49131f2666d5ffcf24ef75efe509f532a0f5268b4a7dfdd",
+    "source_sha256": "204217dc46c343751f457fa48f781ce91f9dab508cb2af5a0c4d38340405f61b",
+    "bound_file_count": 419,
+    "tested_tree": "cdb0101f73b02c02327aec0520a1cb0dd30a8e7"
+  },
+  "package_smoke": {
+    "status": "PASS",
+    "wheel_sha256": "8E63C3FF77031B64740A68F58224574D78D5D870DB8646266CB6D6BB120FB043",
+    "sdist_sha256": "6864436FFD17791E99A37C6D9EDDADC8D6D8C84CD33459418ECDAF164343C026",
+    "sdist_roundtrip_wheel_sha256": "7E95B4D2E0E6E66D93B0F0C41F1658800D669F9BFE16B734819E8BAE8E225EC2",
+    "leak_checks": "PASS",
+    "record_tamper_matrix": "PASS"
+  },
+  "candidate_15": "NOT_CREATED",
+  "hosted_ci": {"baseline_lookup": "35429308350 exact baseline SHA in_progress; no credit claimed", "final_child": "PENDING_COMMIT_AND_PUSH"}
 }

@@ -37,6 +37,7 @@ _COMMAND_PERMISSIONS = {
     Permission.RESOURCE_EXECUTE,
     Permission.PRIVILEGE_GRANT,
 }
+_STARTUP_PERMISSIONS = {Permission.STARTUP_WRITE}
 _WINDOWS_RESERVED = frozenset(
     {
         "aux",
@@ -159,6 +160,22 @@ def _normalize_host(value: str) -> str:
     return encoded
 
 
+def _normalize_startup_entry(value: str) -> str:
+    try:
+        normalized = validate_safe_display_text(
+            value,
+            field="Startup entry",
+            max_length=256,
+        )
+    except ValueError as error:
+        raise ScopeNormalizationError("Startup entry must be bounded printable text") from error
+    if any(character.isspace() for character in normalized) or any(
+        character in normalized for character in ("*", "?")
+    ):
+        raise ScopeNormalizationError("Startup entry must be one exact non-wildcard identity")
+    return normalized.casefold()
+
+
 def normalize_scope(scope: PermissionScope, permission: Permission) -> PermissionScope:
     """Canonicalize and structurally validate a permission scope."""
 
@@ -168,6 +185,7 @@ def normalize_scope(scope: PermissionScope, permission: Permission) -> Permissio
     applications_input = _require_string_tuple(scope.applications, "Applications")
     hosts_input = _require_string_tuple(scope.hosts, "Hosts")
     commands_input = _require_string_tuple(scope.command_families, "Command families")
+    startup_entries_input = _require_string_tuple(scope.startup_entries, "Startup entries")
     try:
         tool_id = validate_safe_display_text(
             scope.tool_id,
@@ -192,12 +210,16 @@ def normalize_scope(scope: PermissionScope, permission: Permission) -> Permissio
     command_families = tuple(
         dict.fromkeys(_normalize_label(value, "Command family") for value in commands_input)
     )
+    startup_entries = tuple(
+        dict.fromkeys(_normalize_startup_entry(value) for value in startup_entries_input)
+    )
     normalized = replace(
         scope,
         paths=paths,
         applications=applications,
         hosts=hosts,
         command_families=command_families,
+        startup_entries=startup_entries,
         tool_id=tool_id,
     )
     if permission in _PATH_PERMISSIONS and not normalized.paths:
@@ -208,6 +230,8 @@ def normalize_scope(scope: PermissionScope, permission: Permission) -> Permissio
         raise ScopeNormalizationError("Network permission requires a host")
     if permission in _COMMAND_PERMISSIONS and not normalized.command_families:
         raise ScopeNormalizationError("Command permission requires a command family")
+    if permission in _STARTUP_PERMISSIONS and not normalized.startup_entries:
+        raise ScopeNormalizationError("Startup permissions require an exact startup entry")
     return normalized
 
 
@@ -224,6 +248,7 @@ def normalize_constraint(scope: ScopeConstraint) -> ScopeConstraint:
             scope.command_families,
             "Policy command families",
         )
+        startup_entries = _require_string_tuple(scope.startup_entries, "Policy startup entries")
     except ScopeNormalizationError as error:
         raise ValueError("Policy scope containers are malformed") from error
     if (
@@ -262,6 +287,9 @@ def normalize_constraint(scope: ScopeConstraint) -> ScopeConstraint:
         hosts=tuple(dict.fromkeys(_normalize_host(value) for value in hosts)),
         command_families=tuple(
             dict.fromkeys(_normalize_label(value, "Command family") for value in command_families)
+        ),
+        startup_entries=tuple(
+            dict.fromkeys(_normalize_startup_entry(value) for value in startup_entries)
         ),
         tools=normalized_tools,
     )
@@ -363,6 +391,7 @@ class PolicyEngine:
             SafetyClass.DESTRUCTIVE_SYSTEM_COMMAND,
             SafetyClass.SOFTWARE_INSTALLATION,
             SafetyClass.SELF_MODIFICATION,
+            SafetyClass.SYSTEM_CONFIGURATION,
         }:
             return PolicyEvaluation(
                 Decision.REQUIRE_APPROVAL,
@@ -412,6 +441,11 @@ class PolicyEngine:
         if request.command_families and (
             not policy.command_families
             or not set(request.command_families).issubset(policy.command_families)
+        ):
+            return False
+        if request.startup_entries and (
+            not policy.startup_entries
+            or not set(request.startup_entries).issubset(policy.startup_entries)
         ):
             return False
         return not (

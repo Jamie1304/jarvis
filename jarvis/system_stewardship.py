@@ -18,6 +18,7 @@ from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from pathlib import Path
 from typing import Final, Protocol
+from uuid import UUID, uuid4
 
 from jarvis.applications.manager import ApplicationManager
 from jarvis.applications.models import (
@@ -78,6 +79,9 @@ class StartupEffectStatus(StrEnum):
     """Status of the separate startup mutation authority."""
 
     NOT_YET_TRUSTED = "STARTUP_EFFECT_PROVIDER_NOT_YET_TRUSTED"
+    SUPPORTED_FOR_EXACT_CURRENT_USER_RUN = "SUPPORTED_FOR_EXACT_CURRENT_USER_RUN"
+    READ_ONLY = "READ_ONLY"
+    UNAVAILABLE = "UNAVAILABLE"
 
 
 class UpdateStage(StrEnum):
@@ -348,6 +352,7 @@ class StartupEntryEvidence:
     observed_at: datetime
     state: StartupEntryState
     detail: str
+    value_type: int | None = None
 
     def __post_init__(self) -> None:
         _text(self.entry_id, "Startup entry identity", 256)
@@ -364,6 +369,10 @@ class StartupEntryEvidence:
         if not isinstance(self.state, StartupEntryState):
             raise StewardshipError("Startup entry state is malformed")
         _text(self.detail, "Startup evidence detail", 2_048)
+        if self.value_type is not None and (
+            isinstance(self.value_type, bool) or not isinstance(self.value_type, int)
+        ):
+            raise StewardshipError("Startup registry value type is malformed")
 
 
 class StartupProvider(Protocol):
@@ -373,6 +382,10 @@ class StartupProvider(Protocol):
 
 class StartupProviderError(RuntimeError):
     """A bounded startup source could not produce safe evidence."""
+
+
+class _StartupObservationBackend(Protocol):
+    def read(self, scope: str, key_path: str) -> tuple[tuple[str, str, int], ...]: ...
 
 
 class WindowsStartupProvider:
@@ -386,10 +399,57 @@ class WindowsStartupProvider:
         ("machine", r"Software\Microsoft\Windows\CurrentVersion\RunOnce"),
     )
 
+    def __init__(self, backend: _StartupObservationBackend | None = None) -> None:
+        self._backend = backend
+
     async def observe(self) -> tuple[StartupEntryEvidence, ...]:
-        if sys.platform != "win32":
+        if sys.platform != "win32" and self._backend is None:
             raise StartupProviderError("Windows startup provider is unavailable on this host")
+        if self._backend is not None:
+            return await asyncio.to_thread(self._observe_backend, self._backend)
         return await asyncio.to_thread(self._observe_registry)
+
+    @classmethod
+    def _observe_backend(
+        cls, backend: _StartupObservationBackend
+    ) -> tuple[StartupEntryEvidence, ...]:
+        entries: list[StartupEntryEvidence] = []
+        identities: set[str] = set()
+        for scope, key_path in cls.TRUSTED_REGISTRY_SOURCES:
+            values = backend.read(scope, key_path)
+            if not isinstance(values, tuple):
+                raise StartupProviderError("Windows startup backend returned malformed values")
+            for value in values:
+                if type(value) is not tuple or len(value) != 3:
+                    raise StartupProviderError("Windows startup backend value is malformed")
+                name, command, value_type = value
+                if (
+                    type(name) is not str
+                    or not name.strip()
+                    or type(command) is not str
+                    or not command.strip()
+                    or value_type not in (1, 2)
+                ):
+                    raise StartupProviderError("Windows startup registry evidence is malformed")
+                entry_id = cls.entry_id(scope, key_path, name)
+                if entry_id in identities:
+                    raise StartupProviderError("Windows startup entry identity is ambiguous")
+                identities.add(entry_id)
+                entries.append(
+                    StartupEntryEvidence(
+                        entry_id,
+                        name,
+                        cls.provider_id,
+                        True,
+                        command,
+                        None,
+                        datetime.now(UTC),
+                        StartupEntryState.HEALTHY,
+                        "read-only Windows startup registry observation",
+                        value_type,
+                    )
+                )
+        return tuple(sorted(entries, key=lambda item: item.entry_id))
 
     @classmethod
     def _observe_registry(cls) -> tuple[StartupEntryEvidence, ...]:
@@ -440,6 +500,7 @@ class WindowsStartupProvider:
                             datetime.now(UTC),
                             StartupEntryState.HEALTHY,
                             "read-only Windows startup registry observation",
+                            value_type,
                         )
                     )
         return tuple(sorted(entries, key=lambda item: item.entry_id))
@@ -471,6 +532,10 @@ class StartupMutationPlan:
     planned_at: datetime
     expires_at: datetime
     fingerprint: str
+    operation: str = "disable"
+    mutation_id: str | None = None
+    value_type: int | None = None
+    task_id: UUID | None = None
 
     def __post_init__(self) -> None:
         _text(self.entry_id, "Startup plan entry identity", 256)
@@ -489,6 +554,16 @@ class StartupMutationPlan:
             c not in "0123456789abcdef" for c in self.fingerprint
         ):
             raise StewardshipError("Startup plan fingerprint is malformed")
+        if self.operation not in {"disable", "restore"}:
+            raise StewardshipError("Startup plan operation is malformed")
+        if self.mutation_id is not None:
+            _text(self.mutation_id, "Startup mutation identity", 64)
+        if self.value_type is not None and (
+            isinstance(self.value_type, bool) or not isinstance(self.value_type, int)
+        ):
+            raise StewardshipError("Startup plan registry value type is malformed")
+        if self.task_id is not None and not isinstance(self.task_id, UUID):
+            raise StewardshipError("Startup plan task identity is malformed")
 
 
 class StartupHealthService:
@@ -528,7 +603,15 @@ class StartupHealthService:
             raise StaleStewardshipPlan("Startup entry is missing or ambiguous")
         item = matches[0]
         planned = _timestamp(self._clock(), "Startup plan time")
-        payload = (item.entry_id, item.provider, item.enabled, enabled, item.target_command)
+        payload = (
+            item.entry_id,
+            item.provider,
+            item.enabled,
+            enabled,
+            item.target_command,
+            item.value_type,
+            "disable" if not enabled else "restore",
+        )
         return StartupMutationPlan(
             item.entry_id,
             item.provider,
@@ -538,6 +621,10 @@ class StartupHealthService:
             planned,
             planned + ttl,
             _fingerprint(payload),
+            "disable" if not enabled else "restore",
+            None,
+            item.value_type,
+            uuid4(),
         )
 
     async def revalidate(self, plan: StartupMutationPlan) -> StartupEntryEvidence:
@@ -550,6 +637,8 @@ class StartupHealthService:
             current.provider != plan.provider
             or current.enabled != plan.previous_enabled
             or current.target_command != plan.target_command
+            or plan.value_type is not None
+            and current.value_type != plan.value_type
         ):
             raise StaleStewardshipPlan("Startup entry changed after planning")
         return current
@@ -831,6 +920,21 @@ class SystemHealthProjection:
     security: SecurityHealthReport
     startup: StartupHealthReport
     updates: tuple[UpdateEvidence, ...]
+    startup_effect: StartupEffectStatus = StartupEffectStatus.NOT_YET_TRUSTED
+
+
+class StartupMutationCapability(Protocol):
+    async def plan_disable(self, entry_id: str) -> StartupMutationPlan: ...
+
+    async def plan_restore(self, mutation_id: str) -> StartupMutationPlan: ...
+
+    async def authorize(
+        self, plan: StartupMutationPlan, *, user_id: str | None = None
+    ) -> object: ...
+
+    async def execute(self, plan: StartupMutationPlan, receipt: object) -> object: ...
+
+    async def reconcile(self) -> tuple[object, ...]: ...
 
 
 @dataclass(slots=True)
@@ -842,6 +946,7 @@ class SystemStewardshipComposition:
     startup: StartupHealthService
     updates: UpdateCoordinator
     startup_effect: StartupEffectStatus = StartupEffectStatus.NOT_YET_TRUSTED
+    startup_mutation: StartupMutationCapability | None = None
 
     async def refresh(self) -> SystemHealthProjection:
         software, security, startup, updates = await asyncio.gather(
@@ -850,12 +955,39 @@ class SystemStewardshipComposition:
             self.startup.observe(),
             self.updates.observe(),
         )
-        return SystemHealthProjection(software, security, startup, updates)
+        return SystemHealthProjection(software, security, startup, updates, self.startup_effect)
 
     async def plan_application_update(self, application_id: str) -> InstallationPlan:
         """Create an existing ApplicationManager plan; never execute an update."""
 
         return await self.updates.plan_application_update(application_id)
+
+    async def plan_startup_disable(self, entry_id: str) -> StartupMutationPlan:
+        if self.startup_mutation is None:
+            raise StewardshipError("startup effect provider is not composed")
+        return await self.startup_mutation.plan_disable(entry_id)
+
+    async def plan_startup_restore(self, mutation_id: str) -> StartupMutationPlan:
+        if self.startup_mutation is None:
+            raise StewardshipError("startup effect provider is not composed")
+        return await self.startup_mutation.plan_restore(mutation_id)
+
+    async def authorize_startup(
+        self, plan: StartupMutationPlan, *, user_id: str | None = None
+    ) -> object:
+        if self.startup_mutation is None:
+            raise StewardshipError("startup effect provider is not composed")
+        return await self.startup_mutation.authorize(plan, user_id=user_id)
+
+    async def execute_startup(self, plan: StartupMutationPlan, receipt: object) -> object:
+        if self.startup_mutation is None:
+            raise StewardshipError("startup effect provider is not composed")
+        return await self.startup_mutation.execute(plan, receipt)
+
+    async def reconcile_startup(self) -> tuple[object, ...]:
+        if self.startup_mutation is None:
+            raise StewardshipError("startup effect provider is not composed")
+        return await self.startup_mutation.reconcile()
 
 
 def create_system_stewardship_composition(
@@ -866,6 +998,7 @@ def create_system_stewardship_composition(
     startup_provider: StartupProvider | None = None,
     additional_security_providers: tuple[TrustedSecurityProvider, ...] = (),
     clock: Callable[[], datetime] | None = None,
+    startup_mutation: StartupMutationCapability | None = None,
 ) -> SystemStewardshipComposition:
     """Compose trusted provider instances without dynamic provider discovery."""
 
@@ -886,6 +1019,12 @@ def create_system_stewardship_composition(
         SecurityHealthService(registry, clock=clock),
         StartupHealthService(startup_provider or WindowsStartupProvider(), clock=clock),
         UpdateCoordinator(manager, clock=clock),
+        (
+            StartupEffectStatus.SUPPORTED_FOR_EXACT_CURRENT_USER_RUN
+            if startup_mutation is not None
+            else StartupEffectStatus.NOT_YET_TRUSTED
+        ),
+        startup_mutation,
     )
 
 

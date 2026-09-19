@@ -85,6 +85,7 @@ class Permission(StrEnum):
     RESOURCE_EXECUTE = "resource.execute"
     PRIVILEGE_GRANT = "privilege.grant"
     MODEL_REMOVE = "model.remove"
+    STARTUP_WRITE = "startup.write"
 
 
 class Decision(StrEnum):
@@ -146,6 +147,7 @@ class SafetyClass(StrEnum):
     DESTRUCTIVE_SYSTEM_COMMAND = "destructive_system_command"
     SOFTWARE_INSTALLATION = "software_installation"
     SELF_MODIFICATION = "self_modification"
+    SYSTEM_CONFIGURATION = "system_configuration"
 
 
 class ApprovalStatus(StrEnum):
@@ -186,6 +188,7 @@ class PermissionScope:
     applications: tuple[str, ...] = ()
     hosts: tuple[str, ...] = ()
     command_families: tuple[str, ...] = ()
+    startup_entries: tuple[str, ...] = ()
     tool_id: str | None = None
     task_id: UUID | None = None
     duration_seconds: int | None = None
@@ -199,6 +202,7 @@ class ScopeConstraint:
     applications: tuple[str, ...] = ()
     hosts: tuple[str, ...] = ()
     command_families: tuple[str, ...] = ()
+    startup_entries: tuple[str, ...] = ()
     tools: frozenset[str] = frozenset()
     tasks: frozenset[UUID] = frozenset()
     max_duration_seconds: int | None = None
