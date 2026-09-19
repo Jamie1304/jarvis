@@ -48,8 +48,8 @@
     "qualification_source_sha256": "204217dc46c343751f457fa48f781ce91f9dab508cb2af5a0c4d38340405f61b",
     "qualification_bound_file_count": 419,
     "prospective_tree": "cdb0101f73b02c02327aec0520a1cb0dd30a8e7",
-    "final_commit": "614671bf277a117e387e2f7d5ba90345333e5801",
-    "final_tree": "2842ef20210df13f0a7f39572e8730365ef361"
+    "final_commit": "70e18d620df4ace93352a0393e186811799135b4",
+    "final_tree": "c9fcb8b0422ee16d03830d8c4058a98708a404c8"
   },
-  "hosted_ci": {"baseline_lookup": "35429308350 exact baseline SHA in_progress; no credit claimed", "final_commit": "614671bf277a117e387e2f7d5ba90345333e5801", "final_child_lookup": "PENDING_PUSH"}
+  "hosted_ci": {"baseline_lookup": "35429308350 exact baseline SHA in_progress; no credit claimed", "final_commit": "70e18d620df4ace93352a0393e186811799135b4", "final_child_lookup": "PENDING_PUSH"}
 }
