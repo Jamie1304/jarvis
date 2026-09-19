@@ -1676,6 +1676,7 @@ class ApplicationRuntime:
                 capability_registry=capability_registry,
                 fitness=routing_fitness,
                 resilience=routing_resilience,
+                routing_store=routing_fitness_store,
             )
             paths.validate_storage_layout()
             planning_store = SQLitePlanningStore(paths.planning_database)
@@ -1698,6 +1699,7 @@ class ApplicationRuntime:
                 approval_invalidator=broker.invalidate_task_approvals,
                 routing_fitness=routing_fitness,
                 routing_resilience=routing_resilience,
+                routing_store=routing_fitness_store,
             )
             engine.reconcile_after_restart()
             for task in engine.list_tasks():
@@ -1761,6 +1763,7 @@ class ApplicationRuntime:
                 resource_governor,
                 model_knowledge,
                 hardware_profile=hardware_inventory.inspect(),
+                routing_store=routing_fitness_store,
             )
             model_knowledge.refresh_registry(
                 configured_provider_registry,

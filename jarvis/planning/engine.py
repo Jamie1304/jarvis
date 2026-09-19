@@ -12,7 +12,13 @@ from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
-from jarvis.ai.fitness import RoutingFitnessProjection, RoutingResilienceService, SemanticOutcome
+from jarvis.ai.fitness import (
+    RoutingDecisionOutcome,
+    RoutingFitnessProjection,
+    RoutingResilienceService,
+    SemanticOutcome,
+    SQLiteRoutingFitnessStore,
+)
 from jarvis.autonomy.routing import (
     ExecutionCandidateKind,
     ExecutionRouteSelector,
@@ -141,27 +147,45 @@ class BrokeredPlanningStepExecutor(PlanningStepExecutor):
     async def execute(
         self, task: PlanningTask, step: PlanningStep, cancellation: asyncio.Event
     ) -> StepExecutionResult:
+        routing_decision_id: str | None = None
+
+        def attach_routing(result: StepExecutionResult) -> StepExecutionResult:
+            return (
+                result
+                if routing_decision_id is None
+                else replace(result, routing_decision_id=routing_decision_id)
+            )
+
         if self._route_selector is not None:
             decision = self._route_selector.route_planning_step(step)
+            routing_decision_id = decision.decision_id
             if decision.status is not ExecutionRouteStatus.SELECTED:
-                return StepExecutionResult(
-                    StepExecutionStatus.DETERMINISTIC_FAILURE,
-                    error_code="execution_route_unavailable",
-                    error_message="No valid executable route matched the owned planning step",
-                    evidence=tuple(code.value for code in decision.reasons),
+                return attach_routing(
+                    StepExecutionResult(
+                        StepExecutionStatus.DETERMINISTIC_FAILURE,
+                        error_code="execution_route_unavailable",
+                        error_message="No valid executable route matched the owned planning step",
+                        evidence=tuple(code.value for code in decision.reasons),
+                    )
                 )
             candidate = decision.primary
             if candidate is None or candidate.kind is not ExecutionCandidateKind.TOOL:
-                return StepExecutionResult(
-                    StepExecutionStatus.DETERMINISTIC_FAILURE,
-                    error_code="execution_route_kind_unsupported",
-                    error_message="The planning executor accepts only selected TOOL routes",
+                return attach_routing(
+                    StepExecutionResult(
+                        StepExecutionStatus.DETERMINISTIC_FAILURE,
+                        error_code="execution_route_kind_unsupported",
+                        error_message="The planning executor accepts only selected TOOL routes",
+                    )
                 )
             if candidate.tool_id != step.tool_id:
-                return StepExecutionResult(
-                    StepExecutionStatus.DETERMINISTIC_FAILURE,
-                    error_code="execution_route_identity_mismatch",
-                    error_message="Selected tool identity does not match the owned planning step",
+                return attach_routing(
+                    StepExecutionResult(
+                        StepExecutionStatus.DETERMINISTIC_FAILURE,
+                        error_code="execution_route_identity_mismatch",
+                        error_message=(
+                            "Selected tool identity does not match the owned planning step"
+                        ),
+                    )
                 )
         tool = self._registry.get(step.tool_id)
         context = ToolExecutionContext(
@@ -173,20 +197,24 @@ class BrokeredPlanningStepExecutor(PlanningStepExecutor):
         )
         raw_input = json.loads(step.input_json)
         if not isinstance(raw_input, dict):
-            return StepExecutionResult(
-                StepExecutionStatus.DETERMINISTIC_FAILURE,
-                error_code="malformed_owned_input",
-                error_message="Owned step input is not an object",
+            return attach_routing(
+                StepExecutionResult(
+                    StepExecutionStatus.DETERMINISTIC_FAILURE,
+                    error_code="malformed_owned_input",
+                    error_message="Owned step input is not an object",
+                )
             )
         result = await tool.invoke(
             context, raw_input, self._registry.permission_broker, event_bus=self._event_bus
         )
         evidence = tuple(item.value for item in result.evidence)
         if result.status is ToolResultStatus.SUCCESS and result.output is not None:
-            return StepExecutionResult(
-                StepExecutionStatus.SUCCEEDED,
-                output_json=result.output.model_dump_json(),
-                evidence=evidence,
+            return attach_routing(
+                StepExecutionResult(
+                    StepExecutionStatus.SUCCEEDED,
+                    output_json=result.output.model_dump_json(),
+                    evidence=evidence,
+                )
             )
         if result.status is ToolResultStatus.PERMISSION_DENIED:
             request_ids: list[UUID] = []
@@ -195,56 +223,68 @@ class BrokeredPlanningStepExecutor(PlanningStepExecutor):
                     try:
                         request_ids.append(UUID(item.value))
                     except ValueError:
-                        return StepExecutionResult(
-                            StepExecutionStatus.DETERMINISTIC_FAILURE,
-                            error_code="malformed_approval_reference",
-                            error_message=(
-                                "Permission broker returned an invalid approval reference"
-                            ),
+                        return attach_routing(
+                            StepExecutionResult(
+                                StepExecutionStatus.DETERMINISTIC_FAILURE,
+                                error_code="malformed_approval_reference",
+                                error_message=(
+                                    "Permission broker returned an invalid approval reference"
+                                ),
+                            )
                         )
             if request_ids:
-                return StepExecutionResult(
-                    StepExecutionStatus.WAITING_FOR_PERMISSION,
-                    approval_request_ids=tuple(request_ids),
+                return attach_routing(
+                    StepExecutionResult(
+                        StepExecutionStatus.WAITING_FOR_PERMISSION,
+                        approval_request_ids=tuple(request_ids),
+                    )
                 )
         if result.status is ToolResultStatus.UNKNOWN_OUTCOME:
-            return StepExecutionResult(
-                StepExecutionStatus.UNKNOWN_OUTCOME,
-                evidence=evidence,
-                error_code=(
-                    result.error.code if result.error is not None else "unknown_operation_outcome"
-                ),
-                error_message=(
-                    result.error.message
-                    if result.error is not None
-                    else "The external effect outcome is unknown"
-                ),
-                effect_outcome=EffectOutcome.UNKNOWN_OUTCOME,
+            return attach_routing(
+                StepExecutionResult(
+                    StepExecutionStatus.UNKNOWN_OUTCOME,
+                    evidence=evidence,
+                    error_code=(
+                        result.error.code
+                        if result.error is not None
+                        else "unknown_operation_outcome"
+                    ),
+                    error_message=(
+                        result.error.message
+                        if result.error is not None
+                        else "The external effect outcome is unknown"
+                    ),
+                    effect_outcome=EffectOutcome.UNKNOWN_OUTCOME,
+                )
             )
         if result.effect_disposition is ToolEffectDisposition.NO_EFFECT and result.status in {
             ToolResultStatus.TIMEOUT,
             ToolResultStatus.UNAVAILABLE,
             ToolResultStatus.INTERNAL_FAILURE,
         }:
-            return StepExecutionResult(
-                StepExecutionStatus.TRANSIENT_FAILURE,
-                error_code=result.error.code if result.error else result.status.value,
-                error_message=result.error.message if result.error else "Tool had no effect",
-                effect_outcome=EffectOutcome.SAFE_TO_RETRY,
+            return attach_routing(
+                StepExecutionResult(
+                    StepExecutionStatus.TRANSIENT_FAILURE,
+                    error_code=result.error.code if result.error else result.status.value,
+                    error_message=result.error.message if result.error else "Tool had no effect",
+                    effect_outcome=EffectOutcome.SAFE_TO_RETRY,
+                )
             )
         if tool.manifest.declared_permissions and result.effect_disposition in {
             ToolEffectDisposition.CONFIRMED_EFFECT,
             ToolEffectDisposition.UNKNOWN,
         }:
-            return StepExecutionResult(
-                StepExecutionStatus.UNKNOWN_OUTCOME,
-                error_code="tool_execution_outcome_unknown",
-                error_message="A tool effect cannot be safely replayed",
-                effect_outcome=(
-                    EffectOutcome.EFFECT_CONFIRMED
-                    if result.effect_disposition is ToolEffectDisposition.CONFIRMED_EFFECT
-                    else EffectOutcome.UNKNOWN_OUTCOME
-                ),
+            return attach_routing(
+                StepExecutionResult(
+                    StepExecutionStatus.UNKNOWN_OUTCOME,
+                    error_code="tool_execution_outcome_unknown",
+                    error_message="A tool effect cannot be safely replayed",
+                    effect_outcome=(
+                        EffectOutcome.EFFECT_CONFIRMED
+                        if result.effect_disposition is ToolEffectDisposition.CONFIRMED_EFFECT
+                        else EffectOutcome.UNKNOWN_OUTCOME
+                    ),
+                )
             )
         error_code = result.error.code if result.error else result.status.value
         error_message = result.error.message if result.error else "Tool execution failed"
@@ -255,7 +295,9 @@ class BrokeredPlanningStepExecutor(PlanningStepExecutor):
             if result.status is ToolResultStatus.CANCELLED
             else StepExecutionStatus.DETERMINISTIC_FAILURE
         )
-        return StepExecutionResult(status, error_code=error_code, error_message=error_message)
+        return attach_routing(
+            StepExecutionResult(status, error_code=error_code, error_message=error_message)
+        )
 
 
 class EvidencePlanningStepVerifier(PlanningStepVerifier):
@@ -334,6 +376,7 @@ class PlanningEngine:
         approval_invalidator: Callable[[UUID], Awaitable[tuple[UUID, ...]]] | None = None,
         routing_fitness: RoutingFitnessProjection | None = None,
         routing_resilience: RoutingResilienceService | None = None,
+        routing_store: SQLiteRoutingFitnessStore | None = None,
     ) -> None:
         self._store = store
         self._advisor = advisor
@@ -356,6 +399,9 @@ class PlanningEngine:
         ):
             raise TypeError("Routing resilience service is invalid")
         self._routing_resilience = routing_resilience
+        if routing_store is not None and not isinstance(routing_store, SQLiteRoutingFitnessStore):
+            raise TypeError("Routing decision store is invalid")
+        self._routing_store = routing_store
         self._cancellations: dict[UUID, asyncio.Event] = {}
 
     async def create_task(
@@ -1283,18 +1329,18 @@ class PlanningEngine:
         execution: StepExecutionResult,
         verification: StepVerification | None,
     ) -> None:
+        semantic = (
+            SemanticOutcome.UNKNOWN
+            if execution.status is StepExecutionStatus.UNKNOWN_OUTCOME
+            else SemanticOutcome.UNVERIFIED
+            if verification is None
+            else SemanticOutcome.VERIFIED_SUCCESS
+            if verification.succeeded
+            else SemanticOutcome.VERIFIED_FAILURE
+        )
         if self._routing_fitness is not None:
             self._routing_fitness.record_planning_step(task, step, execution, verification)
         if self._routing_resilience is not None:
-            semantic = (
-                SemanticOutcome.UNKNOWN
-                if execution.status is StepExecutionStatus.UNKNOWN_OUTCOME
-                else SemanticOutcome.UNVERIFIED
-                if verification is None
-                else SemanticOutcome.VERIFIED_SUCCESS
-                if verification.succeeded
-                else SemanticOutcome.VERIFIED_FAILURE
-            )
             key = self._routing_resilience.key(
                 step.tool_id, "tool", step.capability, "orchestration"
             )
@@ -1303,6 +1349,19 @@ class PlanningEngine:
                 operational_outcome=execution.status.value,
                 semantic_outcome=semantic,
                 failure_class=execution.error_code,
+            )
+        if self._routing_store is not None and execution.routing_decision_id is not None:
+            self._routing_store.record_decision_outcome(
+                RoutingDecisionOutcome(
+                    outcome_id=f"planning:{task.task_id}:{step.step_id}:{step.attempts}",
+                    decision_id=execution.routing_decision_id,
+                    observed_at=self._clock(),
+                    executed_identity=step.tool_id,
+                    operational_outcome=execution.status.value,
+                    semantic_outcome=semantic,
+                    retry_count=step.attempts,
+                    evidence_refs=(f"task:{task.task_id}", f"step:{step.step_id}"),
+                )
             )
 
     def _recover_unknown_outcome(

@@ -9,7 +9,15 @@ from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Any, Protocol
+from uuid import uuid4
 
+from jarvis.ai.fitness import (
+    RoutingDecisionOutcome,
+    RoutingDecisionRecord,
+    RoutingDecisionView,
+    SemanticOutcome,
+    SQLiteRoutingFitnessStore,
+)
 from jarvis.ai.knowledge import (
     CookbookObservation,
     CookbookOutcome,
@@ -411,6 +419,7 @@ class RouteDecision:
     reasons: tuple[str, ...] = ()
     resource_decision: ResourceDecision | None = None
     evidence: tuple[tuple[str, str], ...] = ()
+    decision_id: str | None = None
 
 
 class InferenceLifecycle(Protocol):
@@ -441,10 +450,14 @@ class ProviderRouter:
         clock: Callable[[], datetime] | None = None,
         failure_cooldown_seconds: float = 300.0,
         rate_limit_cooldown_seconds: float = 30.0,
+        routing_store: SQLiteRoutingFitnessStore | None = None,
     ) -> None:
         self._registry = registry
         self._resource_governor = resource_governor
         self._knowledge = knowledge
+        if routing_store is not None and not isinstance(routing_store, SQLiteRoutingFitnessStore):
+            raise TypeError("Routing decision store is invalid")
+        self._routing_store = routing_store
         self._hardware_profile = hardware_profile
         if type(usability_evidence) is not tuple or any(
             not isinstance(item, ModelUsabilityEvidence) for item in usability_evidence
@@ -592,6 +605,61 @@ class ProviderRouter:
         ]
         candidates = self._enrich_candidates(candidates, request)
         return self._select(candidates, request, resource_decision)
+
+    @property
+    def routing_store(self) -> SQLiteRoutingFitnessStore | None:
+        return self._routing_store
+
+    def decision_view(self, decision_id: str) -> RoutingDecisionView | None:
+        return (
+            None if self._routing_store is None else self._routing_store.decision_view(decision_id)
+        )
+
+    def record_execution_outcome(
+        self,
+        decision: RouteDecision,
+        *,
+        executed_identity: str,
+        operational_outcome: str,
+        semantic_outcome: SemanticOutcome,
+        rerouted: bool = False,
+        retry_count: int = 0,
+        evidence_refs: tuple[str, ...] = (),
+    ) -> bool:
+        if self._routing_store is None or decision.decision_id is None:
+            return False
+        return self._routing_store.record_decision_outcome(
+            RoutingDecisionOutcome(
+                outcome_id=(
+                    f"{decision.decision_id}:{retry_count}:"
+                    f"{executed_identity}:{operational_outcome}"
+                )[:256],
+                decision_id=decision.decision_id,
+                observed_at=self._clock(),
+                executed_identity=executed_identity,
+                operational_outcome=operational_outcome,
+                semantic_outcome=semantic_outcome,
+                rerouted=rerouted,
+                retry_count=retry_count,
+                evidence_refs=evidence_refs,
+            )
+        )
+
+    def persist_fusion_decision(
+        self,
+        request: RouteRequest,
+        decision: RouteDecision,
+        sources: tuple[RouteCandidate, ...],
+    ) -> RouteDecision:
+        if self._routing_store is None:
+            return decision
+        return self._persist_decision(
+            request,
+            replace(decision, primary=sources[0], fallbacks=sources[1:]),
+            (),
+            strategy="fusion",
+            fusion_strategy="bounded_distinct_model_sources",
+        )
 
     def route_voice(self, kind: VoiceProviderKind, request: RouteRequest) -> RouteDecision:
         if not isinstance(kind, VoiceProviderKind):
@@ -746,6 +814,7 @@ class ProviderRouter:
         unknown: list[str] = []
         rejected: list[str] = []
         rejected_evidence: list[tuple[str, str]] = []
+        rejected_facts: list[tuple[str, str]] = []
         benchmarks = {
             (item.provider_id.casefold(), item.model_id): item for item in request.benchmarks
         }
@@ -816,6 +885,8 @@ class ProviderRouter:
                 unknown.append(f"{candidate.provider_id}/{candidate.model_id}: {reason}")
             else:
                 rejected.append(f"{candidate.provider_id}/{candidate.model_id}: {reason}")
+            if reason is not None:
+                rejected_facts.append((candidate.identity.storage_key, reason[:128]))
             if reason is not None and candidate.usability is not None:
                 rejected_evidence.extend(
                     (
@@ -835,13 +906,17 @@ class ProviderRouter:
                 viable.sort(
                     key=lambda item: (self._resource_size(item), self._sort_key(item, request))
                 )
-            return RouteDecision(
-                RouteStatus.SELECTED,
-                viable[0],
-                tuple(viable[1:]),
-                (f"selected {viable[0].identity.storage_key}",),
-                resource_decision,
-                evidence=self._evidence(viable[0]),
+            return self._persist_decision(
+                request,
+                RouteDecision(
+                    RouteStatus.SELECTED,
+                    viable[0],
+                    tuple(viable[1:]),
+                    (f"selected {viable[0].identity.storage_key}",),
+                    resource_decision,
+                    evidence=self._evidence(viable[0]),
+                ),
+                tuple(rejected_facts),
             )
         if request.allow_no_llm:
             return self._no_llm(request, *(unknown or rejected or ("no compatible provider",)))
@@ -855,14 +930,97 @@ class ProviderRouter:
             and all("privacy classification" in item for item in rejected)
         ):
             status = RouteStatus.PRIVACY_BLOCKED
-        return RouteDecision(
-            status,
-            None,
-            (),
-            tuple((unknown or rejected or ["no compatible provider"])[:8]),
-            resource_decision,
-            evidence=tuple(rejected_evidence[:40]),
+        return self._persist_decision(
+            request,
+            RouteDecision(
+                status,
+                None,
+                (),
+                tuple((unknown or rejected or ["no compatible provider"])[:8]),
+                resource_decision,
+                evidence=tuple(rejected_evidence[:40]),
+            ),
+            tuple(rejected_facts),
         )
+
+    def _persist_decision(
+        self,
+        request: RouteRequest,
+        decision: RouteDecision,
+        exclusions: tuple[tuple[str, str], ...],
+        *,
+        strategy: str | None = None,
+        fusion_strategy: str | None = None,
+    ) -> RouteDecision:
+        if self._routing_store is None:
+            return decision
+        selected = decision.primary
+        record = RoutingDecisionRecord(
+            decision_id=str(uuid4()),
+            decided_at=self._clock(),
+            route_kind="model",
+            selected_identity=(selected.identity.storage_key if selected is not None else None),
+            role=request.role.value,
+            task_class=request.task_class,
+            policy=request.policy.value,
+            privacy_classification=request.effective_privacy_context().classification.value,
+            required_capabilities=tuple(sorted(request.required_capabilities)),
+            strategy=strategy or request.policy.value,
+            alternative_identities=tuple(
+                candidate.identity.storage_key for candidate in decision.fallbacks[:4]
+            ),
+            exclusions=exclusions[:8],
+            quality_score=selected.quality if selected is not None else None,
+            sample_count=(
+                selected.cookbook.sample_count if selected and selected.cookbook else None
+            ),
+            evidence_sufficiency=(
+                selected.cookbook.evidence_sufficiency.value
+                if selected is not None and selected.cookbook is not None
+                else None
+            ),
+            resource_status=(
+                decision.resource_decision.status.value
+                if decision.resource_decision is not None
+                else None
+            ),
+            protected_headroom=(
+                request.priority
+                in {
+                    ResourcePriority.BACKGROUND,
+                    ResourcePriority.MAINTENANCE,
+                    ResourcePriority.BENCHMARK,
+                    ResourcePriority.INDEXING,
+                }
+                if decision.resource_decision is not None
+                else None
+            ),
+            affinity_current=(
+                selected is not None
+                and request.current_identity is not None
+                and selected.identity == request.current_identity
+            ),
+            affinity_warm=(selected is not None and selected.identity in request.warm_identities),
+            switching_cost_ms=(
+                selected.measurement.load_seconds * 1000.0
+                if selected is not None
+                and selected.measurement is not None
+                and selected.measurement.load_seconds is not None
+                else selected.benchmark.load_latency_ms
+                if selected is not None
+                and selected.benchmark is not None
+                and selected.benchmark.load_latency_ms is not None
+                else None
+            ),
+            predicted_latency_ms=selected.latency if selected is not None else None,
+            predicted_cost=selected.cost if selected is not None else None,
+            fallback_identities=tuple(
+                candidate.identity.storage_key for candidate in decision.fallbacks[:4]
+            ),
+            fusion_strategy=fusion_strategy,
+        )
+        self._routing_store.record_decision(record)
+        return replace(decision, decision_id=record.decision_id)
 
     def resource_budget_for(
         self, candidate: RouteCandidate, request: RouteRequest
@@ -1313,6 +1471,215 @@ class DispatchChunk:
     rerouted: bool = False
 
 
+class FusionMode(StrEnum):
+    NEVER = "never"
+    AUTO = "auto"
+    REQUIRE = "require"
+
+
+@dataclass(frozen=True, slots=True)
+class FusionPolicy:
+    """Conservative model-only fusion policy."""
+
+    mode: FusionMode = FusionMode.AUTO
+    max_sources: int = 2
+    minimum_complexity: str = "high"
+    minimum_quality_score: float | None = 0.70
+    allow_quality_first: bool = True
+    allow_exploration: bool = False
+    synthesis_enabled: bool = False
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.mode, FusionMode) or not 1 <= self.max_sources <= 2:
+            raise ValueError("Fusion policy is invalid")
+        if self.minimum_complexity not in {"medium", "high", "critical"}:
+            raise ValueError("Fusion complexity threshold is invalid")
+        if self.minimum_quality_score is not None and not 0.0 <= self.minimum_quality_score <= 1.0:
+            raise ValueError("Fusion quality threshold is invalid")
+        if type(self.allow_quality_first) is not bool or type(self.allow_exploration) is not bool:
+            raise ValueError("Fusion policy flags are invalid")
+        if self.synthesis_enabled:
+            raise ValueError("V1 synthesis is intentionally unsupported")
+
+
+@dataclass(frozen=True, slots=True)
+class FusionDispatchResult:
+    final_result: GenerationResult | None
+    source_results: tuple[DispatchResult, ...]
+    planned_source_identities: tuple[str, ...]
+    actual_source_identities: tuple[str, ...]
+    fused: bool
+    degraded_to_single: bool
+    synthesis_result: GenerationResult | None = None
+    decision_id: str | None = None
+
+
+class FusionDispatchError(RuntimeError):
+    """Fusion could not produce a safe bounded result."""
+
+
+class FusionCoordinator:
+    """Coordinate bounded model legs through the ordinary dispatcher only."""
+
+    def __init__(
+        self,
+        router: ProviderRouter,
+        dispatcher: InferenceDispatcher,
+        *,
+        policy: FusionPolicy | None = None,
+        resilience: Any | None = None,
+    ) -> None:
+        if not isinstance(router, ProviderRouter) or not isinstance(
+            dispatcher, InferenceDispatcher
+        ):
+            raise TypeError("Fusion requires the canonical router and dispatcher")
+        self._router = router
+        self._dispatcher = dispatcher
+        self._policy = policy or FusionPolicy()
+        self._resilience = resilience
+
+    @property
+    def policy(self) -> FusionPolicy:
+        return self._policy
+
+    async def generate(
+        self,
+        request: GenerationRequest,
+        intent: RouteRequest,
+        *,
+        decision: RouteDecision | None = None,
+    ) -> FusionDispatchResult:
+        if not isinstance(request, GenerationRequest) or not isinstance(intent, RouteRequest):
+            raise ValueError("Fusion input is malformed")
+        selected = decision or self._router.route(intent)
+        sources = self._sources(selected, intent)
+        if not self._should_fuse(intent):
+            result = await self._dispatcher.generate(request, intent, decision=selected)
+            actual_identity = (
+                result.decision.primary.identity.storage_key
+                if result.decision.primary is not None
+                else None
+            )
+            return FusionDispatchResult(
+                result.result,
+                (result,),
+                (selected.primary.identity.storage_key,) if selected.primary is not None else (),
+                (actual_identity,) if actual_identity is not None else (),
+                False,
+                False,
+                decision_id=selected.decision_id,
+            )
+        if len(sources) < 2:
+            if not sources:
+                raise FusionDispatchError("No independently eligible fusion source remains")
+            single_decision = replace(selected, primary=sources[0], fallbacks=())
+            result = await self._dispatcher.generate(request, intent, decision=single_decision)
+            actual_identity = (
+                result.decision.primary.identity.storage_key
+                if result.decision.primary is not None
+                else None
+            )
+            return FusionDispatchResult(
+                result.result,
+                (result,),
+                (sources[0].identity.storage_key,),
+                (actual_identity,) if actual_identity is not None else (),
+                False,
+                True,
+                decision_id=selected.decision_id,
+            )
+        fusion_decision = self._router.persist_fusion_decision(intent, selected, sources)
+        successes: list[DispatchResult] = []
+        unknown_failure = False
+        for source in sources:
+            leg_decision = replace(
+                fusion_decision,
+                primary=source,
+                fallbacks=(),
+            )
+            try:
+                successes.append(
+                    await self._dispatcher.generate(request, intent, decision=leg_decision)
+                )
+            except InferenceDispatchError as error:
+                unknown_failure = unknown_failure or error.status is RouteStatus.UNKNOWN
+        actual_identities = tuple(
+            dict.fromkeys(
+                result.decision.primary.identity.storage_key
+                for result in successes
+                if result.decision.primary is not None
+            )
+        )
+        if len(actual_identities) < 2:
+            if not successes:
+                raise FusionDispatchError(
+                    "No fusion source completed safely"
+                    + ("; source outcome is unknown" if unknown_failure else "")
+                )
+            return FusionDispatchResult(
+                successes[0].result,
+                tuple(successes),
+                tuple(source.identity.storage_key for source in sources),
+                actual_identities,
+                False,
+                True,
+                decision_id=fusion_decision.decision_id,
+            )
+        return FusionDispatchResult(
+            successes[0].result,
+            tuple(successes),
+            tuple(source.identity.storage_key for source in sources),
+            actual_identities,
+            True,
+            False,
+            decision_id=fusion_decision.decision_id,
+        )
+
+    def _should_fuse(self, intent: RouteRequest) -> bool:
+        if self._policy.mode is FusionMode.NEVER or not self._policy.allow_quality_first:
+            return False
+        if intent.requires_tools or intent.role is ModelRole.TOOL_USE:
+            return False
+        rank = {"low": 0, "medium": 1, "high": 2, "critical": 3}
+        qualifies = (
+            rank.get(intent.complexity.casefold(), 0) >= rank[self._policy.minimum_complexity]
+        )
+        return qualifies or (
+            self._policy.mode is FusionMode.REQUIRE and intent.policy is RoutingPolicy.QUALITY_FIRST
+        )
+
+    def _sources(self, decision: RouteDecision, intent: RouteRequest) -> tuple[RouteCandidate, ...]:
+        candidates = (() if decision.primary is None else (decision.primary,)) + decision.fallbacks
+        valid: list[RouteCandidate] = []
+        identities: set[str] = set()
+        for candidate in candidates:
+            identity = candidate.identity.storage_key
+            if identity in identities:
+                continue
+            if self._policy.minimum_quality_score is not None and (
+                candidate.quality is None or candidate.quality < self._policy.minimum_quality_score
+            ):
+                continue
+            if self._resilience is not None:
+                key = self._resilience.key(identity, "model", intent.task_class, intent.role.value)
+                allowed, _probe = self._resilience.admit(key)
+                if (
+                    not allowed
+                    or not self._policy.allow_exploration
+                    and not self._resilience.is_lkgr(key)
+                ):
+                    # A closed route with insufficient evidence is valid for ordinary routing,
+                    # but experimental exploration is not compounded with fusion.
+                    snapshot = self._resilience.snapshot(key)
+                    if snapshot.state.value != "closed" or not self._resilience.is_lkgr(key):
+                        continue
+            identities.add(identity)
+            valid.append(candidate)
+            if len(valid) >= self._policy.max_sources:
+                break
+        return tuple(valid)
+
+
 class InferenceDispatcher:
     """Execute the router's decision through registry-owned provider factories."""
 
@@ -1417,6 +1784,14 @@ class InferenceDispatcher:
                 if not isinstance(result, GenerationResult) or result.model != candidate.model_id:
                     raise RuntimeError("provider/model identity mismatch")
                 self._router.record_success(candidate.identity)
+                self._router.record_execution_outcome(
+                    current_decision,
+                    executed_identity=candidate.identity.storage_key,
+                    operational_outcome="succeeded",
+                    semantic_outcome=SemanticOutcome.UNVERIFIED,
+                    rerouted=rerouted,
+                    retry_count=attempt,
+                )
                 return DispatchResult(
                     result,
                     current_decision,
@@ -1424,6 +1799,14 @@ class InferenceDispatcher:
                 )
             except PrivacyBlockedError as error:
                 release_reason = ReservationReleaseReason.CRASH
+                self._router.record_execution_outcome(
+                    current_decision,
+                    executed_identity=candidate.identity.storage_key,
+                    operational_outcome="privacy_block",
+                    semantic_outcome=SemanticOutcome.UNKNOWN,
+                    rerouted=rerouted,
+                    retry_count=attempt,
+                )
                 self._router.record_failure(
                     candidate.identity,
                     UsabilityReason.PRIVACY_BLOCKED,
@@ -1458,6 +1841,18 @@ class InferenceDispatcher:
                     else ReservationReleaseReason.CRASH
                 )
                 usability_reason = _usability_reason(error)
+                self._router.record_execution_outcome(
+                    current_decision,
+                    executed_identity=candidate.identity.storage_key,
+                    operational_outcome=failure.value,
+                    semantic_outcome=(
+                        SemanticOutcome.UNKNOWN
+                        if failure is RouteFailureClass.UNKNOWN_OUTCOME
+                        else SemanticOutcome.UNVERIFIED
+                    ),
+                    rerouted=rerouted,
+                    retry_count=attempt,
+                )
                 if usability_reason is not None:
                     self._router.record_failure(candidate.identity, usability_reason)
                 if failure is RouteFailureClass.UNKNOWN_OUTCOME:
@@ -1567,9 +1962,25 @@ class InferenceDispatcher:
                     yielded = True
                     yield DispatchChunk(chunk, current_decision, rerouted)
                 self._router.record_success(candidate.identity)
+                self._router.record_execution_outcome(
+                    current_decision,
+                    executed_identity=candidate.identity.storage_key,
+                    operational_outcome="succeeded",
+                    semantic_outcome=SemanticOutcome.UNVERIFIED,
+                    rerouted=rerouted,
+                    retry_count=attempt,
+                )
                 return
             except PrivacyBlockedError as error:
                 release_reason = ReservationReleaseReason.CRASH
+                self._router.record_execution_outcome(
+                    current_decision,
+                    executed_identity=candidate.identity.storage_key,
+                    operational_outcome="privacy_block",
+                    semantic_outcome=SemanticOutcome.UNKNOWN,
+                    rerouted=rerouted,
+                    retry_count=attempt,
+                )
                 self._router.record_failure(
                     candidate.identity,
                     UsabilityReason.PRIVACY_BLOCKED,
@@ -1604,6 +2015,18 @@ class InferenceDispatcher:
                     else ReservationReleaseReason.CRASH
                 )
                 usability_reason = _usability_reason(error)
+                self._router.record_execution_outcome(
+                    current_decision,
+                    executed_identity=candidate.identity.storage_key,
+                    operational_outcome=failure.value,
+                    semantic_outcome=(
+                        SemanticOutcome.UNKNOWN
+                        if failure is RouteFailureClass.UNKNOWN_OUTCOME
+                        else SemanticOutcome.UNVERIFIED
+                    ),
+                    rerouted=rerouted,
+                    retry_count=attempt,
+                )
                 if usability_reason is not None:
                     self._router.record_failure(candidate.identity, usability_reason)
                 if failure is RouteFailureClass.UNKNOWN_OUTCOME:

@@ -3,15 +3,18 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+from datetime import UTC, datetime
 from enum import StrEnum
 from typing import TYPE_CHECKING
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from jarvis.ai.fitness import (
     FitnessEvidence,
     RouteFitnessView,
+    RoutingDecisionRecord,
     RoutingFitnessProjection,
     RoutingResilienceService,
+    SQLiteRoutingFitnessStore,
 )
 from jarvis.ai.models import ModelRole, PrivacyContext
 from jarvis.ai.providers.registry import ProviderLocality
@@ -374,6 +377,7 @@ class ExecutionRouteDecision:
     eligible: tuple[ExecutionCandidate, ...] = ()
     excluded: tuple[ExecutionCandidate, ...] = ()
     reasons: tuple[EligibilityCode, ...] = ()
+    decision_id: str | None = None
 
 
 class ExecutionRouteSelector:
@@ -388,6 +392,7 @@ class ExecutionRouteSelector:
         resource_governor: ResourceGovernor | None = None,
         fitness: RoutingFitnessProjection | None = None,
         resilience: RoutingResilienceService | None = None,
+        routing_store: SQLiteRoutingFitnessStore | None = None,
     ) -> None:
         if model_router is not None and not isinstance(model_router, ProviderRouter):
             raise TypeError("Model router is invalid")
@@ -403,12 +408,15 @@ class ExecutionRouteSelector:
             raise TypeError("Routing fitness projection is invalid")
         if resilience is not None and not isinstance(resilience, RoutingResilienceService):
             raise TypeError("Routing resilience service is invalid")
+        if routing_store is not None and not isinstance(routing_store, SQLiteRoutingFitnessStore):
+            raise TypeError("Routing decision store is invalid")
         self._model_router = model_router
         self._tool_registry = tool_registry
         self._capability_registry = capability_registry
         self._resource_governor = resource_governor
         self._fitness = fitness
         self._resilience = resilience
+        self._routing_store = routing_store
 
     def route(self, requirements: StepRequirements) -> ExecutionRouteDecision:
         if not isinstance(requirements, StepRequirements):
@@ -423,18 +431,118 @@ class ExecutionRouteSelector:
         excluded.extend(resilience_excluded)
         eligible.sort(key=lambda item: self._preference_key(item, requirements))
         if eligible:
-            return ExecutionRouteDecision(
-                ExecutionRouteStatus.SELECTED,
-                eligible[0],
-                tuple(eligible),
-                tuple(excluded),
+            return self._persist_decision(
+                requirements,
+                ExecutionRouteDecision(
+                    ExecutionRouteStatus.SELECTED,
+                    eligible[0],
+                    tuple(eligible),
+                    tuple(excluded),
+                ),
             )
         reasons = tuple(dict.fromkeys(code for item in excluded for code in item.eligibility.codes))
         if not reasons and requirements.model_inference is ModelInferencePolicy.FORBIDDEN:
             reasons = (EligibilityCode.NOT_EXECUTABLE,)
-        return ExecutionRouteDecision(
-            ExecutionRouteStatus.NO_VALID_ROUTE, None, (), tuple(excluded), reasons
+        return self._persist_decision(
+            requirements,
+            ExecutionRouteDecision(
+                ExecutionRouteStatus.NO_VALID_ROUTE, None, (), tuple(excluded), reasons
+            ),
         )
+
+    def _persist_decision(
+        self, requirements: StepRequirements, decision: ExecutionRouteDecision
+    ) -> ExecutionRouteDecision:
+        if self._routing_store is None:
+            return decision
+        selected = decision.primary
+        resilience_snapshot = None
+        selected_lkgr = None
+        selected_resource_status = None
+        if selected is not None and self._resilience is not None:
+            resilience_key = self._resilience.key(
+                selected.identity,
+                selected.kind.value,
+                requirements.task_class,
+                requirements.role.value,
+            )
+            resilience_snapshot = self._resilience.snapshot(resilience_key)
+            selected_lkgr = self._resilience.is_lkgr(resilience_key)
+        if (
+            selected is not None
+            and self._resource_governor is not None
+            and requirements.resource_budget
+        ):
+            selected_resource_status = self._resource_governor.decide(
+                f"execution-decision.{selected.identity}",
+                requirements.priority,
+                requirements.resource_budget,
+            ).status.value
+        record = RoutingDecisionRecord(
+            decision_id=str(uuid4()),
+            decided_at=datetime.now(UTC),
+            route_kind=(
+                "tool"
+                if selected is None or selected.kind is ExecutionCandidateKind.TOOL
+                else "model"
+            ),
+            selected_identity=selected.identity if selected is not None else None,
+            role=requirements.role.value,
+            task_class=requirements.task_class,
+            policy=requirements.policy.value,
+            privacy_classification=requirements.privacy_context.classification.value,
+            required_capabilities=tuple(sorted(requirements.required_capabilities)),
+            strategy=requirements.policy.value,
+            alternative_identities=tuple(item.identity for item in decision.eligible[1:5]),
+            exclusions=tuple(
+                (item.identity, item.eligibility.codes[0].value)
+                for item in decision.excluded[:8]
+                if item.eligibility.codes
+            ),
+            quality_score=(
+                selected.fitness.verified_success_rate
+                if selected is not None and selected.fitness is not None
+                else None
+            ),
+            sample_count=(
+                selected.fitness.sample_count
+                if selected is not None and selected.fitness is not None
+                else None
+            ),
+            evidence_sufficiency=(
+                selected.fitness.evidence.value
+                if selected is not None and selected.fitness is not None
+                else None
+            ),
+            lkgr=selected_lkgr,
+            breaker_state=(
+                resilience_snapshot.state.value if resilience_snapshot is not None else None
+            ),
+            resource_status=(
+                selected_resource_status
+                or (
+                    EligibilityCode.RESOURCE_INELIGIBLE.value
+                    if any(
+                        EligibilityCode.RESOURCE_INELIGIBLE in item.eligibility.codes
+                        for item in decision.excluded
+                    )
+                    else None
+                )
+            ),
+            protected_headroom=(
+                requirements.priority.value
+                in {"background", "maintenance", "benchmark", "indexing"}
+                if selected_resource_status is not None
+                else None
+            ),
+            exploration=any(
+                EligibilityCode.EXPLORATION_SELECTED in item.eligibility.codes
+                for item in decision.eligible
+            ),
+            fallback_identities=tuple(item.identity for item in decision.eligible[1:5]),
+        )
+        self._routing_store.record_decision(record)
+        return replace(decision, decision_id=record.decision_id)
 
     def _apply_resilience(
         self,

@@ -305,6 +305,7 @@ class StepExecutionResult:
     error_message: str | None = None
     approval_request_ids: tuple[UUID, ...] = ()
     effect_outcome: EffectOutcome | None = None
+    routing_decision_id: str | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.status, StepExecutionStatus):
@@ -321,6 +322,12 @@ class StepExecutionResult:
                 StepExecutionStatus.UNKNOWN_OUTCOME: EffectOutcome.UNKNOWN_OUTCOME,
             }[self.status]
             object.__setattr__(self, "effect_outcome", default_outcome)
+        if self.routing_decision_id is not None and (
+            type(self.routing_decision_id) is not str
+            or not self.routing_decision_id.strip()
+            or len(self.routing_decision_id) > 128
+        ):
+            raise ValueError("Routing decision reference is invalid")
         try:
             json.loads(self.output_json)
         except json.JSONDecodeError as error:

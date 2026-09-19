@@ -146,6 +146,140 @@ class VerifiedRouteOutcome:
             raise ValueError("Route outcome evidence reference is invalid")
 
 
+@dataclass(frozen=True, slots=True)
+class RoutingDecisionRecord:
+    """Safe immutable routing facts; prompts and model output are excluded."""
+
+    decision_id: str
+    decided_at: datetime
+    route_kind: str
+    selected_identity: str | None
+    role: str
+    task_class: str
+    policy: str
+    privacy_classification: str
+    required_capabilities: tuple[str, ...] = ()
+    strategy: str = "single_route"
+    alternative_identities: tuple[str, ...] = ()
+    exclusions: tuple[tuple[str, str], ...] = ()
+    quality_score: float | None = None
+    sample_count: int | None = None
+    evidence_sufficiency: str | None = None
+    lkgr: bool | None = None
+    breaker_state: str | None = None
+    exploration: bool = False
+    resource_status: str | None = None
+    protected_headroom: bool | None = None
+    affinity_current: bool | None = None
+    affinity_warm: bool | None = None
+    switching_cost_ms: float | None = None
+    predicted_latency_ms: float | None = None
+    predicted_cost: float | None = None
+    fallback_identities: tuple[str, ...] = ()
+    evidence_refs: tuple[str, ...] = ()
+    fusion_strategy: str | None = None
+
+    def __post_init__(self) -> None:
+        for name, value, limit in (
+            ("decision ID", self.decision_id, 128),
+            ("route kind", self.route_kind, 64),
+            ("role", self.role, 64),
+            ("task class", self.task_class, 128),
+            ("policy", self.policy, 64),
+            ("privacy classification", self.privacy_classification, 64),
+            ("strategy", self.strategy, 64),
+        ):
+            if type(value) is not str or not value.strip() or len(value) > limit:
+                raise ValueError(f"Routing decision {name} is invalid")
+        if self.decided_at.tzinfo is None:
+            raise ValueError("Routing decision timestamp must be timezone-aware")
+        if self.selected_identity is not None and (
+            type(self.selected_identity) is not str or not self.selected_identity.strip()
+        ):
+            raise ValueError("Routing decision selected identity is invalid")
+        for name, values, limit in (
+            ("capabilities", self.required_capabilities, 32),
+            ("alternatives", self.alternative_identities, 4),
+            ("fallbacks", self.fallback_identities, 4),
+            ("evidence references", self.evidence_refs, 16),
+        ):
+            if type(values) is not tuple or len(values) > limit:
+                raise ValueError(f"Routing decision {name} are invalid")
+            if any(type(item) is not str or not item.strip() or len(item) > 256 for item in values):
+                raise ValueError(f"Routing decision {name} are invalid")
+        if type(self.exclusions) is not tuple or len(self.exclusions) > 8:
+            raise ValueError("Routing decision exclusions are invalid")
+        if any(
+            type(identity) is not str
+            or not identity.strip()
+            or type(reason) is not str
+            or not reason.strip()
+            for identity, reason in self.exclusions
+        ):
+            raise ValueError("Routing decision exclusions are invalid")
+        if self.sample_count is not None and (
+            type(self.sample_count) is not int or self.sample_count < 0
+        ):
+            raise ValueError("Routing decision sample count is invalid")
+        if type(self.exploration) is not bool:
+            raise ValueError("Routing decision exploration flag is invalid")
+        for metric_name, metric_value in (
+            ("quality", self.quality_score),
+            ("switching cost", self.switching_cost_ms),
+            ("latency", self.predicted_latency_ms),
+            ("cost", self.predicted_cost),
+        ):
+            if metric_value is not None and (
+                type(metric_value) not in {int, float} or metric_value < 0
+            ):
+                raise ValueError(f"Routing decision {metric_name} is invalid")
+
+
+@dataclass(frozen=True, slots=True)
+class RoutingDecisionOutcome:
+    """Trusted execution facts linked after an immutable routing decision."""
+
+    outcome_id: str
+    decision_id: str
+    observed_at: datetime
+    executed_identity: str
+    operational_outcome: str
+    semantic_outcome: SemanticOutcome
+    rerouted: bool = False
+    retry_count: int = 0
+    evidence_refs: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        for name, value in (
+            ("outcome ID", self.outcome_id),
+            ("decision ID", self.decision_id),
+            ("executed identity", self.executed_identity),
+            ("operational outcome", self.operational_outcome),
+        ):
+            if type(value) is not str or not value.strip() or len(value) > 256:
+                raise ValueError(f"Routing outcome {name} is invalid")
+        if self.observed_at.tzinfo is None or not isinstance(
+            self.semantic_outcome, SemanticOutcome
+        ):
+            raise ValueError("Routing outcome metadata is invalid")
+        if (
+            type(self.rerouted) is not bool
+            or type(self.retry_count) is not int
+            or self.retry_count < 0
+        ):
+            raise ValueError("Routing outcome state is invalid")
+        if type(self.evidence_refs) is not tuple or len(self.evidence_refs) > 16:
+            raise ValueError("Routing outcome evidence references are invalid")
+
+
+@dataclass(frozen=True, slots=True)
+class RoutingDecisionView:
+    """Bounded explainability projection with no prompt or response content."""
+
+    decision: RoutingDecisionRecord
+    outcomes: tuple[RoutingDecisionOutcome, ...] = ()
+
+
 class RoutingFitnessStoreError(RuntimeError):
     """Durable routing-fitness state is malformed or unavailable."""
 
@@ -161,7 +295,7 @@ def _parse_time(value: object) -> datetime | None:
 class SQLiteRoutingFitnessStore:
     """Durable bounded history for non-model route observations."""
 
-    _SCHEMA_VERSION = 3
+    _SCHEMA_VERSION = 4
     _MIGRATION_NAME = "create_routing_fitness_observations"
 
     def __init__(self, database_path: Path) -> None:
@@ -226,6 +360,8 @@ class SQLiteRoutingFitnessStore:
                     raise RoutingFitnessStoreError("Routing fitness migration identity mismatch")
                 if 3 in versions and versions[3] != "add_routing_fitness_budget":
                     raise RoutingFitnessStoreError("Routing fitness migration identity mismatch")
+                if 4 in versions and versions[4] != "add_routing_decisions":
+                    raise RoutingFitnessStoreError("Routing fitness migration identity mismatch")
                 if not versions:
                     self._connection.executescript(
                         """
@@ -286,6 +422,33 @@ class SQLiteRoutingFitnessStore:
                     self._connection.execute(
                         "INSERT INTO routing_fitness_schema(version, name) "
                         "VALUES (3, 'add_routing_fitness_budget')"
+                    )
+                if 4 not in versions:
+                    self._connection.executescript(
+                        """
+                        CREATE TABLE routing_decisions (
+                            decision_id TEXT PRIMARY KEY,
+                            decided_at TEXT NOT NULL,
+                            route_kind TEXT NOT NULL,
+                            decision_json TEXT NOT NULL
+                        );
+                        CREATE TABLE routing_decision_outcomes (
+                            outcome_id TEXT PRIMARY KEY,
+                            decision_id TEXT NOT NULL,
+                            observed_at TEXT NOT NULL,
+                            executed_identity TEXT NOT NULL,
+                            operational_outcome TEXT NOT NULL,
+                            semantic_outcome TEXT NOT NULL,
+                            rerouted INTEGER NOT NULL,
+                            retry_count INTEGER NOT NULL,
+                            evidence_refs_json TEXT NOT NULL,
+                            FOREIGN KEY(decision_id) REFERENCES routing_decisions(decision_id)
+                        );
+                        CREATE INDEX routing_decision_outcomes_decision
+                            ON routing_decision_outcomes(decision_id, observed_at, outcome_id);
+                        INSERT INTO routing_fitness_schema(version, name)
+                        VALUES (4, 'add_routing_decisions');
+                        """
                     )
         except sqlite3.DatabaseError as error:
             raise RoutingFitnessStoreError("Routing fitness migration failed") from error
@@ -423,6 +586,205 @@ class SQLiteRoutingFitnessStore:
             except sqlite3.DatabaseError as error:
                 self._connection.rollback()
                 raise RoutingFitnessStoreError("Routing breaker persistence failed") from error
+
+    def record_decision(self, decision: RoutingDecisionRecord) -> bool:
+        if not isinstance(decision, RoutingDecisionRecord):
+            raise RoutingFitnessStoreError("Routing decision is malformed")
+        payload = json.dumps(
+            {
+                "decision_id": decision.decision_id,
+                "decided_at": decision.decided_at.astimezone(UTC).isoformat(),
+                "route_kind": decision.route_kind,
+                "selected_identity": decision.selected_identity,
+                "role": decision.role,
+                "task_class": decision.task_class,
+                "policy": decision.policy,
+                "privacy_classification": decision.privacy_classification,
+                "required_capabilities": decision.required_capabilities,
+                "strategy": decision.strategy,
+                "alternative_identities": decision.alternative_identities,
+                "exclusions": decision.exclusions,
+                "quality_score": decision.quality_score,
+                "sample_count": decision.sample_count,
+                "evidence_sufficiency": decision.evidence_sufficiency,
+                "lkgr": decision.lkgr,
+                "breaker_state": decision.breaker_state,
+                "exploration": decision.exploration,
+                "resource_status": decision.resource_status,
+                "protected_headroom": decision.protected_headroom,
+                "affinity_current": decision.affinity_current,
+                "affinity_warm": decision.affinity_warm,
+                "switching_cost_ms": decision.switching_cost_ms,
+                "predicted_latency_ms": decision.predicted_latency_ms,
+                "predicted_cost": decision.predicted_cost,
+                "fallback_identities": decision.fallback_identities,
+                "evidence_refs": decision.evidence_refs,
+                "fusion_strategy": decision.fusion_strategy,
+            },
+            separators=(",", ":"),
+        )
+        with self._lock:
+            try:
+                self._connection.execute(
+                    "INSERT INTO routing_decisions("
+                    "decision_id, decided_at, route_kind, decision_json) "
+                    "VALUES (?, ?, ?, ?)",
+                    (
+                        decision.decision_id,
+                        decision.decided_at.astimezone(UTC).isoformat(),
+                        decision.route_kind,
+                        payload,
+                    ),
+                )
+                self._connection.commit()
+                return True
+            except sqlite3.IntegrityError:
+                self._connection.rollback()
+                row = self._connection.execute(
+                    "SELECT decision_json FROM routing_decisions WHERE decision_id = ?",
+                    (decision.decision_id,),
+                ).fetchone()
+                if row is None:
+                    raise RoutingFitnessStoreError(
+                        "Routing decision duplicate was ambiguous"
+                    ) from None
+                existing = self._decision_from_payload(str(row[0]))
+                if existing != decision:
+                    raise RoutingFitnessStoreError(
+                        "Conflicting routing decision replay is rejected"
+                    ) from None
+                return False
+            except sqlite3.DatabaseError as error:
+                self._connection.rollback()
+                raise RoutingFitnessStoreError("Routing decision persistence failed") from error
+
+    def decision(self, decision_id: str) -> RoutingDecisionRecord | None:
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT decision_json FROM routing_decisions WHERE decision_id = ?",
+                (decision_id,),
+            ).fetchone()
+        return None if row is None else self._decision_from_payload(str(row[0]))
+
+    def decisions(self, *, limit: int = 128) -> tuple[RoutingDecisionRecord, ...]:
+        if type(limit) is not int or not 1 <= limit <= 512:
+            raise RoutingFitnessStoreError("Routing decision limit is invalid")
+        with self._lock:
+            rows = self._connection.execute(
+                "SELECT decision_json FROM routing_decisions "
+                "ORDER BY decided_at, decision_id LIMIT ?",
+                (limit,),
+            ).fetchall()
+        return tuple(self._decision_from_payload(str(row[0])) for row in rows)
+
+    def record_decision_outcome(self, outcome: RoutingDecisionOutcome) -> bool:
+        if not isinstance(outcome, RoutingDecisionOutcome):
+            raise RoutingFitnessStoreError("Routing decision outcome is malformed")
+        with self._lock:
+            try:
+                if (
+                    self._connection.execute(
+                        "SELECT 1 FROM routing_decisions WHERE decision_id = ?",
+                        (outcome.decision_id,),
+                    ).fetchone()
+                    is None
+                ):
+                    raise RoutingFitnessStoreError("Routing decision is not durable")
+                self._connection.execute(
+                    "INSERT INTO routing_decision_outcomes("
+                    "outcome_id, decision_id, observed_at, executed_identity, "
+                    "operational_outcome, semantic_outcome, rerouted, retry_count, "
+                    "evidence_refs_json) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        outcome.outcome_id,
+                        outcome.decision_id,
+                        outcome.observed_at.astimezone(UTC).isoformat(),
+                        outcome.executed_identity,
+                        outcome.operational_outcome,
+                        outcome.semantic_outcome.value,
+                        int(outcome.rerouted),
+                        outcome.retry_count,
+                        json.dumps(outcome.evidence_refs, separators=(",", ":")),
+                    ),
+                )
+                self._connection.commit()
+                return True
+            except sqlite3.IntegrityError:
+                self._connection.rollback()
+                row = self._connection.execute(
+                    "SELECT * FROM routing_decision_outcomes WHERE outcome_id = ?",
+                    (outcome.outcome_id,),
+                ).fetchone()
+                if row is None:
+                    raise RoutingFitnessStoreError(
+                        "Routing outcome duplicate was ambiguous"
+                    ) from None
+                existing = self._outcome_from_decision_row(row)
+                if existing != outcome:
+                    raise RoutingFitnessStoreError(
+                        "Conflicting routing outcome replay is rejected"
+                    ) from None
+                return False
+            except RoutingFitnessStoreError:
+                self._connection.rollback()
+                raise
+            except sqlite3.DatabaseError as error:
+                self._connection.rollback()
+                raise RoutingFitnessStoreError("Routing outcome persistence failed") from error
+
+    def decision_outcomes(self, decision_id: str) -> tuple[RoutingDecisionOutcome, ...]:
+        with self._lock:
+            rows = self._connection.execute(
+                "SELECT * FROM routing_decision_outcomes WHERE decision_id = "
+                "? ORDER BY observed_at, outcome_id",
+                (decision_id,),
+            ).fetchall()
+        return tuple(self._outcome_from_decision_row(row) for row in rows)
+
+    def decision_view(self, decision_id: str) -> RoutingDecisionView | None:
+        record = self.decision(decision_id)
+        return (
+            None
+            if record is None
+            else RoutingDecisionView(record, self.decision_outcomes(decision_id))
+        )
+
+    @staticmethod
+    def _decision_from_payload(payload: str) -> RoutingDecisionRecord:
+        try:
+            values = json.loads(payload)
+            if not isinstance(values, dict):
+                raise ValueError("Routing decision payload is not an object")
+            values["decided_at"] = datetime.fromisoformat(str(values["decided_at"]))
+            values["required_capabilities"] = tuple(values["required_capabilities"])
+            values["alternative_identities"] = tuple(values["alternative_identities"])
+            values["exclusions"] = tuple(tuple(item) for item in values["exclusions"])
+            values["fallback_identities"] = tuple(values["fallback_identities"])
+            values["evidence_refs"] = tuple(values["evidence_refs"])
+            return RoutingDecisionRecord(**values)
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
+            raise RoutingFitnessStoreError("Stored routing decision is malformed") from error
+
+    @staticmethod
+    def _outcome_from_decision_row(row: sqlite3.Row) -> RoutingDecisionOutcome:
+        try:
+            refs = json.loads(str(row["evidence_refs_json"]))
+            if not isinstance(refs, list):
+                raise ValueError("Routing outcome references are malformed")
+            return RoutingDecisionOutcome(
+                outcome_id=str(row["outcome_id"]),
+                decision_id=str(row["decision_id"]),
+                observed_at=datetime.fromisoformat(str(row["observed_at"])),
+                executed_identity=str(row["executed_identity"]),
+                operational_outcome=str(row["operational_outcome"]),
+                semantic_outcome=SemanticOutcome(str(row["semantic_outcome"])),
+                rerouted=bool(row["rerouted"]),
+                retry_count=int(row["retry_count"]),
+                evidence_refs=tuple(str(item) for item in refs),
+            )
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
+            raise RoutingFitnessStoreError("Stored routing outcome is malformed") from error
 
     @staticmethod
     def _outcome_from_row(row: sqlite3.Row) -> VerifiedRouteOutcome:
@@ -831,6 +1193,9 @@ __all__ = [
     "ResiliencePolicy",
     "RouteFitnessView",
     "RouteResilienceKey",
+    "RoutingDecisionOutcome",
+    "RoutingDecisionRecord",
+    "RoutingDecisionView",
     "RoutingFitnessProjection",
     "RoutingResilienceService",
     "RoutingFitnessStoreError",

@@ -169,6 +169,26 @@ reservation race cannot invoke a provider. Current and warm route identities
 remain request-scoped affinity hints; quality eligibility precedes resource-size
 optimization and no scheduler or preemption authority is introduced.
 
+R3D-F extends the same routing-fitness store with schema v4 decision evidence
+and linked execution outcomes. A `RoutingDecisionRecord` contains bounded typed
+selection facts only: identities, policy/role/task class, hard exclusions,
+quality/resilience/resource/affinity facts, and evidence references. It never
+stores raw route prompts, conversation content, credentials, hidden reasoning,
+or model output. The selected route is immutable; a later trusted outcome stores
+the actual executed identity and operational/semantic status separately, with
+idempotent replay and conflict rejection. `RoutingDecisionView` is a structured
+diagnostic projection, not a second audit, trace, planning, permission, or
+verification authority.
+
+Selective fusion is model-generation-only and uses the existing
+`ProviderRouter`/`InferenceDispatcher` seams. Automatic fusion requires a
+high-value typed request, at least two distinct independently eligible source
+identities, and a bounded maximum of two legs. Each leg passes ordinary privacy,
+quality, resilience, and resource admission independently. Fusion is never
+used for effectful tools, does not synthesize in V1, does not claim semantic
+verification, and remains unsupported for streaming; streaming stays on the
+ordinary single-route path.
+
 ## Evidence and limits
 
 CI uses deterministic fake catalogs, downloaders, runtimes, hardware, model
