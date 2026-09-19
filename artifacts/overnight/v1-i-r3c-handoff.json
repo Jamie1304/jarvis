@@ -1,0 +1,63 @@
+{
+  "schema": "v1-i-r3c-handoff-1",
+  "authoritative_start_remote": "23c0791c739e14d1a7b55610f6cd683bbb98bc0f",
+  "local_reconciliation": {
+    "primary_head": "580be1279e8c332e6073f44bd970f2c5eaa7b635",
+    "preserved_primary_worktree_changes": [".gitignore", "weppy-project-sync/.gitignore"],
+    "reused_local_commit": "bc56db7aeef2254a80d82a96001d108498931e8e",
+    "reused_as": "7058c3315e9720bdda2123b05797eeabbf3535ce",
+    "discarded_local_commits": [],
+    "already_remote_commit": "580be1279e8c332e6073f44bd970f2c5eaa7b635"
+  },
+  "r3b": "COMPLETE",
+  "p3a": "INTEGRATED_SUPERSEDED_BY_GREEN_DESCENDANT",
+  "known_wsl_signal": "ENVIRONMENT_BLOCKED",
+  "r3c_files": [
+    "jarvis/applications/__init__.py",
+    "jarvis/applications/manager.py",
+    "jarvis/applications/models.py",
+    "tests/test_applications.py",
+    "jarvis/system_stewardship.py",
+    "tests/test_system_stewardship.py",
+    "artifacts/overnight/v1-i-r3c-acceptance.json",
+    "artifacts/overnight/v1-i-r3c-handoff.json"
+  ],
+  "focused_verification": {
+    "tests": "41 passed",
+    "changed_file_coverage": {"statement_percent": 95, "basis": "coverage run --branch focused relevant tests"},
+    "mypy": "PASS",
+    "ruff": "PASS",
+    "diff_check": "PASS",
+    "test_strength": "PASS; all weakening flags NO"
+  },
+  "canonical_quality": {
+    "interpreter": "C:/Users/jamie/AppData/Local/Programs/Python/Python312/python.exe",
+    "selected": "2382 passed, 9 skipped, 3 deselected",
+    "exact_coverage": {"covered": 49100, "total": 52970, "percent": 90.08012591214766},
+    "durable_stdout": "build/r3c-quality.stdout.log",
+    "durable_stderr": "build/r3c-quality.stderr.log",
+    "durable_pid": 48572,
+    "durable_started_at": "2026-09-19T08:02:35.0441305+02:00",
+    "durable_finished_at": "2026-09-19T08:21:01.3291537+02:00",
+    "status": "PASS",
+    "capture_note": "Start-Process handle did not refresh child exit_code; wrapper returned 0 and quality output completed the exact coverage report"
+  },
+  "standalone_v1_acceptance": {
+    "status": "PASS",
+    "passed": 174,
+    "skipped": 2,
+    "run_id": "fc11310f-d459-4880-ad5f-7c8424c7b456",
+    "result_artifact": "build/system-test-artifacts/fc11310f-d459-4880-ad5f-7c8424c7b456/stdout.log",
+    "source_sha256": "2da97e706aedd4c4783eca72399d91f659e1af8612127369a8fbd27dd3e6534c",
+    "bound_file_count": 415
+  },
+  "package_smoke": {
+    "status": "PASS",
+    "wheel_sha256": "7A6EF023359EFDE8E71589ACB31684C30045A9929B035E8C4397C14453D6DA40",
+    "sdist_sha256": "297B72BF0748F4C044BBAA2E29A3486BA8BCE34003BA82405258FBF541AF34C4",
+    "leak_checks": "PASS",
+    "record_tamper_matrix": "PASS"
+  },
+  "candidate_15": "NOT_CREATED",
+  "hosted_ci": "NOT_STARTED; requires final exact R3C push SHA"
+}

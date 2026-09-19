@@ -1,0 +1,55 @@
+{
+  "schema": "v1-i-r3c-acceptance-1",
+  "baseline": "23c0791c739e14d1a7b55610f6cd683bbb98bc0f",
+  "source": {
+    "prospective_tree": "uncommitted-r3c-source",
+    "source_sha256": "2da97e706aedd4c4783eca72399d91f659e1af8612127369a8fbd27dd3e6534c",
+    "bound_file_count": 415,
+    "changed_paths": [
+      "jarvis/applications/__init__.py",
+      "jarvis/applications/manager.py",
+      "jarvis/applications/models.py",
+      "tests/test_applications.py",
+      "jarvis/system_stewardship.py",
+      "tests/test_system_stewardship.py"
+    ]
+  },
+  "cases": {
+    "software_health": {
+      "status": "PASS",
+      "evidence": "tests/test_applications.py and tests/test_system_stewardship.py",
+      "limitation": "read-only trusted inventory and launch evidence only"
+    },
+    "security_health": {
+      "status": "PASS",
+      "evidence": "tests/test_system_stewardship.py provider provenance, threat, stale, unavailable, and model-claim rejection",
+      "limitation": "no trusted host security provider was composed for the real-host probe"
+    },
+    "startup_health": {
+      "status": "PASS",
+      "evidence": "tests/test_system_stewardship.py exact reversible plans, stale identity, receipt binding, and wildcard denial",
+      "limitation": "planning and revalidation only; no host startup mutation provider was composed"
+    },
+    "update_coordination": {
+      "status": "PASS",
+      "evidence": "tests/test_system_stewardship.py trusted candidate identity, provenance, version, plan, and stale-candidate checks",
+      "limitation": "coordination produces no direct install or privilege effect"
+    },
+    "authority_privacy_recovery": {
+      "status": "PASS",
+      "evidence": "41 focused relevant tests, audit_test_strength.py, package smoke tamper matrix",
+      "limitation": "raw host inventory was not emitted; real host probes record counts/status only"
+    }
+  },
+  "real_host_read_only_probes": {
+    "platform": "win32",
+    "application_inventory": {"status": "PASS", "record_count": 172},
+    "update_provider": {"status": "AVAILABLE", "provider": "winget availability check"},
+    "security_provider": {"status": "NOT_PROBED", "reason": "no trusted provider composed"},
+    "startup_provider": {"status": "NOT_PROBED", "reason": "no trusted provider composed"}
+  },
+  "limitations": [
+    "known WSL focus_change host signal remains ENVIRONMENT_BLOCKED and was not reopened",
+    "canonical quality wrapper metadata retained child_exit_code=null; native wrapper returned 0 and the durable quality output reached the exact coverage report"
+  ]
+}
