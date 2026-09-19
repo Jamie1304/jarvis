@@ -8,6 +8,8 @@
   },
   "source": {
     "prospective_tree": "cdb0101f73b02c02327aec0520a1cb0dd30a8e7f",
+    "final_commit": "614671bf277a117e387e2f7d5ba90345333e5801",
+    "final_tree": "2842ef20210df13f0a7f39572e8730365ef361",
     "qualification_source_sha256": "204217dc46c343751f457fa48f781ce91f9dab508cb2af5a0c4d38340405f61b",
     "qualification_bound_file_count": 419,
     "acceptance_source_sha256": "204217dc46c343751f457fa48f781ce91f9dab508cb2af5a0c4d38340405f61b",
@@ -79,5 +81,5 @@
     "record_tamper_matrix": "PASS"
   },
   "candidate_15": "NOT_CREATED",
-  "hosted_ci": {"baseline_lookup": "35429308350 exact baseline SHA in_progress; no credit claimed", "final_child": "PENDING_COMMIT_AND_PUSH"}
+  "hosted_ci": {"baseline_lookup": "35429308350 exact baseline SHA in_progress; no credit claimed", "final_child": "PENDING_PUSH"}
 }
