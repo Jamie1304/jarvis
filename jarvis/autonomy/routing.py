@@ -2,12 +2,17 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import StrEnum
 from typing import TYPE_CHECKING
 from uuid import UUID
 
-from jarvis.ai.fitness import FitnessEvidence, RouteFitnessView, RoutingFitnessProjection
+from jarvis.ai.fitness import (
+    FitnessEvidence,
+    RouteFitnessView,
+    RoutingFitnessProjection,
+    RoutingResilienceService,
+)
 from jarvis.ai.models import ModelRole, PrivacyContext
 from jarvis.ai.providers.registry import ProviderLocality
 from jarvis.ai.routing import (
@@ -71,6 +76,11 @@ class EligibilityCode(StrEnum):
     QUALITY_EVIDENCE_INSUFFICIENT = "quality_evidence_insufficient"
     QUALITY_EVIDENCE_STALE = "quality_evidence_stale"
     QUALITY_FLOOR_NOT_MET = "quality_floor_not_met"
+    CIRCUIT_OPEN = "circuit_open"
+    HALF_OPEN_PROBE = "half_open_probe"
+    LKGR_PREFERRED = "lkgr_preferred"
+    EXPLORATION_SELECTED = "exploration_selected"
+    EXPLORATION_NOT_ALLOWED = "exploration_not_allowed"
 
 
 class ExecutionRouteStatus(StrEnum):
@@ -126,6 +136,9 @@ class StepRoutingContext:
     resource_state: HardwareProfile | None = None
     preferred_tool_id: str | None = None
     minimum_verified_reliability: float | None = None
+    allow_exploration: bool = False
+    high_consequence: bool = False
+    verification_available: bool = True
 
     def __post_init__(self) -> None:
         if not isinstance(self.role, LogicalRole):
@@ -167,6 +180,10 @@ class StepRoutingContext:
             or not 0.0 <= self.minimum_verified_reliability <= 1.0
         ):
             raise ValueError("Step routing quality floor is invalid")
+        if type(self.allow_exploration) is not bool or type(self.high_consequence) is not bool:
+            raise ValueError("Step routing exploration flags are invalid")
+        if type(self.verification_available) is not bool:
+            raise ValueError("Step routing verification flag is invalid")
 
 
 @dataclass(frozen=True, slots=True)
@@ -195,6 +212,9 @@ class StepRequirements:
     resource_state: HardwareProfile | None
     preferred_tool_id: str | None
     minimum_verified_reliability: float | None
+    allow_exploration: bool
+    high_consequence: bool
+    verification_available: bool
 
     @classmethod
     def from_step(
@@ -226,6 +246,9 @@ class StepRequirements:
             resource_state=supplied.resource_state,
             preferred_tool_id=supplied.preferred_tool_id,
             minimum_verified_reliability=supplied.minimum_verified_reliability,
+            allow_exploration=supplied.allow_exploration,
+            high_consequence=supplied.high_consequence,
+            verification_available=supplied.verification_available,
         )
 
     @classmethod
@@ -269,6 +292,9 @@ class StepRequirements:
             resource_state=supplied.resource_state,
             preferred_tool_id=step.tool_id,
             minimum_verified_reliability=supplied.minimum_verified_reliability,
+            allow_exploration=supplied.allow_exploration,
+            high_consequence=supplied.high_consequence,
+            verification_available=supplied.verification_available,
         )
 
     def to_model_request(self) -> RouteRequest:
@@ -361,6 +387,7 @@ class ExecutionRouteSelector:
         capability_registry: CapabilityRegistry | None = None,
         resource_governor: ResourceGovernor | None = None,
         fitness: RoutingFitnessProjection | None = None,
+        resilience: RoutingResilienceService | None = None,
     ) -> None:
         if model_router is not None and not isinstance(model_router, ProviderRouter):
             raise TypeError("Model router is invalid")
@@ -374,11 +401,14 @@ class ExecutionRouteSelector:
             raise TypeError("Resource governor is invalid")
         if fitness is not None and not isinstance(fitness, RoutingFitnessProjection):
             raise TypeError("Routing fitness projection is invalid")
+        if resilience is not None and not isinstance(resilience, RoutingResilienceService):
+            raise TypeError("Routing resilience service is invalid")
         self._model_router = model_router
         self._tool_registry = tool_registry
         self._capability_registry = capability_registry
         self._resource_governor = resource_governor
         self._fitness = fitness
+        self._resilience = resilience
 
     def route(self, requirements: StepRequirements) -> ExecutionRouteDecision:
         if not isinstance(requirements, StepRequirements):
@@ -389,6 +419,9 @@ class ExecutionRouteSelector:
             self._discover_models(requirements, eligible, excluded)
         if requirements.model_inference is not ModelInferencePolicy.REQUIRED:
             self._discover_tools(requirements, eligible, excluded)
+        eligible, resilience_excluded = self._apply_resilience(eligible, requirements)
+        excluded.extend(resilience_excluded)
+        eligible.sort(key=lambda item: self._preference_key(item, requirements))
         if eligible:
             return ExecutionRouteDecision(
                 ExecutionRouteStatus.SELECTED,
@@ -402,6 +435,85 @@ class ExecutionRouteSelector:
         return ExecutionRouteDecision(
             ExecutionRouteStatus.NO_VALID_ROUTE, None, (), tuple(excluded), reasons
         )
+
+    def _apply_resilience(
+        self,
+        candidates: list[ExecutionCandidate],
+        requirements: StepRequirements,
+    ) -> tuple[list[ExecutionCandidate], list[ExecutionCandidate]]:
+        if self._resilience is None:
+            return candidates, []
+        eligible: list[ExecutionCandidate] = []
+        excluded: list[ExecutionCandidate] = []
+        for candidate in candidates:
+            key = self._resilience.key(
+                candidate.identity,
+                candidate.kind.value,
+                requirements.task_class,
+                requirements.role.value,
+            )
+            allowed, probe = self._resilience.admit(key)
+            if not allowed:
+                excluded.append(
+                    replace(
+                        candidate,
+                        eligibility=CandidateEligibility(
+                            False,
+                            (*candidate.eligibility.codes, EligibilityCode.CIRCUIT_OPEN),
+                        ),
+                    )
+                )
+                continue
+            if (
+                candidate.kind is ExecutionCandidateKind.TOOL
+                and requirements.allow_exploration
+                and not self._resilience.claim_exploration(
+                    key,
+                    allow_exploration=True,
+                    high_consequence=requirements.high_consequence,
+                    verification_available=requirements.verification_available,
+                )
+                and candidate.fitness is not None
+                and candidate.fitness.evidence
+                in {FitnessEvidence.UNKNOWN, FitnessEvidence.INSUFFICIENT}
+            ):
+                excluded.append(
+                    replace(
+                        candidate,
+                        eligibility=CandidateEligibility(
+                            False,
+                            (
+                                *candidate.eligibility.codes,
+                                EligibilityCode.EXPLORATION_NOT_ALLOWED,
+                            ),
+                        ),
+                    )
+                )
+                continue
+            codes = list(candidate.eligibility.codes)
+            if probe:
+                codes.append(EligibilityCode.HALF_OPEN_PROBE)
+            elif self._resilience.is_lkgr(key):
+                codes.append(EligibilityCode.LKGR_PREFERRED)
+            elif candidate.kind is ExecutionCandidateKind.TOOL and requirements.allow_exploration:
+                codes.append(EligibilityCode.EXPLORATION_SELECTED)
+            eligible.append(
+                replace(candidate, eligibility=CandidateEligibility(True, tuple(codes)))
+            )
+        return eligible, excluded
+
+    def _preference_key(
+        self, candidate: ExecutionCandidate, requirements: StepRequirements
+    ) -> tuple[int, str]:
+        if self._resilience is None:
+            return (0, candidate.identity)
+        key = self._resilience.key(
+            candidate.identity,
+            candidate.kind.value,
+            requirements.task_class,
+            requirements.role.value,
+        )
+        return (0 if self._resilience.is_lkgr(key) else 1, candidate.identity)
 
     def route_planning_step(self, step: PlanningStep) -> ExecutionRouteDecision:
         """Route the live PlanningEngine step; this path currently permits tools only."""

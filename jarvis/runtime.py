@@ -41,7 +41,11 @@ from jarvis.adoption import (
     WindowsSignerVerifier,
 )
 from jarvis.agent_runtime import AgentLoop
-from jarvis.ai.fitness import RoutingFitnessProjection, SQLiteRoutingFitnessStore
+from jarvis.ai.fitness import (
+    RoutingFitnessProjection,
+    RoutingResilienceService,
+    SQLiteRoutingFitnessStore,
+)
 from jarvis.ai.knowledge import ModelKnowledgeService, ModelKnowledgeStore
 from jarvis.ai.local_ai import LocalAIControlPlane, LocalAIUserPolicy
 from jarvis.ai.model_manager import LocalModelManager
@@ -735,6 +739,7 @@ class RuntimeContainer:
     model_knowledge: ModelKnowledgeService
     routing_fitness_store: SQLiteRoutingFitnessStore
     routing_fitness: RoutingFitnessProjection
+    routing_resilience: RoutingResilienceService
     acquisition_broker: AcquisitionBroker
     portfolio_optimizer: ModelPortfolioOptimizer
     ollama_runtime: OllamaRuntimeManager
@@ -1661,11 +1666,16 @@ class ApplicationRuntime:
             capability_registry = CapabilityRegistry()
             routing_fitness_store = SQLiteRoutingFitnessStore(paths.routing_fitness_database)
             routing_fitness = RoutingFitnessProjection(store=routing_fitness_store)
+            routing_resilience = RoutingResilienceService(
+                routing_fitness,
+                store=routing_fitness_store,
+            )
             execution_route_selector = ExecutionRouteSelector(
                 model_router=None,
                 tool_registry=registry,
                 capability_registry=capability_registry,
                 fitness=routing_fitness,
+                resilience=routing_resilience,
             )
             paths.validate_storage_layout()
             planning_store = SQLitePlanningStore(paths.planning_database)
@@ -1687,6 +1697,7 @@ class ApplicationRuntime:
                 lifecycle_audit=audit,
                 approval_invalidator=broker.invalidate_task_approvals,
                 routing_fitness=routing_fitness,
+                routing_resilience=routing_resilience,
             )
             engine.reconcile_after_restart()
             for task in engine.list_tasks():
@@ -2983,6 +2994,7 @@ class ApplicationRuntime:
                 model_knowledge=model_knowledge,
                 routing_fitness_store=routing_fitness_store,
                 routing_fitness=routing_fitness,
+                routing_resilience=routing_resilience,
                 acquisition_broker=acquisition_broker,
                 portfolio_optimizer=portfolio_optimizer,
                 ollama_runtime=ollama_runtime,

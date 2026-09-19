@@ -12,7 +12,7 @@ from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
-from jarvis.ai.fitness import RoutingFitnessProjection
+from jarvis.ai.fitness import RoutingFitnessProjection, RoutingResilienceService, SemanticOutcome
 from jarvis.autonomy.routing import (
     ExecutionCandidateKind,
     ExecutionRouteSelector,
@@ -333,6 +333,7 @@ class PlanningEngine:
         lifecycle_audit: SQLiteAuditSink | None = None,
         approval_invalidator: Callable[[UUID], Awaitable[tuple[UUID, ...]]] | None = None,
         routing_fitness: RoutingFitnessProjection | None = None,
+        routing_resilience: RoutingResilienceService | None = None,
     ) -> None:
         self._store = store
         self._advisor = advisor
@@ -350,6 +351,11 @@ class PlanningEngine:
         ):
             raise TypeError("Routing fitness projection is invalid")
         self._routing_fitness = routing_fitness
+        if routing_resilience is not None and not isinstance(
+            routing_resilience, RoutingResilienceService
+        ):
+            raise TypeError("Routing resilience service is invalid")
+        self._routing_resilience = routing_resilience
         self._cancellations: dict[UUID, asyncio.Event] = {}
 
     async def create_task(
@@ -1279,6 +1285,25 @@ class PlanningEngine:
     ) -> None:
         if self._routing_fitness is not None:
             self._routing_fitness.record_planning_step(task, step, execution, verification)
+        if self._routing_resilience is not None:
+            semantic = (
+                SemanticOutcome.UNKNOWN
+                if execution.status is StepExecutionStatus.UNKNOWN_OUTCOME
+                else SemanticOutcome.UNVERIFIED
+                if verification is None
+                else SemanticOutcome.VERIFIED_SUCCESS
+                if verification.succeeded
+                else SemanticOutcome.VERIFIED_FAILURE
+            )
+            key = self._routing_resilience.key(
+                step.tool_id, "tool", step.capability, "orchestration"
+            )
+            self._routing_resilience.record(
+                key,
+                operational_outcome=execution.status.value,
+                semantic_outcome=semantic,
+                failure_class=execution.error_code,
+            )
 
     def _recover_unknown_outcome(
         self,

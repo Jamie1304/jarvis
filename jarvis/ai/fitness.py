@@ -35,6 +35,57 @@ class FitnessEvidence(StrEnum):
     STALE = "stale"
 
 
+class CircuitState(StrEnum):
+    CLOSED = "closed"
+    OPEN = "open"
+    HALF_OPEN = "half_open"
+
+
+@dataclass(frozen=True, slots=True)
+class RouteResilienceKey:
+    route_identity: str
+    candidate_kind: str
+    task_class: str
+    role: str
+
+    @property
+    def storage_key(self) -> str:
+        return "|".join((self.route_identity, self.candidate_kind, self.task_class, self.role))
+
+
+@dataclass(frozen=True, slots=True)
+class CircuitSnapshot:
+    key: RouteResilienceKey
+    state: CircuitState = CircuitState.CLOSED
+    qualifying_failures: int = 0
+    window_started_at: datetime | None = None
+    opened_at: datetime | None = None
+    cooldown_until: datetime | None = None
+    probe_claimed: bool = False
+    exploration_attempts: int = 0
+    exploration_last_at: datetime | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ResiliencePolicy:
+    failure_threshold: int = 3
+    failure_window: timedelta = timedelta(minutes=10)
+    cooldown: timedelta = timedelta(minutes=5)
+    lkgr_min_samples: int = 3
+    lkgr_min_verified_reliability: float = 0.8
+    exploration_max_attempts: int = 1
+
+    def __post_init__(self) -> None:
+        if self.failure_threshold < 1 or self.failure_window <= timedelta(0):
+            raise ValueError("Circuit failure policy is invalid")
+        if self.cooldown <= timedelta(0) or self.lkgr_min_samples < 1:
+            raise ValueError("Circuit cooldown policy is invalid")
+        if not 0.0 <= self.lkgr_min_verified_reliability <= 1.0:
+            raise ValueError("LKGR reliability policy is invalid")
+        if self.exploration_max_attempts < 1:
+            raise ValueError("Exploration policy is invalid")
+
+
 @dataclass(frozen=True, slots=True)
 class VerifiedRouteOutcome:
     """One trusted, bounded route observation; no prompt or response content."""
@@ -99,10 +150,18 @@ class RoutingFitnessStoreError(RuntimeError):
     """Durable routing-fitness state is malformed or unavailable."""
 
 
+def _format_time(value: datetime | None) -> str | None:
+    return value.astimezone(UTC).isoformat() if value is not None else None
+
+
+def _parse_time(value: object) -> datetime | None:
+    return datetime.fromisoformat(str(value)) if value is not None else None
+
+
 class SQLiteRoutingFitnessStore:
     """Durable bounded history for non-model route observations."""
 
-    _SCHEMA_VERSION = 1
+    _SCHEMA_VERSION = 3
     _MIGRATION_NAME = "create_routing_fitness_observations"
 
     def __init__(self, database_path: Path) -> None:
@@ -163,6 +222,10 @@ class SQLiteRoutingFitnessStore:
                     raise RoutingFitnessStoreError("Routing fitness database uses a future schema")
                 if versions and versions.get(1) != self._MIGRATION_NAME:
                     raise RoutingFitnessStoreError("Routing fitness migration identity mismatch")
+                if 2 in versions and versions[2] != "add_routing_fitness_breakers":
+                    raise RoutingFitnessStoreError("Routing fitness migration identity mismatch")
+                if 3 in versions and versions[3] != "add_routing_fitness_budget":
+                    raise RoutingFitnessStoreError("Routing fitness migration identity mismatch")
                 if not versions:
                     self._connection.executescript(
                         """
@@ -189,6 +252,40 @@ class SQLiteRoutingFitnessStore:
                         INSERT INTO routing_fitness_schema(version, name)
                         VALUES (1, 'create_routing_fitness_observations');
                         """
+                    )
+                    versions[1] = "create_routing_fitness_observations"
+                if 2 not in versions:
+                    self._connection.executescript(
+                        """
+                        CREATE TABLE routing_fitness_breakers (
+                            breaker_key TEXT PRIMARY KEY,
+                            route_identity TEXT NOT NULL,
+                            candidate_kind TEXT NOT NULL,
+                            task_class TEXT NOT NULL,
+                            role TEXT NOT NULL,
+                            state TEXT NOT NULL,
+                            qualifying_failures INTEGER NOT NULL,
+                            window_started_at TEXT,
+                            opened_at TEXT,
+                            cooldown_until TEXT,
+                            probe_claimed INTEGER NOT NULL
+                        );
+                        INSERT INTO routing_fitness_schema(version, name)
+                        VALUES (2, 'add_routing_fitness_breakers');
+                        """
+                    )
+                    versions[2] = "add_routing_fitness_breakers"
+                if 3 not in versions:
+                    self._connection.execute(
+                        "ALTER TABLE routing_fitness_breakers ADD COLUMN "
+                        "exploration_attempts INTEGER NOT NULL DEFAULT 0"
+                    )
+                    self._connection.execute(
+                        "ALTER TABLE routing_fitness_breakers ADD COLUMN exploration_last_at TEXT"
+                    )
+                    self._connection.execute(
+                        "INSERT INTO routing_fitness_schema(version, name) "
+                        "VALUES (3, 'add_routing_fitness_budget')"
                     )
         except sqlite3.DatabaseError as error:
             raise RoutingFitnessStoreError("Routing fitness migration failed") from error
@@ -260,6 +357,72 @@ class SQLiteRoutingFitnessStore:
             return tuple(self._outcome_from_row(row) for row in rows)
         except (KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
             raise RoutingFitnessStoreError("Stored routing fitness is malformed") from error
+
+    def load_breaker(self, key: RouteResilienceKey) -> CircuitSnapshot:
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT * FROM routing_fitness_breakers WHERE breaker_key = ?",
+                (key.storage_key,),
+            ).fetchone()
+        if row is None:
+            return CircuitSnapshot(key)
+        try:
+            return CircuitSnapshot(
+                key=key,
+                state=CircuitState(str(row["state"])),
+                qualifying_failures=int(row["qualifying_failures"]),
+                window_started_at=_parse_time(row["window_started_at"]),
+                opened_at=_parse_time(row["opened_at"]),
+                cooldown_until=_parse_time(row["cooldown_until"]),
+                probe_claimed=bool(row["probe_claimed"]),
+                exploration_attempts=int(row["exploration_attempts"]),
+                exploration_last_at=_parse_time(row["exploration_last_at"]),
+            )
+        except (KeyError, TypeError, ValueError) as error:
+            raise RoutingFitnessStoreError("Stored routing breaker is malformed") from error
+
+    def save_breaker(self, snapshot: CircuitSnapshot) -> None:
+        key = snapshot.key
+        with self._lock:
+            try:
+                self._connection.execute(
+                    """
+                    INSERT INTO routing_fitness_breakers(
+                        breaker_key, route_identity, candidate_kind, task_class, role,
+                        state, qualifying_failures, window_started_at, opened_at,
+                        cooldown_until, probe_claimed, exploration_attempts,
+                        exploration_last_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(breaker_key) DO UPDATE SET
+                        state=excluded.state,
+                        qualifying_failures=excluded.qualifying_failures,
+                        window_started_at=excluded.window_started_at,
+                        opened_at=excluded.opened_at,
+                        cooldown_until=excluded.cooldown_until,
+                        probe_claimed=excluded.probe_claimed,
+                        exploration_attempts=excluded.exploration_attempts,
+                        exploration_last_at=excluded.exploration_last_at
+                    """,
+                    (
+                        key.storage_key,
+                        key.route_identity,
+                        key.candidate_kind,
+                        key.task_class,
+                        key.role,
+                        snapshot.state.value,
+                        snapshot.qualifying_failures,
+                        _format_time(snapshot.window_started_at),
+                        _format_time(snapshot.opened_at),
+                        _format_time(snapshot.cooldown_until),
+                        int(snapshot.probe_claimed),
+                        snapshot.exploration_attempts,
+                        _format_time(snapshot.exploration_last_at),
+                    ),
+                )
+                self._connection.commit()
+            except sqlite3.DatabaseError as error:
+                self._connection.rollback()
+                raise RoutingFitnessStoreError("Routing breaker persistence failed") from error
 
     @staticmethod
     def _outcome_from_row(row: sqlite3.Row) -> VerifiedRouteOutcome:
@@ -333,6 +496,206 @@ class RouteFitnessView:
             return False
         rate = self.verified_success_rate
         return rate is not None and rate >= minimum_verified_reliability
+
+
+class RoutingResilienceService:
+    """Durable route-scoped LKGR and circuit-breaker policy."""
+
+    _NON_ATTRIBUTABLE = frozenset(
+        {"permission_denied", "policy_block", "privacy_block", "cancelled", "unknown_outcome"}
+    )
+    _QUALIFYING_OPERATIONAL = frozenset(
+        {
+            "transient_failure",
+            "deterministic_failure",
+            "provider_unavailable",
+            "timeout",
+            "route_unavailable",
+            "execution_route_unavailable",
+            "execution_route_kind_unsupported",
+            "resource_failure",
+        }
+    )
+
+    def __init__(
+        self,
+        fitness: RoutingFitnessProjection,
+        *,
+        store: SQLiteRoutingFitnessStore | None = None,
+        clock: Callable[[], datetime] | None = None,
+        policy: ResiliencePolicy | None = None,
+    ) -> None:
+        if not isinstance(fitness, RoutingFitnessProjection):
+            raise TypeError("Routing fitness projection is invalid")
+        if store is not None and not isinstance(store, SQLiteRoutingFitnessStore):
+            raise TypeError("Routing fitness store is invalid")
+        self._fitness = fitness
+        self._store = store
+        self._clock = clock or fitness.now
+        self._policy = policy or ResiliencePolicy()
+        self._lock = RLock()
+        self._breakers: dict[str, CircuitSnapshot] = {}
+
+    def key(
+        self, route_identity: str, candidate_kind: str, task_class: str, role: str
+    ) -> RouteResilienceKey:
+        return RouteResilienceKey(route_identity, candidate_kind, task_class, role)
+
+    def snapshot(self, key: RouteResilienceKey) -> CircuitSnapshot:
+        with self._lock:
+            snapshot = self._load(key)
+            if (
+                snapshot.state is CircuitState.OPEN
+                and snapshot.cooldown_until is not None
+                and self._clock() >= snapshot.cooldown_until
+            ):
+                snapshot = replace(snapshot, state=CircuitState.HALF_OPEN, probe_claimed=False)
+                self._save(snapshot)
+            return snapshot
+
+    def admit(self, key: RouteResilienceKey) -> tuple[bool, bool]:
+        """Return (allowed, is_half_open_probe), claiming at most one probe."""
+
+        with self._lock:
+            snapshot = self.snapshot(key)
+            if snapshot.state is CircuitState.CLOSED:
+                return True, False
+            if snapshot.state is CircuitState.OPEN:
+                return False, False
+            if snapshot.probe_claimed:
+                return False, False
+            self._save(replace(snapshot, probe_claimed=True))
+            return True, True
+
+    def is_lkgr(self, key: RouteResilienceKey) -> bool:
+        if self.snapshot(key).state is CircuitState.OPEN:
+            return False
+        view = self._fitness.view(
+            key.route_identity,
+            key.task_class,
+            candidate_kind=key.candidate_kind,
+            now=self._clock(),
+        )
+        return (
+            view.evidence is FitnessEvidence.SUFFICIENT
+            and view.sample_count >= self._policy.lkgr_min_samples
+            and (view.verified_success_rate or 0.0) >= self._policy.lkgr_min_verified_reliability
+        )
+
+    def exploration_allowed(
+        self,
+        key: RouteResilienceKey,
+        *,
+        allow_exploration: bool,
+        high_consequence: bool,
+        verification_available: bool,
+    ) -> bool:
+        if not allow_exploration or high_consequence or not verification_available:
+            return False
+        if self.snapshot(key).state is not CircuitState.CLOSED:
+            return False
+        evidence = self._fitness.view(
+            key.route_identity,
+            key.task_class,
+            candidate_kind=key.candidate_kind,
+            now=self._clock(),
+        ).evidence
+        return evidence in {FitnessEvidence.UNKNOWN, FitnessEvidence.INSUFFICIENT}
+
+    def claim_exploration(
+        self,
+        key: RouteResilienceKey,
+        *,
+        allow_exploration: bool,
+        high_consequence: bool,
+        verification_available: bool,
+    ) -> bool:
+        if not self.exploration_allowed(
+            key,
+            allow_exploration=allow_exploration,
+            high_consequence=high_consequence,
+            verification_available=verification_available,
+        ):
+            return False
+        with self._lock:
+            snapshot = self._load(key)
+            now = self._clock()
+            if snapshot.exploration_attempts >= self._policy.exploration_max_attempts:
+                return False
+            if (
+                snapshot.exploration_last_at is not None
+                and now - snapshot.exploration_last_at < self._policy.cooldown
+            ):
+                return False
+            self._save(
+                replace(
+                    snapshot,
+                    exploration_attempts=snapshot.exploration_attempts + 1,
+                    exploration_last_at=now,
+                )
+            )
+            return True
+
+    def record(
+        self,
+        key: RouteResilienceKey,
+        *,
+        operational_outcome: str,
+        semantic_outcome: SemanticOutcome,
+        failure_class: str | None = None,
+    ) -> None:
+        with self._lock:
+            now = self._clock()
+            snapshot = self.snapshot(key)
+            if semantic_outcome is SemanticOutcome.VERIFIED_SUCCESS:
+                self._save(CircuitSnapshot(key))
+                return
+            if snapshot.state is CircuitState.HALF_OPEN:
+                self._save(self._opened(snapshot, now))
+                return
+            if semantic_outcome is SemanticOutcome.UNKNOWN:
+                return
+            failure = (failure_class or operational_outcome).casefold()
+            if failure in self._NON_ATTRIBUTABLE:
+                return
+            qualifying = semantic_outcome is SemanticOutcome.VERIFIED_FAILURE or failure in (
+                self._QUALIFYING_OPERATIONAL
+            )
+            if not qualifying:
+                return
+            window_start = snapshot.window_started_at
+            count = snapshot.qualifying_failures
+            if window_start is None or now - window_start > self._policy.failure_window:
+                window_start, count = now, 0
+            updated = replace(
+                snapshot,
+                qualifying_failures=count + 1,
+                window_started_at=window_start,
+            )
+            if updated.qualifying_failures >= self._policy.failure_threshold:
+                updated = self._opened(updated, now)
+            self._save(updated)
+
+    def _opened(self, snapshot: CircuitSnapshot, now: datetime) -> CircuitSnapshot:
+        return replace(
+            snapshot,
+            state=CircuitState.OPEN,
+            opened_at=now,
+            cooldown_until=now + self._policy.cooldown,
+            probe_claimed=False,
+        )
+
+    def _load(self, key: RouteResilienceKey) -> CircuitSnapshot:
+        if key.storage_key not in self._breakers:
+            self._breakers[key.storage_key] = (
+                self._store.load_breaker(key) if self._store is not None else CircuitSnapshot(key)
+            )
+        return self._breakers[key.storage_key]
+
+    def _save(self, snapshot: CircuitSnapshot) -> None:
+        self._breakers[snapshot.key.storage_key] = snapshot
+        if self._store is not None:
+            self._store.save_breaker(snapshot)
 
 
 class RoutingFitnessProjection:
@@ -462,9 +825,14 @@ class RoutingFitnessProjection:
 
 
 __all__ = [
+    "CircuitSnapshot",
+    "CircuitState",
     "FitnessEvidence",
+    "ResiliencePolicy",
     "RouteFitnessView",
+    "RouteResilienceKey",
     "RoutingFitnessProjection",
+    "RoutingResilienceService",
     "RoutingFitnessStoreError",
     "SemanticOutcome",
     "SQLiteRoutingFitnessStore",

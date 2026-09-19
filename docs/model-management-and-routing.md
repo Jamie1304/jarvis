@@ -147,6 +147,17 @@ not a second durable task ledger: `PlanningStore` owns task/plan truth, verifica
 the model Cookbook owns model-specific empirical knowledge, and TraceStore is
 observability only.
 
+R3D-D adds task-family and logical-role scoped resilience on the same bounded
+domain. LKGR is derived from sufficiently current verified fitness and is only
+a preference; hard eligibility, quality, resource, privacy, policy, and exact
+planned-tool identity remain authoritative. Route-scoped breakers persist a
+typed `CLOSED`/`OPEN`/`HALF_OPEN` lifecycle with bounded failure thresholds,
+cooldown, one claimed probe, and a durable exploration budget/cooldown. Fallback means another independently valid
+candidate, never blind retry or silent PlanningStep tool substitution. Explicit
+low-consequence, verifiable exploration may select insufficiently proven
+eligible routes, but it never bypasses permission, sandbox, Host Bridge, or
+verification and is blocked for high-consequence work and open breakers.
+
 ## Evidence and limits
 
 CI uses deterministic fake catalogs, downloaders, runtimes, hardware, model
