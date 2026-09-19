@@ -12,6 +12,7 @@ from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
+from jarvis.ai.fitness import RoutingFitnessProjection
 from jarvis.autonomy.routing import (
     ExecutionCandidateKind,
     ExecutionRouteSelector,
@@ -331,6 +332,7 @@ class PlanningEngine:
         event_bus: EventBus | None = None,
         lifecycle_audit: SQLiteAuditSink | None = None,
         approval_invalidator: Callable[[UUID], Awaitable[tuple[UUID, ...]]] | None = None,
+        routing_fitness: RoutingFitnessProjection | None = None,
     ) -> None:
         self._store = store
         self._advisor = advisor
@@ -343,6 +345,11 @@ class PlanningEngine:
         self._event_bus = event_bus
         self._lifecycle_audit = lifecycle_audit
         self._approval_invalidator = approval_invalidator
+        if routing_fitness is not None and not isinstance(
+            routing_fitness, RoutingFitnessProjection
+        ):
+            raise TypeError("Routing fitness projection is invalid")
+        self._routing_fitness = routing_fitness
         self._cancellations: dict[UUID, asyncio.Event] = {}
 
     async def create_task(
@@ -1072,12 +1079,16 @@ class PlanningEngine:
                     ),
                 )
             if execution.status is StepExecutionStatus.UNKNOWN_OUTCOME:
+                self._record_routing_outcome(task, step, execution, None)
                 return self._recover_unknown_outcome(task, plan, step, execution)
             if cancellation.is_set() or execution.status is StepExecutionStatus.CANCELLED:
+                self._record_routing_outcome(task, step, execution, None)
                 return self._cancelled(task, plan)
             if execution.status is StepExecutionStatus.WAITING_FOR_PERMISSION:
+                self._record_routing_outcome(task, step, execution, None)
                 return self._pause(task, plan, step, execution.approval_request_ids)
             if execution.status is StepExecutionStatus.TRANSIENT_FAILURE:
+                self._record_routing_outcome(task, step, execution, None)
                 if execution.effect_outcome not in {
                     EffectOutcome.PRE_EFFECT_FAILURE,
                     EffectOutcome.SAFE_TO_RETRY,
@@ -1107,6 +1118,7 @@ class PlanningEngine:
                     continue
                 return await self._replan_or_fail(task, plan, step, step_error, execution.evidence)
             if execution.status is StepExecutionStatus.DETERMINISTIC_FAILURE:
+                self._record_routing_outcome(task, step, execution, None)
                 self._emit_step(
                     EventType.STEP_FAILED,
                     task,
@@ -1131,6 +1143,7 @@ class PlanningEngine:
                     execution.evidence,
                     f"Step verifier failed ({type(adapter_error).__name__})",
                 )
+            self._record_routing_outcome(task, step, execution, verification)
             if not verification.succeeded:
                 self._emit_step(EventType.STEP_FAILED, task, step, "step_verification_failed")
                 step_error = StepError(
@@ -1256,6 +1269,16 @@ class PlanningEngine:
         )
         self._save_state(task, replacement)
         return await self._run(task, replacement, self._cancellations[task.task_id])
+
+    def _record_routing_outcome(
+        self,
+        task: PlanningTask,
+        step: PlanningStep,
+        execution: StepExecutionResult,
+        verification: StepVerification | None,
+    ) -> None:
+        if self._routing_fitness is not None:
+            self._routing_fitness.record_planning_step(task, step, execution, verification)
 
     def _recover_unknown_outcome(
         self,

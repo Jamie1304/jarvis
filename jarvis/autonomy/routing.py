@@ -7,6 +7,7 @@ from enum import StrEnum
 from typing import TYPE_CHECKING
 from uuid import UUID
 
+from jarvis.ai.fitness import FitnessEvidence, RouteFitnessView, RoutingFitnessProjection
 from jarvis.ai.models import ModelRole, PrivacyContext
 from jarvis.ai.providers.registry import ProviderLocality
 from jarvis.ai.routing import (
@@ -67,6 +68,9 @@ class EligibilityCode(StrEnum):
     NOT_EXECUTABLE = "not_executable"
     POLICY_BLOCKED = "policy_blocked"
     MODEL_ROUTE_UNAVAILABLE = "model_route_unavailable"
+    QUALITY_EVIDENCE_INSUFFICIENT = "quality_evidence_insufficient"
+    QUALITY_EVIDENCE_STALE = "quality_evidence_stale"
+    QUALITY_FLOOR_NOT_MET = "quality_floor_not_met"
 
 
 class ExecutionRouteStatus(StrEnum):
@@ -121,6 +125,7 @@ class StepRoutingContext:
     resource_budget: ResourceBudget | None = None
     resource_state: HardwareProfile | None = None
     preferred_tool_id: str | None = None
+    minimum_verified_reliability: float | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.role, LogicalRole):
@@ -157,6 +162,11 @@ class StepRoutingContext:
             type(self.preferred_tool_id) is not str or not self.preferred_tool_id.strip()
         ):
             raise ValueError("Step routing tool identity is invalid")
+        if self.minimum_verified_reliability is not None and (
+            type(self.minimum_verified_reliability) not in {int, float}
+            or not 0.0 <= self.minimum_verified_reliability <= 1.0
+        ):
+            raise ValueError("Step routing quality floor is invalid")
 
 
 @dataclass(frozen=True, slots=True)
@@ -184,6 +194,7 @@ class StepRequirements:
     resource_budget: ResourceBudget | None
     resource_state: HardwareProfile | None
     preferred_tool_id: str | None
+    minimum_verified_reliability: float | None
 
     @classmethod
     def from_step(
@@ -214,6 +225,7 @@ class StepRequirements:
             resource_budget=supplied.resource_budget,
             resource_state=supplied.resource_state,
             preferred_tool_id=supplied.preferred_tool_id,
+            minimum_verified_reliability=supplied.minimum_verified_reliability,
         )
 
     @classmethod
@@ -256,6 +268,7 @@ class StepRequirements:
             resource_budget=supplied.resource_budget,
             resource_state=supplied.resource_state,
             preferred_tool_id=step.tool_id,
+            minimum_verified_reliability=supplied.minimum_verified_reliability,
         )
 
     def to_model_request(self) -> RouteRequest:
@@ -281,6 +294,7 @@ class StepRequirements:
             allow_no_llm=False,
             privacy_context=self.privacy_context,
             required_capabilities=frozenset(self.required_capabilities),
+            minimum_expected_reliability=self.minimum_verified_reliability,
             priority=self.priority,
             task_class=self.task_class,
             responsibility=self.role.value,
@@ -312,6 +326,7 @@ class ExecutionCandidate:
     eligibility: CandidateEligibility
     model: RouteCandidate | None = None
     tool_id: str | None = None
+    fitness: RouteFitnessView | None = None
 
     def __post_init__(self) -> None:
         if type(self.identity) is not str or not self.identity.strip():
@@ -345,6 +360,7 @@ class ExecutionRouteSelector:
         tool_registry: ToolRegistry,
         capability_registry: CapabilityRegistry | None = None,
         resource_governor: ResourceGovernor | None = None,
+        fitness: RoutingFitnessProjection | None = None,
     ) -> None:
         if model_router is not None and not isinstance(model_router, ProviderRouter):
             raise TypeError("Model router is invalid")
@@ -356,10 +372,13 @@ class ExecutionRouteSelector:
             raise TypeError("Capability registry is invalid")
         if resource_governor is not None and not isinstance(resource_governor, ResourceGovernor):
             raise TypeError("Resource governor is invalid")
+        if fitness is not None and not isinstance(fitness, RoutingFitnessProjection):
+            raise TypeError("Routing fitness projection is invalid")
         self._model_router = model_router
         self._tool_registry = tool_registry
         self._capability_registry = capability_registry
         self._resource_governor = resource_governor
+        self._fitness = fitness
 
     def route(self, requirements: StepRequirements) -> ExecutionRouteDecision:
         if not isinstance(requirements, StepRequirements):
@@ -488,6 +507,24 @@ class ExecutionRouteSelector:
             codes.append(EligibilityCode.NOT_EXECUTABLE)
         if not requirements.required_capabilities.issubset(declared_capabilities):
             codes.append(EligibilityCode.CAPABILITY_MISSING)
+        fitness = None
+        fitness_now = None
+        if self._fitness is not None:
+            fitness_now = self._fitness.now()
+            fitness = self._fitness.view(
+                record.manifest.tool_id,
+                requirements.task_class,
+                now=fitness_now,
+            )
+        if requirements.minimum_verified_reliability is not None and fitness is not None:
+            if fitness.evidence in {FitnessEvidence.UNKNOWN, FitnessEvidence.INSUFFICIENT}:
+                codes.append(EligibilityCode.QUALITY_EVIDENCE_INSUFFICIENT)
+            elif fitness.evidence is FitnessEvidence.STALE:
+                codes.append(EligibilityCode.QUALITY_EVIDENCE_STALE)
+            elif fitness_now is not None and not fitness.meets_quality_floor(
+                requirements.minimum_verified_reliability, fitness_now
+            ):
+                codes.append(EligibilityCode.QUALITY_FLOOR_NOT_MET)
         if self._resource_governor is not None and requirements.resource_budget is not None:
             resource = self._resource_governor.decide(
                 f"execution-route.{record.manifest.tool_id}",
@@ -507,6 +544,7 @@ class ExecutionRouteSelector:
             executable=record.usable,
             eligibility=CandidateEligibility(not codes, tuple(dict.fromkeys(codes))),
             tool_id=record.manifest.tool_id,
+            fitness=fitness,
         )
 
     @staticmethod

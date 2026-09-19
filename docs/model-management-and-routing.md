@@ -133,6 +133,19 @@ real non-model route being selected. `ProviderRouter`'s `NO_LLM` contract is
 therefore not treated as proof that deterministic or tool execution succeeded;
 an empty candidate set is an explicit `NO_VALID_ROUTE` result.
 
+`RoutingFitnessProjection` is a bounded, process-local derived view of actual
+planning outcomes. `PlanningEngine` records an operational result for each
+attempt and records semantic success or failure only after the trusted
+`StepVerifier`; `UNKNOWN_OUTCOME` and unverified results remain distinct from
+success. The view keeps route identity, task family, sample sufficiency,
+recency, retries, and operational versus verified-semantic rates separate.
+With an explicit tool quality floor, insufficient or stale evidence and a
+failed verified rate are hard eligibility failures before cost or latency
+optimization. The projection is rebuildable and is not a second durable task
+ledger: `PlanningStore` owns task/plan truth, verification owns semantic proof,
+the model Cookbook owns model-specific empirical knowledge, and TraceStore is
+observability only.
+
 ## Evidence and limits
 
 CI uses deterministic fake catalogs, downloaders, runtimes, hardware, model

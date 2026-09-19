@@ -41,6 +41,7 @@ from jarvis.adoption import (
     WindowsSignerVerifier,
 )
 from jarvis.agent_runtime import AgentLoop
+from jarvis.ai.fitness import RoutingFitnessProjection
 from jarvis.ai.knowledge import ModelKnowledgeService, ModelKnowledgeStore
 from jarvis.ai.local_ai import LocalAIControlPlane, LocalAIUserPolicy
 from jarvis.ai.model_manager import LocalModelManager
@@ -1652,10 +1653,12 @@ class ApplicationRuntime:
                     browser_service = None
             mcp_manager = MCPExtensionManager(registry)
             capability_registry = CapabilityRegistry()
+            routing_fitness = RoutingFitnessProjection()
             execution_route_selector = ExecutionRouteSelector(
                 model_router=None,
                 tool_registry=registry,
                 capability_registry=capability_registry,
+                fitness=routing_fitness,
             )
             paths.validate_storage_layout()
             planning_store = SQLitePlanningStore(paths.planning_database)
@@ -1676,6 +1679,7 @@ class ApplicationRuntime:
                 event_bus=events,
                 lifecycle_audit=audit,
                 approval_invalidator=broker.invalidate_task_approvals,
+                routing_fitness=routing_fitness,
             )
             engine.reconcile_after_restart()
             for task in engine.list_tasks():
