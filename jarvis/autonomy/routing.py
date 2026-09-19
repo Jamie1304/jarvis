@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import StrEnum
+from typing import TYPE_CHECKING
 from uuid import UUID
 
 from jarvis.ai.models import ModelRole, PrivacyContext
@@ -25,6 +26,9 @@ from jarvis.resources import (
     ResourcePriority,
 )
 from jarvis.tools.registry import ToolRecord, ToolRegistry
+
+if TYPE_CHECKING:
+    from jarvis.planning.models import PlanningStep
 
 
 class LogicalRole(StrEnum):
@@ -116,6 +120,7 @@ class StepRoutingContext:
     concurrency: int = 1
     resource_budget: ResourceBudget | None = None
     resource_state: HardwareProfile | None = None
+    preferred_tool_id: str | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.role, LogicalRole):
@@ -148,6 +153,10 @@ class StepRoutingContext:
             raise ValueError("Step routing priority is invalid")
         if type(self.concurrency) is not int or not 1 <= self.concurrency <= 64:
             raise ValueError("Step routing concurrency is invalid")
+        if self.preferred_tool_id is not None and (
+            type(self.preferred_tool_id) is not str or not self.preferred_tool_id.strip()
+        ):
+            raise ValueError("Step routing tool identity is invalid")
 
 
 @dataclass(frozen=True, slots=True)
@@ -174,6 +183,7 @@ class StepRequirements:
     concurrency: int
     resource_budget: ResourceBudget | None
     resource_state: HardwareProfile | None
+    preferred_tool_id: str | None
 
     @classmethod
     def from_step(
@@ -203,6 +213,49 @@ class StepRequirements:
             concurrency=supplied.concurrency,
             resource_budget=supplied.resource_budget,
             resource_state=supplied.resource_state,
+            preferred_tool_id=supplied.preferred_tool_id,
+        )
+
+    @classmethod
+    def from_planning_step(
+        cls, step: PlanningStep, *, context: StepRoutingContext | None = None
+    ) -> StepRequirements:
+        """Project the live PlanningEngine step without copying its full state."""
+
+        from jarvis.planning.models import PlanningStep as OwnedPlanningStep
+
+        if not isinstance(step, OwnedPlanningStep):
+            raise ValueError("A trusted PlanningStep is required")
+        supplied = context or StepRoutingContext(
+            model_inference=ModelInferencePolicy.FORBIDDEN,
+            preferred_tool_id=step.tool_id,
+        )
+        if supplied.preferred_tool_id not in {None, step.tool_id}:
+            raise ValueError("Planning step tool identity conflicts with routing context")
+        return cls(
+            step_id=step.step_id,
+            capability=step.capability,
+            action=step.key,
+            role=supplied.role,
+            task_class=supplied.task_class,
+            complexity=supplied.complexity,
+            privacy_context=supplied.privacy_context,
+            modality=supplied.modality,
+            required_capabilities=frozenset(
+                {step.capability, step.tool_id, *supplied.required_capabilities}
+            ),
+            context_tokens=supplied.context_tokens,
+            requires_structured_output=supplied.requires_structured_output,
+            requires_tools=supplied.requires_tools,
+            latency_budget_ms=supplied.latency_budget_ms,
+            max_cost_per_million=supplied.max_cost_per_million,
+            model_inference=supplied.model_inference,
+            policy=supplied.policy,
+            priority=supplied.priority,
+            concurrency=supplied.concurrency,
+            resource_budget=supplied.resource_budget,
+            resource_state=supplied.resource_state,
+            preferred_tool_id=step.tool_id,
         )
 
     def to_model_request(self) -> RouteRequest:
@@ -288,14 +341,14 @@ class ExecutionRouteSelector:
     def __init__(
         self,
         *,
-        model_router: ProviderRouter,
+        model_router: ProviderRouter | None,
         tool_registry: ToolRegistry,
         capability_registry: CapabilityRegistry | None = None,
         resource_governor: ResourceGovernor | None = None,
     ) -> None:
-        if not isinstance(model_router, ProviderRouter) or not isinstance(
-            tool_registry, ToolRegistry
-        ):
+        if model_router is not None and not isinstance(model_router, ProviderRouter):
+            raise TypeError("Model router is invalid")
+        if not isinstance(tool_registry, ToolRegistry):
             raise TypeError("Execution routing requires canonical registries")
         if capability_registry is not None and not isinstance(
             capability_registry, CapabilityRegistry
@@ -331,13 +384,38 @@ class ExecutionRouteSelector:
             ExecutionRouteStatus.NO_VALID_ROUTE, None, (), tuple(excluded), reasons
         )
 
+    def route_planning_step(self, step: PlanningStep) -> ExecutionRouteDecision:
+        """Route the live PlanningEngine step; this path currently permits tools only."""
+
+        return self.route(StepRequirements.from_planning_step(step))
+
     def _discover_models(
         self,
         requirements: StepRequirements,
         eligible: list[ExecutionCandidate],
         excluded: list[ExecutionCandidate],
     ) -> None:
-        decision = self._model_router.route(requirements.to_model_request())
+        if self._model_router is None:
+            decision = None
+        else:
+            decision = self._model_router.route(requirements.to_model_request())
+        if decision is None:
+            excluded.append(
+                ExecutionCandidate(
+                    identity="model-route",
+                    kind=ExecutionCandidateKind.MODEL,
+                    owner="ProviderRouter/ProviderRegistry",
+                    declared_capabilities=frozenset(),
+                    locality=ProviderLocality.UNKNOWN.value,
+                    modality=None,
+                    requires_permission=False,
+                    executable=False,
+                    eligibility=CandidateEligibility(
+                        False, (EligibilityCode.MODEL_ROUTE_UNAVAILABLE,)
+                    ),
+                )
+            )
+            return
         model_candidates = (
             () if decision.primary is None else (decision.primary,)
         ) + decision.fallbacks
@@ -384,6 +462,12 @@ class ExecutionRouteSelector:
         excluded: list[ExecutionCandidate],
     ) -> None:
         records = self._tool_registry.find_by_capability(requirements.capability)
+        if requirements.preferred_tool_id is not None:
+            records = tuple(
+                record
+                for record in records
+                if record.manifest.tool_id == requirements.preferred_tool_id
+            )
         if not records and self._capability_registry is not None:
             try:
                 self._capability_registry.inspect(requirements.capability)

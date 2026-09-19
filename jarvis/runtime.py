@@ -57,6 +57,7 @@ from jarvis.ai.sessions import AgentSessionStore
 from jarvis.artifacts import ArtifactStore
 from jarvis.attention import AttentionItem, AttentionPolicy, AttentionPriority, SQLiteAttentionStore
 from jarvis.automations import AutomationService, AutomationStoreError, SQLiteAutomationStore
+from jarvis.autonomy.routing import ExecutionRouteSelector
 from jarvis.backup import BackupService
 from jarvis.bootstrap import create_provider_registry
 from jarvis.browser import BrowserAdapter, BrowserSemanticBridge
@@ -1650,6 +1651,12 @@ class ApplicationRuntime:
                 except BrowserCapabilityUnavailable:
                     browser_service = None
             mcp_manager = MCPExtensionManager(registry)
+            capability_registry = CapabilityRegistry()
+            execution_route_selector = ExecutionRouteSelector(
+                model_router=None,
+                tool_registry=registry,
+                capability_registry=capability_registry,
+            )
             paths.validate_storage_layout()
             planning_store = SQLitePlanningStore(paths.planning_database)
             paths.validate_storage_layout()
@@ -1658,7 +1665,11 @@ class ApplicationRuntime:
                 store=planning_store,
                 advisor=SafeBuiltinPlanAdvisor(),
                 validator=validator,
-                executor=BrokeredPlanningStepExecutor(registry, event_bus=events),
+                executor=BrokeredPlanningStepExecutor(
+                    registry,
+                    event_bus=events,
+                    route_selector=execution_route_selector,
+                ),
                 step_verifier=EvidencePlanningStepVerifier(),
                 goal_verifier=CompletionCriteriaVerifier(),
                 state_machine=state_machine,
@@ -1830,7 +1841,6 @@ class ApplicationRuntime:
             )
             conversation_memory = ConversationContextService()
             system_memory = ProjectSystemMemory(knowledge, root)
-            capability_registry = CapabilityRegistry()
             skill_registry = SkillRegistry()
             agent_registry = AgentRegistry()
             memory_consistency = MemoryConsistencyService(memory_store)

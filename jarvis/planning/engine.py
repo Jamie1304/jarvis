@@ -12,6 +12,11 @@ from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
+from jarvis.autonomy.routing import (
+    ExecutionCandidateKind,
+    ExecutionRouteSelector,
+    ExecutionRouteStatus,
+)
 from jarvis.events import (
     EventBus,
     EventEnvelope,
@@ -121,13 +126,42 @@ class PlanningGoalVerifier(ABC):
 class BrokeredPlanningStepExecutor(PlanningStepExecutor):
     """Invoke an exact registry tool through its mandatory bound PermissionBroker."""
 
-    def __init__(self, registry: ToolRegistry, *, event_bus: EventBus | None = None) -> None:
+    def __init__(
+        self,
+        registry: ToolRegistry,
+        *,
+        event_bus: EventBus | None = None,
+        route_selector: ExecutionRouteSelector | None = None,
+    ) -> None:
         self._registry = registry
         self._event_bus = event_bus
+        self._route_selector = route_selector
 
     async def execute(
         self, task: PlanningTask, step: PlanningStep, cancellation: asyncio.Event
     ) -> StepExecutionResult:
+        if self._route_selector is not None:
+            decision = self._route_selector.route_planning_step(step)
+            if decision.status is not ExecutionRouteStatus.SELECTED:
+                return StepExecutionResult(
+                    StepExecutionStatus.DETERMINISTIC_FAILURE,
+                    error_code="execution_route_unavailable",
+                    error_message="No valid executable route matched the owned planning step",
+                    evidence=tuple(code.value for code in decision.reasons),
+                )
+            candidate = decision.primary
+            if candidate is None or candidate.kind is not ExecutionCandidateKind.TOOL:
+                return StepExecutionResult(
+                    StepExecutionStatus.DETERMINISTIC_FAILURE,
+                    error_code="execution_route_kind_unsupported",
+                    error_message="The planning executor accepts only selected TOOL routes",
+                )
+            if candidate.tool_id != step.tool_id:
+                return StepExecutionResult(
+                    StepExecutionStatus.DETERMINISTIC_FAILURE,
+                    error_code="execution_route_identity_mismatch",
+                    error_message="Selected tool identity does not match the owned planning step",
+                )
         tool = self._registry.get(step.tool_id)
         context = ToolExecutionContext(
             task_id=task.task_id,
