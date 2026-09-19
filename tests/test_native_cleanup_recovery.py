@@ -4,7 +4,6 @@ import base64
 import json
 import sys
 import threading
-import time
 from collections.abc import Mapping
 from hashlib import sha256
 from pathlib import Path
@@ -44,12 +43,16 @@ class FakeOperations:
         self.restores: list[str] = []
         self.observations: list[str] = []
         self.profile_calls = 0
+        self.profile_started = threading.Event()
+        self.profile_completed = threading.Event()
 
     def profile_sid_bytes(self, profile_name: str, expected_sid: str) -> bytes:
         assert profile_name == PROFILE
         assert expected_sid == SID
         if self.stall is not None:
+            self.profile_started.set()
             self.stall.wait()
+        self.profile_completed.set()
         return b"temporary-sid"
 
     def observe_acl(self, path: str, baseline: bytes, temporary_sid: bytes) -> Mapping[str, object]:
@@ -207,16 +210,43 @@ def test_stalled_reconciliation_is_bounded_and_lock_is_retained(tmp_path: Path) 
     release = threading.Event()
     operations = FakeOperations(stall=release)
     coordinator = _coordinator(receipt, operations, deadline=0.01)
-    started = time.monotonic()
-    result = coordinator.reconcile_all()[0]
-    elapsed = time.monotonic() - started
-    assert result.timed_out
-    assert elapsed < 0.2
+
+    foreground_done = threading.Event()
+    foreground_results: list[tuple[Any, ...]] = []
+    foreground_errors: list[BaseException] = []
+
+    def run_foreground() -> None:
+        try:
+            foreground_results.append(coordinator.reconcile_all())
+        except BaseException as error:  # test watchdog must also capture assertion setup failures
+            foreground_errors.append(error)
+        finally:
+            foreground_done.set()
+
+    foreground = threading.Thread(
+        target=run_foreground,
+        name="test-native-reconcile-foreground",
+        daemon=True,
+    )
+    foreground.start()
+    if not foreground_done.wait(5.0):
+        release.set()
+        foreground.join(5.0)
+        pytest.fail("foreground reconciliation watchdog expired")
+
+    assert not foreground_errors
+    assert len(foreground_results) == 1
+    result = foreground_results[0][0]
+    assert result.timed_out is True
+    assert operations.profile_started.is_set()
+    assert not operations.profile_completed.is_set()
+    assert not release.is_set()
     assert json.loads(receipt.read_text(encoding="utf-8"))["state"] == "RECOVERY_BLOCKED"
     second = _coordinator(receipt, FakeOperations(), deadline=0.01).reconcile_all()[0]
     assert second.live_owner
     release.set()
-    time.sleep(0.05)
+    assert operations.profile_completed.wait(5.0)
+    foreground.join(5.0)
 
 
 def test_repeated_restart_can_reconcile_after_prior_failure(tmp_path: Path) -> None:
