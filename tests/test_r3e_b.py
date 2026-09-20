@@ -2,20 +2,67 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import cast
 from uuid import UUID
 
 import pytest
-from jarvis.ai.models import PrivacyClassification, PrivacyContext
+from jarvis.ai.models import ModelRole, PrivacyClassification, PrivacyContext
+from jarvis.ai.providers import ModelMetadata, ProviderDefinition, ProviderRegistry
 from jarvis.ai.providers.registry import ProviderLocality, ProviderMetadata
 from jarvis.ai.roles import LogicalModelRole, LogicalRoleRequirements
-from jarvis.ai.routing import RoutingPolicy
+from jarvis.ai.routing import ProviderRouter, RouteStatus, RoutingPolicy
 from jarvis.conversation.service import ConversationService, ConversationTurnStatus
 from jarvis.planning import OrchestrationRequest, OrchestrationResult, PlanAdvisor, ReplanEvidence
 
 from tests.fakes import FakeAIProvider
+from tests.test_hardware import _hardware
 
 _LOCAL = ProviderMetadata("local", "local", "test", locality=ProviderLocality.LOCAL)
+
+
+def _role_registry() -> ProviderRegistry:
+    return ProviderRegistry(
+        (
+            ProviderDefinition(
+                ProviderMetadata("remote", "remote", "test", locality=ProviderLocality.REMOTE),
+                lambda _: FakeAIProvider(),
+                (
+                    ModelMetadata(
+                        "remote-general",
+                        8_192,
+                        frozenset({"chat"}),
+                        frozenset({ModelRole.GENERAL}),
+                        modalities=frozenset({"text"}),
+                        quality_score=0.99,
+                        latency_ms=100,
+                        input_cost_per_million=1,
+                        output_cost_per_million=1,
+                    ),
+                ),
+            ),
+            ProviderDefinition(
+                ProviderMetadata("local", "local", "test", local_only=True),
+                lambda _: FakeAIProvider(),
+                (
+                    ModelMetadata(
+                        "local-reasoning",
+                        8_192,
+                        frozenset({"chat", "structured_output"}),
+                        frozenset({ModelRole.REASONING}),
+                        modalities=frozenset({"text"}),
+                        quality_score=0.8,
+                        latency_ms=40,
+                        input_cost_per_million=0,
+                        output_cost_per_million=0,
+                        storage_bytes=1,
+                        ram_bytes=1,
+                        compatibility=frozenset({"windows"}),
+                    ),
+                ),
+            ),
+        )
+    )
 
 
 def test_logical_roles_are_distinct_from_capability_model_roles() -> None:
@@ -42,6 +89,36 @@ def test_route_projection_preserves_local_only_privacy_without_provider_selectio
     assert route.privacy_context.classification is PrivacyClassification.LOCAL_ONLY
     assert route.preferred_provider_id is None
     assert route.preferred_model_id is None
+
+
+def test_logical_roles_can_select_different_physical_models_through_existing_router() -> None:
+    router = ProviderRouter(_role_registry())
+    conversation = router.route(
+        replace(
+            LogicalRoleRequirements(
+                LogicalModelRole.CONVERSATION,
+                "say hello",
+                policy=RoutingPolicy.QUALITY_FIRST,
+                privacy_context=PrivacyContext(PrivacyClassification.SAFE_PUBLIC),
+            ).to_route_request(),
+            resource_state=_hardware(tags=frozenset({"windows"})),
+        )
+    )
+    orchestration = router.route(
+        replace(
+            LogicalRoleRequirements(
+                LogicalModelRole.ORCHESTRATION,
+                "make a plan",
+                privacy_context=PrivacyContext(PrivacyClassification.SAFE_PUBLIC),
+            ).to_route_request(),
+            resource_state=_hardware(tags=frozenset({"windows"})),
+        )
+    )
+
+    assert conversation.status is RouteStatus.SELECTED
+    assert orchestration.status is RouteStatus.SELECTED
+    assert conversation.primary is not None and conversation.primary.provider_id == "remote"
+    assert orchestration.primary is not None and orchestration.primary.provider_id == "local"
 
 
 def test_orchestration_request_has_trusted_distinct_identity_and_untrusted_result() -> None:
