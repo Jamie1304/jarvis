@@ -73,6 +73,7 @@ class GoalStatus(StrEnum):
     RECOVERING = "recovering"
     BUDGET_EXHAUSTED = "budget_exhausted"
     FAILED = "failed"
+    CANCELLED = "cancelled"
 
 
 class AlternativeKind(StrEnum):
@@ -92,6 +93,7 @@ class GoalExecutionStatus(StrEnum):
     RECOVERING = "recovering"
     BUDGET_EXHAUSTED = "budget_exhausted"
     FAILED = "failed"
+    CANCELLED = "cancelled"
 
 
 class GoalSupervisorStoreError(GoalSupervisorError):
@@ -402,6 +404,7 @@ class GoalSupervisorState:
     evidence: tuple[str, ...] = ()
     last_error: str | None = None
     active_run: bool = False
+    cancellation_requested: bool = False
 
     def __post_init__(self) -> None:
         if not isinstance(self.intent, GoalIntent) or not isinstance(self.budget, GoalBudget):
@@ -421,6 +424,8 @@ class GoalSupervisorState:
             _text(self.last_error, "Goal error")
         if type(self.active_run) is not bool:
             raise GoalSupervisorValidationError("Goal active-run marker is malformed")
+        if type(self.cancellation_requested) is not bool:
+            raise GoalSupervisorValidationError("Goal cancellation marker is malformed")
 
     @property
     def terminal(self) -> bool:
@@ -430,6 +435,7 @@ class GoalSupervisorState:
             GoalStatus.RECOVERING,
             GoalStatus.BUDGET_EXHAUSTED,
             GoalStatus.FAILED,
+            GoalStatus.CANCELLED,
         }
 
 
@@ -557,6 +563,45 @@ class PlanningGoalTaskRunner:
         self._trace = trace
 
     async def run(self, intent: GoalIntent, budget: GoalBudget) -> GoalExecutionReport:
+        if not callable(getattr(self._controller, "create_task", None)):
+            task = await self._controller.submit_task(
+                intent.original_outcome,
+                assumptions=intent.assumptions,
+                constraints=intent.constraints,
+                budgets=budget.planning_budgets(),
+            )
+            status = {
+                PlanningTaskStatus.COMPLETED: GoalExecutionStatus.COMPLETED,
+                PlanningTaskStatus.WAITING_FOR_PERMISSION: (
+                    GoalExecutionStatus.WAITING_FOR_PERMISSION
+                ),
+                PlanningTaskStatus.RECOVERING: GoalExecutionStatus.RECOVERING,
+                PlanningTaskStatus.BUDGET_EXHAUSTED: GoalExecutionStatus.BUDGET_EXHAUSTED,
+                PlanningTaskStatus.CANCELLED: GoalExecutionStatus.CANCELLED,
+            }.get(task.status, GoalExecutionStatus.FAILED)
+            unknown = (
+                task.error is not None and task.error.failure_kind is FailureKind.UNKNOWN_OUTCOME
+            )
+            return GoalExecutionReport(
+                status,
+                task.task_id,
+                GoalUsage(retries=task.usage.retries),
+                task.result_evidence or (task.error.evidence if task.error else ()),
+                task.error.message if task.error else "task completed",
+                not unknown
+                and task.error is not None
+                and task.error.failure_kind is FailureKind.TRANSIENT,
+                EffectOutcome.UNKNOWN_OUTCOME if unknown else None,
+            )
+        return await self.run_bound(intent, budget, on_task_bound=None)
+
+    async def run_bound(
+        self,
+        intent: GoalIntent,
+        budget: GoalBudget,
+        *,
+        on_task_bound: Callable[[UUID], None] | None,
+    ) -> GoalExecutionReport:
         proposal: PlanProposal | None = None
         if self._generated_planner is not None:
             propose = getattr(self._generated_planner, "proposal_for", None)
@@ -569,23 +614,27 @@ class PlanningGoalTaskRunner:
                 )
             proposal = candidate
         if proposal is None:
-            task = await self._controller.submit_task(
+            task = await self._controller.create_task(
                 intent.original_outcome,
                 assumptions=intent.assumptions,
                 constraints=intent.constraints,
                 budgets=budget.planning_budgets(),
             )
         else:
-            task = await self._controller.submit_proposal(
+            task = await self._controller.create_proposal_task(
                 proposal,
                 budgets=budget.planning_budgets(),
                 provenance=("goal-supervisor.generated-action",),
             )
+        if on_task_bound is not None:
+            on_task_bound(task.task_id)
+        task = await self._controller.run_task(task.task_id)
         status = {
             PlanningTaskStatus.COMPLETED: GoalExecutionStatus.COMPLETED,
             PlanningTaskStatus.WAITING_FOR_PERMISSION: GoalExecutionStatus.WAITING_FOR_PERMISSION,
             PlanningTaskStatus.RECOVERING: GoalExecutionStatus.RECOVERING,
             PlanningTaskStatus.BUDGET_EXHAUSTED: GoalExecutionStatus.BUDGET_EXHAUSTED,
+            PlanningTaskStatus.CANCELLED: GoalExecutionStatus.CANCELLED,
         }.get(task.status, GoalExecutionStatus.FAILED)
         failure_kind = task.error.failure_kind if task.error is not None else None
         unknown = failure_kind is FailureKind.UNKNOWN_OUTCOME
@@ -623,6 +672,30 @@ class PlanningGoalTaskRunner:
             retry_safe,
             EffectOutcome.UNKNOWN_OUTCOME if unknown else None,
         )
+
+    async def resume_task(self, task_id: UUID) -> GoalExecutionReport:
+        task = await self._controller.resume_task(task_id)
+        status = {
+            PlanningTaskStatus.COMPLETED: GoalExecutionStatus.COMPLETED,
+            PlanningTaskStatus.WAITING_FOR_PERMISSION: GoalExecutionStatus.WAITING_FOR_PERMISSION,
+            PlanningTaskStatus.RECOVERING: GoalExecutionStatus.RECOVERING,
+            PlanningTaskStatus.BUDGET_EXHAUSTED: GoalExecutionStatus.BUDGET_EXHAUSTED,
+            PlanningTaskStatus.CANCELLED: GoalExecutionStatus.CANCELLED,
+        }.get(task.status, GoalExecutionStatus.FAILED)
+        failure_kind = task.error.failure_kind if task.error is not None else None
+        unknown = failure_kind is FailureKind.UNKNOWN_OUTCOME
+        return GoalExecutionReport(
+            status,
+            task.task_id,
+            GoalUsage(retries=task.usage.retries),
+            task.result_evidence or (task.error.evidence if task.error else ()),
+            task.error.message if task.error else "task resumed",
+            not unknown and failure_kind is FailureKind.TRANSIENT,
+            EffectOutcome.UNKNOWN_OUTCOME if unknown else None,
+        )
+
+    async def cancel_task(self, task_id: UUID) -> None:
+        await self._controller.cancel_task(task_id)
 
     def _verify_generated_result(
         self, task: PlanningTask, proposal: PlanProposal
@@ -831,7 +904,13 @@ class GoalSupervisor:
             raise GoalSupervisorValidationError("Trace service is malformed")
         self._trace = trace
 
-    async def start(self, intent: GoalIntent, budget: GoalBudget) -> GoalSupervisorState:
+    async def start(
+        self,
+        intent: GoalIntent,
+        budget: GoalBudget,
+        *,
+        on_task_bound: Callable[[UUID], None] | None = None,
+    ) -> GoalSupervisorState:
         current = self._store.load(intent.goal_id)
         if current is None:
             now = _utc(self._clock())
@@ -854,11 +933,19 @@ class GoalSupervisor:
             )
         if current.status in {GoalStatus.RECOVERING, GoalStatus.WAITING_FOR_PERMISSION}:
             return current
+        if current.cancellation_requested:
+            return self._finish(
+                current, GoalStatus.CANCELLED, "Goal cancellation was requested", ()
+            )
         current = self._save(replace(current, active_run=True))
         analysis: GoalAnalysis | None = None
         selected: GoalAlternative | None = None
         try:
             while True:
+                if current.cancellation_requested:
+                    return self._finish(
+                        current, GoalStatus.CANCELLED, "Goal cancellation was requested", ()
+                    )
                 current = self._check_budget(current)
                 current = self._transition(current, GoalStatus.ANALYZING)
                 analysis = await self._analyzer.analyze(intent, self._registry)
@@ -913,7 +1000,23 @@ class GoalSupervisor:
                         continue
                 current = self._transition(current, GoalStatus.PLANNING)
                 current = self._transition(current, GoalStatus.EXECUTING)
-                report = await self._runner.run(intent, current.budget)
+                if current is None:  # pragma: no cover - state is initialized above
+                    raise GoalSupervisorStoreError("Goal state disappeared during execution")
+                bound_state = current
+                bound = getattr(self._runner, "run_bound", None)
+
+                def bind_task(
+                    task_id: UUID, initial_state: GoalSupervisorState = bound_state
+                ) -> None:
+                    nonlocal current
+                    current = self._save(replace(initial_state, task_id=task_id))
+                    if on_task_bound is not None:
+                        on_task_bound(task_id)
+
+                if callable(bound):
+                    report = await bound(intent, current.budget, on_task_bound=bind_task)
+                else:
+                    report = await self._runner.run(intent, current.budget)
                 if not isinstance(report, GoalExecutionReport):
                     raise GoalSupervisorValidationError("Goal task runner returned malformed data")
                 current = self._add_usage(current, report.usage)
@@ -923,6 +1026,10 @@ class GoalSupervisor:
                     if self._trace is not None:
                         self._trace.bind_goal_task(intent.goal_id, report.task_id)
                     current = self._save(replace(current, task_id=report.task_id))
+                if report.status is GoalExecutionStatus.CANCELLED:
+                    return self._finish(
+                        current, GoalStatus.CANCELLED, report.detail, report.evidence
+                    )
                 current = self._transition(current, GoalStatus.VERIFYING)
                 if report.status is GoalExecutionStatus.COMPLETED:
                     return self._finish(
@@ -982,12 +1089,63 @@ class GoalSupervisor:
         if state is None:
             raise GoalSupervisorError("Unknown goal")
         if state.status is GoalStatus.WAITING_FOR_PERMISSION:
-            return state
+            if state.task_id is None:
+                return state
+            resume_task = getattr(self._runner, "resume_task", None)
+            if not callable(resume_task):
+                return state
+            state = self._save(replace(state, active_run=True, cancellation_requested=False))
+            report = await resume_task(state.task_id)
+            if report.status is GoalExecutionStatus.COMPLETED:
+                return self._finish(state, GoalStatus.COMPLETED, report.detail, report.evidence)
+            if report.status is GoalExecutionStatus.CANCELLED:
+                return self._finish(state, GoalStatus.CANCELLED, report.detail, report.evidence)
+            if report.status is GoalExecutionStatus.RECOVERING:
+                return self._finish(state, GoalStatus.RECOVERING, report.detail, report.evidence)
+            if report.status is GoalExecutionStatus.WAITING_FOR_PERMISSION:
+                return self._finish(
+                    state, GoalStatus.WAITING_FOR_PERMISSION, report.detail, report.evidence
+                )
+            return self._finish_blocked(state, report.detail or "Resumed goal failed")
         if state.status is GoalStatus.RECOVERING and not reconciled:
             return state
         if state.status is GoalStatus.RECOVERING:
             state = self._save(replace(state, status=GoalStatus.ANALYZING, last_error=None))
         return await self.start(state.intent, state.budget)
+
+    async def cancel(
+        self,
+        goal_id: UUID,
+        *,
+        intent: GoalIntent | None = None,
+        budget: GoalBudget | None = None,
+    ) -> GoalSupervisorState:
+        state = self._store.load(goal_id, reconcile_active=False)
+        if state is None:
+            if intent is None or budget is None or intent.goal_id != goal_id:
+                raise GoalSupervisorError("Unknown goal")
+            now = _utc(self._clock())
+            state = self._store.create(
+                GoalSupervisorState(
+                    intent,
+                    budget,
+                    GoalStatus.ANALYZING,
+                    now,
+                    now,
+                    cancellation_requested=True,
+                )
+            )
+            return self._finish(state, GoalStatus.CANCELLED, "Goal cancellation was requested", ())
+        if state.status is GoalStatus.RECOVERING or state.status is GoalStatus.CANCELLED:
+            return state
+        state = self._save(replace(state, cancellation_requested=True))
+        if state.task_id is not None:
+            cancel_task = getattr(self._runner, "cancel_task", None)
+            if callable(cancel_task):
+                await cancel_task(state.task_id)
+        if not state.active_run:
+            return self._finish(state, GoalStatus.CANCELLED, "Goal cancellation was requested", ())
+        return state
 
     def get(self, goal_id: UUID) -> GoalSupervisorState | None:
         return self._store.load(goal_id, reconcile_active=False)
@@ -1157,6 +1315,7 @@ def _encode_state(state: GoalSupervisorState) -> str:
         "evidence": list(state.evidence),
         "last_error": state.last_error,
         "active_run": state.active_run,
+        "cancellation_requested": state.cancellation_requested,
     }
     return json.dumps(payload, sort_keys=True, separators=(",", ":"), allow_nan=False)
 
@@ -1208,6 +1367,7 @@ def _decode_state(payload: str) -> GoalSupervisorState:
             tuple(data["evidence"]),
             data.get("last_error"),
             data["active_run"],
+            data.get("cancellation_requested", False),
         )
     except (KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
         raise GoalSupervisorStoreError("Goal supervisor state is malformed") from error

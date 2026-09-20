@@ -165,6 +165,7 @@ from jarvis.generated_capability import (
     GeneratedActionPlanPlanner,
     GeneratedCapabilityToolRegistrar,
 )
+from jarvis.goal_scheduler import GoalScheduler
 from jarvis.goal_supervisor import (
     GoalAnalysis,
     GoalIntent,
@@ -812,6 +813,7 @@ class RuntimeContainer:
     candidate_evaluator: CandidateEvaluator
     goal_supervisor_store: GoalSupervisorStore
     goal_supervisor: GoalSupervisor
+    goal_scheduler: GoalScheduler
     solution_discovery: SolutionDiscovery
     capability_factory: CapabilityFactory
     package_reviewer: GeneratedPackageReviewer
@@ -1044,6 +1046,7 @@ class RuntimeContainer:
             if self.episode_start_task is not None:
                 self.episode_start_task.cancel()
                 await asyncio.gather(self.episode_start_task, return_exceptions=True)
+            await self.goal_scheduler.shutdown()
             resources = (
                 self.episode_composer,
                 self.interruption_intelligence,
@@ -2385,6 +2388,7 @@ class ApplicationRuntime:
                 ),
                 trace=trace_service,
             )
+            goal_scheduler = GoalScheduler(goal_supervisor)
             workflow_procedure_store = SQLiteWorkflowProcedureStore(
                 paths.workflow_procedure_database
             )
@@ -3073,6 +3077,7 @@ class ApplicationRuntime:
                 candidate_evaluator=CandidateEvaluator(),
                 goal_supervisor_store=goal_supervisor_store,
                 goal_supervisor=goal_supervisor,
+                goal_scheduler=goal_scheduler,
                 solution_discovery=solution_discovery,
                 capability_factory=capability_factory,
                 package_reviewer=package_reviewer,
