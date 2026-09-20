@@ -1137,7 +1137,6 @@ class PlanningEngine:
                 self._record_routing_outcome(task, step, execution, None)
                 return self._cancelled(task, plan)
             if execution.status is StepExecutionStatus.WAITING_FOR_PERMISSION:
-                self._record_routing_outcome(task, step, execution, None)
                 return self._pause(task, plan, step, execution.approval_request_ids)
             if execution.status is StepExecutionStatus.TRANSIENT_FAILURE:
                 self._record_routing_outcome(task, step, execution, None)
