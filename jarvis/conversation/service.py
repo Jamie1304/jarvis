@@ -25,6 +25,7 @@ from jarvis.ai.routing import (
     RoutingPolicy,
 )
 from jarvis.ai.sessions import AgentSessionStore, AgentSessionType
+from jarvis.context_projection import ConversationContextEnvelope
 from jarvis.core.errors import ConversationCancelledError
 
 
@@ -175,6 +176,7 @@ class ConversationService:
         user_content: str,
         *,
         privacy_context: PrivacyContext | None = None,
+        context: ConversationContextEnvelope | None = None,
     ) -> AsyncIterator[ConversationUpdate]:
         """Store a user message then yield and retain one assistant response.
 
@@ -212,7 +214,11 @@ class ConversationService:
         )
         assistant_id = uuid4()
         content = ""
-        provided_privacy = privacy_context or PrivacyContext()
+        if context is not None and context.user_turn != user_content:
+            raise ValueError("Conversation context user turn must match submitted content")
+        provided_privacy = privacy_context or (
+            context.privacy_context if context else PrivacyContext()
+        )
         decision = None
         if self._dispatcher is not None:
             intent = LogicalRoleRequirements(
@@ -232,8 +238,20 @@ class ConversationService:
             )
         else:
             session_id = self._ensure_session(conversation_id)
+        projected_messages = self._within_context(messages)
+        if context is not None:
+            projected_messages = (
+                ChatMessage(
+                    uuid4(),
+                    conversation_id,
+                    MessageRole.SYSTEM,
+                    context.model_text(),
+                    datetime.now(UTC),
+                ),
+                *projected_messages,
+            )
         request = GenerationRequest(
-            messages=self._within_context(messages),
+            messages=projected_messages,
             model=self._model,
             context_limit=self._context_limit,
             privacy_context=PrivacyContext(
