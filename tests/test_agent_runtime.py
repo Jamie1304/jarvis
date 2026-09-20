@@ -436,8 +436,15 @@ def test_context_manager_and_loop_guard_cover_bounded_projections() -> None:
 )
 async def test_planning_adapter_maps_bounded_results(reason: AgentTerminationReason) -> None:
     class FakeLoop:
-        async def run(self, task_id: object, prompt: str, *, cancellation: asyncio.Event) -> object:
-            del task_id, prompt, cancellation
+        async def run(
+            self,
+            task_id: object,
+            prompt: str,
+            *,
+            cancellation: asyncio.Event,
+            context: object,
+        ) -> object:
+            del task_id, prompt, cancellation, context
             return SimpleNamespace(
                 termination_reason=reason,
                 proposed_result="proposed",
@@ -447,7 +454,16 @@ async def test_planning_adapter_maps_bounded_results(reason: AgentTerminationRea
     adapter = AgenticPlanningStepExecutor(FakeLoop())  # type: ignore[arg-type]
     result = await adapter.execute(
         cast(Any, SimpleNamespace(task_id=uuid4(), goal="goal")),
-        cast(Any, SimpleNamespace()),
+        cast(
+            Any,
+            SimpleNamespace(
+                step_id=uuid4(),
+                input_json='{"value":"step"}',
+                capability="test",
+                expected_output="out",
+                expected_evidence=("evidence",),
+            ),
+        ),
         asyncio.Event(),
     )
     assert result.status.value in {"succeeded", "cancelled"}
@@ -459,8 +475,15 @@ async def test_planning_adapter_maps_approval_pause_and_failure() -> None:
         def __init__(self, reason: AgentTerminationReason) -> None:
             self.reason = reason
 
-        async def run(self, task_id: object, prompt: str, *, cancellation: asyncio.Event) -> object:
-            del task_id, prompt, cancellation
+        async def run(
+            self,
+            task_id: object,
+            prompt: str,
+            *,
+            cancellation: asyncio.Event,
+            context: object,
+        ) -> object:
+            del task_id, prompt, cancellation, context
             return SimpleNamespace(
                 termination_reason=self.reason,
                 proposed_result=None,
@@ -481,7 +504,16 @@ async def test_planning_adapter_maps_approval_pause_and_failure() -> None:
     ):
         result = await AgenticPlanningStepExecutor(cast(Any, FakeLoop(reason))).execute(
             cast(Any, SimpleNamespace(task_id=uuid4(), goal="goal")),
-            cast(Any, SimpleNamespace()),
+            cast(
+                Any,
+                SimpleNamespace(
+                    step_id=uuid4(),
+                    input_json='{"value":"step"}',
+                    capability="test",
+                    expected_output="out",
+                    expected_evidence=("evidence",),
+                ),
+            ),
             asyncio.Event(),
         )
         assert result.status.value == expected
