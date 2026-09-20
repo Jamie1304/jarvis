@@ -19,6 +19,7 @@ from jarvis.ai.fitness import (
     SemanticOutcome,
     SQLiteRoutingFitnessStore,
 )
+from jarvis.ai.roles import LogicalModelRole, LogicalRoleRequirements
 from jarvis.autonomy.routing import (
     ExecutionCandidateKind,
     ExecutionRouteSelector,
@@ -63,6 +64,7 @@ from jarvis.planning.models import (
     StepResult,
     StepVerification,
 )
+from jarvis.planning.orchestration import OrchestrationRequest, OrchestrationResult
 from jarvis.planning.store import PlanningStore, PlanningStoreError
 from jarvis.planning.validation import PlanProposal, PlanValidationError, PlanValidator
 from jarvis.state import ApplicationStateMachine
@@ -109,6 +111,20 @@ class PlanAdvisor(ABC):
 
     @abstractmethod
     async def replan(self, evidence: ReplanEvidence) -> object: ...
+
+    async def propose_orchestration(self, request: OrchestrationRequest) -> OrchestrationResult:
+        """Adapt the existing advisor at the canonical typed planning seam."""
+
+        proposal = await self.propose(request.goal, request.assumptions, request.constraints)
+        return OrchestrationResult(request.orchestration_attempt_id, proposal=proposal)
+
+    async def replan_orchestration(
+        self, request: OrchestrationRequest, evidence: ReplanEvidence
+    ) -> OrchestrationResult:
+        """Return an untrusted proposal for this distinct orchestration attempt."""
+
+        proposal = await self.replan(evidence)
+        return OrchestrationResult(request.orchestration_attempt_id, proposal=proposal)
 
 
 class PlanningStepExecutor(ABC):
@@ -433,7 +449,20 @@ class PlanningEngine:
         if budgets.max_model_calls < 1:
             return self._fail_budget(task, "model_call_budget_exhausted")
         try:
-            raw = await self._advisor.propose(goal, assumptions, constraints)
+            orchestration_request = OrchestrationRequest.create(
+                goal,
+                assumptions,
+                constraints,
+                LogicalRoleRequirements(
+                    LogicalModelRole.ORCHESTRATION,
+                    goal,
+                    context_tokens=sum(len(item) for item in (*assumptions, *constraints)) // 4,
+                ),
+            )
+            orchestration_result = await self._advisor.propose_orchestration(orchestration_request)
+            if orchestration_result.failure is not None:
+                raise ValueError(orchestration_result.failure)
+            raw = orchestration_result.proposal
             plan = self._validator.validate(
                 raw,
                 task_id=task.task_id,
@@ -673,7 +702,18 @@ class PlanningEngine:
             prior_plan_version=plan.version,
         )
         try:
-            raw = await self._advisor.replan(evidence)
+            orchestration_request = OrchestrationRequest.create(
+                task.goal,
+                task.original_assumptions,
+                constraints,
+                LogicalRoleRequirements(LogicalModelRole.ORCHESTRATION, task.goal),
+            )
+            orchestration_result = await self._advisor.replan_orchestration(
+                orchestration_request, evidence
+            )
+            if orchestration_result.failure is not None:
+                raise PlanningEngineError(orchestration_result.failure)
+            raw = orchestration_result.proposal
             replacement = self._validator.validate(
                 raw,
                 task_id=task.task_id,
@@ -1284,7 +1324,18 @@ class PlanningEngine:
             prior_plan_version=plan.version,
         )
         try:
-            raw = await self._advisor.replan(replan_evidence)
+            orchestration_request = OrchestrationRequest.create(
+                task.goal,
+                task.original_assumptions,
+                task.original_constraints,
+                LogicalRoleRequirements(LogicalModelRole.ORCHESTRATION, task.goal),
+            )
+            orchestration_result = await self._advisor.replan_orchestration(
+                orchestration_request, replan_evidence
+            )
+            if orchestration_result.failure is not None:
+                raise PlanningEngineError(orchestration_result.failure)
+            raw = orchestration_result.proposal
             replacement = self._validator.validate(
                 raw,
                 task_id=task.task_id,

@@ -39,6 +39,7 @@ from jarvis.planning.models import (
     StepResult,
     StepVerification,
 )
+from jarvis.planning.orchestration import OrchestrationRequest, OrchestrationResult
 from jarvis.planning.store import (
     PlanningMigration,
     PlanningStore,
@@ -58,6 +59,8 @@ __all__ = [
     "GoalVerification",
     "OwnedPlan",
     "OwnedPlanStatus",
+    "OrchestrationRequest",
+    "OrchestrationResult",
     "PlanAdvisor",
     "PlanEdit",
     "PlanEditError",

@@ -2,8 +2,9 @@
 
 import threading
 from collections.abc import AsyncIterator
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
+from enum import StrEnum
 from uuid import UUID, uuid4
 
 from jarvis.ai.models import (
@@ -17,14 +18,33 @@ from jarvis.ai.models import (
 from jarvis.ai.privacy import PrivacyGuardedProvider
 from jarvis.ai.providers.base import AIProvider
 from jarvis.ai.providers.registry import ProviderMetadata
+from jarvis.ai.roles import LogicalModelRole, LogicalRoleRequirements
 from jarvis.ai.routing import (
     DispatchChunk,
     InferenceDispatcher,
-    RouteRequest,
     RoutingPolicy,
 )
 from jarvis.ai.sessions import AgentSessionStore, AgentSessionType
 from jarvis.core.errors import ConversationCancelledError
+
+
+class ConversationTurnStatus(StrEnum):
+    ACTIVE = "active"
+    COMPLETED = "completed"
+    CANCELLED = "cancelled"
+    FAILED = "failed"
+
+
+@dataclass(frozen=True, slots=True)
+class ConversationTurn:
+    """The process-local authoritative logical Conversation Model turn owner."""
+
+    turn_id: UUID
+    conversation_id: UUID
+    generation: int
+    logical_role: LogicalModelRole
+    status: ConversationTurnStatus
+    cancellation_requested: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -33,6 +53,7 @@ class ConversationUpdate:
 
     conversation_id: UUID
     message_id: UUID
+    turn_id: UUID
     content: str
     done: bool
 
@@ -67,6 +88,7 @@ class ConversationService:
         self._messages: dict[UUID, list[ChatMessage]] = {}
         self._cancellations: dict[UUID, threading.Event] = {}
         self._generations: dict[UUID, int] = {}
+        self._turns: dict[UUID, ConversationTurn] = {}
         self._session_store = session_store
         self._session_type = session_type
         self._provider_id = provider_id
@@ -110,6 +132,13 @@ class ConversationService:
         if cancellation is not None:
             cancellation.set()
         self._generations[conversation_id] = self._generations.get(conversation_id, 0) + 1
+        current = self._turns.get(conversation_id)
+        if current is not None and current.status is ConversationTurnStatus.ACTIVE:
+            self._turns[conversation_id] = replace(
+                current,
+                status=ConversationTurnStatus.CANCELLED,
+                cancellation_requested=True,
+            )
         session_id = self._sessions.get(conversation_id)
         if session_id is not None and self._session_store is not None:
             self._session_store.mark_synchronized(session_id, False)
@@ -118,6 +147,17 @@ class ConversationService:
         """Return the bound execution session, if session persistence is enabled."""
 
         return self._sessions.get(conversation_id)
+
+    def active_turn(self, conversation_id: UUID) -> ConversationTurn | None:
+        """Return the one authoritative active logical conversation turn, if any."""
+
+        turn = self._turns.get(conversation_id)
+        return turn if turn is not None and turn.status is ConversationTurnStatus.ACTIVE else None
+
+    def turn(self, conversation_id: UUID) -> ConversationTurn | None:
+        """Return the latest process-local turn owner for diagnostics and UI state."""
+
+        return self._turns.get(conversation_id)
 
     async def provider_health(self) -> ProviderHealth:
         """Expose provider connectivity without leaking its concrete implementation."""
@@ -155,20 +195,33 @@ class ConversationService:
         messages.append(self._message(conversation_id, MessageRole.USER, user_content))
         cancellation = threading.Event()
         self._cancellations[conversation_id] = cancellation
+        prior_turn = self._turns.get(conversation_id)
+        if prior_turn is not None and prior_turn.status is ConversationTurnStatus.ACTIVE:
+            self._turns[conversation_id] = replace(
+                prior_turn,
+                status=ConversationTurnStatus.CANCELLED,
+                cancellation_requested=True,
+            )
+        turn_id = uuid4()
+        self._turns[conversation_id] = ConversationTurn(
+            turn_id,
+            conversation_id,
+            generation,
+            LogicalModelRole.CONVERSATION,
+            ConversationTurnStatus.ACTIVE,
+        )
         assistant_id = uuid4()
         content = ""
         provided_privacy = privacy_context or PrivacyContext()
         decision = None
         if self._dispatcher is not None:
-            intent = RouteRequest(
-                task=user_content,
-                profile="conversation",
-                task_class="conversation",
-                responsibility="conversation",
+            intent = LogicalRoleRequirements(
+                LogicalModelRole.CONVERSATION,
+                user_content,
                 context_tokens=sum(len(item.content) for item in messages) // 4,
                 policy=self._routing_policy,
                 privacy_context=provided_privacy,
-            )
+            ).to_route_request()
             decision = self._dispatcher.route(intent)
             if decision.primary is None:
                 raise RuntimeError("No eligible conversation inference model")
@@ -224,13 +277,35 @@ class ConversationService:
                 yield ConversationUpdate(
                     conversation_id=conversation_id,
                     message_id=assistant_id,
+                    turn_id=turn_id,
                     content=chunk.content,
                     done=chunk.done,
                 )
             self._raise_if_cancelled(cancellation, conversation_id, generation, self._generations)
+            current_turn = self._turns.get(conversation_id)
+            if current_turn is not None and current_turn.turn_id == turn_id:
+                self._turns[conversation_id] = replace(
+                    current_turn, status=ConversationTurnStatus.COMPLETED
+                )
             if session_id is not None and self._session_store is not None:
                 self._session_store.mark_synchronized(session_id, True)
                 self._session_store.record_usage(session_id, max(1, len(content) // 4))
+        except ConversationCancelledError:
+            current_turn = self._turns.get(conversation_id)
+            if current_turn is not None and current_turn.turn_id == turn_id:
+                self._turns[conversation_id] = replace(
+                    current_turn,
+                    status=ConversationTurnStatus.CANCELLED,
+                    cancellation_requested=True,
+                )
+            raise
+        except Exception:
+            current_turn = self._turns.get(conversation_id)
+            if current_turn is not None and current_turn.turn_id == turn_id:
+                self._turns[conversation_id] = replace(
+                    current_turn, status=ConversationTurnStatus.FAILED
+                )
+            raise
         finally:
             if self._cancellations.get(conversation_id) is cancellation:
                 self._cancellations.pop(conversation_id, None)
