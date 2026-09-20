@@ -439,7 +439,9 @@ class PlanningEngine:
         if routing_store is not None and not isinstance(routing_store, SQLiteRoutingFitnessStore):
             raise TypeError("Routing decision store is invalid")
         self._routing_store = routing_store
-        self._orchestration_controller = OrchestrationController(advisor, decomposition_policy)
+        self._orchestration_controller = OrchestrationController(
+            advisor, decomposition_policy, store
+        )
         self._cancellations: dict[UUID, asyncio.Event] = {}
 
     async def create_task(
@@ -489,6 +491,7 @@ class PlanningEngine:
                 cancellation=cancellation,
                 deadline=task.deadline,
                 clock=self._clock,
+                task_id=task.task_id,
             )
             raw = orchestration_run.proposal
             plan = self._validator.validate(
@@ -756,6 +759,7 @@ class PlanningEngine:
                 deadline=task.deadline,
                 replan_evidence=evidence,
                 clock=self._clock,
+                task_id=task.task_id,
             )
             raw = orchestration_run.proposal
             replacement = self._validator.validate(
@@ -1403,6 +1407,7 @@ class PlanningEngine:
                 deadline=task.deadline,
                 replan_evidence=replan_evidence,
                 clock=self._clock,
+                task_id=task.task_id,
             )
             raw = orchestration_run.proposal
             replacement = self._validator.validate(

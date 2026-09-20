@@ -64,6 +64,18 @@ class GoalScheduler:
         self._active = 0
         self._sequence = 0
         self._accepting = True
+        self._persistent = all(
+            callable(getattr(supervisor, name, None))
+            for name in (
+                "ensure_durable",
+                "save_schedule_record",
+                "list_schedule_records",
+                "durable_inputs",
+                "reconcile_after_restart",
+            )
+        )
+        if self._persistent:
+            self._restore_durable_records()
 
     @property
     def policy(self) -> GoalSchedulerPolicy:
@@ -73,24 +85,28 @@ class GoalScheduler:
         async with self._changed:
             if not self._accepting:
                 raise RuntimeError("Goal scheduler is shut down")
-            if (
-                intent.goal_id in self._views
-                and self._views[intent.goal_id].status is not GoalScheduleStatus.TERMINAL
-            ):
-                raise ValueError("Goal is already queued or active")
+            if intent.goal_id in self._views:
+                raise ValueError("Goal is already durable and cannot be resubmitted")
             if len(self._queue) >= self._policy.max_queued_goals:
                 raise RuntimeError("Goal scheduler queue is full")
-            self._sequence += 1
+            submitted_at = datetime.now(UTC)
+            if self._persistent:
+                durable_sequence = self._supervisor.ensure_durable(intent, budget, submitted_at)
+                self._sequence = max(self._sequence, durable_sequence)
+            else:
+                self._sequence += 1
+                durable_sequence = self._sequence
             view = GoalScheduleView(
                 intent.goal_id,
                 GoalScheduleStatus.QUEUED,
-                self._sequence,
-                datetime.now(UTC),
+                durable_sequence,
+                submitted_at,
             )
             self._views[intent.goal_id] = view
             self._inputs[intent.goal_id] = (intent, budget)
             self._queue.append(intent.goal_id)
             self._workers[intent.goal_id] = asyncio.create_task(self._run_goal(intent.goal_id))
+            self._persist(view)
             self._changed.notify_all()
             return view
 
@@ -125,6 +141,7 @@ class GoalScheduler:
                 self._queue.remove(goal_id)
             updated = replace(view, cancellation_requested=True)
             self._views[goal_id] = updated
+            self._persist(updated)
             self._changed.notify_all()
         if queued:
             state = await self._supervisor.cancel(goal_id, intent=intent, budget=budget)
@@ -146,6 +163,7 @@ class GoalScheduler:
             self._queue.append(goal_id)
             self._resuming.add(goal_id)
             self._workers[goal_id] = asyncio.create_task(self._run_goal(goal_id))
+            self._persist(self._views[goal_id])
             self._changed.notify_all()
             return self._views[goal_id]
 
@@ -208,6 +226,7 @@ class GoalScheduler:
                         status=GoalScheduleStatus.RUNNING,
                         started_at=current.started_at or datetime.now(UTC),
                     )
+                    self._persist(self._views[goal_id])
                     self._changed.notify_all()
                     return
                 await self._changed.wait()
@@ -234,8 +253,94 @@ class GoalScheduler:
                 error=error,
             )
             self._views[goal_id] = updated
+            self._persist(updated)
             self._changed.notify_all()
             return updated
+
+    def reconcile_after_restart(self) -> tuple[GoalScheduleView, ...]:
+        """Reconstruct queue metadata without recreating process-owned workers."""
+
+        if not self._persistent:
+            return tuple(sorted(self._views.values(), key=lambda item: item.sequence))
+        self._supervisor.reconcile_after_restart()
+        self._queue.clear()
+        self._workers.clear()
+        self._resuming.clear()
+        self._active = 0
+        for goal_id, view in tuple(self._views.items()):
+            state = self._supervisor.get(goal_id)
+            if state is None:
+                continue
+            if view.status is GoalScheduleStatus.RUNNING and not state.terminal:
+                state = self._supervisor.mark_recovering(goal_id)
+            if state.status in {
+                GoalStatus.COMPLETED,
+                GoalStatus.BLOCKED,
+                GoalStatus.FAILED,
+                GoalStatus.CANCELLED,
+                GoalStatus.BUDGET_EXHAUSTED,
+            }:
+                restored = replace(
+                    view,
+                    status=GoalScheduleStatus.TERMINAL,
+                    goal_status=state.status,
+                    task_id=state.task_id,
+                    stopped_at=view.stopped_at or datetime.now(UTC),
+                )
+            elif state.status in {GoalStatus.RECOVERING, GoalStatus.WAITING_FOR_PERMISSION}:
+                restored = replace(
+                    view,
+                    status=GoalScheduleStatus.SUSPENDED,
+                    goal_status=state.status,
+                    task_id=state.task_id,
+                    stopped_at=view.stopped_at or datetime.now(UTC),
+                )
+            else:
+                restored = replace(view, status=GoalScheduleStatus.QUEUED)
+                self._queue.append(goal_id)
+            self._views[goal_id] = restored
+            self._persist(restored)
+        return tuple(sorted(self._views.values(), key=lambda item: item.sequence))
+
+    def _restore_durable_records(self) -> None:
+        records = self._supervisor.list_schedule_records()
+        for record in records:
+            goal_id = UUID(str(record["goal_id"]))
+            inputs = self._supervisor.durable_inputs(goal_id)
+            if inputs is None:
+                continue
+            self._sequence = max(self._sequence, int(str(record["sequence"])))
+            self._inputs[goal_id] = inputs
+            self._views[goal_id] = GoalScheduleView(
+                goal_id,
+                GoalScheduleStatus(str(record["status"])),
+                int(str(record["sequence"])),
+                datetime.fromisoformat(str(record["submitted_at"])),
+                datetime.fromisoformat(str(record["started_at"])) if record["started_at"] else None,
+                datetime.fromisoformat(str(record["stopped_at"])) if record["stopped_at"] else None,
+                bool(record["cancellation_requested"]),
+                GoalStatus(str(record["goal_status"])) if record["goal_status"] else None,
+                UUID(str(record["task_id"])) if record["task_id"] else None,
+                str(record["error"]) if record["error"] else None,
+            )
+
+    def _persist(self, view: GoalScheduleView) -> None:
+        if not self._persistent:
+            return
+        self._supervisor.save_schedule_record(
+            {
+                "goal_id": str(view.goal_id),
+                "sequence": view.sequence,
+                "status": view.status.value,
+                "submitted_at": view.submitted_at.isoformat(),
+                "started_at": view.started_at.isoformat() if view.started_at else None,
+                "stopped_at": view.stopped_at.isoformat() if view.stopped_at else None,
+                "cancellation_requested": view.cancellation_requested,
+                "goal_status": view.goal_status.value if view.goal_status else None,
+                "task_id": str(view.task_id) if view.task_id else None,
+                "error": view.error,
+            }
+        )
 
 
 __all__ = ["GoalScheduleStatus", "GoalScheduleView", "GoalScheduler", "GoalSchedulerPolicy"]

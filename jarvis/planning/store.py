@@ -28,6 +28,11 @@ from jarvis.planning.models import (
     StepError,
     StepResult,
 )
+from jarvis.planning.orchestration import (
+    DurableOrchestrationAttempt,
+    OrchestrationAttemptStatus,
+    OrchestrationResultKind,
+)
 
 
 class PlanningStoreError(RuntimeError):
@@ -81,6 +86,27 @@ DEFAULT_PLANNING_MIGRATIONS = (
         );
         """,
     ),
+    PlanningMigration(
+        3,
+        "create_orchestration_attempts",
+        """
+        CREATE TABLE planning_orchestration_attempts (
+            attempt_id TEXT PRIMARY KEY,
+            task_id TEXT,
+            parent_attempt_id TEXT,
+            root_attempt_id TEXT NOT NULL,
+            depth INTEGER NOT NULL,
+            status TEXT NOT NULL,
+            started_at TEXT NOT NULL,
+            finished_at TEXT,
+            kind TEXT,
+            route_decision_id TEXT,
+            diagnostic_code TEXT,
+            FOREIGN KEY(task_id) REFERENCES planning_tasks(task_id)
+        );
+        CREATE INDEX planning_orchestration_task ON planning_orchestration_attempts(task_id);
+        """,
+    ),
 )
 
 
@@ -127,6 +153,27 @@ class PlanningStore(ABC):
 
         return True
 
+    @abstractmethod
+    def begin_orchestration_attempt(self, attempt: DurableOrchestrationAttempt) -> None: ...
+
+    @abstractmethod
+    def finish_orchestration_attempt(
+        self,
+        attempt_id: UUID,
+        *,
+        status: OrchestrationAttemptStatus,
+        kind: OrchestrationResultKind | None = None,
+        route_decision_id: str | None = None,
+        diagnostic_code: str | None = None,
+        finished_at: datetime | None = None,
+    ) -> None: ...
+
+    @abstractmethod
+    def reconcile_orchestration_attempts(self) -> tuple[DurableOrchestrationAttempt, ...]: ...
+
+    @abstractmethod
+    def list_orchestration_attempts(self) -> tuple[DurableOrchestrationAttempt, ...]: ...
+
 
 def _now() -> datetime:
     return datetime.now(UTC)
@@ -148,13 +195,20 @@ class SQLitePlanningStore(PlanningStore):
         self._validate_migrations()
         database_path.parent.mkdir(parents=True, exist_ok=True)
         self._connection = sqlite3.connect(database_path, check_same_thread=False)
-        self._connection.row_factory = sqlite3.Row
-        self._connection.execute("PRAGMA foreign_keys = ON")
-        self._connection.execute("PRAGMA busy_timeout = 5000")
-        self._connection.execute("PRAGMA journal_mode = WAL")
         self._lock = threading.RLock()
-        self._integrity_check()
-        self.apply_migrations()
+        try:
+            self._connection.row_factory = sqlite3.Row
+            self._connection.execute("PRAGMA foreign_keys = ON")
+            self._connection.execute("PRAGMA busy_timeout = 5000")
+            self._connection.execute("PRAGMA journal_mode = WAL")
+            self._integrity_check()
+            self.apply_migrations()
+        except PlanningStoreError:
+            self._connection.close()
+            raise
+        except sqlite3.DatabaseError as error:
+            self._connection.close()
+            raise PlanningStoreError("Planning database is unavailable") from error
 
     @property
     def database_path(self) -> Path:
@@ -296,6 +350,115 @@ class SQLitePlanningStore(PlanningStore):
             except sqlite3.DatabaseError as error:
                 self._connection.rollback()
                 raise PlanningStoreError("Operation idempotency release failed") from error
+
+    def begin_orchestration_attempt(self, attempt: DurableOrchestrationAttempt) -> None:
+        if attempt.status is not OrchestrationAttemptStatus.STARTED:
+            raise PlanningStoreError("Orchestration attempt must begin in started state")
+        with self._lock:
+            try:
+                self._connection.execute(
+                    "INSERT INTO planning_orchestration_attempts "
+                    "(attempt_id, task_id, parent_attempt_id, root_attempt_id, depth, status, "
+                    "started_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        str(attempt.attempt_id),
+                        str(attempt.task_id) if attempt.task_id else None,
+                        str(attempt.parent_attempt_id) if attempt.parent_attempt_id else None,
+                        str(attempt.root_attempt_id),
+                        attempt.depth,
+                        attempt.status.value,
+                        _iso(attempt.started_at),
+                    ),
+                )
+                self._connection.commit()
+            except sqlite3.IntegrityError as error:
+                self._connection.rollback()
+                raise PlanningStoreError("Orchestration attempt already exists") from error
+            except sqlite3.DatabaseError as error:
+                self._connection.rollback()
+                raise PlanningStoreError("Orchestration attempt could not be stored") from error
+
+    def finish_orchestration_attempt(
+        self,
+        attempt_id: UUID,
+        *,
+        status: OrchestrationAttemptStatus,
+        kind: OrchestrationResultKind | None = None,
+        route_decision_id: str | None = None,
+        diagnostic_code: str | None = None,
+        finished_at: datetime | None = None,
+    ) -> None:
+        with self._lock:
+            try:
+                cursor = self._connection.execute(
+                    "UPDATE planning_orchestration_attempts SET status=?, finished_at=?, kind=?, "
+                    "route_decision_id=?, diagnostic_code=? WHERE attempt_id=?",
+                    (
+                        status.value,
+                        _iso(finished_at or self._clock()),
+                        kind.value if kind else None,
+                        route_decision_id,
+                        diagnostic_code,
+                        str(attempt_id),
+                    ),
+                )
+                if cursor.rowcount != 1:
+                    raise PlanningStoreError("Orchestration attempt does not exist")
+                self._connection.commit()
+            except sqlite3.DatabaseError as error:
+                self._connection.rollback()
+                raise PlanningStoreError("Orchestration attempt could not be finalized") from error
+
+    def reconcile_orchestration_attempts(self) -> tuple[DurableOrchestrationAttempt, ...]:
+        with self._lock:
+            try:
+                self._connection.execute(
+                    "UPDATE planning_orchestration_attempts SET status=?, finished_at=?, "
+                    "diagnostic_code=? WHERE status=?",
+                    (
+                        OrchestrationAttemptStatus.INTERRUPTED.value,
+                        _iso(self._clock()),
+                        "process_interrupted",
+                        OrchestrationAttemptStatus.STARTED.value,
+                    ),
+                )
+                self._connection.commit()
+            except sqlite3.DatabaseError as error:
+                self._connection.rollback()
+                raise PlanningStoreError("Orchestration attempt reconciliation failed") from error
+        return tuple(
+            item
+            for item in self.list_orchestration_attempts()
+            if item.status is OrchestrationAttemptStatus.INTERRUPTED
+        )
+
+    def list_orchestration_attempts(self) -> tuple[DurableOrchestrationAttempt, ...]:
+        with self._lock:
+            rows = self._connection.execute(
+                "SELECT attempt_id, task_id, parent_attempt_id, root_attempt_id, depth, status, "
+                "started_at, finished_at, kind, route_decision_id, diagnostic_code "
+                "FROM planning_orchestration_attempts ORDER BY started_at, attempt_id"
+            ).fetchall()
+        try:
+            return tuple(
+                DurableOrchestrationAttempt(
+                    UUID(str(row[0])),
+                    UUID(str(row[1])) if row[1] else None,
+                    UUID(str(row[2])) if row[2] else None,
+                    UUID(str(row[3])),
+                    int(row[4]),
+                    OrchestrationAttemptStatus(str(row[5])),
+                    datetime.fromisoformat(str(row[6])),
+                    datetime.fromisoformat(str(row[7])) if row[7] else None,
+                    OrchestrationResultKind(str(row[8])) if row[8] else None,
+                    str(row[9]) if row[9] else None,
+                    str(row[10]) if row[10] else None,
+                )
+                for row in rows
+            )
+        except (TypeError, ValueError) as error:
+            raise PlanningStoreError("Stored orchestration attempt is malformed") from error
 
     def load_plan(self, task_id: UUID) -> OwnedPlan | None:
         with self._lock:

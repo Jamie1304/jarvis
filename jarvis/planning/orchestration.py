@@ -21,6 +21,13 @@ class OrchestrationResultKind(StrEnum):
     DECOMPOSITION = "decomposition"
 
 
+class OrchestrationAttemptStatus(StrEnum):
+    STARTED = "started"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    INTERRUPTED = "interrupted"
+
+
 @dataclass(frozen=True, slots=True)
 class DecompositionSubproblem:
     """Untrusted bounded child objective; trusted code assigns attempt identity."""
@@ -191,6 +198,40 @@ class OrchestrationAttempt:
 
 
 @dataclass(frozen=True, slots=True)
+class DurableOrchestrationAttempt:
+    attempt_id: UUID
+    task_id: UUID | None
+    parent_attempt_id: UUID | None
+    root_attempt_id: UUID
+    depth: int
+    status: OrchestrationAttemptStatus
+    started_at: datetime
+    finished_at: datetime | None = None
+    kind: OrchestrationResultKind | None = None
+    route_decision_id: str | None = None
+    diagnostic_code: str | None = None
+
+
+class OrchestrationAttemptStore(Protocol):
+    def begin_orchestration_attempt(self, attempt: DurableOrchestrationAttempt) -> None: ...
+
+    def finish_orchestration_attempt(
+        self,
+        attempt_id: UUID,
+        *,
+        status: OrchestrationAttemptStatus,
+        kind: OrchestrationResultKind | None = None,
+        route_decision_id: str | None = None,
+        diagnostic_code: str | None = None,
+        finished_at: datetime | None = None,
+    ) -> None: ...
+
+    def reconcile_orchestration_attempts(self) -> tuple[DurableOrchestrationAttempt, ...]: ...
+
+    def list_orchestration_attempts(self) -> tuple[DurableOrchestrationAttempt, ...]: ...
+
+
+@dataclass(frozen=True, slots=True)
 class OrchestrationRun:
     proposal: object
     model_calls: int
@@ -213,10 +254,14 @@ class OrchestrationController:
     """Own recursion, budgets and lineage; never executes effects."""
 
     def __init__(
-        self, advisor: OrchestrationAdvisor, policy: DecompositionPolicy | None = None
+        self,
+        advisor: OrchestrationAdvisor,
+        policy: DecompositionPolicy | None = None,
+        attempt_store: OrchestrationAttemptStore | None = None,
     ) -> None:
         self._advisor = advisor
         self._policy = policy or DecompositionPolicy()
+        self._attempt_store = attempt_store
 
     async def run(
         self,
@@ -227,9 +272,17 @@ class OrchestrationController:
         deadline: datetime | None = None,
         replan_evidence: ReplanEvidence | None = None,
         clock: Callable[[], datetime] | None = None,
+        task_id: UUID | None = None,
     ) -> OrchestrationRun:
         ledger = _Ledger(
-            self._advisor, self._policy, max_model_calls, cancellation, deadline, clock
+            self._advisor,
+            self._policy,
+            max_model_calls,
+            cancellation,
+            deadline,
+            clock,
+            self._attempt_store,
+            task_id,
         )
         ledger.register_root(request)
         proposal, attempts = await self._visit(request, ledger, replan_evidence)
@@ -322,6 +375,8 @@ class _Ledger:
         cancellation: asyncio.Event | None,
         deadline: datetime | None,
         clock: Callable[[], datetime] | None,
+        attempt_store: OrchestrationAttemptStore | None,
+        task_id: UUID | None,
     ) -> None:
         self._advisor = advisor
         self.policy = policy
@@ -332,6 +387,8 @@ class _Ledger:
         self.calls = 0
         self.nodes = 0
         self._fingerprints: set[str] = set()
+        self._attempt_store = attempt_store
+        self._task_id = task_id
 
     def register_root(self, request: OrchestrationRequest) -> None:
         self.nodes = 1
@@ -365,16 +422,52 @@ class _Ledger:
         if self.calls >= self.max_model_calls:
             raise DecompositionError("Orchestration model-call budget exhausted")
         self.calls += 1
-        if evidence is None:
-            result = await self._advisor.propose_orchestration(request)
-        else:
-            result = await self._advisor.replan_orchestration(request, evidence)
+        started = DurableOrchestrationAttempt(
+            request.orchestration_attempt_id,
+            self._task_id,
+            request.parent_attempt_id,
+            request.root_attempt_id or request.orchestration_attempt_id,
+            request.depth,
+            OrchestrationAttemptStatus.STARTED,
+            self.clock(),
+        )
+        if self._attempt_store is not None:
+            self._attempt_store.begin_orchestration_attempt(started)
+        try:
+            if evidence is None:
+                result = await self._advisor.propose_orchestration(request)
+            else:
+                result = await self._advisor.replan_orchestration(request, evidence)
+        except Exception:
+            if self._attempt_store is not None:
+                self._attempt_store.finish_orchestration_attempt(
+                    request.orchestration_attempt_id,
+                    status=OrchestrationAttemptStatus.FAILED,
+                    diagnostic_code="advisor_failed",
+                    finished_at=self.clock(),
+                )
+            raise
         if not isinstance(result, OrchestrationResult):
             raise DecompositionError("Orchestration advisor returned malformed result")
         if result.orchestration_attempt_id != request.orchestration_attempt_id:
             raise DecompositionError("Orchestration attempt identity mismatch")
         if result.failure is not None:
+            if self._attempt_store is not None:
+                self._attempt_store.finish_orchestration_attempt(
+                    request.orchestration_attempt_id,
+                    status=OrchestrationAttemptStatus.FAILED,
+                    diagnostic_code="advisor_rejected",
+                    finished_at=self.clock(),
+                )
             raise DecompositionError(result.failure)
+        if self._attempt_store is not None:
+            self._attempt_store.finish_orchestration_attempt(
+                request.orchestration_attempt_id,
+                status=OrchestrationAttemptStatus.COMPLETED,
+                kind=result.kind,
+                route_decision_id=result.route_decision_id,
+                finished_at=self.clock(),
+            )
         return result
 
     @staticmethod
@@ -392,7 +485,10 @@ __all__ = [
     "DecompositionPolicy",
     "DecompositionSubproblem",
     "DecompositionSummary",
+    "DurableOrchestrationAttempt",
     "OrchestrationAttempt",
+    "OrchestrationAttemptStatus",
+    "OrchestrationAttemptStore",
     "OrchestrationAdvisor",
     "OrchestrationController",
     "OrchestrationRequest",

@@ -26,6 +26,7 @@ from jarvis.ai.routing import (
 )
 from jarvis.ai.sessions import AgentSessionStore, AgentSessionType
 from jarvis.context_projection import ConversationContextEnvelope
+from jarvis.conversation.store import ConversationStore, DurableTurn, DurableTurnStatus
 from jarvis.core.errors import ConversationCancelledError
 
 
@@ -34,6 +35,7 @@ class ConversationTurnStatus(StrEnum):
     COMPLETED = "completed"
     CANCELLED = "cancelled"
     FAILED = "failed"
+    INTERRUPTED = "interrupted"
 
 
 @dataclass(frozen=True, slots=True)
@@ -74,6 +76,7 @@ class ConversationService:
         provider_metadata: ProviderMetadata | None = None,
         dispatcher: InferenceDispatcher | None = None,
         routing_policy: RoutingPolicy = RoutingPolicy.BALANCED,
+        conversation_store: ConversationStore | None = None,
     ) -> None:
         self._provider = (
             provider
@@ -96,12 +99,17 @@ class ConversationService:
         self._sessions: dict[UUID, UUID] = {}
         self._dispatcher = dispatcher
         self._routing_policy = routing_policy
+        self._conversation_store = conversation_store
+        if self._conversation_store is not None:
+            self._conversation_store.reconcile_after_restart()
 
     def create_conversation(self, system_prompt: str | None = None) -> UUID:
         """Create a conversation, optionally seeded with a system instruction."""
 
         conversation_id = uuid4()
         self._messages[conversation_id] = []
+        if self._conversation_store is not None:
+            self._conversation_store.create(conversation_id)
         if self._session_store is not None:
             session = self._session_store.create(
                 self._session_type,
@@ -114,17 +122,55 @@ class ConversationService:
             self._messages[conversation_id].append(
                 self._message(conversation_id, MessageRole.SYSTEM, system_prompt)
             )
+            if self._conversation_store is not None:
+                self._conversation_store.append_message(self._messages[conversation_id][-1])
         return conversation_id
 
     def history(self, conversation_id: UUID) -> tuple[ChatMessage, ...]:
         """Return immutable process-local history for UI rendering."""
 
+        if conversation_id not in self._messages and self._conversation_store is not None:
+            self.reopen_conversation(conversation_id)
         return tuple(self._messages.get(conversation_id, []))
 
     def has_conversation(self, conversation_id: UUID) -> bool:
         """Return whether this process-local service owns the conversation reference."""
 
-        return conversation_id in self._messages
+        return conversation_id in self._messages or (
+            self._conversation_store is not None
+            and any(
+                item.conversation_id == conversation_id for item in self._conversation_store.list()
+            )
+        )
+
+    def list_conversations(self) -> tuple[UUID, ...]:
+        """List durable conversation identities when persistence is configured."""
+
+        if self._conversation_store is None:
+            return tuple(self._messages)
+        return tuple(item.conversation_id for item in self._conversation_store.list())
+
+    def reopen_conversation(self, conversation_id: UUID) -> UUID:
+        """Hydrate one durable conversation without restoring provider ownership."""
+
+        if self._conversation_store is None:
+            raise KeyError("Conversation persistence is not configured")
+        history = self._conversation_store.history(conversation_id)
+        if not history and not any(
+            item.conversation_id == conversation_id for item in self._conversation_store.list()
+        ):
+            raise KeyError(f"Unknown conversation: {conversation_id}")
+        self._messages[conversation_id] = list(history)
+        self._generations[conversation_id] = max(
+            (turn.generation for turn in self._conversation_store.turns(conversation_id)),
+            default=0,
+        )
+        return conversation_id
+
+    def durable_turns(self, conversation_id: UUID) -> tuple[DurableTurn, ...]:
+        if self._conversation_store is None:
+            return ()
+        return self._conversation_store.turns(conversation_id)
 
     def cancel(self, conversation_id: UUID) -> None:
         """Request cancellation from any thread, including the desktop UI thread."""
@@ -140,6 +186,12 @@ class ConversationService:
                 status=ConversationTurnStatus.CANCELLED,
                 cancellation_requested=True,
             )
+            if self._conversation_store is not None:
+                self._conversation_store.set_turn_status(
+                    current.turn_id,
+                    DurableTurnStatus.CANCELLED,
+                    completed_at=datetime.now(UTC),
+                )
         session_id = self._sessions.get(conversation_id)
         if session_id is not None and self._session_store is not None:
             self._session_store.mark_synchronized(session_id, False)
@@ -186,6 +238,8 @@ class ConversationService:
         """
 
         messages = self._messages.setdefault(conversation_id, [])
+        if self._conversation_store is not None:
+            self._conversation_store.create(conversation_id)
         session_id = self._sessions.get(conversation_id)
         self._generations[conversation_id] = self._generations.get(conversation_id, 0) + 1
         generation = self._generations[conversation_id]
@@ -194,7 +248,10 @@ class ConversationService:
             previous.set()
             if session_id is not None and self._session_store is not None:
                 self._session_store.mark_synchronized(session_id, False)
-        messages.append(self._message(conversation_id, MessageRole.USER, user_content))
+        user_message = self._message(conversation_id, MessageRole.USER, user_content)
+        messages.append(user_message)
+        if self._conversation_store is not None:
+            self._conversation_store.append_message(user_message)
         cancellation = threading.Event()
         self._cancellations[conversation_id] = cancellation
         prior_turn = self._turns.get(conversation_id)
@@ -204,6 +261,12 @@ class ConversationService:
                 status=ConversationTurnStatus.CANCELLED,
                 cancellation_requested=True,
             )
+            if self._conversation_store is not None:
+                self._conversation_store.set_turn_status(
+                    prior_turn.turn_id,
+                    DurableTurnStatus.CANCELLED,
+                    completed_at=datetime.now(UTC),
+                )
         turn_id = uuid4()
         self._turns[conversation_id] = ConversationTurn(
             turn_id,
@@ -212,6 +275,16 @@ class ConversationService:
             LogicalModelRole.CONVERSATION,
             ConversationTurnStatus.ACTIVE,
         )
+        if self._conversation_store is not None:
+            self._conversation_store.begin_turn(
+                DurableTurn(
+                    turn_id,
+                    conversation_id,
+                    generation,
+                    DurableTurnStatus.ACTIVE,
+                    datetime.now(UTC),
+                )
+            )
         assistant_id = uuid4()
         content = ""
         if context is not None and context.user_turn != user_content:
@@ -301,10 +374,25 @@ class ConversationService:
                 )
             self._raise_if_cancelled(cancellation, conversation_id, generation, self._generations)
             current_turn = self._turns.get(conversation_id)
+            if generation == self._generations.get(conversation_id):
+                assistant_message = ChatMessage(
+                    id=assistant_id,
+                    conversation_id=conversation_id,
+                    role=MessageRole.ASSISTANT,
+                    content=content,
+                    created_at=datetime.now(UTC),
+                )
+                messages.append(assistant_message)
+                if self._conversation_store is not None:
+                    self._conversation_store.append_message(assistant_message)
             if current_turn is not None and current_turn.turn_id == turn_id:
                 self._turns[conversation_id] = replace(
                     current_turn, status=ConversationTurnStatus.COMPLETED
                 )
+                if self._conversation_store is not None:
+                    self._conversation_store.set_turn_status(
+                        turn_id, DurableTurnStatus.COMPLETED, completed_at=datetime.now(UTC)
+                    )
             if session_id is not None and self._session_store is not None:
                 self._session_store.mark_synchronized(session_id, True)
                 self._session_store.record_usage(session_id, max(1, len(content) // 4))
@@ -316,6 +404,10 @@ class ConversationService:
                     status=ConversationTurnStatus.CANCELLED,
                     cancellation_requested=True,
                 )
+            if self._conversation_store is not None:
+                self._conversation_store.set_turn_status(
+                    turn_id, DurableTurnStatus.CANCELLED, completed_at=datetime.now(UTC)
+                )
             raise
         except Exception:
             current_turn = self._turns.get(conversation_id)
@@ -323,20 +415,14 @@ class ConversationService:
                 self._turns[conversation_id] = replace(
                     current_turn, status=ConversationTurnStatus.FAILED
                 )
+            if self._conversation_store is not None:
+                self._conversation_store.set_turn_status(
+                    turn_id, DurableTurnStatus.FAILED, completed_at=datetime.now(UTC)
+                )
             raise
         finally:
             if self._cancellations.get(conversation_id) is cancellation:
                 self._cancellations.pop(conversation_id, None)
-        if generation == self._generations.get(conversation_id):
-            messages.append(
-                ChatMessage(
-                    id=assistant_id,
-                    conversation_id=conversation_id,
-                    role=MessageRole.ASSISTANT,
-                    content=content,
-                    created_at=datetime.now(UTC),
-                )
-            )
 
     def _ensure_session(
         self,

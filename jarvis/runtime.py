@@ -118,6 +118,7 @@ from jarvis.control_center import (
     static_provider,
 )
 from jarvis.conversation.service import ConversationService
+from jarvis.conversation.store import ConversationStore, ConversationStoreError
 from jarvis.core.config import Settings, get_settings
 from jarvis.core.errors import ConfigurationError
 from jarvis.core.logging import configure_logging
@@ -450,6 +451,7 @@ class RuntimePaths:
     root: Path
     state_database: Path
     planning_database: Path
+    conversation_database: Path
     memory_database: Path
     user_model_database: Path
     knowledge_library_database: Path
@@ -493,6 +495,7 @@ class RuntimePaths:
             base,
             base / "state.sqlite3",
             base / "planning.sqlite3",
+            base / "conversations.sqlite3",
             base / "memory.sqlite3",
             base / "user-model.sqlite3",
             base / "knowledge-library.sqlite3",
@@ -573,6 +576,7 @@ class RuntimePaths:
         databases = (
             self.state_database,
             self.planning_database,
+            self.conversation_database,
             self.memory_database,
             self.user_model_database,
             self.knowledge_library_database,
@@ -747,6 +751,7 @@ class RuntimeContainer:
     stt: SpeechToTextService | None
     tts: TextToSpeechService | None
     conversation: ConversationService
+    conversation_store: ConversationStore
     event_bus: EventBus
     state_store: SQLiteStateStore
     state_machine: ApplicationStateMachine
@@ -1062,6 +1067,7 @@ class RuntimeContainer:
                 self.control_center,
                 self.inference_dispatcher,
                 self.conversation,
+                self.conversation_store,
                 self.portfolio_optimizer,
                 self.acquisition_broker,
                 self.model_manager,
@@ -1683,6 +1689,7 @@ class ApplicationRuntime:
             )
             paths.validate_storage_layout()
             planning_store = SQLitePlanningStore(paths.planning_database)
+            planning_store.reconcile_orchestration_attempts()
             paths.validate_storage_layout()
             validator = PlanValidator(registry, max_steps=settings.agent_max_steps)
             engine = PlanningEngine(
@@ -2389,6 +2396,13 @@ class ApplicationRuntime:
                 trace=trace_service,
             )
             goal_scheduler = GoalScheduler(goal_supervisor)
+            for goal_state in goal_supervisor.reconcile_after_restart():
+                if goal_state.task_id is not None:
+                    goal_supervisor.reconcile_planning_state(
+                        goal_state.intent.goal_id,
+                        planning_store.load_task(goal_state.task_id),
+                    )
+            goal_scheduler.reconcile_after_restart()
             workflow_procedure_store = SQLiteWorkflowProcedureStore(
                 paths.workflow_procedure_database
             )
@@ -2509,6 +2523,7 @@ class ApplicationRuntime:
                 model_id=settings.ai_model,
             )
 
+            conversation_store = ConversationStore(paths.conversation_database)
             conversation = ConversationService(
                 provider,
                 model=settings.ai_model,
@@ -2519,6 +2534,7 @@ class ApplicationRuntime:
                     settings.ai_provider
                 ).metadata,
                 dispatcher=inference_dispatcher,
+                conversation_store=conversation_store,
             )
             current_context = CurrentContextService(
                 actor_context_service=actor_context_service,
@@ -3009,6 +3025,7 @@ class ApplicationRuntime:
                 stt=stt,
                 tts=tts,
                 conversation=conversation,
+                conversation_store=conversation_store,
                 event_bus=events,
                 state_store=state_store,
                 state_machine=state_machine,
@@ -3182,6 +3199,7 @@ class ApplicationRuntime:
             AuditStoreError,
             AutomationStoreError,
             PlanningStoreError,
+            ConversationStoreError,
             MemoryMigrationError,
             KnowledgeLibraryMigrationError,
             UserModelMigrationError,

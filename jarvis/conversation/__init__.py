@@ -6,10 +6,22 @@ from jarvis.conversation.service import (
     ConversationTurnStatus,
     ConversationUpdate,
 )
+from jarvis.conversation.store import (
+    ConversationStore,
+    ConversationStoreError,
+    DurableConversation,
+    DurableTurn,
+    DurableTurnStatus,
+)
 
 __all__ = [
     "ConversationService",
     "ConversationTurn",
     "ConversationTurnStatus",
     "ConversationUpdate",
+    "ConversationStore",
+    "ConversationStoreError",
+    "DurableConversation",
+    "DurableTurn",
+    "DurableTurnStatus",
 ]

@@ -134,6 +134,10 @@ def _utc(value: datetime) -> datetime:
     return value.astimezone(UTC)
 
 
+def _iso(value: datetime) -> str:
+    return _utc(value).isoformat()
+
+
 def _json_safe(value: object, *, depth: int = 0) -> object:
     if depth > 5:
         raise GoalSupervisorValidationError("Goal metadata is too deeply nested")
@@ -759,16 +763,16 @@ class PlanningGoalTaskRunner:
 class GoalSupervisorStore:
     """Single durable owner for user intent and supervisor coordination state."""
 
-    CURRENT_SCHEMA = 1
+    CURRENT_SCHEMA = 2
 
     def __init__(self, path: Path) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         self._connection = sqlite3.connect(path, timeout=5.0, check_same_thread=False)
-        self._connection.execute("PRAGMA journal_mode=WAL")
-        self._connection.execute("PRAGMA busy_timeout=5000")
-        self._connection.execute("PRAGMA foreign_keys=ON")
         self._lock = threading.RLock()
         try:
+            self._connection.execute("PRAGMA journal_mode=WAL")
+            self._connection.execute("PRAGMA busy_timeout=5000")
+            self._connection.execute("PRAGMA foreign_keys=ON")
             self._connection.execute(
                 "CREATE TABLE IF NOT EXISTS goal_supervisor_schema_migrations "
                 "(version INTEGER PRIMARY KEY, name TEXT NOT NULL)"
@@ -782,20 +786,157 @@ class GoalSupervisorStore:
             if any(version > self.CURRENT_SCHEMA for version in versions):
                 raise GoalSupervisorStoreError("Goal supervisor database uses a future schema")
             if not versions:
-                self._connection.execute(
-                    "CREATE TABLE goal_supervisor_state "
-                    "(goal_id TEXT PRIMARY KEY, state_json TEXT NOT NULL, updated_at TEXT NOT NULL)"
-                )
+                self._create_state_table()
+                self._create_scheduler_table()
                 self._connection.execute(
                     "INSERT INTO goal_supervisor_schema_migrations(version, name) "
-                    "VALUES (1, 'create_goal_supervisor_state')"
+                    "VALUES (1, 'create_goal_supervisor_state'), "
+                    "(2, 'create_goal_scheduler_state')"
                 )
             elif versions.get(1) != "create_goal_supervisor_state":
                 raise GoalSupervisorStoreError("Goal supervisor migration identity mismatch")
+            elif versions.get(2) is None:
+                self._create_scheduler_table()
+                self._connection.execute(
+                    "INSERT INTO goal_supervisor_schema_migrations(version, name) "
+                    "VALUES (2, 'create_goal_scheduler_state')"
+                )
+            elif versions.get(2) != "create_goal_scheduler_state":
+                raise GoalSupervisorStoreError("Goal scheduler migration identity mismatch")
             self._connection.commit()
         except (sqlite3.DatabaseError, ValueError) as error:
             self._connection.close()
             raise GoalSupervisorStoreError("Goal supervisor database is unavailable") from error
+
+    def _create_state_table(self) -> None:
+        self._connection.execute(
+            "CREATE TABLE goal_supervisor_state "
+            "(goal_id TEXT PRIMARY KEY, state_json TEXT NOT NULL, updated_at TEXT NOT NULL)"
+        )
+
+    def _create_scheduler_table(self) -> None:
+        self._connection.execute(
+            """CREATE TABLE goal_scheduler_state (
+                goal_id TEXT PRIMARY KEY,
+                sequence INTEGER NOT NULL UNIQUE,
+                status TEXT NOT NULL,
+                submitted_at TEXT NOT NULL,
+                started_at TEXT,
+                stopped_at TEXT,
+                cancellation_requested INTEGER NOT NULL,
+                goal_status TEXT,
+                task_id TEXT,
+                error TEXT,
+                FOREIGN KEY(goal_id) REFERENCES goal_supervisor_state(goal_id)
+            )"""
+        )
+
+    def ensure_scheduled_goal(
+        self, intent: GoalIntent, budget: GoalBudget, submitted_at: datetime
+    ) -> int:
+        """Atomically persist Goal truth and its queued FIFO record before acknowledgement."""
+
+        now = _utc(submitted_at)
+        with self._lock:
+            try:
+                self._connection.execute("BEGIN IMMEDIATE")
+                existing = self._connection.execute(
+                    "SELECT state_json FROM goal_supervisor_state WHERE goal_id=?",
+                    (str(intent.goal_id),),
+                ).fetchone()
+                if existing is None:
+                    state = GoalSupervisorState(intent, budget, GoalStatus.ANALYZING, now, now)
+                    self._connection.execute(
+                        "INSERT INTO goal_supervisor_state(goal_id, state_json, updated_at) "
+                        "VALUES (?, ?, ?)",
+                        (str(intent.goal_id), _encode_state(state), _iso(now)),
+                    )
+                else:
+                    state = _decode_state(str(existing[0]))
+                    if state.intent != intent or state.budget != budget:
+                        raise GoalSupervisorValidationError(
+                            "Restart intent or budget does not match durable state"
+                        )
+                scheduled = self._connection.execute(
+                    "SELECT sequence FROM goal_scheduler_state WHERE goal_id=?",
+                    (str(intent.goal_id),),
+                ).fetchone()
+                if scheduled is not None:
+                    self._connection.commit()
+                    return int(scheduled[0])
+                row = self._connection.execute(
+                    "SELECT COALESCE(MAX(sequence), 0) + 1 FROM goal_scheduler_state"
+                ).fetchone()
+                sequence = int(row[0])
+                self._connection.execute(
+                    "INSERT INTO goal_scheduler_state "
+                    "(goal_id, sequence, status, submitted_at, cancellation_requested) "
+                    "VALUES (?, ?, 'queued', ?, 0)",
+                    (str(intent.goal_id), sequence, _iso(now)),
+                )
+                self._connection.commit()
+                return sequence
+            except (sqlite3.DatabaseError, GoalSupervisorError):
+                self._connection.rollback()
+                raise
+
+    def save_schedule(self, record: Mapping[str, object]) -> None:
+        required = ("goal_id", "sequence", "status", "submitted_at", "cancellation_requested")
+        if any(key not in record for key in required):
+            raise GoalSupervisorStoreError("Scheduler record is incomplete")
+        with self._lock:
+            try:
+                self._connection.execute(
+                    """INSERT INTO goal_scheduler_state
+                    (goal_id, sequence, status, submitted_at, started_at, stopped_at,
+                     cancellation_requested, goal_status, task_id, error)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(goal_id) DO UPDATE SET sequence=excluded.sequence,
+                    status=excluded.status, submitted_at=excluded.submitted_at,
+                    started_at=excluded.started_at, stopped_at=excluded.stopped_at,
+                    cancellation_requested=excluded.cancellation_requested,
+                    goal_status=excluded.goal_status, task_id=excluded.task_id,
+                    error=excluded.error""",
+                    (
+                        str(record["goal_id"]),
+                        int(str(record["sequence"])),
+                        str(record["status"]),
+                        str(record["submitted_at"]),
+                        record.get("started_at"),
+                        record.get("stopped_at"),
+                        int(bool(record["cancellation_requested"])),
+                        record.get("goal_status"),
+                        record.get("task_id"),
+                        record.get("error"),
+                    ),
+                )
+                self._connection.commit()
+            except sqlite3.DatabaseError as error:
+                self._connection.rollback()
+                raise GoalSupervisorStoreError("Scheduler record could not be saved") from error
+
+    def list_schedules(self) -> tuple[dict[str, object], ...]:
+        with self._lock:
+            rows = self._connection.execute(
+                "SELECT goal_id, sequence, status, submitted_at, started_at, stopped_at, "
+                "cancellation_requested, goal_status, task_id, error "
+                "FROM goal_scheduler_state ORDER BY sequence"
+            ).fetchall()
+        return tuple(
+            {
+                "goal_id": str(row[0]),
+                "sequence": int(row[1]),
+                "status": str(row[2]),
+                "submitted_at": str(row[3]),
+                "started_at": str(row[4]) if row[4] else None,
+                "stopped_at": str(row[5]) if row[5] else None,
+                "cancellation_requested": bool(row[6]),
+                "goal_status": str(row[7]) if row[7] else None,
+                "task_id": str(row[8]) if row[8] else None,
+                "error": str(row[9]) if row[9] else None,
+            }
+            for row in rows
+        )
 
     def create(self, state: GoalSupervisorState) -> GoalSupervisorState:
         payload = _encode_state(state)
@@ -1083,6 +1224,101 @@ class GoalSupervisor:
             latest = self._store.load(intent.goal_id)
             if latest is not None and latest.active_run and latest.terminal:
                 self._save(replace(latest, active_run=False))
+
+    def ensure_durable(self, intent: GoalIntent, budget: GoalBudget, submitted_at: datetime) -> int:
+        """Persist Goal intent and scheduler admission before queue acknowledgement."""
+
+        return self._store.ensure_scheduled_goal(intent, budget, submitted_at)
+
+    def save_schedule_record(self, record: Mapping[str, object]) -> None:
+        self._store.save_schedule(record)
+
+    def list_schedule_records(self) -> tuple[dict[str, object], ...]:
+        return self._store.list_schedules()
+
+    def durable_inputs(self, goal_id: UUID) -> tuple[GoalIntent, GoalBudget] | None:
+        state = self._store.load(goal_id, reconcile_active=False)
+        return None if state is None else (state.intent, state.budget)
+
+    def reconcile_after_restart(self) -> tuple[GoalSupervisorState, ...]:
+        states: list[GoalSupervisorState] = []
+        for state in self._store.list():
+            current = self._store.load(state.intent.goal_id)
+            if current is not None:
+                states.append(current)
+        return tuple(states)
+
+    def mark_recovering(self, goal_id: UUID) -> GoalSupervisorState:
+        state = self._store.load(goal_id, reconcile_active=False)
+        if state is None:
+            raise GoalSupervisorError("Unknown goal")
+        if state.status in {
+            GoalStatus.COMPLETED,
+            GoalStatus.BLOCKED,
+            GoalStatus.FAILED,
+            GoalStatus.CANCELLED,
+            GoalStatus.BUDGET_EXHAUSTED,
+            GoalStatus.RECOVERING,
+        }:
+            return state
+        return self._save(
+            replace(
+                state,
+                status=GoalStatus.RECOVERING,
+                active_run=False,
+                last_error="Scheduler ownership was lost during process restart",
+                updated_at=_utc(self._clock()),
+            )
+        )
+
+    def reconcile_planning_state(
+        self, goal_id: UUID, task: PlanningTask | None
+    ) -> GoalSupervisorState | None:
+        """Project authoritative PlanningTask truth into the durable Goal state."""
+
+        state = self._store.load(goal_id, reconcile_active=False)
+        if state is None or task is None:
+            return state
+        target: GoalStatus | None = None
+        if task.status is PlanningTaskStatus.RECOVERING:
+            target = GoalStatus.RECOVERING
+        elif task.status is PlanningTaskStatus.WAITING_FOR_PERMISSION:
+            target = GoalStatus.WAITING_FOR_PERMISSION
+        elif task.status is PlanningTaskStatus.COMPLETED:
+            target = GoalStatus.COMPLETED
+        elif task.status is PlanningTaskStatus.CANCELLED:
+            target = GoalStatus.CANCELLED
+        elif task.status is PlanningTaskStatus.BUDGET_EXHAUSTED:
+            target = GoalStatus.BUDGET_EXHAUSTED
+        elif task.status is PlanningTaskStatus.FAILED:
+            target = GoalStatus.FAILED
+        if target is None or state.status is target:
+            return state
+        if (
+            state.status
+            in {
+                GoalStatus.COMPLETED,
+                GoalStatus.BLOCKED,
+                GoalStatus.FAILED,
+                GoalStatus.CANCELLED,
+                GoalStatus.BUDGET_EXHAUSTED,
+            }
+            and target is not GoalStatus.RECOVERING
+        ):
+            return state
+        updated = replace(
+            state,
+            status=target,
+            task_id=task.task_id,
+            active_run=False,
+            last_error=(
+                "Planning task restart reconciliation requires operator resolution"
+                if target is GoalStatus.RECOVERING
+                else state.last_error
+            ),
+            updated_at=_utc(self._clock()),
+        )
+        return self._save(updated)
 
     async def resume(self, goal_id: UUID, *, reconciled: bool = False) -> GoalSupervisorState:
         state = self._store.load(goal_id)
