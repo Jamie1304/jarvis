@@ -129,7 +129,9 @@ class GoalScheduler:
         if queued:
             state = await self._supervisor.cancel(goal_id, intent=intent, budget=budget)
             return await self._finish(goal_id, state.status, None)
-        await self._supervisor.cancel(goal_id)
+        state = await self._supervisor.cancel(goal_id)
+        if view.status is GoalScheduleStatus.SUSPENDED:
+            return await self._finish(goal_id, state.status, state.task_id)
         current_view = await self.inspect(goal_id)
         if current_view is None:  # pragma: no cover - the goal was validated above
             raise RuntimeError("Scheduled goal disappeared during cancellation")
