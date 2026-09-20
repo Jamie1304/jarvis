@@ -65,7 +65,13 @@ from jarvis.planning.models import (
     StepResult,
     StepVerification,
 )
-from jarvis.planning.orchestration import OrchestrationRequest, OrchestrationResult
+from jarvis.planning.orchestration import (
+    DecompositionError,
+    DecompositionPolicy,
+    OrchestrationController,
+    OrchestrationRequest,
+    OrchestrationResult,
+)
 from jarvis.planning.store import PlanningStore, PlanningStoreError
 from jarvis.planning.validation import PlanProposal, PlanValidationError, PlanValidator
 from jarvis.state import ApplicationStateMachine
@@ -407,6 +413,7 @@ class PlanningEngine:
         routing_fitness: RoutingFitnessProjection | None = None,
         routing_resilience: RoutingResilienceService | None = None,
         routing_store: SQLiteRoutingFitnessStore | None = None,
+        decomposition_policy: DecompositionPolicy | None = None,
     ) -> None:
         self._store = store
         self._advisor = advisor
@@ -432,6 +439,7 @@ class PlanningEngine:
         if routing_store is not None and not isinstance(routing_store, SQLiteRoutingFitnessStore):
             raise TypeError("Routing decision store is invalid")
         self._routing_store = routing_store
+        self._orchestration_controller = OrchestrationController(advisor, decomposition_policy)
         self._cancellations: dict[UUID, asyncio.Event] = {}
 
     async def create_task(
@@ -462,6 +470,8 @@ class PlanningEngine:
         self._publish_state(task)
         if budgets.max_model_calls < 1:
             return self._fail_budget(task, "model_call_budget_exhausted")
+        cancellation = asyncio.Event()
+        self._cancellations[task.task_id] = cancellation
         try:
             orchestration_request = OrchestrationRequest.create(
                 goal,
@@ -473,10 +483,14 @@ class PlanningEngine:
                     context_tokens=sum(len(item) for item in (*assumptions, *constraints)) // 4,
                 ),
             )
-            orchestration_result = await self._advisor.propose_orchestration(orchestration_request)
-            if orchestration_result.failure is not None:
-                raise ValueError(orchestration_result.failure)
-            raw = orchestration_result.proposal
+            orchestration_run = await self._orchestration_controller.run(
+                orchestration_request,
+                max_model_calls=budgets.max_model_calls,
+                cancellation=cancellation,
+                deadline=task.deadline,
+                clock=self._clock,
+            )
+            raw = orchestration_run.proposal
             plan = self._validator.validate(
                 raw,
                 task_id=task.task_id,
@@ -486,9 +500,22 @@ class PlanningEngine:
             )
             if len(plan.steps) > budgets.max_steps:
                 raise PlanValidationError("Plan exceeds this task's step budget")
+        except DecompositionError as error:
+            if cancellation.is_set():
+                self._cancellations.pop(task.task_id, None)
+                return self._finish(
+                    task,
+                    PlanningTaskStatus.CANCELLED,
+                    StepError("task_cancelled", str(error), FailureKind.CANCELLED),
+                    None,
+                )
+            self._cancellations.pop(task.task_id, None)
+            return self._fail(task, "planning_orchestration_failed", str(error))
         except (PlanValidationError, ValueError) as error:
+            self._cancellations.pop(task.task_id, None)
             return self._fail(task, "plan_validation_failed", str(error))
         except Exception as error:
+            self._cancellations.pop(task.task_id, None)
             return self._fail(
                 task,
                 "planning_provider_failed",
@@ -498,9 +525,10 @@ class PlanningEngine:
             task,
             status=PlanningTaskStatus.READY,
             plan_id=plan.plan_id,
-            usage=replace(task.usage, model_calls=1),
+            usage=replace(task.usage, model_calls=orchestration_run.model_calls),
             updated_at=self._clock(),
         )
+        self._cancellations.pop(task.task_id, None)
         self._save_state(task, plan)
         if self._event_bus is not None:
             self._event_bus.publish_nowait(
@@ -722,12 +750,14 @@ class PlanningEngine:
                 constraints,
                 LogicalRoleRequirements(LogicalModelRole.ORCHESTRATION, task.goal),
             )
-            orchestration_result = await self._advisor.replan_orchestration(
-                orchestration_request, evidence
+            orchestration_run = await self._orchestration_controller.run(
+                orchestration_request,
+                max_model_calls=task.budgets.max_model_calls - task.usage.model_calls,
+                deadline=task.deadline,
+                replan_evidence=evidence,
+                clock=self._clock,
             )
-            if orchestration_result.failure is not None:
-                raise PlanningEngineError(orchestration_result.failure)
-            raw = orchestration_result.proposal
+            raw = orchestration_run.proposal
             replacement = self._validator.validate(
                 raw,
                 task_id=task.task_id,
@@ -741,6 +771,12 @@ class PlanningEngine:
                 raise PlanValidationError("Replan exceeds this task's step budget")
         except (PlanValidationError, ValueError) as error:
             raise PlanningEngineError("Requested replan failed validation") from error
+        task = replace(
+            task,
+            usage=replace(
+                task.usage, model_calls=task.usage.model_calls + orchestration_run.model_calls
+            ),
+        )
         return await self._persist_revision(
             task,
             plan,
@@ -1360,12 +1396,15 @@ class PlanningEngine:
                 task.original_constraints,
                 LogicalRoleRequirements(LogicalModelRole.ORCHESTRATION, task.goal),
             )
-            orchestration_result = await self._advisor.replan_orchestration(
-                orchestration_request, replan_evidence
+            orchestration_run = await self._orchestration_controller.run(
+                orchestration_request,
+                max_model_calls=task.budgets.max_model_calls - task.usage.model_calls,
+                cancellation=self._cancellations.get(task.task_id),
+                deadline=task.deadline,
+                replan_evidence=replan_evidence,
+                clock=self._clock,
             )
-            if orchestration_result.failure is not None:
-                raise PlanningEngineError(orchestration_result.failure)
-            raw = orchestration_result.proposal
+            raw = orchestration_run.proposal
             replacement = self._validator.validate(
                 raw,
                 task_id=task.task_id,
@@ -1376,7 +1415,7 @@ class PlanningEngine:
             )
             if len(replacement.steps) > task.budgets.max_steps:
                 raise PlanValidationError("Replan exceeds this task's step budget")
-        except (PlanValidationError, ValueError) as validation_error:
+        except (DecompositionError, PlanValidationError, ValueError) as validation_error:
             return self._fail(
                 task,
                 "replan_validation_failed",
@@ -1396,7 +1435,9 @@ class PlanningEngine:
             status=PlanningTaskStatus.READY,
             plan_id=replacement.plan_id,
             active_step_id=None,
-            usage=replace(task.usage, model_calls=task.usage.model_calls + 1),
+            usage=replace(
+                task.usage, model_calls=task.usage.model_calls + orchestration_run.model_calls
+            ),
             updated_at=self._clock(),
         )
         self._save_state(task, replacement)

@@ -41,7 +41,17 @@ from jarvis.planning.models import (
     StepResult,
     StepVerification,
 )
-from jarvis.planning.orchestration import OrchestrationRequest, OrchestrationResult
+from jarvis.planning.orchestration import (
+    DecompositionError,
+    DecompositionPolicy,
+    DecompositionSubproblem,
+    OrchestrationAttempt,
+    OrchestrationController,
+    OrchestrationRequest,
+    OrchestrationResult,
+    OrchestrationResultKind,
+    OrchestrationRun,
+)
 from jarvis.planning.store import (
     PlanningMigration,
     PlanningStore,
@@ -54,6 +64,9 @@ __all__ = [
     "BudgetUsage",
     "DependencyBinding",
     "DependencyResolutionError",
+    "DecompositionError",
+    "DecompositionPolicy",
+    "DecompositionSubproblem",
     "EffectOutcome",
     "BrokeredPlanningStepExecutor",
     "CompletionCriteriaVerifier",
@@ -66,6 +79,10 @@ __all__ = [
     "OwnedPlanStatus",
     "OrchestrationRequest",
     "OrchestrationResult",
+    "OrchestrationResultKind",
+    "OrchestrationAttempt",
+    "OrchestrationController",
+    "OrchestrationRun",
     "PlanAdvisor",
     "PlanEdit",
     "PlanEditError",
