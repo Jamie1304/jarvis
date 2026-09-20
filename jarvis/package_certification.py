@@ -645,7 +645,8 @@ def package_fingerprints(
 def _safe_failure_detail(value: str) -> str:
     """Keep trusted gate evidence bounded without retaining arbitrary text."""
 
-    normalized = " ".join(character if character.isprintable() else " " for character in value)
+    printable = "".join(character if character.isprintable() else " " for character in value)
+    normalized = " ".join(printable.split())
     return normalized.strip()[:512] or "certification gate rejected the candidate"
 
 

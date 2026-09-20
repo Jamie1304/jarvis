@@ -1337,6 +1337,7 @@ class SandboxProcess:
         self._paths: SandboxPaths | None = None
         self._cleanup_quarantined = False
         self._cleanup_observations: list[Mapping[str, object]] = []
+        self._cleanup_diagnostics: list[Mapping[str, object]] = []
         self._lock = asyncio.Lock()
         self._closed = False
         self._restart_count = 0
@@ -1412,9 +1413,17 @@ class SandboxProcess:
 
     @property
     def cleanup_observations(self) -> tuple[Mapping[str, object], ...]:
-        """Return parent-owned native cleanup observations for qualification."""
+        """Return authoritative native cleanup receipts for qualification."""
 
-        return tuple(dict(item) for item in self._cleanup_observations)
+        observations = getattr(self, "_cleanup_observations", ())
+        return tuple(dict(item) for item in observations)
+
+    @property
+    def cleanup_diagnostics(self) -> tuple[Mapping[str, object], ...]:
+        """Return supplementary bounded cleanup observations for forensics."""
+
+        diagnostics = getattr(self, "_cleanup_diagnostics", ())
+        return tuple(dict(item) for item in diagnostics)
 
     def _phase(self, phase: str, *, state: Mapping[str, object] | None = None) -> None:
         process = self._process
@@ -2192,10 +2201,20 @@ class SandboxProcess:
             if job is not None:
                 try:
                     empty = await job.wait_for_empty(2)
+                    self._append_cleanup_observation(
+                        "JOB_EMPTY_WAIT",
+                        "CONFIRMED" if empty else "UNRESOLVED",
+                        job_empty=empty,
+                    )
                     self._parent_observation(
                         "JOB_EMPTY_WAIT", process=process, job=job, state={"empty": empty}
                     )
                 except Exception as error:
+                    self._append_cleanup_observation(
+                        "JOB_EMPTY_WAIT",
+                        "UNKNOWN",
+                        failure_class=type(error).__name__,
+                    )
                     self._parent_observation(
                         "JOB_EMPTY_WAIT_UNKNOWN",
                         process=process,
@@ -2258,13 +2277,31 @@ class SandboxProcess:
                     if cleanup_state is NativeCleanupState.CONFIRMED:
                         self._record_native_cleanup_receipt(cleanup_state, process)
                     self._parent_observation("SECURITY_CLEANUP_COMPLETE", process=process, job=job)
+                self._append_cleanup_observation(
+                    "SECURITY_CLEANUP",
+                    (
+                        cleanup_state.value
+                        if isinstance(cleanup_state, NativeCleanupState)
+                        else "UNKNOWN"
+                    ),
+                    failure_class=(
+                        type(native_cleanup_cause or native_cleanup_error).__name__
+                        if native_cleanup_error is not None
+                        else None
+                    ),
+                )
         if job is not None:
             try:
                 job.close()
             except Exception as error:
                 job_cleanup_error = error
+                self._append_cleanup_observation(
+                    "JOB_CLOSE", "FAILED", failure_class=type(error).__name__
+                )
             finally:
                 self._parent_observation("JOB_CLOSED", process=process, job=job)
+            if job_cleanup_error is None:
+                self._append_cleanup_observation("JOB_CLOSE", "CONFIRMED")
         self._parent_phase("PROCESS_EXIT_OBSERVED")
         self._parent_phase("CLEANUP_COMPLETE")
         if native_cleanup_error is not None:
@@ -2278,6 +2315,28 @@ class SandboxProcess:
         paths, self._paths = self._paths, None
         if paths is not None:
             paths.cleanup()
+
+    def _append_cleanup_observation(
+        self,
+        stage: str,
+        state: str,
+        *,
+        job_empty: bool | None = None,
+        failure_class: str | None = None,
+    ) -> None:
+        """Retain only bounded terminal lifecycle facts for failure forensics."""
+
+        observation: dict[str, object] = {"stage": stage[:64], "state": state[:64]}
+        if job_empty is not None:
+            observation["job_empty"] = job_empty
+        if failure_class is not None:
+            observation["failure_class"] = failure_class[:128]
+        observations = getattr(self, "_cleanup_diagnostics", None)
+        if not isinstance(observations, list):
+            observations = []
+            self._cleanup_diagnostics = observations
+        observations.append(observation)
+        del observations[:-32]
 
     def _record_native_cleanup_receipt(
         self,

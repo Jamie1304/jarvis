@@ -1520,6 +1520,11 @@ class ProductionSandboxRunner:
                         for item in getattr(process, "cleanup_observations", ())
                         if isinstance(item, Mapping)
                     ]
+                    observed["cleanup_diagnostics"] = [
+                        dict(item)
+                        for item in getattr(process, "cleanup_diagnostics", ())
+                        if isinstance(item, Mapping)
+                    ]
                     self._remember_protocol_diagnostics(observed)
 
         status, response = _run_in_new_thread(run())
@@ -2278,6 +2283,46 @@ class ProductionCertificationProvider:
         job = diagnostics.get("job")
         job_state = job.get("state") if isinstance(job, Mapping) else None
         job_active = job.get("active_process_count") if isinstance(job, Mapping) else None
+        raw_cleanup = diagnostics.get("cleanup_observations")
+        cleanup = (
+            tuple(item for item in raw_cleanup if isinstance(item, Mapping))
+            if isinstance(raw_cleanup, list | tuple)
+            else ()
+        )
+        raw_cleanup_diagnostics = diagnostics.get("cleanup_diagnostics")
+        cleanup_diagnostics = (
+            tuple(item for item in raw_cleanup_diagnostics if isinstance(item, Mapping))
+            if isinstance(raw_cleanup_diagnostics, list | tuple)
+            else ()
+        )
+        final_cleanup = (
+            cleanup_diagnostics[-1] if cleanup_diagnostics else (cleanup[-1] if cleanup else {})
+        )
+        job_empty = next(
+            (
+                item.get("job_empty")
+                for item in reversed((*cleanup_diagnostics, *cleanup))
+                if "job_empty" in item
+            ),
+            None,
+        )
+        native_state = next(
+            (
+                item.get("state")
+                for item in reversed((*cleanup_diagnostics, *cleanup))
+                if item.get("stage") == "SECURITY_CLEANUP"
+                or ("operation_id" in item and "state" in item)
+            ),
+            None,
+        )
+        cleanup_failure = next(
+            (
+                item.get("failure_class")
+                for item in reversed((*cleanup_diagnostics, *cleanup))
+                if item.get("failure_class") is not None
+            ),
+            None,
+        )
         fields = (
             ("protocol_phase", phase),
             ("classification", classification),
@@ -2285,7 +2330,12 @@ class ProductionCertificationProvider:
             ("exit_code", exit_code),
             ("response_received", response_received),
             ("job_state", job_state),
-            ("job_active_process_count", job_active),
+            ("request_job_active_process_count", job_active),
+            ("final_cleanup_stage", final_cleanup.get("stage")),
+            ("final_cleanup_state", final_cleanup.get("state")),
+            ("final_job_empty", job_empty),
+            ("native_cleanup_state", native_state),
+            ("cleanup_failure_class", cleanup_failure),
         )
         bounded = ";".join(
             f"{key}={str(value)[:128]}" for key, value in fields if value is not None

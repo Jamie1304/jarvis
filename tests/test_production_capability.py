@@ -378,6 +378,12 @@ class _DiagnosticFailureSandboxRunner(_FakeSandboxRunner):
             "exit_code": 1,
             "response_received": False,
             "job": {"state": "CLOSED", "active_process_count": 0},
+            "cleanup_observations": (
+                {"stage": "JOB_EMPTY_WAIT", "state": "CONFIRMED", "job_empty": True},
+                {"stage": "SECURITY_CLEANUP", "state": "confirmed"},
+                {"stage": "JOB_CLOSE", "state": "CONFIRMED"},
+            ),
+            "raw_payload": "api_key=must-not-escape",
         }
 
     def execute(
@@ -385,6 +391,31 @@ class _DiagnosticFailureSandboxRunner(_FakeSandboxRunner):
     ) -> tuple[SandboxSecurityStatus, dict[str, object]]:
         del package, action_id, payload
         raise RuntimeError("synthetic worker startup failure")
+
+
+class _UnknownCleanupSandboxRunner(_DiagnosticFailureSandboxRunner):
+    def protocol_diagnostics(self) -> dict[str, object]:
+        diagnostics = super().protocol_diagnostics()
+        diagnostics.update(
+            {
+                "phase": "HEALTH_COMPLETE",
+                "response_received": True,
+                "job": {"state": "ASSIGNED", "active_process_count": 1},
+                "cleanup_observations": (
+                    {
+                        "stage": "JOB_EMPTY_WAIT",
+                        "state": "UNKNOWN",
+                        "failure_class": "SandboxIsolationUnavailable",
+                    },
+                    {
+                        "stage": "SECURITY_CLEANUP",
+                        "state": "outcome_unknown",
+                        "failure_class": "SandboxCleanupOutcomeUnknown",
+                    },
+                ),
+            }
+        )
+        return diagnostics
 
 
 class _WrongSemanticSandboxRunner(_FakeSandboxRunner):
@@ -2258,7 +2289,36 @@ async def test_production_certification_retains_bounded_worker_startup_evidence(
         assert "pid=1234" in evidence
         assert "exit_code=1" in evidence
         assert "job_state=CLOSED" in evidence
+        assert "final_cleanup_stage=JOB_CLOSE" in evidence
+        assert "final_cleanup_state=CONFIRMED" in evidence
+        assert "final_job_empty=True" in evidence
+        assert "native_cleanup_state=confirmed" in evidence
+        assert "must-not-escape" not in evidence
         assert len(evidence) <= 512
+
+
+@pytest.mark.asyncio
+async def test_production_certification_distinguishes_request_state_from_unknown_cleanup(
+    tmp_path: Path,
+) -> None:
+    store, generated, _ = await _generated(tmp_path)
+    sandbox = _UnknownCleanupSandboxRunner()
+    provider = ProductionCertificationProvider(
+        store, cast(ProductionSandboxRunner, sandbox), VerificationEngine()
+    )
+
+    result = provider.hooks(generated.package).healthcheck(generated.package)
+
+    assert not result.passed
+    detail = result.evidence[0]
+    assert "response_received=True" in detail
+    assert "request_job_active_process_count=1" in detail
+    assert "final_cleanup_stage=SECURITY_CLEANUP" in detail
+    assert "final_cleanup_state=outcome_unknown" in detail
+    assert "final_job_empty" not in detail
+    assert "native_cleanup_state=outcome_unknown" in detail
+    assert "cleanup_failure_class=SandboxCleanupOutcomeUnknown" in detail
+    assert len(detail) <= 512
 
 
 @pytest.mark.asyncio
@@ -2279,7 +2339,15 @@ async def test_production_certification_executes_actions_and_rejects_wrong_seman
     assert hooks.healthcheck(generated.package).passed
     result = hooks.unit_tests(generated.package)
     assert not result.passed
-    assert "independent semantic oracle mismatch" in result.evidence[0]
+    functional_detail = result.evidence[0]
+    assert "case=observe:deterministic" in functional_detail
+    assert "action=observe" in functional_detail
+    assert "input=" in functional_detail
+    assert "actual=" in functional_detail
+    assert "expected=" in functional_detail
+    assert "schema=True" in functional_detail
+    assert "passed=False" in functional_detail
+    assert "failure=independent semantic oracle mismatch" in functional_detail
     assert "observe" in sandbox.calls
     assert provider.plan(generated.package).package_hash == generated.package.package_hash
     with pytest.raises(CertificationFailure) as failure:
@@ -2293,6 +2361,10 @@ async def test_production_certification_executes_actions_and_rejects_wrong_seman
             hooks,
         )
     assert failure.value.stage is CertificationStage.UNIT_TESTS
+    assert failure.value.reason.code == "CERTIFICATION_UNIT_TESTS_FAILED"
+    assert "actual=" in failure.value.reason.safe_detail
+    assert "expected=" in failure.value.reason.safe_detail
+    assert "schema=True" in failure.value.reason.safe_detail
 
 
 def test_certification_contracts_reject_malformed_typed_evidence() -> None:

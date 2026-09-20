@@ -2700,8 +2700,10 @@ async def _run_v1_production_composition_acquires_randomized_capability_and_rest
     # The constrained default observation has a trusted generic semantic
     # oracle. It may be certified for proposal, but remains inactive pending
     # the ordinary trusted activation authority.
-    assert prepared_opportunity.status is OpportunityStatus.READY_TO_PROPOSE
-    assert prepared_opportunity.preparation_state is OpportunityPreparationState.READY
+    assert prepared_opportunity.status is OpportunityStatus.READY_TO_PROPOSE, preparation_diagnostic
+    assert prepared_opportunity.preparation_state is OpportunityPreparationState.READY, (
+        preparation_diagnostic
+    )
     assert prepared_opportunity.decision.value == "propose"
     assert prepared_opportunity.remaining_authority == ("trusted activation approval",)
     reobserved_opportunity = container.opportunity_engine.observe(

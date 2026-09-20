@@ -60,6 +60,16 @@ async def test_native_cleanup_failure_closes_job_before_propagation() -> None:
     assert process.closed is True
     assert job.empty_waited is True
     assert job.closed is True
+    assert sandbox_process.cleanup_observations == ()
+    assert sandbox_process.cleanup_diagnostics == (
+        {"stage": "JOB_EMPTY_WAIT", "state": "CONFIRMED", "job_empty": True},
+        {
+            "stage": "SECURITY_CLEANUP",
+            "state": "UNKNOWN",
+            "failure_class": "RuntimeError",
+        },
+        {"stage": "JOB_CLOSE", "state": "CONFIRMED"},
+    )
 
 
 @pytest.mark.asyncio
@@ -98,6 +108,50 @@ async def test_unknown_native_cleanup_closes_job_but_quarantines_sandbox() -> No
         await sandbox_process._stop_locked()
 
     assert sandbox_process._cleanup_quarantined is True
+    assert sandbox_process.cleanup_observations == ()
+    assert sandbox_process.cleanup_diagnostics[-3:] == (
+        {"stage": "JOB_EMPTY_WAIT", "state": "CONFIRMED", "job_empty": True},
+        {
+            "stage": "SECURITY_CLEANUP",
+            "state": "CLEANUP_OUTCOME_UNKNOWN",
+            "failure_class": "SandboxCleanupOutcomeUnknown",
+        },
+        {"stage": "JOB_CLOSE", "state": "CONFIRMED"},
+    )
+
+
+def test_authoritative_receipts_are_separate_from_supplementary_diagnostics(
+    tmp_path: Path,
+) -> None:
+    class FakeProcess:
+        pid = 1234
+        cleanup_operation_id = "cleanup-first"
+        cleanup_evidence = {"cleanup_terminal": True}
+
+    sandbox_process: Any = object.__new__(SandboxProcess)
+    sandbox_process._paths = SandboxPaths.create(tmp_path, "cleanup-separation")
+    sandbox_process._integration_id = "cleanup-separation"
+    sandbox_process._recovery_integrity_signer = None
+    sandbox_process._cleanup_observations = []
+    sandbox_process._cleanup_diagnostics = []
+
+    sandbox_process._record_native_cleanup_receipt(NativeCleanupState.CONFIRMED, FakeProcess())
+    sandbox_process._append_cleanup_observation("JOB_CLOSE", "CONFIRMED")
+
+    assert sandbox_process.cleanup_observations == (
+        {
+            "operation_id": "cleanup-first",
+            "state": "CLEANUP_CONFIRMED",
+            "evidence": {"cleanup_terminal": True},
+        },
+    )
+    assert sandbox_process.cleanup_diagnostics == ({"stage": "JOB_CLOSE", "state": "CONFIRMED"},)
+
+    sandbox_process._paths = SandboxPaths.create(tmp_path, "cleanup-separation-latest")
+    FakeProcess.cleanup_operation_id = "cleanup-latest"
+    sandbox_process._record_native_cleanup_receipt(NativeCleanupState.CONFIRMED, FakeProcess())
+    assert sandbox_process.cleanup_observations[-1]["operation_id"] == "cleanup-latest"
+    assert sandbox_process.cleanup_observations[-1]["state"] == "CLEANUP_CONFIRMED"
 
 
 def test_pending_cleanup_receipt_denies_reuse_until_terminal_observation(tmp_path: Path) -> None:
