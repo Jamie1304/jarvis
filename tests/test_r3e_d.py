@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import asyncio
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import cast
+from uuid import UUID
 
 import pytest
 from jarvis.planning import (
@@ -44,7 +46,7 @@ class _Advisor:
         )
 
 
-def _decompose(request_id, *objectives: str) -> OrchestrationResult:
+def _decompose(request_id: UUID, *objectives: str) -> OrchestrationResult:
     return OrchestrationResult(
         request_id,
         kind=OrchestrationResultKind.DECOMPOSITION,
@@ -79,6 +81,45 @@ async def test_one_level_tree_uses_child_objectives_and_final_synthesis() -> Non
     assert run.attempts[1].parent_attempt_id == root.orchestration_attempt_id
     assert run.attempts[1].depth == 1
     assert advisor.requests[-1].decomposition_context
+
+
+@pytest.mark.asyncio
+async def test_multiple_levels_keep_distinct_ids_and_parent_depth_lineage() -> None:
+    class RecursiveAdvisor:
+        def __init__(self) -> None:
+            self.requests: list[OrchestrationRequest] = []
+
+        async def propose_orchestration(self, request: OrchestrationRequest) -> OrchestrationResult:
+            self.requests.append(request)
+            if request.decomposition_context:
+                return OrchestrationResult(
+                    request.orchestration_attempt_id, proposal={"final": True}
+                )
+            if request.goal == "root":
+                return _decompose(request.orchestration_attempt_id, "left", "right")
+            if request.goal == "left":
+                return _decompose(request.orchestration_attempt_id, "leaf")
+            return OrchestrationResult(
+                request.orchestration_attempt_id, proposal={"goal": request.goal}
+            )
+
+        async def replan_orchestration(
+            self, request: OrchestrationRequest, evidence: ReplanEvidence
+        ) -> OrchestrationResult:
+            del evidence
+            return OrchestrationResult(request.orchestration_attempt_id, proposal={})
+
+    advisor = RecursiveAdvisor()
+    run = await OrchestrationController(advisor).run(
+        OrchestrationRequest.create("root"), max_model_calls=8
+    )
+
+    assert run.model_calls == 6
+    assert len({attempt.attempt_id for attempt in run.attempts}) == 6
+    left = next(attempt for attempt in run.attempts if attempt.depth == 1)
+    leaf = next(attempt for attempt in run.attempts if attempt.depth == 2)
+    assert leaf.parent_attempt_id == left.attempt_id
+    assert leaf.root_attempt_id == run.attempts[0].root_attempt_id
 
 
 @pytest.mark.asyncio
@@ -169,7 +210,7 @@ def test_result_is_discriminated_and_never_carries_effect_authority() -> None:
 
 @pytest.mark.asyncio
 async def test_bounded_tree_reaches_one_validated_owned_plan_before_execution(
-    tmp_path,
+    tmp_path: Path,
 ) -> None:
     from jarvis.planning import (
         CompletionCriteriaVerifier,
@@ -197,21 +238,28 @@ async def test_bounded_tree_reaches_one_validated_owned_plan_before_execution(
     class TreeAdvisor(PlanAdvisor):
         def __init__(self) -> None:
             self.calls = 0
+            self.requests: list[OrchestrationRequest] = []
 
-        async def propose(self, goal, assumptions, constraints):
+        async def propose(
+            self, goal: str, assumptions: tuple[str, ...], constraints: tuple[str, ...]
+        ) -> object:
             del goal, assumptions, constraints
             return _plan(_step("prepare"))
 
-        async def replan(self, evidence):
+        async def replan(self, evidence: ReplanEvidence) -> object:
             del evidence
             return _plan(_step("prepare"))
 
-        async def propose_orchestration(self, request):
+        async def propose_orchestration(self, request: OrchestrationRequest) -> OrchestrationResult:
             self.calls += 1
+            self.requests.append(request)
             if self.calls == 1:
                 return _decompose(request.orchestration_attempt_id, "prepare", "verify")
+            if request.goal == "prepare" and not request.decomposition_context:
+                return _decompose(request.orchestration_attempt_id, "prepare-core", "prepare-check")
             return OrchestrationResult(
-                request.orchestration_attempt_id, proposal=_plan(_step("prepare"))
+                request.orchestration_attempt_id,
+                proposal=_plan(_step("prepare"), constraints=["hard constraint"]),
             )
 
     advisor = TreeAdvisor()
@@ -228,11 +276,18 @@ async def test_bounded_tree_reaches_one_validated_owned_plan_before_execution(
     )
 
     created = await engine.create_task(
-        goal, budgets=ExecutionBudgets(max_model_calls=8, max_elapsed_seconds=60)
+        goal,
+        constraints=("hard constraint",),
+        budgets=ExecutionBudgets(max_model_calls=8, max_elapsed_seconds=60),
     )
 
     assert created.status.value == "ready"
-    assert created.usage.model_calls == 4
+    assert created.usage.model_calls == 7
+    assert advisor.calls == 7
+    assert len({request.orchestration_attempt_id for request in advisor.requests}) == 7
+    assert advisor.requests[1].parent_attempt_id == advisor.requests[0].orchestration_attempt_id
+    assert advisor.requests[1].depth == 1
+    assert advisor.requests[2].depth == 2
     assert executor.calls == []
     completed = await engine.run(created.task_id)
     assert completed.status.value == "completed"
