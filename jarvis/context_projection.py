@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 from enum import StrEnum
+from typing import TYPE_CHECKING
 from uuid import UUID
 
 from jarvis.actor_persona import PersonaProfile
@@ -21,6 +22,9 @@ from jarvis.planning.models import (
     PlanningTask,
     PlanningTaskStatus,
 )
+
+if TYPE_CHECKING:
+    from jarvis.agent_runtime import AgentContext
 
 _MAX_ITEMS = 32
 _MAX_TEXT = 4_000
@@ -214,6 +218,29 @@ class WorkerContextEnvelope:
 
     def model_text(self) -> str:
         return json.dumps(self.model_payload(), sort_keys=True, separators=(",", ":"))
+
+    def to_agent_context(
+        self,
+        *,
+        provider_context_limit: int = 4_096,
+        reserved_output: int = 1_024,
+    ) -> AgentContext:
+        """Adapt one worker envelope into the existing AgentLoop seam."""
+
+        from jarvis.agent_runtime import AgentContext
+
+        return AgentContext(
+            request=self.resolved_input_json,
+            goal=self.required_capability,
+            current_step=str(self.step_id),
+            evidence=self.verification_expectation,
+            tool_outputs=tuple(value for _, value in self.dependency_outputs),
+            provider_context_limit=provider_context_limit,
+            reserved_output=reserved_output,
+            privacy_context=self.privacy_context,
+            task_class="worker",
+            responsibility="worker",
+        )
 
 
 class ProgressState(StrEnum):

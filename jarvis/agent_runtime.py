@@ -37,6 +37,7 @@ from jarvis.ai.routing import (
     RouteRequest,
     RoutingPolicy,
 )
+from jarvis.context_projection import RoleContextProjector
 from jarvis.core.errors import PrivacyBlockedError
 from jarvis.planning.models import (
     PlanningStep,
@@ -877,16 +878,35 @@ def _resource_priority(priority: int) -> ResourcePriority:
 class AgenticPlanningStepExecutor:
     """Adapter seam for a future explicit AGENTIC PlanningStep contract."""
 
-    def __init__(self, loop: AgentLoop) -> None:
+    def __init__(
+        self,
+        loop: AgentLoop,
+        *,
+        privacy_context: PrivacyContext | None = None,
+    ) -> None:
         self._loop = loop
+        self._privacy_context = privacy_context or PrivacyContext()
 
     async def execute(
         self, task: PlanningTask, step: PlanningStep, cancellation: asyncio.Event
     ) -> StepExecutionResult:
+        worker_context = RoleContextProjector.worker(
+            task.task_id,
+            step.step_id,
+            step.input_json,
+            step.capability,
+            verification_expectation=(step.expected_output, *step.expected_evidence),
+            privacy_context=self._privacy_context,
+        )
+        context_limit = getattr(self._loop, "context_limit", 4_096)
         result = await self._loop.run(
             task.task_id,
-            task.goal,
+            worker_context.resolved_input_json,
             cancellation=cancellation,
+            context=worker_context.to_agent_context(
+                provider_context_limit=context_limit,
+                reserved_output=min(1_024, max(1, context_limit // 4)),
+            ),
         )
         if result.termination_reason is AgentTerminationReason.APPROVAL_PAUSED:
             return StepExecutionResult(
