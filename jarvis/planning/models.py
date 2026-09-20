@@ -138,6 +138,31 @@ class StepResult:
 
 
 @dataclass(frozen=True, slots=True)
+class DependencyBinding:
+    """A bounded top-level value binding from one declared dependency."""
+
+    dependency_step_id: UUID
+    source_field: str
+    target_field: str
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.dependency_step_id, UUID):
+            raise ValueError("Dependency binding identity is invalid")
+        for name, value in (
+            ("source field", self.source_field),
+            ("target field", self.target_field),
+        ):
+            if (
+                type(value) is not str
+                or not value.isidentifier()
+                or len(value) > 128
+                or "_" not in value
+                and not value.isalnum()
+            ):
+                raise ValueError(f"Dependency binding {name} is invalid")
+
+
+@dataclass(frozen=True, slots=True)
 class StepError:
     code: str
     message: str
@@ -173,6 +198,7 @@ class PlanningStep:
     attempts: int = 0
     result: StepResult | None = None
     error: StepError | None = None
+    input_bindings: tuple[DependencyBinding, ...] = ()
 
     def __post_init__(self) -> None:
         for value, name, limit in (
@@ -206,6 +232,13 @@ class PlanningStep:
             not item.strip() or len(item) > 1_000 for item in self.expected_evidence
         ):
             raise ValueError("Expected evidence must be bounded and non-empty")
+        if len(self.input_bindings) > 32 or len(
+            {binding.target_field for binding in self.input_bindings}
+        ) != len(self.input_bindings):
+            raise ValueError("Dependency binding targets must be unique and bounded")
+        dependencies = set(self.dependencies)
+        if any(binding.dependency_step_id not in dependencies for binding in self.input_bindings):
+            raise ValueError("Dependency bindings must reference declared dependencies")
 
 
 @dataclass(frozen=True, slots=True)

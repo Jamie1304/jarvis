@@ -11,6 +11,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from jarvis.permissions.models import Permission
 from jarvis.planning.models import (
+    DependencyBinding,
     OwnedPlan,
     OwnedPlanStatus,
     PlanningStep,
@@ -41,6 +42,18 @@ class ProposedStep(BaseModel):
     expected_evidence: list[BoundedText] = Field(min_length=1, max_length=32)
     expensive_action: bool = False
     max_retries: int = Field(default=0, ge=0, le=8)
+    bindings: list[ProposedBinding] = Field(default_factory=list, max_length=32)
+
+
+class ProposedBinding(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    dependency: BoundedLabel
+    source_field: str = Field(pattern=r"^[A-Za-z_][A-Za-z0-9_]{0,127}$")
+    target_field: str = Field(pattern=r"^[A-Za-z_][A-Za-z0-9_]{0,127}$")
+
+
+ProposedStep.model_rebuild()
 
 
 class PlanProposal(BaseModel):
@@ -167,6 +180,17 @@ class PlanValidator:
             raise PlanValidationError(
                 f"Step input does not match schema for {proposed.tool_id}"
             ) from error
+        if len({binding.target_field for binding in proposed.bindings}) != len(proposed.bindings):
+            raise PlanValidationError("Step binding targets must be unique")
+        bindings: list[DependencyBinding] = []
+        for binding in proposed.bindings:
+            if binding.dependency not in key_ids:
+                raise PlanValidationError("Step binding dependency cannot be resolved")
+            bindings.append(
+                DependencyBinding(
+                    key_ids[binding.dependency], binding.source_field, binding.target_field
+                )
+            )
         return PlanningStep(
             step_id=key_ids[proposed.key],
             key=proposed.key,
@@ -180,6 +204,7 @@ class PlanValidator:
             required_permissions=permissions,
             expensive_action=proposed.expensive_action,
             max_retries=proposed.max_retries,
+            input_bindings=tuple(bindings),
         )
 
     @staticmethod

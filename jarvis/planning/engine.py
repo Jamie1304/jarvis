@@ -45,6 +45,7 @@ from jarvis.planning.editing import (
     PlanStepView,
     StructuredStepEdit,
 )
+from jarvis.planning.graph import DependencyResolutionError, TaskGraphView
 from jarvis.planning.models import (
     BudgetUsage,
     EffectOutcome,
@@ -218,6 +219,19 @@ class BrokeredPlanningStepExecutor(PlanningStepExecutor):
                     StepExecutionStatus.DETERMINISTIC_FAILURE,
                     error_code="malformed_owned_input",
                     error_message="Owned step input is not an object",
+                )
+            )
+        try:
+            tool.input_model.model_validate(raw_input, strict=True)
+        except Exception as error:
+            return attach_routing(
+                StepExecutionResult(
+                    StepExecutionStatus.DETERMINISTIC_FAILURE,
+                    error_code="resolved_input_schema_invalid",
+                    error_message=(
+                        "Resolved tool input failed trusted schema validation "
+                        f"({type(error).__name__})"
+                    ),
                 )
             )
         result = await tool.invoke(
@@ -1157,10 +1171,26 @@ class PlanningEngine:
             budget_error = self._budget_error(task, step)
             if budget_error is not None:
                 return self._fail_budget(task, budget_error, plan=plan)
+            try:
+                resolved_input = TaskGraphView(plan).resolve_input(step)
+            except DependencyResolutionError as error:
+                return await self._replan_or_fail(
+                    task,
+                    plan,
+                    step,
+                    StepError(
+                        "dependency_input_resolution_failed",
+                        str(error),
+                        FailureKind.DETERMINISTIC,
+                    ),
+                    (),
+                )
             task, plan, step = self._begin_step(task, plan, step)
             self._emit_step(EventType.STEP_STARTED, task, step, "started")
             try:
-                execution = await self._executor.execute(task, step, cancellation)
+                execution = await self._executor.execute(
+                    task, replace(step, input_json=resolved_input), cancellation
+                )
             except Exception as adapter_error:
                 execution = StepExecutionResult(
                     StepExecutionStatus.UNKNOWN_OUTCOME,
@@ -1749,16 +1779,8 @@ class PlanningEngine:
 
     @staticmethod
     def _next_step(plan: OwnedPlan) -> PlanningStep | None:
-        succeeded = {
-            step.step_id for step in plan.steps if step.status is PlanningStepStatus.SUCCEEDED
-        }
-        ready = tuple(
-            step
-            for step in plan.steps
-            if step.status is PlanningStepStatus.QUEUED
-            and all(dependency in succeeded for dependency in step.dependencies)
-        )
-        return min(ready, key=lambda item: item.key) if ready else None
+        ready = TaskGraphView(plan).ready_steps()
+        return ready[0] if ready else None
 
     def _replace_step(self, plan: OwnedPlan, replacement: PlanningStep) -> OwnedPlan:
         return replace(

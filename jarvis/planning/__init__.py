@@ -20,8 +20,10 @@ from jarvis.planning.engine import (
     PlanningStepExecutor,
     PlanningStepVerifier,
 )
+from jarvis.planning.graph import DependencyResolutionError, GraphReadiness, TaskGraphView
 from jarvis.planning.models import (
     BudgetUsage,
+    DependencyBinding,
     EffectOutcome,
     ExecutionBudgets,
     FailureKind,
@@ -50,6 +52,8 @@ from jarvis.planning.validation import PlanProposal, PlanValidationError, PlanVa
 
 __all__ = [
     "BudgetUsage",
+    "DependencyBinding",
+    "DependencyResolutionError",
     "EffectOutcome",
     "BrokeredPlanningStepExecutor",
     "CompletionCriteriaVerifier",
@@ -57,6 +61,7 @@ __all__ = [
     "FailureKind",
     "EvidencePlanningStepVerifier",
     "GoalVerification",
+    "GraphReadiness",
     "OwnedPlan",
     "OwnedPlanStatus",
     "OrchestrationRequest",
@@ -89,6 +94,7 @@ __all__ = [
     "StepExecutionStatus",
     "StepResult",
     "StepVerification",
+    "TaskGraphView",
     "StructuredStepEdit",
     "SQLitePlanningStore",
 ]

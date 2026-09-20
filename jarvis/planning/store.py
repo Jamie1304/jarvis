@@ -16,6 +16,7 @@ from uuid import UUID
 from jarvis.permissions.models import Permission
 from jarvis.planning.models import (
     BudgetUsage,
+    DependencyBinding,
     ExecutionBudgets,
     FailureKind,
     OwnedPlan,
@@ -514,6 +515,14 @@ def _step_dict(step: PlanningStep) -> dict[str, object]:
             else None
         ),
         "error": _error_dict(step.error),
+        "input_bindings": [
+            {
+                "dependency_step_id": str(binding.dependency_step_id),
+                "source_field": binding.source_field,
+                "target_field": binding.target_field,
+            }
+            for binding in step.input_bindings
+        ],
     }
 
 
@@ -523,6 +532,9 @@ def _step_from_dict(data: dict[str, object]) -> PlanningStep:
     if raw_result is not None:
         result_data = _object(raw_result)
         result = StepResult(str(result_data["output_json"]), _strings(result_data["evidence"]))
+    raw_bindings = data.get("input_bindings", [])
+    if not isinstance(raw_bindings, list):
+        raise PlanningStoreError("Stored dependency bindings are malformed")
     return PlanningStep(
         step_id=UUID(str(data["step_id"])),
         key=str(data["key"]),
@@ -542,6 +554,14 @@ def _step_from_dict(data: dict[str, object]) -> PlanningStep:
         attempts=_int(data["attempts"]),
         result=result,
         error=_error_from_dict(data.get("error")),
+        input_bindings=tuple(
+            DependencyBinding(
+                UUID(str(_object(binding)["dependency_step_id"])),
+                str(_object(binding)["source_field"]),
+                str(_object(binding)["target_field"]),
+            )
+            for binding in raw_bindings
+        ),
     )
 
 
