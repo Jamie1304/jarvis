@@ -38,12 +38,15 @@ class _FakeSupervisor:
         self.cancelled: list[UUID] = []
         self.release: dict[UUID, asyncio.Event] = defaultdict(asyncio.Event)
         self.started_events: dict[UUID, asyncio.Event] = defaultdict(asyncio.Event)
+        self.fail: set[UUID] = set()
         self.statuses: dict[UUID, GoalStatus] = {}
 
     async def start(self, intent: GoalIntent, budget: GoalBudget) -> GoalSupervisorState:
         del budget
         self.started.append(intent.goal_id)
         self.started_events[intent.goal_id].set()
+        if intent.goal_id in self.fail:
+            raise RuntimeError("deterministic goal failure")
         await self.release[intent.goal_id].wait()
         status = self.statuses.get(intent.goal_id, GoalStatus.COMPLETED)
         return GoalSupervisorState(
@@ -129,6 +132,23 @@ async def test_fifo_admission_and_bounded_active_slots() -> None:
 
 
 @pytest.mark.asyncio
+async def test_three_goals_never_exceed_two_active_slots() -> None:
+    fake = _FakeSupervisor()
+    scheduler = _scheduler(fake, active=2)
+    goals = [_intent(label) for label in ("A", "B", "C")]
+    for goal in goals:
+        await scheduler.submit(goal, GoalBudget())
+    await asyncio.wait_for(fake.started_events[goals[0].goal_id].wait(), timeout=1)
+    await asyncio.wait_for(fake.started_events[goals[1].goal_id].wait(), timeout=1)
+    assert goals[2].goal_id not in fake.started
+    fake.release[goals[0].goal_id].set()
+    await asyncio.wait_for(fake.started_events[goals[2].goal_id].wait(), timeout=1)
+    fake.release[goals[1].goal_id].set()
+    fake.release[goals[2].goal_id].set()
+    await scheduler.wait(goals[2].goal_id)
+
+
+@pytest.mark.asyncio
 async def test_queue_bound_duplicate_rejection_and_queued_cancellation() -> None:
     fake = _FakeSupervisor()
     scheduler = _scheduler(fake, active=1, queued=1)
@@ -197,6 +217,7 @@ async def test_suspended_goal_releases_slot_and_resume_requeues_fairly() -> None
     await asyncio.wait_for(fake.started_events[first.goal_id].wait(), timeout=1)
     fake.release[first.goal_id].set()
     assert (await scheduler.wait(first.goal_id)).status is GoalScheduleStatus.TERMINAL
+    assert fake.started.count(first.goal_id) == 1
 
 
 @pytest.mark.asyncio
@@ -234,3 +255,35 @@ async def test_cancellation_isolated_to_one_active_goal() -> None:
     fake.release[second.goal_id].set()
     assert (await scheduler.wait(first.goal_id)).goal_status is GoalStatus.CANCELLED
     assert (await scheduler.wait(second.goal_id)).goal_status is GoalStatus.COMPLETED
+
+
+@pytest.mark.asyncio
+async def test_terminal_cancellation_is_idempotent_and_failure_isolated() -> None:
+    fake = _FakeSupervisor()
+    scheduler = _scheduler(fake, active=2)
+    failed, healthy = _intent("failed"), _intent("healthy")
+    fake.fail.add(failed.goal_id)
+    await scheduler.submit(failed, GoalBudget())
+    await scheduler.submit(healthy, GoalBudget())
+    assert (await scheduler.wait(failed.goal_id)).goal_status is GoalStatus.FAILED
+    await asyncio.wait_for(fake.started_events[healthy.goal_id].wait(), timeout=1)
+    fake.release[healthy.goal_id].set()
+    assert (await scheduler.wait(healthy.goal_id)).goal_status is GoalStatus.COMPLETED
+    first_cancel = await scheduler.cancel(failed.goal_id)
+    second_cancel = await scheduler.cancel(failed.goal_id)
+    assert first_cancel == second_cancel
+
+
+@pytest.mark.asyncio
+async def test_shutdown_stops_admission_and_requests_cooperative_cancellation() -> None:
+    fake = _FakeSupervisor()
+    scheduler = _scheduler(fake)
+    goal = _intent("shutdown")
+    await scheduler.submit(goal, GoalBudget())
+    await asyncio.wait_for(fake.started_events[goal.goal_id].wait(), timeout=1)
+    await scheduler.shutdown()
+    assert fake.cancelled == [goal.goal_id]
+    with pytest.raises(RuntimeError, match="shut down"):
+        await scheduler.submit(_intent("late"), GoalBudget())
+    fake.release[goal.goal_id].set()
+    assert (await scheduler.wait(goal.goal_id)).goal_status is GoalStatus.CANCELLED

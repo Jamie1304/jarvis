@@ -156,6 +156,8 @@ class GoalScheduler:
                 for goal_id, view in self._views.items()
                 if view.status is GoalScheduleStatus.RUNNING
             )
+            for goal_id in active:
+                self._views[goal_id] = replace(self._views[goal_id], cancellation_requested=True)
             self._changed.notify_all()
         for goal_id in queued:
             await self.cancel(goal_id)
