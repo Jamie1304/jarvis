@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import cast
@@ -38,7 +39,9 @@ from jarvis.human_adaptation import (
     localize_approval_request,
     localize_capability_metadata,
 )
+from jarvis.permissions.broker import PermissionBroker
 from jarvis.permissions.models import (
+    ActionDescriptor,
     ApprovalRequest,
     ApprovalStatus,
     DecisionReason,
@@ -47,7 +50,7 @@ from jarvis.permissions.models import (
     Risk,
     SafeArgument,
 )
-from jarvis.permissions.policy import normalize_scope
+from jarvis.permissions.policy import PolicyEngine, normalize_scope
 
 
 def _service(tmp_path: Path) -> HumanAdaptationService:
@@ -421,6 +424,18 @@ def test_r3f_r2_canonical_p15_personalization_does_not_authorize_effects(tmp_pat
     assert (
         "approval" not in settings and "permission" not in settings and "authority" not in settings
     )
+    decision = asyncio.run(
+        PermissionBroker(PolicyEngine()).authorize(
+            tool_id="unregistered",
+            tool_identity=object(),
+            declared_permissions=frozenset(),
+            task_id=uuid4(),
+            user_id=None,
+            descriptor=ActionDescriptor("write", (), Risk.HIGH, ()),
+            normalized_arguments={},
+        )
+    )
+    assert decision.authorized is False
 
 
 def test_r3f_r2_canonical_p16_behavior_does_not_authenticate_actor(tmp_path: Path) -> None:
