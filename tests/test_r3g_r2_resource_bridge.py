@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import threading
-import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
@@ -73,12 +72,17 @@ PAYLOAD_HASH = hashlib.sha256(PAYLOAD).hexdigest()
 
 class _Handler(BaseHTTPRequestHandler):
     hits = 0
-    delay_seconds = 0.0
+    download_started: threading.Event | None = None
+    release_download: threading.Event | None = None
 
     def do_GET(self) -> None:  # noqa: N802 - stdlib handler contract
         type(self).hits += 1
-        if type(self).delay_seconds:
-            time.sleep(type(self).delay_seconds)
+        started = type(self).download_started
+        if started is not None:
+            started.set()
+        release = type(self).release_download
+        if release is not None and not release.wait(timeout=5):
+            raise RuntimeError("controlled download release was not signalled")
         if self.path != "/resource.bin":
             self.send_error(404)
             return
@@ -372,7 +376,10 @@ async def test_concurrent_goals_share_registered_resource_without_duplicate_acqu
     tmp_path: Path,
 ) -> None:
     _Handler.hits = 0
-    _Handler.delay_seconds = 0.5
+    download_started = threading.Event()
+    release_download = threading.Event()
+    _Handler.download_started = download_started
+    _Handler.release_download = release_download
     server = ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
@@ -409,6 +416,8 @@ async def test_concurrent_goals_share_registered_resource_without_duplicate_acqu
         scheduled = await asyncio.gather(
             *(scheduler.submit(intent, GoalBudget()) for intent in intents)
         )
+        assert await asyncio.to_thread(download_started.wait, 5)
+        release_download.set()
         views = await asyncio.gather(*(scheduler.wait(intent.goal_id) for intent in intents))
 
         assert all(
@@ -436,7 +445,8 @@ async def test_concurrent_goals_share_registered_resource_without_duplicate_acqu
         assert ledger.records()[0].state.value == "registered"
         del scheduled
     finally:
-        _Handler.delay_seconds = 0.0
+        _Handler.download_started = None
+        _Handler.release_download = None
         server.shutdown()
         server.server_close()
         thread.join(timeout=5)
