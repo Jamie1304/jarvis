@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import uuid4
@@ -9,7 +10,9 @@ from jarvis.ai.models import (
     ChatMessage,
     GenerationChunk,
     GenerationRequest,
+    GenerationResult,
     MessageRole,
+    ModelInfo,
     PrivacyClassification,
     PrivacyContext,
     ProviderHealth,
@@ -53,20 +56,20 @@ from jarvis.permissions.policy import normalize_scope
 
 class CapturingProvider(AIProvider):
     def __init__(self) -> None:
-        self.requests = []
+        self.requests: list[GenerationRequest] = []
 
-    async def generate(self, request):
+    async def generate(self, request: GenerationRequest) -> GenerationResult:
         self.requests.append(request)
         raise AssertionError("stream path expected")
 
-    async def stream(self, request):
+    async def stream(self, request: GenerationRequest) -> AsyncIterator[GenerationChunk]:
         self.requests.append(request)
         yield GenerationChunk("antwoord", True)
 
     async def health_check(self) -> ProviderHealth:
         return ProviderHealth(True, "test")
 
-    async def model_info(self):
+    async def model_info(self) -> ModelInfo:
         raise NotImplementedError
 
     async def aclose(self) -> None:
@@ -214,7 +217,8 @@ def test_voice_contract_is_truthful_without_physical_device_claims() -> None:
         )
     )
     assert catalog.supports("stt", "local-stt", "nl")
-    assert catalog.get("stt", "local-stt").physical_evidence is False
+    capability = catalog.get("stt", "local-stt")
+    assert capability is not None and capability.physical_evidence is False
     assert not catalog.supports("tts", "local-stt", "nl")
 
 
