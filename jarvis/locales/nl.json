@@ -1,0 +1,11 @@
+{
+  "app.settings": "Instellingen",
+  "app.language_region": "Taal & Regio",
+  "app.personalization": "Persoonlijkheid & Personalisatie",
+  "app.conversation_ready": "Assistent gereed",
+  "app.safe_mode": "Veilige modus",
+  "permission.request": "JARVIS vraagt {permission}-toestemming om {action}.",
+  "task.completed": "Taak voltooid",
+  "task.pending": "Taak staat klaar",
+  "empty.no_history": "Nog geen gespreksgeschiedenis"
+}

@@ -1,0 +1,11 @@
+{
+  "app.settings": "Settings",
+  "app.language_region": "Language & Region",
+  "app.personalization": "Personality & Personalization",
+  "app.conversation_ready": "Assistant ready",
+  "app.safe_mode": "Safe Mode",
+  "permission.request": "JARVIS requests {permission} permission to {action}.",
+  "task.completed": "Task completed",
+  "task.pending": "Task is pending",
+  "empty.no_history": "No conversation history yet"
+}
