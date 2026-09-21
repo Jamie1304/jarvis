@@ -18,6 +18,7 @@ class PlanningTaskStatus(StrEnum):
     READY = "ready"
     EXECUTING = "executing"
     WAITING_FOR_PERMISSION = "waiting_for_permission"
+    WAITING_FOR_RESOURCE = "waiting_for_resource"
     VERIFYING = "verifying"
     REPLANNING = "replanning"
     RECOVERING = "recovering"
@@ -31,6 +32,7 @@ class OwnedPlanStatus(StrEnum):
     READY = "ready"
     ACTIVE = "active"
     WAITING_FOR_PERMISSION = "waiting_for_permission"
+    WAITING_FOR_RESOURCE = "waiting_for_resource"
     COMPLETED = "completed"
     FAILED = "failed"
     CANCELLED = "cancelled"
@@ -41,6 +43,7 @@ class PlanningStepStatus(StrEnum):
     QUEUED = "queued"
     RUNNING = "running"
     WAITING_FOR_PERMISSION = "waiting_for_permission"
+    WAITING_FOR_RESOURCE = "waiting_for_resource"
     VERIFYING = "verifying"
     SUCCEEDED = "succeeded"
     FAILED = "failed"
@@ -71,6 +74,51 @@ class EffectOutcome(StrEnum):
     SAFE_TO_RETRY = "safe_to_retry"
     EFFECT_CONFIRMED = "effect_confirmed"
     UNKNOWN_OUTCOME = "unknown_outcome"
+
+
+@dataclass(frozen=True, slots=True)
+class PlanningResourceRequirement:
+    """A bounded, untrusted declaration of a resource needed by one step.
+
+    This declaration contains intent only.  Trusted resource metadata, source,
+    integrity, placement, and acquisition authority are supplied by the
+    application-owned resolver and AcquisitionBroker.
+    """
+
+    resource_id: str
+    resource_type: str
+    purpose: str
+    consumer_input_field: str
+    required_for: str | None = None
+    requested_version: str | None = None
+    privacy_constraint: str = "unknown"
+    platform_constraint: str | None = None
+    environment_constraint: str | None = None
+    alternatives: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        for value, name, limit in (
+            (self.resource_id, "Resource requirement identity", 256),
+            (self.resource_type, "Resource requirement type", 64),
+            (self.purpose, "Resource requirement purpose", 2_000),
+            (self.consumer_input_field, "Resource consumer input field", 128),
+            (self.required_for, "Resource required-for relationship", 512),
+            (self.requested_version, "Resource requested version", 256),
+            (self.privacy_constraint, "Resource privacy constraint", 64),
+            (self.platform_constraint, "Resource platform constraint", 128),
+            (self.environment_constraint, "Resource environment constraint", 128),
+        ):
+            if value is not None and (
+                type(value) is not str or not value.strip() or len(value) > limit or "\x00" in value
+            ):
+                raise ValueError(f"{name} is malformed")
+        if not self.consumer_input_field.isidentifier():
+            raise ValueError("Resource consumer input field must be an identifier")
+        if len(self.alternatives) > 32 or any(
+            type(item) is not str or not item.strip() or len(item) > 256
+            for item in self.alternatives
+        ):
+            raise ValueError("Resource alternatives are malformed")
 
 
 def utc(value: datetime) -> datetime:
@@ -199,6 +247,7 @@ class PlanningStep:
     result: StepResult | None = None
     error: StepError | None = None
     input_bindings: tuple[DependencyBinding, ...] = ()
+    resource_requirements: tuple[PlanningResourceRequirement, ...] = ()
 
     def __post_init__(self) -> None:
         for value, name, limit in (
@@ -239,6 +288,14 @@ class PlanningStep:
         dependencies = set(self.dependencies)
         if any(binding.dependency_step_id not in dependencies for binding in self.input_bindings):
             raise ValueError("Dependency bindings must reference declared dependencies")
+        if len({item.resource_id for item in self.resource_requirements}) != len(
+            self.resource_requirements
+        ):
+            raise ValueError("Step resource requirements must be unique")
+        if any(
+            not isinstance(item, PlanningResourceRequirement) for item in self.resource_requirements
+        ):
+            raise ValueError("Step resource requirements are malformed")
 
 
 @dataclass(frozen=True, slots=True)
@@ -306,6 +363,7 @@ class PlanningTask:
     updated_at: datetime
     active_step_id: UUID | None = None
     waiting_request_ids: tuple[UUID, ...] = ()
+    waiting_resource_ids: tuple[str, ...] = ()
     cancellation_requested: bool = False
     result_evidence: tuple[str, ...] = ()
     error: StepError | None = None
@@ -320,6 +378,11 @@ class PlanningTask:
             raise ValueError("Task deadline must follow its start time")
         if len(set(self.waiting_request_ids)) != len(self.waiting_request_ids):
             raise ValueError("Waiting permission request IDs must be unique")
+        if len(set(self.waiting_resource_ids)) != len(self.waiting_resource_ids) or any(
+            type(item) is not str or not item.strip() or len(item) > 256
+            for item in self.waiting_resource_ids
+        ):
+            raise ValueError("Waiting resource identities must be unique and bounded")
         if len(self.original_assumptions) > 32 or len(self.original_constraints) > 32:
             raise ValueError("Task assumptions and constraints must be bounded")
         if any(

@@ -1057,6 +1057,9 @@ class MissingResourceRequirement:
     evidence_reference: str
     request: AcquisitionRequest
     observed_missing: bool = True
+    task_id: UUID | None = None
+    step_id: UUID | None = None
+    attempt_id: UUID | None = None
 
     def __post_init__(self) -> None:
         _text(self.requirement_id, "Missing-resource requirement identity", 256)
@@ -1066,6 +1069,13 @@ class MissingResourceRequirement:
             raise StewardshipError("Missing-resource formal request is malformed")
         if type(self.observed_missing) is not bool or not self.observed_missing:
             raise StewardshipError("Missing-resource evidence must establish absence")
+        for value, name in (
+            (self.task_id, "Missing-resource task identity"),
+            (self.step_id, "Missing-resource step identity"),
+            (self.attempt_id, "Missing-resource attempt identity"),
+        ):
+            if value is not None and not isinstance(value, UUID):
+                raise StewardshipError(f"{name} is malformed")
 
 
 @dataclass(frozen=True, slots=True)
@@ -1398,7 +1408,7 @@ class SystemStewardshipCoordinator:
             raise StewardshipError("Acquisition plan request is malformed")
         if ttl <= timedelta(0):
             raise StewardshipError("Acquisition plan lifetime is invalid")
-        self._acquisition_requests[request.fingerprint] = request
+        self.record_acquisition_request(request)
         payload = AcquisitionStewardshipPlan(request, build_acquisition_presentation(request))
         reversibility = (
             Reversibility.REINSTALL_REQUIRED
@@ -1413,6 +1423,13 @@ class SystemStewardshipCoordinator:
             ttl,
             "formal acquisition request prepared; trusted broker authority remains required",
         )
+
+    def record_acquisition_request(self, request: AcquisitionRequest) -> None:
+        """Project a trusted task-originated request without granting effect authority."""
+
+        if not isinstance(request, AcquisitionRequest):
+            raise StewardshipError("Acquisition request is malformed")
+        self._acquisition_requests[request.fingerprint] = request
 
     def prepare_missing_resource(
         self,

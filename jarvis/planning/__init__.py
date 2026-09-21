@@ -30,6 +30,7 @@ from jarvis.planning.models import (
     GoalVerification,
     OwnedPlan,
     OwnedPlanStatus,
+    PlanningResourceRequirement,
     PlanningStep,
     PlanningStepStatus,
     PlanningTask,
@@ -51,6 +52,12 @@ from jarvis.planning.orchestration import (
     OrchestrationResult,
     OrchestrationResultKind,
     OrchestrationRun,
+)
+from jarvis.planning.resources import (
+    AcquisitionResourceBridge,
+    ResourceResolution,
+    ResourceResolutionState,
+    TrustedResourceDescriptor,
 )
 from jarvis.planning.store import (
     PlanningMigration,
@@ -77,6 +84,7 @@ __all__ = [
     "GraphReadiness",
     "OwnedPlan",
     "OwnedPlanStatus",
+    "PlanningResourceRequirement",
     "OrchestrationRequest",
     "OrchestrationResult",
     "OrchestrationResultKind",
@@ -93,6 +101,10 @@ __all__ = [
     "PlanStepView",
     "PlanValidationError",
     "PlanValidator",
+    "AcquisitionResourceBridge",
+    "ResourceResolution",
+    "ResourceResolutionState",
+    "TrustedResourceDescriptor",
     "PlanningEngine",
     "PlanningEngineError",
     "PlanningGoalVerifier",

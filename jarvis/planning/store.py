@@ -21,6 +21,7 @@ from jarvis.planning.models import (
     FailureKind,
     OwnedPlan,
     OwnedPlanStatus,
+    PlanningResourceRequirement,
     PlanningStep,
     PlanningStepStatus,
     PlanningTask,
@@ -615,6 +616,7 @@ def _task_dict(task: PlanningTask) -> dict[str, object]:
         "updated_at": _iso(task.updated_at),
         "active_step_id": str(task.active_step_id) if task.active_step_id else None,
         "waiting_request_ids": [str(item) for item in task.waiting_request_ids],
+        "waiting_resource_ids": list(task.waiting_resource_ids),
         "cancellation_requested": task.cancellation_requested,
         "result_evidence": list(task.result_evidence),
         "error": _error_dict(task.error),
@@ -650,6 +652,7 @@ def _task_from_dict(data: dict[str, object]) -> PlanningTask:
         updated_at=datetime.fromisoformat(str(data["updated_at"])),
         active_step_id=UUID(str(data["active_step_id"])) if data.get("active_step_id") else None,
         waiting_request_ids=tuple(UUID(value) for value in _strings(data["waiting_request_ids"])),
+        waiting_resource_ids=_strings(data.get("waiting_resource_ids", [])),
         cancellation_requested=_bool(data["cancellation_requested"]),
         result_evidence=_strings(data["result_evidence"]),
         error=_error_from_dict(data.get("error")),
@@ -686,6 +689,21 @@ def _step_dict(step: PlanningStep) -> dict[str, object]:
             }
             for binding in step.input_bindings
         ],
+        "resource_requirements": [
+            {
+                "resource_id": item.resource_id,
+                "resource_type": item.resource_type,
+                "purpose": item.purpose,
+                "consumer_input_field": item.consumer_input_field,
+                "required_for": item.required_for,
+                "requested_version": item.requested_version,
+                "privacy_constraint": item.privacy_constraint,
+                "platform_constraint": item.platform_constraint,
+                "environment_constraint": item.environment_constraint,
+                "alternatives": list(item.alternatives),
+            }
+            for item in step.resource_requirements
+        ],
     }
 
 
@@ -698,6 +716,9 @@ def _step_from_dict(data: dict[str, object]) -> PlanningStep:
     raw_bindings = data.get("input_bindings", [])
     if not isinstance(raw_bindings, list):
         raise PlanningStoreError("Stored dependency bindings are malformed")
+    raw_requirements = data.get("resource_requirements", [])
+    if not isinstance(raw_requirements, list):
+        raise PlanningStoreError("Stored resource requirements are malformed")
     return PlanningStep(
         step_id=UUID(str(data["step_id"])),
         key=str(data["key"]),
@@ -724,6 +745,29 @@ def _step_from_dict(data: dict[str, object]) -> PlanningStep:
                 str(_object(binding)["target_field"]),
             )
             for binding in raw_bindings
+        ),
+        resource_requirements=tuple(
+            PlanningResourceRequirement(
+                str(_object(requirement)["resource_id"]),
+                str(_object(requirement)["resource_type"]),
+                str(_object(requirement)["purpose"]),
+                str(_object(requirement)["consumer_input_field"]),
+                str(_object(requirement)["required_for"])
+                if _object(requirement).get("required_for") is not None
+                else None,
+                str(_object(requirement)["requested_version"])
+                if _object(requirement).get("requested_version") is not None
+                else None,
+                str(_object(requirement).get("privacy_constraint", "unknown")),
+                str(_object(requirement)["platform_constraint"])
+                if _object(requirement).get("platform_constraint") is not None
+                else None,
+                str(_object(requirement)["environment_constraint"])
+                if _object(requirement).get("environment_constraint") is not None
+                else None,
+                _strings(_object(requirement).get("alternatives", [])),
+            )
+            for requirement in raw_requirements
         ),
     )
 

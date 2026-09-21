@@ -1260,6 +1260,14 @@ class AcquisitionBroker:
     def ledger(self) -> AcquisitionLedger:
         return self._ledger
 
+    def materialized_path_for(self, request: AcquisitionRequest) -> Path | None:
+        """Return the broker-owned path for an existing ledger record."""
+
+        if not isinstance(request, AcquisitionRequest):
+            raise AcquisitionValidationError("Acquisition request is malformed")
+        record = self._ledger.get(request.fingerprint)
+        return None if record is None else self._path_for(record.target_location)
+
     async def acquire(
         self,
         request: AcquisitionRequest,

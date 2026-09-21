@@ -14,6 +14,7 @@ from jarvis.planning.models import (
     DependencyBinding,
     OwnedPlan,
     OwnedPlanStatus,
+    PlanningResourceRequirement,
     PlanningStep,
     canonical_json,
 )
@@ -26,6 +27,21 @@ class PlanValidationError(ValueError):
 
 BoundedLabel = Annotated[str, Field(min_length=1, max_length=128)]
 BoundedText = Annotated[str, Field(min_length=1, max_length=1_000)]
+
+
+class ProposedResourceRequirement(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    resource_id: BoundedLabel
+    resource_type: BoundedLabel
+    purpose: BoundedText
+    consumer_input_field: str = Field(pattern=r"^[A-Za-z_][A-Za-z0-9_]{0,127}$")
+    required_for: str | None = Field(default=None, min_length=1, max_length=512)
+    requested_version: str | None = Field(default=None, min_length=1, max_length=256)
+    privacy_constraint: BoundedLabel = "unknown"
+    platform_constraint: str | None = Field(default=None, min_length=1, max_length=128)
+    environment_constraint: str | None = Field(default=None, min_length=1, max_length=128)
+    alternatives: list[BoundedLabel] = Field(default_factory=list, max_length=32)
 
 
 class ProposedStep(BaseModel):
@@ -43,6 +59,9 @@ class ProposedStep(BaseModel):
     expensive_action: bool = False
     max_retries: int = Field(default=0, ge=0, le=8)
     bindings: list[ProposedBinding] = Field(default_factory=list, max_length=32)
+    resource_requirements: list[ProposedResourceRequirement] = Field(
+        default_factory=list, max_length=8
+    )
 
 
 class ProposedBinding(BaseModel):
@@ -182,6 +201,10 @@ class PlanValidator:
             ) from error
         if len({binding.target_field for binding in proposed.bindings}) != len(proposed.bindings):
             raise PlanValidationError("Step binding targets must be unique")
+        if len({item.resource_id for item in proposed.resource_requirements}) != len(
+            proposed.resource_requirements
+        ):
+            raise PlanValidationError("Step resource requirements must be unique")
         bindings: list[DependencyBinding] = []
         for binding in proposed.bindings:
             if binding.dependency not in key_ids:
@@ -205,6 +228,21 @@ class PlanValidator:
             expensive_action=proposed.expensive_action,
             max_retries=proposed.max_retries,
             input_bindings=tuple(bindings),
+            resource_requirements=tuple(
+                PlanningResourceRequirement(
+                    item.resource_id,
+                    item.resource_type,
+                    item.purpose,
+                    item.consumer_input_field,
+                    item.required_for,
+                    item.requested_version,
+                    item.privacy_constraint,
+                    item.platform_constraint,
+                    item.environment_constraint,
+                    tuple(item.alternatives),
+                )
+                for item in proposed.resource_requirements
+            ),
         )
 
     @staticmethod

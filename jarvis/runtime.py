@@ -242,6 +242,7 @@ from jarvis.planning.engine import (
     task_state_for_status,
 )
 from jarvis.planning.models import ReplanEvidence
+from jarvis.planning.resources import AcquisitionResourceBridge
 from jarvis.planning.store import PlanningStoreError, SQLitePlanningStore
 from jarvis.planning.validation import PlanValidator
 from jarvis.presence import PresenceProjection
@@ -795,6 +796,7 @@ class RuntimeContainer:
     routing_fitness: RoutingFitnessProjection
     routing_resilience: RoutingResilienceService
     acquisition_broker: AcquisitionBroker
+    resource_bridge: AcquisitionResourceBridge
     portfolio_optimizer: ModelPortfolioOptimizer
     ollama_runtime: OllamaRuntimeManager
     stt: SpeechToTextService | None
@@ -2084,6 +2086,11 @@ class ApplicationRuntime:
                 resource_governor=resource_governor,
                 target_revalidator=revalidate_acquisition_target,
             )
+            resource_bridge = AcquisitionResourceBridge(
+                acquisition_broker,
+                disk_free_bytes=lambda: resource_governor.snapshot().disk_free_bytes,
+            )
+            engine.bind_resource_bridge(resource_bridge)
             retirement_store = SQLiteRetirementStore(paths.retirement_database)
             portfolio_optimizer = ModelPortfolioOptimizer(
                 model_manager,
@@ -2121,6 +2128,7 @@ class ApplicationRuntime:
                 jarvis_roots=(paths.root,),
                 protected_roots=(paths.recovery, paths.backups),
             )
+            resource_bridge.bind_request_sink(system_stewardship.record_acquisition_request)
             registry.register(
                 StewardshipObservationTool(
                     system_stewardship,
@@ -2671,10 +2679,14 @@ class ApplicationRuntime:
                     record.state.value in {"active", "verification_required", "placement_pending"}
                     for record in observation.acquisition_records
                 )
+                task_waiting_for_resource = any(
+                    task.status.value == "waiting_for_resource" for task in engine.list_tasks()
+                )
                 return CurrentStewardshipProjection(
                     storage_pressure=storage_pressure,
                     critical_disk="critical" in pressure_values,
                     acquisition_active=acquisition_active,
+                    task_waiting_for_resource=task_waiting_for_resource,
                     maintenance_deferred=observation.storage.duplicate_scan_state == "deferred"
                     or bool(
                         observation.resources and observation.resources.heavy_foreground_workload
@@ -3174,6 +3186,7 @@ class ApplicationRuntime:
                 routing_fitness=routing_fitness,
                 routing_resilience=routing_resilience,
                 acquisition_broker=acquisition_broker,
+                resource_bridge=resource_bridge,
                 portfolio_optimizer=portfolio_optimizer,
                 ollama_runtime=ollama_runtime,
                 stt=stt,

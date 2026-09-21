@@ -72,6 +72,13 @@ from jarvis.planning.orchestration import (
     OrchestrationRequest,
     OrchestrationResult,
 )
+from jarvis.planning.resources import (
+    AcquisitionResourceBridge,
+    ResourceRequirementResolver,
+    ResourceResolution,
+    ResourceResolutionState,
+    TrustedResourceDescriptor,
+)
 from jarvis.planning.store import PlanningStore, PlanningStoreError
 from jarvis.planning.validation import PlanProposal, PlanValidationError, PlanValidator
 from jarvis.state import ApplicationStateMachine
@@ -94,6 +101,7 @@ def task_state_for_status(status: PlanningTaskStatus) -> TaskState:
         PlanningTaskStatus.READY: TaskState.WAITING,
         PlanningTaskStatus.EXECUTING: TaskState.EXECUTING,
         PlanningTaskStatus.WAITING_FOR_PERMISSION: TaskState.WAITING_FOR_PERMISSION,
+        PlanningTaskStatus.WAITING_FOR_RESOURCE: TaskState.WAITING_FOR_RESOURCE,
         PlanningTaskStatus.VERIFYING: TaskState.VERIFYING,
         PlanningTaskStatus.REPLANNING: TaskState.THINKING,
         PlanningTaskStatus.RECOVERING: TaskState.RECOVERING,
@@ -414,6 +422,7 @@ class PlanningEngine:
         routing_resilience: RoutingResilienceService | None = None,
         routing_store: SQLiteRoutingFitnessStore | None = None,
         decomposition_policy: DecompositionPolicy | None = None,
+        resource_bridge: ResourceRequirementResolver | None = None,
     ) -> None:
         self._store = store
         self._advisor = advisor
@@ -439,10 +448,26 @@ class PlanningEngine:
         if routing_store is not None and not isinstance(routing_store, SQLiteRoutingFitnessStore):
             raise TypeError("Routing decision store is invalid")
         self._routing_store = routing_store
+        self._resource_bridge = resource_bridge
         self._orchestration_controller = OrchestrationController(
             advisor, decomposition_policy, store
         )
         self._cancellations: dict[UUID, asyncio.Event] = {}
+
+    def bind_resource_bridge(self, bridge: ResourceRequirementResolver) -> None:
+        """Bind the application-owned resource resolver after runtime composition."""
+
+        if not all(
+            callable(getattr(bridge, name, None)) for name in ("resolve", "acquire", "reconcile")
+        ):
+            raise TypeError("Resource bridge does not implement the trusted resolver contract")
+        self._resource_bridge = bridge
+
+    def register_resource_descriptor(self, descriptor: TrustedResourceDescriptor) -> None:
+        bridge = self._resource_bridge
+        if not isinstance(bridge, AcquisitionResourceBridge):
+            raise PlanningEngineError("The configured resource bridge has no trusted catalog")
+        bridge.register_descriptor(descriptor)
 
     async def create_task(
         self,
@@ -1089,6 +1114,7 @@ class PlanningEngine:
                     task,
                     status=PlanningTaskStatus.RECOVERING,
                     active_step_id=None,
+                    waiting_resource_ids=(),
                     error=StepError(
                         "unknown_operation_outcome",
                         "Task was interrupted during an operation; operator resolution is required",
@@ -1130,6 +1156,7 @@ class PlanningEngine:
         task, plan = self._load_state(task_id)
         if task.status in self._TERMINAL or task.status in {
             PlanningTaskStatus.WAITING_FOR_PERMISSION,
+            PlanningTaskStatus.WAITING_FOR_RESOURCE,
             PlanningTaskStatus.RECOVERING,
         }:
             return task
@@ -1161,11 +1188,20 @@ class PlanningEngine:
         """Retry a paused step; the PermissionBroker, not this method, decides authorization."""
 
         task, plan = self._load_state(task_id)
-        if task.status is not PlanningTaskStatus.WAITING_FOR_PERMISSION:
-            raise PlanningEngineError("Only a permission-paused task can be resumed")
+        if task.status not in {
+            PlanningTaskStatus.WAITING_FOR_PERMISSION,
+            PlanningTaskStatus.WAITING_FOR_RESOURCE,
+        }:
+            raise PlanningEngineError(
+                "Only a permission-paused or resource-paused task can be resumed"
+            )
         steps = tuple(
             replace(step, status=PlanningStepStatus.QUEUED)
-            if step.status is PlanningStepStatus.WAITING_FOR_PERMISSION
+            if step.status
+            in {
+                PlanningStepStatus.WAITING_FOR_PERMISSION,
+                PlanningStepStatus.WAITING_FOR_RESOURCE,
+            }
             else step
             for step in plan.steps
         )
@@ -1175,6 +1211,7 @@ class PlanningEngine:
             task,
             status=PlanningTaskStatus.READY,
             waiting_request_ids=(),
+            waiting_resource_ids=(),
             active_step_id=None,
             updated_at=now,
         )
@@ -1225,6 +1262,16 @@ class PlanningEngine:
                     ),
                     (),
                 )
+            task, plan, resource_input, resource_error = await self._ensure_resources(
+                task, plan, step, resolved_input, cancellation
+            )
+            if resource_error is not None:
+                return await self._replan_or_fail(
+                    task, plan, step, resource_error, resource_error.evidence
+                )
+            if resource_input is None:
+                return task
+            resolved_input = resource_input
             task, plan, step = self._begin_step(task, plan, step)
             self._emit_step(EventType.STEP_STARTED, task, step, "started")
             try:
@@ -1334,6 +1381,167 @@ class PlanningEngine:
             )
             self._save_state(task, plan)
             self._emit_step(EventType.STEP_COMPLETED, task, step, "succeeded")
+
+    async def _ensure_resources(
+        self,
+        task: PlanningTask,
+        plan: OwnedPlan,
+        step: PlanningStep,
+        resolved_input: str,
+        cancellation: asyncio.Event,
+    ) -> tuple[PlanningTask, OwnedPlan, str | None, StepError | None]:
+        requirements = step.resource_requirements
+        if not requirements:
+            return task, plan, resolved_input, None
+        bridge = self._resource_bridge
+        if bridge is None:
+            return (
+                task,
+                plan,
+                None,
+                StepError(
+                    "resource_resolver_unavailable",
+                    "This step declares a resource requirement but no trusted resolver is composed",
+                    FailureKind.DETERMINISTIC,
+                ),
+            )
+        injections: dict[str, str] = {}
+        for requirement in requirements:
+            resolution = await bridge.resolve(
+                requirement,
+                task_id=task.task_id,
+                step_id=step.step_id,
+            )
+            if (
+                resolution.state is ResourceResolutionState.UNKNOWN
+                and resolution.request is not None
+            ):
+                resolution = await bridge.reconcile(resolution, task_id=task.task_id)
+            if resolution.state is ResourceResolutionState.MISSING:
+                task, plan = self._pause_for_resource(task, plan, step, resolution)
+                resolution = await bridge.acquire(
+                    resolution,
+                    task_id=task.task_id,
+                    step_id=step.step_id,
+                    cancellation=cancellation,
+                )
+                if resolution.state is ResourceResolutionState.SATISFIED:
+                    task, plan = self._resume_resource_state(task, plan, step)
+                    return await self._ensure_resources(
+                        task, plan, step, resolved_input, cancellation
+                    )
+                if resolution.state in {
+                    ResourceResolutionState.INELIGIBLE,
+                    ResourceResolutionState.DENIED,
+                }:
+                    return (
+                        task,
+                        plan,
+                        None,
+                        StepError(
+                            "resource_acquisition_denied",
+                            resolution.detail or "Trusted acquisition was denied",
+                            FailureKind.DETERMINISTIC,
+                            resolution.evidence,
+                        ),
+                    )
+                return task, plan, None, None
+            if resolution.state is not ResourceResolutionState.SATISFIED:
+                task, plan = self._pause_for_resource(task, plan, step, resolution)
+                return task, plan, None, None
+            if resolution.resource_path is None:
+                return (
+                    task,
+                    plan,
+                    None,
+                    StepError(
+                        "resource_resolution_missing_path",
+                        "Trusted resource resolution did not provide a usable path",
+                        FailureKind.DETERMINISTIC,
+                        resolution.evidence,
+                    ),
+                )
+            field = requirement.consumer_input_field
+            prior = injections.get(field)
+            if prior is not None and prior != str(resolution.resource_path):
+                return (
+                    task,
+                    plan,
+                    None,
+                    StepError(
+                        "resource_input_binding_conflict",
+                        f"Multiple resources attempted to bind consumer field {field}",
+                        FailureKind.DETERMINISTIC,
+                    ),
+                )
+            injections[field] = str(resolution.resource_path)
+        raw_input = json.loads(resolved_input)
+        if not isinstance(raw_input, dict):
+            return (
+                task,
+                plan,
+                None,
+                StepError(
+                    "resource_consumer_input_invalid",
+                    "The consuming step input is not an object",
+                    FailureKind.DETERMINISTIC,
+                ),
+            )
+        raw_input.update(injections)
+        return task, plan, json.dumps(raw_input, sort_keys=True, separators=(",", ":")), None
+
+    def _pause_for_resource(
+        self,
+        task: PlanningTask,
+        plan: OwnedPlan,
+        step: PlanningStep,
+        resolution: ResourceResolution,
+    ) -> tuple[PlanningTask, OwnedPlan]:
+        error_kind = (
+            FailureKind.UNKNOWN_OUTCOME
+            if resolution.state is ResourceResolutionState.UNKNOWN
+            else FailureKind.TRANSIENT
+        )
+        error = StepError(
+            "resource_requirement_unresolved",
+            resolution.detail or "A required resource is not currently usable",
+            error_kind,
+            resolution.evidence,
+        )
+        paused_step = replace(step, status=PlanningStepStatus.WAITING_FOR_RESOURCE, error=error)
+        paused_plan = self._replace_step(
+            replace(plan, status=OwnedPlanStatus.WAITING_FOR_RESOURCE), paused_step
+        )
+        paused_task = replace(
+            task,
+            status=PlanningTaskStatus.WAITING_FOR_RESOURCE,
+            active_step_id=step.step_id,
+            waiting_request_ids=(),
+            waiting_resource_ids=tuple(item.resource_id for item in step.resource_requirements),
+            error=error,
+            updated_at=self._clock(),
+        )
+        self._save_state(paused_task, paused_plan)
+        return paused_task, paused_plan
+
+    def _resume_resource_state(
+        self, task: PlanningTask, plan: OwnedPlan, step: PlanningStep
+    ) -> tuple[PlanningTask, OwnedPlan]:
+        resumed_step = replace(step, status=PlanningStepStatus.QUEUED, error=None)
+        resumed_plan = self._replace_step(
+            replace(plan, status=OwnedPlanStatus.ACTIVE), resumed_step
+        )
+        resumed_task = replace(
+            task,
+            status=PlanningTaskStatus.READY,
+            active_step_id=None,
+            waiting_request_ids=(),
+            waiting_resource_ids=(),
+            error=None,
+            updated_at=self._clock(),
+        )
+        self._save_state(resumed_task, resumed_plan)
+        return resumed_task, resumed_plan
 
     def _begin_step(
         self, task: PlanningTask, plan: OwnedPlan, step: PlanningStep
@@ -1512,6 +1720,7 @@ class PlanningEngine:
             task,
             status=PlanningTaskStatus.RECOVERING,
             active_step_id=step.step_id,
+            waiting_resource_ids=(),
             error=error,
             updated_at=self._clock(),
         )
@@ -1577,6 +1786,7 @@ class PlanningEngine:
             status=PlanningTaskStatus.WAITING_FOR_PERMISSION,
             active_step_id=step.step_id,
             waiting_request_ids=request_ids,
+            waiting_resource_ids=(),
             usage=replace(
                 task.usage,
                 executed_steps=max(0, task.usage.executed_steps - 1),
@@ -1637,6 +1847,7 @@ class PlanningEngine:
             cancellation_requested=True,
             active_step_id=None,
             waiting_request_ids=(),
+            waiting_resource_ids=(),
             error=StepError(
                 "task_cancelled", "Task cancellation was requested", FailureKind.CANCELLED
             ),
@@ -1675,6 +1886,7 @@ class PlanningEngine:
             status=status,
             active_step_id=None,
             waiting_request_ids=(),
+            waiting_resource_ids=(),
             error=error,
             updated_at=self._clock(),
         )
@@ -1782,6 +1994,7 @@ class PlanningEngine:
             TaskState.PLANNING: TransitionEvent.PLAN_REQUESTED,
             TaskState.WAITING: TransitionEvent.PLAN_READY,
             TaskState.WAITING_FOR_PERMISSION: TransitionEvent.PERMISSION_REQUIRED,
+            TaskState.WAITING_FOR_RESOURCE: TransitionEvent.EXECUTION_WAITING,
             TaskState.EXECUTING: TransitionEvent.EXECUTION_STARTED,
             TaskState.VERIFYING: TransitionEvent.VERIFICATION_STARTED,
             TaskState.RECOVERING: TransitionEvent.RECOVERY_STARTED,
