@@ -258,7 +258,9 @@ class CurrentContextService:
             else "en",
             preferences.locale if preferences else "en-US",
             str(personalization["mode"]) if personalization else "explicit_only",
-            bool(personalization["learning_paused"]) if personalization else True,
+            True
+            if self._safe_mode
+            else (bool(personalization["learning_paused"]) if personalization else True),
         )
 
     def _actor_projection(self) -> CurrentActorProjection | None:

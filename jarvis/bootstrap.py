@@ -43,9 +43,17 @@ def _ollama_factory(configuration: Mapping[str, Any]) -> AIProvider:
 
 
 def create_provider_registry(
-    *, model_id: str = "llama3.2:3b", context_limit: int = 4096
+    *,
+    model_id: str = "llama3.2:3b",
+    context_limit: int = 4096,
+    declared_language_capabilities: frozenset[str] = frozenset({"language:en"}),
 ) -> ProviderRegistry:
-    """Return the native registry; integrations register definitions, not branches."""
+    """Return the native registry with only explicitly declared model languages.
+
+    Provider transport support does not establish model-language quality.  A
+    Dutch capability therefore has to be supplied by the integration/model
+    declaration; it is never inferred from an arbitrary model identifier.
+    """
 
     return ProviderRegistry(
         (
@@ -57,13 +65,8 @@ def create_provider_registry(
                         model_id,
                         context_limit,
                         frozenset(
-                            {
-                                "chat",
-                                "tool_use",
-                                "structured_output",
-                                "language:en",
-                                "language:nl",
-                            }
+                            {"chat", "tool_use", "structured_output"}
+                            | set(declared_language_capabilities)
                         ),
                         roles=frozenset({ModelRole.GENERAL, ModelRole.TOOL_USE}),
                         modalities=frozenset({"text"}),

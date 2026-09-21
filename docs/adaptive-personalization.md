@@ -16,18 +16,22 @@ and `DEEP`. `DEEP` is not the default. Adaptive JARVIS presentation is separate
 from learning depth and is independently `FIXED` or `ADAPTIVE`.
 
 Adaptive changes require repeated evidence, a confidence threshold, and a
-cooldown. Each applied change is at most one bounded trait step per evidence
-window. Changes record field, previous/new value, time, evidence class,
-confidence, provenance, and correction state. Freeze, resume, pin, unpin,
-reset-adaptations, reset-learning, and inspection are explicit APIs.
+cooldown. Evidence is bounded to an injected-clock evidence window, and each
+applied change is at most one bounded trait step per window. Changes record
+field, previous/new value, time, evidence class, confidence, provenance, and
+correction state. Freeze, resume, pin, unpin, reset-adaptations,
+reset-learning, and inspection are explicit APIs. Store mutations are
+serialized and grouped transactionally.
 
 ## Expression and communication
 
-The local Expression Profile stores aggregates such as tone, length, directness,
-greeting, closing, and relationship-scoped values. It stores no unlimited raw
-message corpus. Style fidelity is controlled separately (`OFF` through
-`MAXIMUM`) and rendering happens after semantic content is formed. The renderer
-does not send messages or grant communication authority.
+The local Expression Profile stores bounded aggregate categories such as tone,
+length, directness, greeting, closing, and relationship-scoped values. It
+stores no unlimited raw message corpus; secure-input feedback is discarded and
+unrecognized raw categories are rejected. Style fidelity is controlled
+separately (`OFF` through `MAXIMUM`) and rendering happens after semantic
+content is formed. The renderer does not send messages or grant communication
+authority.
 
 Relationship style is a bounded presentation scope. It can change greetings or
 closing style for permitted contexts while preserving the semantic draft.

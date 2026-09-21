@@ -18,8 +18,11 @@ temporary output override never mutates the persisted preference. Automatic
 detection is local and bounded, with confidence and provenance; ambiguous
 short text remains unknown.
 
-English and Dutch are first-class text/model targets. The default catalog
-truthfully reports `TEXT_ONLY` until measured STT/TTS capability is registered.
+English and Dutch are first-class text/localization targets. Model-language
+capabilities are declarations on the specific model metadata: the native
+default declares English only, and Dutch is not inferred from provider
+transport or an arbitrary model identifier. The default catalog truthfully
+reports `TEXT_ONLY` until measured STT/TTS capability is registered.
 `VoiceLanguageCapability` records provider language metadata separately from
 physical microphone or speaker evidence.
 
