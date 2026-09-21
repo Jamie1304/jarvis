@@ -30,6 +30,7 @@ from jarvis.permissions import (
     DesktopApprovalHandoff,
     TrustedDesktopApprovalSurface,
 )
+from jarvis.system_stewardship import StewardshipObservation, SystemStewardshipCoordinator
 from jarvis.trace import TraceEvent, TraceEventType
 
 if TYPE_CHECKING:
@@ -151,6 +152,23 @@ class DesktopOverviewView:
     attention: DesktopAttentionView
     episodes: tuple[DesktopEpisodeView, ...]
     activity: DesktopActivityView
+
+
+@dataclass(frozen=True, slots=True)
+class DesktopStewardshipView:
+    """Bounded system-health projection; it never presents mutation authority."""
+
+    lifecycle: str
+    observation_id: UUID
+    fingerprint: str
+    security: str
+    startup: str
+    storage_pressure: tuple[tuple[str, str], ...]
+    detected_bytes: int
+    safe_candidate_bytes: int
+    duplicate_groups: int
+    model_count: int
+    model_error: str | None
 
 
 class DesktopApplicationFacade:
@@ -496,6 +514,8 @@ class DesktopApplicationFacade:
             )
         if page == "permissions":
             return await self._permission_rows()
+        if page == "system-health":
+            return self._stewardship_rows(await self.system_stewardship_view())
         sections = {
             "capabilities": ControlCenterSection.CAPABILITIES,
             "tools": ControlCenterSection.TOOLS,
@@ -515,6 +535,16 @@ class DesktopApplicationFacade:
             )
             for item in section.items
         )
+
+    async def system_stewardship_view(self) -> DesktopStewardshipView:
+        """Refresh the canonical stewardship projection for the System Health page."""
+
+        container = self._require_container()
+        coordinator = container.system_stewardship
+        if not isinstance(coordinator, SystemStewardshipCoordinator):
+            raise ServiceUnavailableError("System stewardship is unavailable")
+        observation = await coordinator.observe()
+        return self._stewardship_view(observation)
 
     async def run_task(self, task_id: UUID) -> DesktopRow:
         self._require_container().current_context.select_task(task_id)
@@ -612,6 +642,60 @@ class DesktopApplicationFacade:
 
     async def aclose(self) -> None:
         await self._runtime.aclose()
+
+    @staticmethod
+    def _stewardship_view(observation: StewardshipObservation) -> DesktopStewardshipView:
+        return DesktopStewardshipView(
+            observation.lifecycle.value,
+            observation.observation_id,
+            observation.fingerprint,
+            observation.system.security.overall.value,
+            observation.system.startup.overall.value,
+            tuple((volume_id, state.value) for volume_id, state in observation.storage.pressure),
+            observation.storage.detected_bytes,
+            observation.storage.safe_candidate_bytes,
+            len(observation.storage.duplicate_groups),
+            len(observation.models),
+            observation.model_error,
+        )
+
+    @staticmethod
+    def _stewardship_rows(view: DesktopStewardshipView) -> tuple[DesktopRow, ...]:
+        pressure = "; ".join(f"{volume}: {state}" for volume, state in view.storage_pressure)
+        return (
+            DesktopRow(
+                "stewardship-lifecycle",
+                "Stewardship observation",
+                view.lifecycle.upper(),
+                f"Observation: {view.observation_id}; fingerprint: {view.fingerprint}",
+            ),
+            DesktopRow(
+                "stewardship-security",
+                "Security",
+                view.security.upper(),
+                "Trusted provider projection",
+            ),
+            DesktopRow(
+                "stewardship-startup",
+                "Startup",
+                view.startup.upper(),
+                "Trusted startup observation",
+            ),
+            DesktopRow(
+                "stewardship-storage",
+                "Storage",
+                "OBSERVED",
+                f"Pressure: {pressure or 'UNKNOWN'}; detected={view.detected_bytes}; "
+                f"safe candidate={view.safe_candidate_bytes}; duplicates={view.duplicate_groups}",
+            ),
+            DesktopRow(
+                "stewardship-models",
+                "Model portfolio",
+                "OBSERVED" if view.model_error is None else "UNKNOWN",
+                f"Measured inventory entries: {view.model_count}"
+                + (f"; {view.model_error}" if view.model_error else ""),
+            ),
+        )
 
     @staticmethod
     def _interruption_rank(value: str | None) -> int:

@@ -59,6 +59,13 @@ from jarvis.ai.providers.ollama_runtime import OllamaModelAdapter, OllamaRuntime
 from jarvis.ai.providers.registry import ProviderRegistry
 from jarvis.ai.routing import InferenceDispatcher, ProviderRouter, RoutingFeedbackRecorder
 from jarvis.ai.sessions import AgentSessionStore
+from jarvis.applications.manager import ApplicationManager
+from jarvis.applications.plans import InstallationPlanStore
+from jarvis.applications.providers import (
+    WindowsRegistryInventoryProvider,
+    WingetPackageProvider,
+)
+from jarvis.applications.runtime import WindowsApplicationRuntime
 from jarvis.artifacts import ArtifactStore
 from jarvis.attention import AttentionItem, AttentionPolicy, AttentionPriority, SQLiteAttentionStore
 from jarvis.automations import AutomationService, AutomationStoreError, SQLiteAutomationStore
@@ -331,6 +338,10 @@ from jarvis.storage import (
     VolumeObservation,
 )
 from jarvis.storage_tools import StorageCopyTool, StorageInspectTool, StorageInventoryTool
+from jarvis.system_stewardship import (
+    SystemStewardshipCoordinator,
+    create_system_stewardship_composition,
+)
 from jarvis.task_controller import PlanningTaskController, TaskController
 from jarvis.testing.golden import (
     GoldenExecutor,
@@ -720,6 +731,7 @@ class RuntimeTestFixture:
     compensation_observation_provider: CompensationObservationProvider | None = None
     compensation_state_provider: CompensationStateProvider | None = None
     storage_volume_probe: Callable[[], tuple[VolumeObservation, ...]] | None = None
+    application_manager: ApplicationManager | None = None
     self_development_runtime_verifier: SelfDevelopmentRuntimeVerifier | None = None
     self_development_gate_verifier: GateVerifier | None = None
     self_development_golden_executor: GoldenExecutor | None = None
@@ -867,7 +879,8 @@ class RuntimeContainer:
     browser: BrowserSemanticBridge | None = None
     browser_status: BrowserCapabilityStatus = BrowserCapabilityStatus.UNAVAILABLE
     camera: object | None = None
-    application_manager: object | None = None
+    application_manager: ApplicationManager | None = None
+    system_stewardship: SystemStewardshipCoordinator | None = None
     voice: object | None = None
     multi_agent: object | None = None
     improvement: object | None = None
@@ -1110,7 +1123,6 @@ class RuntimeContainer:
                 self.mcp_manager,
                 self.voice,
                 self.camera,
-                self.application_manager,
                 self.computer,
                 self.vision,
                 self.browser,
@@ -1369,6 +1381,8 @@ class ApplicationRuntime:
         model_knowledge: ModelKnowledgeService | None = None
         acquisition_broker: AcquisitionBroker | None = None
         portfolio_optimizer: ModelPortfolioOptimizer | None = None
+        application_manager: ApplicationManager | None = None
+        system_stewardship: SystemStewardshipCoordinator | None = None
         acquisition_ledger: SQLiteAcquisitionLedger | None = None
         retirement_store: SQLiteRetirementStore | None = None
         automation_store: SQLiteAutomationStore | None = None
@@ -1639,6 +1653,16 @@ class ApplicationRuntime:
                 probe=(test_fixture.storage_volume_probe if test_fixture is not None else None),
             )
             storage_planner = StoragePlanner(storage_inventory)
+            application_manager = (
+                test_fixture.application_manager if test_fixture is not None else None
+            )
+            if application_manager is None:
+                application_manager = ApplicationManager(
+                    WindowsRegistryInventoryProvider(),
+                    WingetPackageProvider(()),
+                    WindowsApplicationRuntime(),
+                    InstallationPlanStore(),
+                )
             placement_root_resolver = ProvisionedPlacementRootResolver()
             file_steward = FileSteward(
                 storage_root,
@@ -2024,6 +2048,30 @@ class ApplicationRuntime:
                 replacement_usability=lambda identity: provider_router.usability_for(
                     identity.provider_id, identity.model_id
                 ),
+            )
+            system_composition = create_system_stewardship_composition(
+                application_manager,
+                project_root=resolved_project_root,
+            )
+            system_stewardship = SystemStewardshipCoordinator(
+                system_composition,
+                storage_inventory=storage_inventory,
+                storage_planner=storage_planner,
+                resource_governor=resource_governor,
+                acquisition=acquisition_broker,
+                portfolio=portfolio_optimizer,
+                storage_history=storage_history,
+                file_steward=file_steward,
+                lifecycle_recorder=audit,
+                cleanup_roots=(
+                    paths.acquisitions,
+                    paths.models,
+                    paths.cache,
+                    paths.temporary,
+                    paths.artifacts,
+                ),
+                jarvis_roots=(paths.root,),
+                protected_roots=(paths.recovery, paths.backups),
             )
             verification_engine = VerificationEngine()
             paths.validate_storage_layout()
@@ -3014,6 +3062,8 @@ class ApplicationRuntime:
             assert backup is not None
             assert acquisition_broker is not None
             assert portfolio_optimizer is not None
+            assert application_manager is not None
+            assert system_stewardship is not None
             container = RuntimeContainer(
                 settings=settings,
                 paths=paths,
@@ -3055,6 +3105,8 @@ class ApplicationRuntime:
                 storage_inventory=storage_inventory,
                 storage_planner=storage_planner,
                 file_steward=file_steward,
+                application_manager=application_manager,
+                system_stewardship=system_stewardship,
                 vm_execution_service=vm_execution_service,
                 memory_store=memory_store,
                 user_model_store=user_model_store,
