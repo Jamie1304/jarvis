@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import StrEnum
 from uuid import UUID
@@ -47,6 +47,34 @@ class CurrentProviderProjection:
 
 
 @dataclass(frozen=True, slots=True)
+class CurrentStewardshipProjection:
+    """Small bounded stewardship state safe for current-context projection."""
+
+    storage_pressure: str = "unknown"
+    critical_disk: bool | None = None
+    acquisition_active: bool | None = None
+    maintenance_deferred: bool = False
+    security_state: str = "unknown"
+    model_retirement_pending: bool = False
+
+    def __post_init__(self) -> None:
+        values = (
+            self.storage_pressure,
+            self.security_state,
+        )
+        if any(type(value) is not str or not value or len(value) > 64 for value in values):
+            raise CurrentContextError("Current stewardship state is malformed")
+        if self.critical_disk not in {None, True, False}:
+            raise CurrentContextError("Current critical-disk state is malformed")
+        if self.acquisition_active not in {None, True, False}:
+            raise CurrentContextError("Current acquisition state is malformed")
+        if type(self.maintenance_deferred) is not bool:
+            raise CurrentContextError("Current maintenance state is malformed")
+        if type(self.model_retirement_pending) is not bool:
+            raise CurrentContextError("Current model-retirement state is malformed")
+
+
+@dataclass(frozen=True, slots=True)
 class CurrentContextModelProjection:
     """Safe descriptive fields suitable for future model-context assembly."""
 
@@ -66,6 +94,7 @@ class CurrentContextModelProjection:
     locale: str = "en-US"
     personalization_mode: str = "explicit_only"
     learning_paused: bool = True
+    stewardship: CurrentStewardshipProjection = field(default_factory=CurrentStewardshipProjection)
 
 
 @dataclass(frozen=True, slots=True)
@@ -90,6 +119,7 @@ class CurrentContextSnapshot:
     locale: str = "en-US"
     personalization_mode: str = "explicit_only"
     learning_paused: bool = True
+    stewardship: CurrentStewardshipProjection = field(default_factory=CurrentStewardshipProjection)
 
     def __post_init__(self) -> None:
         if type(self.revision) is not int or self.revision < 0:
@@ -102,6 +132,8 @@ class CurrentContextSnapshot:
             raise CurrentContextError("Current-context runtime state is malformed")
         if type(self.safe_mode) is not bool:
             raise CurrentContextError("Current-context safe-mode state is malformed")
+        if not isinstance(self.stewardship, CurrentStewardshipProjection):
+            raise CurrentContextError("Current-context stewardship state is malformed")
 
     def model_projection(self) -> CurrentContextModelProjection:
         """Return only bounded descriptive state; no authority or private data."""
@@ -123,6 +155,7 @@ class CurrentContextSnapshot:
             self.locale,
             self.personalization_mode,
             self.learning_paused,
+            self.stewardship,
         )
 
     @classmethod
@@ -173,6 +206,7 @@ class CurrentContextService:
         provider_id: str | None,
         model_id: str | None,
         human_adaptation: HumanAdaptationService | None = None,
+        stewardship: Callable[[], CurrentStewardshipProjection] | None = None,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
         self._actor_context_service = actor_context_service
@@ -186,6 +220,7 @@ class CurrentContextService:
         self._provider_id = provider_id
         self._model_id = model_id
         self._human_adaptation = human_adaptation
+        self._stewardship = stewardship
         self._clock = clock or (lambda: datetime.now(UTC))
         self._active_conversation_id: UUID | None = None
         self._active_task_id: UUID | None = None
@@ -261,6 +296,9 @@ class CurrentContextService:
             True
             if self._safe_mode
             else (bool(personalization["learning_paused"]) if personalization else True),
+            self._stewardship()
+            if self._stewardship is not None
+            else CurrentStewardshipProjection(),
         )
 
     def _actor_projection(self) -> CurrentActorProjection | None:
@@ -295,6 +333,7 @@ __all__ = [
     "CurrentContextModelProjection",
     "CurrentContextService",
     "CurrentContextSnapshot",
+    "CurrentStewardshipProjection",
     "CurrentProviderProjection",
     "ProviderReadiness",
 ]

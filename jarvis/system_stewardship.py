@@ -21,6 +21,7 @@ from typing import Final, Protocol
 from uuid import UUID, uuid4
 
 from jarvis.acquisition import (
+    AcquisitionArtifactRecord,
     AcquisitionBroker,
     AcquisitionPresentation,
     AcquisitionRequest,
@@ -1108,6 +1109,8 @@ class StewardshipObservation:
     model_analysis: tuple[DominanceAnalysis, ...]
     model_error: str | None
     fingerprint: str
+    acquisition_records: tuple[AcquisitionArtifactRecord, ...] = ()
+    acquisition_requests: tuple[AcquisitionRequest, ...] = ()
 
     def __post_init__(self) -> None:
         if not isinstance(self.observation_id, UUID):
@@ -1129,6 +1132,12 @@ class StewardshipObservation:
             _text(self.model_error, "Stewardship model error", 512)
         if len(self.fingerprint) != 64:
             raise StewardshipError("Stewardship observation fingerprint is malformed")
+        if any(
+            not isinstance(item, AcquisitionArtifactRecord) for item in self.acquisition_records
+        ):
+            raise StewardshipError("Stewardship acquisition evidence is malformed")
+        if any(not isinstance(item, AcquisitionRequest) for item in self.acquisition_requests):
+            raise StewardshipError("Stewardship acquisition requests are malformed")
 
 
 @dataclass(frozen=True, slots=True)
@@ -1261,6 +1270,8 @@ class SystemStewardshipCoordinator:
         self._classifier = classifier
         self._clock = clock or (lambda: datetime.now(UTC))
         self._last: StewardshipObservation | None = None
+        self._lifecycle_state: dict[StewardshipOperation, StewardshipLifecycleState] = {}
+        self._acquisition_requests: dict[str, AcquisitionRequest] = {}
 
     @property
     def last_observation(self) -> StewardshipObservation | None:
@@ -1290,9 +1301,20 @@ class SystemStewardshipCoordinator:
             except Exception as error:
                 model_error = f"model portfolio unavailable: {type(error).__name__}"
         resources = self.resource_governor.snapshot() if self.resource_governor else None
+        acquisition_records: tuple[AcquisitionArtifactRecord, ...] = ()
+        if self.acquisition is not None:
+            acquisition_records = tuple(self.acquisition.ledger.records())
+        acquisition_requests = tuple(
+            self._acquisition_requests[key] for key in sorted(self._acquisition_requests)
+        )
         observed_at = _timestamp(self._clock(), "Stewardship clock")
         fingerprint = self._observation_fingerprint(
-            system_result, storage_result, resources, models
+            system_result,
+            storage_result,
+            resources,
+            models,
+            acquisition_records,
+            acquisition_requests,
         )
         observation = StewardshipObservation(
             uuid4(),
@@ -1305,6 +1327,8 @@ class SystemStewardshipCoordinator:
             model_analysis,
             model_error,
             fingerprint,
+            acquisition_records,
+            acquisition_requests,
         )
         self._last = observation
         self._record(
@@ -1374,6 +1398,7 @@ class SystemStewardshipCoordinator:
             raise StewardshipError("Acquisition plan request is malformed")
         if ttl <= timedelta(0):
             raise StewardshipError("Acquisition plan lifetime is invalid")
+        self._acquisition_requests[request.fingerprint] = request
         payload = AcquisitionStewardshipPlan(request, build_acquisition_presentation(request))
         reversibility = (
             Reversibility.REINSTALL_REQUIRED
@@ -1519,13 +1544,36 @@ class SystemStewardshipCoordinator:
             pending,
             "uncertain effect records remain pending until provider evidence closes them",
         )
+        unresolved = pending or tuple(
+            item
+            for item in (*startup, *storage)
+            if getattr(getattr(item, "state", None), "value", "")
+            in {"unknown_outcome", "recovery_required", "pending"}
+        )
+        recovery_state = (
+            StewardshipLifecycleState.UNKNOWN_OUTCOME
+            if unresolved
+            else StewardshipLifecycleState.VERIFIED
+        )
+        recovery_detail = "restart reconciliation completed with provider evidence"
+        for operation in (
+            StewardshipOperation.ACQUISITION,
+            StewardshipOperation.STORAGE_CLEANUP,
+            StewardshipOperation.STORAGE_RELOCATION,
+            StewardshipOperation.STARTUP_MUTATION,
+        ):
+            if operation in self._lifecycle_state:
+                self._record(
+                    operation,
+                    recovery_state,
+                    self._last.fingerprint if self._last is not None else "0" * 64,
+                    detail=recovery_detail,
+                )
         self._record(
             StewardshipOperation.OBSERVE,
-            StewardshipLifecycleState.UNKNOWN_OUTCOME
-            if pending
-            else StewardshipLifecycleState.VERIFIED,
+            recovery_state,
             self._last.fingerprint if self._last is not None else "0" * 64,
-            detail="restart reconciliation completed without blind replay",
+            detail=recovery_detail,
         )
         return report
 
@@ -1634,6 +1682,23 @@ class SystemStewardshipCoordinator:
         *,
         task_id: UUID | None = None,
     ) -> None:
+        previous = self._lifecycle_state.get(operation)
+        if (
+            previous
+            in {
+                StewardshipLifecycleState.UNKNOWN_OUTCOME,
+                StewardshipLifecycleState.FAILED,
+            }
+            and state is StewardshipLifecycleState.VERIFIED
+            and "reconcil" not in detail.casefold()
+        ):
+            raise StewardshipError(
+                f"{operation.value} cannot become verified without a new "
+                "reconciliation evidence path"
+            )
+        if state is StewardshipLifecycleState.ROLLED_BACK and "rollback" not in detail.casefold():
+            raise StewardshipError("rolled-back stewardship state lacks rollback evidence")
+        self._lifecycle_state[operation] = state
         if self.lifecycle_recorder is None:
             return
         self.lifecycle_recorder.record_lifecycle(
@@ -1653,57 +1718,22 @@ class SystemStewardshipCoordinator:
         storage: StorageStewardshipReport,
         resources: ResourceSnapshot | None,
         models: tuple[ModelPortfolioEvidence, ...],
+        acquisition_records: tuple[AcquisitionArtifactRecord, ...] = (),
+        acquisition_requests: tuple[AcquisitionRequest, ...] = (),
     ) -> str:
-        payload = {
-            "software": tuple(
-                (item.application_id, item.state.value) for item in system.software.applications
-            ),
-            "security": tuple(
-                (item.provider, item.target, item.state.value) for item in system.security.findings
-            ),
-            "startup": tuple(
-                (item.entry_id, item.enabled, item.state.value) for item in system.startup.entries
-            ),
-            "updates": tuple(
-                (
-                    item.application_id,
-                    item.current_version,
-                    item.candidate_version,
-                    item.state.value,
-                )
-                for item in system.updates
-            ),
-            "volumes": tuple(
-                (
-                    item.volume_id,
-                    item.capacity_bytes,
-                    item.used_bytes,
-                    item.free_bytes,
-                    item.read_only,
-                )
-                for item in storage.volumes
-            ),
-            "models": tuple(
-                (
-                    item.identity.storage_key,
-                    item.available,
-                    repr(item.measurement),
-                    item.actual_router_use,
-                )
-                for item in models
-            ),
-            "resources": None
-            if resources is None
-            else (
-                resources.cpu_utilization,
-                resources.ram_available_bytes,
-                resources.gpu_vram_available_bytes,
-                resources.disk_free_bytes,
-                resources.user_active,
-                resources.heavy_foreground_workload,
-            ),
-        }
-        return _fingerprint(payload)
+        # These projections are composed of immutable, typed evidence records.
+        # Hashing their complete representations prevents a newly added provider
+        # field from silently escaping stale-plan invalidation.
+        return _fingerprint(
+            {
+                "system": repr(system),
+                "storage": repr(storage),
+                "resources": repr(resources),
+                "models": repr(models),
+                "acquisition_records": repr(acquisition_records),
+                "acquisition_requests": repr(acquisition_requests),
+            }
+        )
 
 
 def create_system_stewardship_composition(

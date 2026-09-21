@@ -167,6 +167,7 @@ def create_assistant_from_runtime(runtime: ApplicationRuntime) -> JarvisAssistan
         ollama_runtime=container.ollama_runtime,
         environment_settings=EnvironmentSettingsService(app_data_dir=container.paths.root),
         human_adaptation=container.human_adaptation,
+        goal_scheduler=container.goal_scheduler,
     )
 
 

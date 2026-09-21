@@ -36,6 +36,8 @@ from jarvis.desktop_shell import (
     TestDriveReport,
     WarmupResult,
 )
+from jarvis.goal_scheduler import GoalScheduler, GoalScheduleView
+from jarvis.goal_supervisor import GoalBudget, GoalIntent
 from jarvis.human_adaptation import (
     HumanAdaptationService,
     LanguageOverrides,
@@ -116,6 +118,7 @@ class JarvisAssistantService:
         ollama_runtime: OllamaRuntimeManager | None = None,
         environment_settings: EnvironmentSettingsService | None = None,
         human_adaptation: HumanAdaptationService | None = None,
+        goal_scheduler: GoalScheduler | None = None,
     ) -> None:
         self._conversation = conversation
         self._normalizer = normalizer or InputNormalizer()
@@ -136,6 +139,7 @@ class JarvisAssistantService:
         self._ollama_runtime = ollama_runtime
         self._environment_settings = environment_settings
         self._human_adaptation = human_adaptation
+        self._goal_scheduler = goal_scheduler
 
     @property
     def launch_profiles(self) -> LaunchProfileRegistry:
@@ -375,6 +379,20 @@ class JarvisAssistantService:
         return await self._require_task_controller().submit_task(
             self._normalizer.normalize(user_request)
         )
+
+    async def submit_goal(self, conversation_id: UUID, user_request: str) -> GoalScheduleView:
+        """Submit one user outcome through the durable GoalSupervisor scheduler."""
+
+        if self._goal_scheduler is None:
+            raise ServiceUnavailableError("Goal orchestration is not configured")
+        if not self._conversation.has_conversation(conversation_id):
+            raise ConversationError("Conversation is not owned by ConversationService")
+        normalized = self._normalizer.normalize(user_request)
+        intent = GoalIntent(
+            original_outcome=normalized,
+            metadata={"conversation_id": str(conversation_id), "source": "desktop"},
+        )
+        return await self._goal_scheduler.submit(intent, GoalBudget())
 
     async def cancel_task(self, task_id: UUID) -> PlanningTask:
         """Request clean cancellation of a running task."""

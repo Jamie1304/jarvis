@@ -136,7 +136,7 @@ from jarvis.credentials import (
     TestOnlyInMemorySecretBackend,
     WindowsCredentialManagerBackend,
 )
-from jarvis.current_context import CurrentContextService
+from jarvis.current_context import CurrentContextService, CurrentStewardshipProjection
 from jarvis.desktop_shell import (
     LaunchProfileRegistry,
     StartupWarmupRegistry,
@@ -327,6 +327,7 @@ from jarvis.skills import SkillRegistry
 from jarvis.speech.stt import FasterWhisperSttProvider, SoundDeviceRecorder, SpeechToTextService
 from jarvis.speech.tts import PiperTtsProvider, Pyttsx3TtsProvider, TextToSpeechService
 from jarvis.state import ApplicationStateMachine, SQLiteStateStore, StateStoreError
+from jarvis.stewardship_tools import StewardshipObservationTool
 from jarvis.storage import (
     FileSteward,
     FileStewardAcquisitionMaterializer,
@@ -651,11 +652,43 @@ class SafeBuiltinPlanAdvisor(PlanAdvisor):
 
     _CALCULATE = re.compile(r"^calculate\s+(.+)$", re.IGNORECASE)
     _PERCENT = re.compile(r"^\s*(\d+(?:\.\d+)?)%\s+of\s+(\d+(?:\.\d+)?)\s*$", re.IGNORECASE)
+    _STEWARDSHIP = re.compile(
+        r"^(?:observe|show|review|inspect)(?:\s+the)?\s+(?:system\s+health|system\s+stewardship|stewardship)(?:\s+(?:status|evidence))?$",
+        re.IGNORECASE,
+    )
 
     async def propose(
         self, goal: str, assumptions: tuple[str, ...], constraints: tuple[str, ...]
     ) -> object:
-        match = self._CALCULATE.fullmatch(" ".join(goal.split()))
+        normalized_goal = " ".join(goal.split())
+        if self._STEWARDSHIP.fullmatch(normalized_goal) is not None:
+            return {
+                "goal": goal,
+                "assumptions": list(assumptions),
+                "constraints": list(constraints),
+                "required_capabilities": ["stewardship"],
+                "required_permissions": ["filesystem.read"],
+                "completion_criteria": ["stewardship.observed", "stewardship.fingerprint"],
+                "steps": [
+                    {
+                        "key": "observe_stewardship",
+                        "tool_id": "stewardship.observe",
+                        "capability": "stewardship",
+                        "input": {},
+                        "dependencies": [],
+                        "required_permissions": ["filesystem.read"],
+                        "expected_output": "fingerprint",
+                        "verification_rule": "evidence_contains_all",
+                        "expected_evidence": [
+                            "stewardship.observed",
+                            "stewardship.fingerprint",
+                        ],
+                        "expensive_action": False,
+                        "max_retries": 0,
+                    }
+                ],
+            }
+        match = self._CALCULATE.fullmatch(normalized_goal)
         if match is None:
             raise ValueError("safe builtin planner supports only explicit calculation goals")
         expression = match.group(1)
@@ -1602,6 +1635,21 @@ class ApplicationRuntime:
                     frozenset({"storage.inventory"}),
                 ),
                 PolicyRule(
+                    "jarvis.stewardship.observe",
+                    Permission.FILESYSTEM_READ,
+                    Decision.ALLOW,
+                    ScopeConstraint(
+                        paths=(
+                            str(paths.root),
+                            str(paths.acquisitions),
+                            str(paths.models),
+                            str(paths.artifacts),
+                        ),
+                        tools=frozenset({"stewardship.observe"}),
+                    ),
+                    frozenset({"stewardship.observe"}),
+                ),
+                PolicyRule(
                     "jarvis.storage.copy",
                     Permission.FILESYSTEM_WRITE,
                     Decision.REQUIRE_APPROVAL,
@@ -2072,6 +2120,12 @@ class ApplicationRuntime:
                 ),
                 jarvis_roots=(paths.root,),
                 protected_roots=(paths.recovery, paths.backups),
+            )
+            registry.register(
+                StewardshipObservationTool(
+                    system_stewardship,
+                    scope_paths=(paths.root, paths.acquisitions, paths.models, paths.artifacts),
+                )
             )
             verification_engine = VerificationEngine()
             paths.validate_storage_layout()
@@ -2594,6 +2648,44 @@ class ApplicationRuntime:
                 dispatcher=inference_dispatcher,
                 conversation_store=conversation_store,
             )
+            assert system_stewardship is not None
+
+            def stewardship_projection() -> CurrentStewardshipProjection:
+                observation = system_stewardship.last_observation
+                if observation is None:
+                    return CurrentStewardshipProjection()
+                pressure_values = [state.value for _, state in observation.storage.pressure]
+                pressure_rank = {
+                    "unknown": 0,
+                    "healthy": 1,
+                    "watch": 2,
+                    "constrained": 3,
+                    "critical": 4,
+                }
+                storage_pressure = max(
+                    pressure_values,
+                    key=lambda value: pressure_rank.get(value, 0),
+                    default="unknown",
+                )
+                acquisition_active = any(
+                    record.state.value in {"active", "verification_required", "placement_pending"}
+                    for record in observation.acquisition_records
+                )
+                return CurrentStewardshipProjection(
+                    storage_pressure=storage_pressure,
+                    critical_disk="critical" in pressure_values,
+                    acquisition_active=acquisition_active,
+                    maintenance_deferred=observation.storage.duplicate_scan_state == "deferred"
+                    or bool(
+                        observation.resources and observation.resources.heavy_foreground_workload
+                    ),
+                    security_state=observation.system.security.overall.value,
+                    model_retirement_pending=any(
+                        analysis.classification.value == "redundant_candidate"
+                        for analysis in observation.model_analysis
+                    ),
+                )
+
             current_context = CurrentContextService(
                 actor_context_service=actor_context_service,
                 actor_context=actor_context,
@@ -2606,6 +2698,7 @@ class ApplicationRuntime:
                 provider_id=settings.ai_provider,
                 model_id=settings.ai_model,
                 human_adaptation=human_adaptation,
+                stewardship=stewardship_projection,
             )
             interruption_intelligence = InterruptionIntelligence(
                 semantic_events,
