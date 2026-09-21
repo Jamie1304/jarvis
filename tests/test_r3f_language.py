@@ -141,11 +141,13 @@ async def test_real_conversation_request_receives_bounded_language_projection() 
             "Schrijf een korte reactie",
             privacy_context=PrivacyContext(PrivacyClassification.SAFE_PUBLIC),
             language_context=context,
+            style_projection={"tone": "neutral", "length": "short"},
         )
     ]
     assert updates[-1].done
     request = provider.requests[0]
     assert any("conversation_language=nl" in message.content for message in request.messages)
+    assert any("tone=neutral" in message.content for message in request.messages)
     assert all("persona" not in message.content.casefold() for message in request.messages)
 
 
