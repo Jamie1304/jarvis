@@ -988,7 +988,7 @@ class HumanAdaptationStore:
                 "provenance=excluded.provenance, updated_at=excluded.updated_at",
                 (
                     attribute.name,
-                    attribute.relationship,
+                    attribute.relationship or "",
                     json.dumps(attribute.value, sort_keys=True, separators=(",", ":")),
                     attribute.confidence,
                     attribute.evidence_count,
@@ -1013,7 +1013,7 @@ class HumanAdaptationStore:
                     int(row["evidence_count"]),
                     row["provenance"],
                     _parse_iso(row["updated_at"]),
-                    row["relationship"],
+                    row["relationship"] or None,
                 )
                 for row in rows
             )

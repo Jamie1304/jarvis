@@ -55,6 +55,20 @@ Approval localization calls the existing `TrustedActionNarrator` and retains
 the same request ID, target, scope, risk, actor/authority inputs, and argument
 and action fingerprints. Language changes only the text rendered to a user.
 
+## Desktop Settings
+
+The existing Qt desktop Settings page uses the
+`DesktopBackendHost -> DesktopApplicationFacade` seam for language and voice
+preferences. Interface language, locale, conversation mode, fallback, STT,
+TTS, and voice preference remain separate controls. Interface labels are
+localized through the English/Dutch resource bundles; conversation-language
+changes are per-turn intent and do not mutate the interface language.
+
+Voice controls report configured preferences only. They do not invent voices
+or claim microphone/speaker evidence that has not been registered. Interface
+language changes are applied by the controlled Settings refresh; any broader
+environment restart behavior remains explicit in the existing Settings flow.
+
 ## Privacy and physical qualification
 
 The existing `PrivacyBoundary` remains the sole provider disclosure boundary.

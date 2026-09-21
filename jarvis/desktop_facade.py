@@ -212,7 +212,18 @@ class DesktopApplicationFacade:
     def language_preferences(self) -> dict[str, object]:
         """Return typed language state through the application service boundary."""
 
-        return self._require_assistant().language_preferences()
+        if self._assistant is None:
+            return {
+                "interface_language": "en",
+                "locale": "en-US",
+                "conversation_language": None,
+                "conversation_mode": "auto",
+                "fallback_language": "en",
+                "stt_language": None,
+                "tts_language": None,
+                "tts_voice": None,
+            }
+        return self._assistant.language_preferences()
 
     def save_language_preferences(self, updates: dict[str, object]) -> dict[str, object]:
         """Persist language preferences without exposing SQLite to Qt."""
@@ -227,11 +238,51 @@ class DesktopApplicationFacade:
     def personalization(self) -> dict[str, object]:
         """Return inspectable bounded adaptation state for the settings surface."""
 
-        return self._require_assistant().personalization()
+        if self._assistant is None:
+            return {
+                "personalization": {
+                    "mode": "explicit_only",
+                    "adaptive_persona": "fixed",
+                    "style_fidelity": "balanced",
+                    "routine_learning": False,
+                    "behavioral_learning": False,
+                    "observation_scope": "jarvis_only",
+                    "learning_paused": True,
+                    "adaptive_frozen": True,
+                },
+                "pinned_traits": (),
+                "adaptive_persona": {},
+                "expression": (),
+                "routines": (),
+                "history": (),
+            }
+        return self._assistant.personalization()
 
     def save_personalization(self, updates: dict[str, object]) -> dict[str, object]:
         assistant = self._require_assistant()
         return assistant.human_adaptation.configure_personalization(**updates)
+
+    def pause_learning(self, paused: bool) -> dict[str, object]:
+        return self._require_assistant().human_adaptation.pause_learning(paused)
+
+    def freeze_adaptive_persona(self, frozen: bool) -> dict[str, object]:
+        return self._require_assistant().human_adaptation.freeze_adaptive_persona(frozen)
+
+    def reset_adaptations(self) -> dict[str, object]:
+        assistant = self._require_assistant()
+        assistant.human_adaptation.reset_adaptations()
+        return assistant.personalization()
+
+    def reset_learning(self) -> dict[str, object]:
+        assistant = self._require_assistant()
+        assistant.human_adaptation.reset_learning()
+        return assistant.personalization()
+
+    def pin_persona_trait(self, field: str, value: int) -> tuple[str, ...]:
+        return self._require_assistant().human_adaptation.pin_persona_trait(field, value)
+
+    def unpin_persona_trait(self, field: str) -> tuple[str, ...]:
+        return self._require_assistant().human_adaptation.unpin_persona_trait(field)
 
     def actor_context(self) -> DesktopActorView:
         context = self._require_container().actor_context

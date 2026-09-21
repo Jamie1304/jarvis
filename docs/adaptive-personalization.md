@@ -67,6 +67,14 @@ does not affect PermissionBroker decisions, approval fingerprints, actor
 identity, resource admission, verification, `UNKNOWN_OUTCOME`, CredentialVault,
 generated capability trust, or recovery authority.
 
+The Qt desktop Settings page exposes these application-owned states without
+opening the adaptation store from the UI: personalization depth, fixed/adaptive
+personality, style fidelity, observation scope, learning pause, adaptive
+freeze, bounded reset operations, pinned traits, and a safe learned-state
+inspection. Reset personality adaptations and clearing learned behavioral state
+are separate confirmed actions. System-wide observation remains visibly
+`UNAVAILABLE`; no fake observer is created to satisfy the control surface.
+
 Physical system-wide observation, physical voice behavior, visual layout
 qualification, and independent frozen acceptance remain reviewer/qualification
 work, not claims of this development handoff.

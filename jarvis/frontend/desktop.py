@@ -12,6 +12,12 @@ from jarvis.desktop_facade import DesktopRow
 from jarvis.desktop_shell import DesktopShellService, ShellSection
 from jarvis.frontend.desktop_backend import DesktopBackendHost
 from jarvis.frontend.theme import desktop_stylesheet
+from jarvis.human_adaptation import (
+    ConversationLanguageMode,
+    LanguageTag,
+    PersonalizationMode,
+    load_default_localizer,
+)
 from jarvis.memory.control import MemoryControlReference
 from jarvis.memory.models import RetentionPolicy
 from jarvis.permissions import ApprovalChoice
@@ -71,6 +77,7 @@ def run_desktop_app(
         permission_action_finished = Signal(object)
         operation_finished = Signal(str, object)
         persona_finished = Signal(object)
+        adaptation_finished = Signal(object)
         projection_updated = Signal(object)
 
     class MainWindow(QMainWindow):
@@ -97,6 +104,7 @@ def run_desktop_app(
             self._signals.permission_action_finished.connect(self._permission_action_finished)
             self._signals.operation_finished.connect(self._operation_finished)
             self._signals.persona_finished.connect(self._persona_saved)
+            self._signals.adaptation_finished.connect(self._adaptation_saved)
             self._signals.projection_updated.connect(self._projection_updated)
             backend.add_projection_listener(self._signals.projection_updated.emit)
             self._safe_mode = backend.submit(lambda service: service.safe_mode).result()
@@ -107,6 +115,9 @@ def run_desktop_app(
             )
             self._text_future: Any | None = None
             self._restart_after_save = False
+            self._localizer = load_default_localizer()
+            self._ui_language = "en"
+            self._nav_buttons: dict[ShellSection, QPushButton] = {}
             self.setWindowTitle("JARVIS")
             self.setMinimumSize(1100, 650)
             self.resize(1672, 941)
@@ -192,6 +203,7 @@ def run_desktop_app(
                 button = QPushButton()
                 button.setText(item.label)
                 button.setObjectName("nav-item")
+                button.setProperty("localization-id", f"nav.{item.section.value}")
                 button.setCheckable(True)
                 button.setAutoExclusive(True)
                 if item.section is ShellSection.OVERVIEW:
@@ -199,6 +211,7 @@ def run_desktop_app(
                 button.clicked.connect(
                     lambda _checked=False, section=item.section: self._select_section(section)
                 )
+                self._nav_buttons[item.section] = button
                 navigation.addWidget(button)
             navigation.addStretch()
             controls.addWidget(self._input)
@@ -251,6 +264,7 @@ def run_desktop_app(
                     persona_reset = QPushButton("Reset Persona Defaults")
                     persona_reset.clicked.connect(self._reset_persona)
                     self._actor_status = QLabel()
+                    self._build_human_adaptation_settings(page_layout)
                     page_layout.addWidget(scroll)
                     page_layout.addWidget(self._reset_setting_selector)
                     page_layout.addWidget(reset_unsaved)
@@ -270,6 +284,7 @@ def run_desktop_app(
                     page_layout.addWidget(self._actor_status)
                     self._refresh_settings()
                     self._refresh_persona()
+                    self._refresh_human_adaptation_settings()
                 else:
                     rows = QListWidget()
                     rows.setObjectName(f"{section.value}-records")
@@ -977,6 +992,470 @@ def run_desktop_app(
                     ShellSection.AUTOMATIONS.value, result
                 )
             )
+
+        def _build_human_adaptation_settings(self, page_layout: QVBoxLayout) -> None:
+            """Build the real R3F settings surface over facade-owned operations."""
+
+            self._r3f_form_labels: dict[str, QLabel] = {}
+
+            def form_label(message_id: str, text: str) -> QLabel:
+                result = QLabel(text)
+                self._r3f_form_labels[message_id] = result
+                return result
+
+            self._language_heading = QLabel()
+            self._language_heading.setObjectName("r3f-language-heading")
+            self._language_status = QLabel()
+            self._language_status.setObjectName("r3f-language-status")
+            language_form = QFormLayout()
+            self._interface_language = QComboBox()
+            self._interface_language.setObjectName("r3f-interface-language")
+            self._interface_language.addItem("English", "en")
+            self._interface_language.addItem("Nederlands", "nl")
+            self._locale = QComboBox()
+            self._locale.setObjectName("r3f-locale")
+            self._locale.addItems(["en-US", "nl-NL"])
+            self._conversation_language = QComboBox()
+            self._conversation_language.setObjectName("r3f-conversation-language")
+            self._conversation_language.addItem("Automatic", None)
+            self._conversation_language.addItem("English", "en")
+            self._conversation_language.addItem("Nederlands", "nl")
+            self._conversation_mode = QComboBox()
+            self._conversation_mode.setObjectName("r3f-conversation-mode")
+            self._conversation_mode.addItem("Automatic", ConversationLanguageMode.AUTO.value)
+            self._conversation_mode.addItem("Fixed", ConversationLanguageMode.FIXED.value)
+            self._fallback_language = QComboBox()
+            self._fallback_language.setObjectName("r3f-fallback-language")
+            self._fallback_language.addItems(["English", "Nederlands"])
+            self._stt_language = QComboBox()
+            self._stt_language.setObjectName("r3f-stt-language")
+            self._stt_language.addItem("Automatic", None)
+            self._stt_language.addItem("English", "en")
+            self._stt_language.addItem("Nederlands", "nl")
+            self._tts_language = QComboBox()
+            self._tts_language.setObjectName("r3f-tts-language")
+            self._tts_language.addItem("Automatic", None)
+            self._tts_language.addItem("English", "en")
+            self._tts_language.addItem("Nederlands", "nl")
+            self._tts_voice = QLineEdit()
+            self._tts_voice.setObjectName("r3f-tts-voice")
+            self._tts_voice.setPlaceholderText("Leave blank for provider default")
+            language_form.addRow(
+                form_label("settings.interface_language", "Interface language"),
+                self._interface_language,
+            )
+            language_form.addRow(form_label("settings.locale", "Locale"), self._locale)
+            language_form.addRow(
+                form_label("settings.conversation_language", "Conversation language"),
+                self._conversation_language,
+            )
+            language_form.addRow(
+                form_label("settings.conversation_behavior", "Conversation behavior"),
+                self._conversation_mode,
+            )
+            language_form.addRow(
+                form_label("settings.fallback_language", "Fallback language"),
+                self._fallback_language,
+            )
+            language_form.addRow(
+                form_label("settings.stt_language", "STT language"), self._stt_language
+            )
+            language_form.addRow(
+                form_label("settings.tts_language", "TTS language"), self._tts_language
+            )
+            language_form.addRow(
+                form_label("settings.tts_voice", "TTS voice preference"), self._tts_voice
+            )
+            save_language = QPushButton()
+            save_language.setObjectName("r3f-save-language")
+            self._save_language_button = save_language
+            save_language.clicked.connect(self._save_language_preferences)
+            self._language_refresh = QPushButton()
+            self._language_refresh.setObjectName("r3f-refresh-language")
+            self._language_refresh.clicked.connect(self._refresh_human_adaptation_settings)
+            language_actions = QHBoxLayout()
+            language_actions.addWidget(save_language)
+            language_actions.addWidget(self._language_refresh)
+            language_body = QWidget()
+            language_body.setLayout(language_form)
+            page_layout.addWidget(self._language_heading)
+            page_layout.addWidget(language_body)
+            page_layout.addLayout(language_actions)
+            page_layout.addWidget(self._language_status)
+
+            self._personalization_heading = QLabel()
+            self._personalization_heading.setObjectName("r3f-personalization-heading")
+            personalization_form = QFormLayout()
+            self._adaptive_persona_mode = QComboBox()
+            self._adaptive_persona_mode.setObjectName("r3f-adaptive-persona")
+            self._adaptive_persona_mode.addItem("Fixed", "fixed")
+            self._adaptive_persona_mode.addItem("Adaptive", "adaptive")
+            self._personalization_mode = QComboBox()
+            self._personalization_mode.setObjectName("r3f-personalization-depth")
+            for mode in PersonalizationMode:
+                self._personalization_mode.addItem(mode.value.replace("_", " ").title(), mode.value)
+            self._style_fidelity = QComboBox()
+            self._style_fidelity.setObjectName("r3f-style-fidelity")
+            for value in ("off", "light", "balanced", "high", "maximum"):
+                self._style_fidelity.addItem(value.title(), value)
+            self._observation_scope = QComboBox()
+            self._observation_scope.setObjectName("r3f-observation-scope")
+            for value in ("jarvis_only", "app_scoped", "system_wide"):
+                self._observation_scope.addItem(value.replace("_", " ").title(), value)
+            self._routine_learning = QCheckBox()
+            self._routine_learning.setObjectName("r3f-routine-learning")
+            self._behavioral_learning = QCheckBox()
+            self._behavioral_learning.setObjectName("r3f-behavioral-learning")
+            self._learning_paused = QCheckBox()
+            self._learning_paused.setObjectName("r3f-learning-paused")
+            self._adaptive_frozen = QCheckBox()
+            self._adaptive_frozen.setObjectName("r3f-adaptive-frozen")
+            personalization_form.addRow(
+                form_label("settings.personality", "Personality"), self._adaptive_persona_mode
+            )
+            personalization_form.addRow(
+                form_label("settings.depth", "Personalization depth"), self._personalization_mode
+            )
+            personalization_form.addRow(
+                form_label("settings.style_fidelity", "Style fidelity"), self._style_fidelity
+            )
+            personalization_form.addRow(
+                form_label("settings.observation_scope", "Observation scope"),
+                self._observation_scope,
+            )
+            personalization_form.addRow(
+                form_label("settings.routine_learning", "Routine learning"), self._routine_learning
+            )
+            personalization_form.addRow(
+                form_label("settings.behavioral_learning", "Behavioral learning"),
+                self._behavioral_learning,
+            )
+            personalization_form.addRow(
+                form_label("settings.pause_learning", "Pause learning"), self._learning_paused
+            )
+            personalization_form.addRow(
+                form_label("settings.freeze_personality", "Freeze adaptive personality"),
+                self._adaptive_frozen,
+            )
+            save_personalization = QPushButton()
+            save_personalization.setObjectName("r3f-save-personalization")
+            self._save_personalization_button = save_personalization
+            save_personalization.clicked.connect(self._save_personalization_settings)
+            self._personalization_refresh = QPushButton()
+            self._personalization_refresh.setObjectName("r3f-refresh-personalization")
+            self._personalization_refresh.clicked.connect(self._refresh_human_adaptation_settings)
+            personalization_actions = QHBoxLayout()
+            personalization_actions.addWidget(save_personalization)
+            personalization_actions.addWidget(self._personalization_refresh)
+            self._learning_status = QLabel()
+            self._learning_status.setObjectName("r3f-learning-status")
+            page_layout.addWidget(self._personalization_heading)
+            page_layout.addLayout(personalization_form)
+            page_layout.addLayout(personalization_actions)
+            page_layout.addWidget(self._learning_status)
+
+            reset_adaptations = QPushButton()
+            reset_adaptations.setObjectName("r3f-reset-adaptations")
+            self._reset_adaptations_button = reset_adaptations
+            reset_adaptations.clicked.connect(self._reset_adaptations)
+            reset_learning = QPushButton()
+            reset_learning.setObjectName("r3f-reset-learning")
+            self._reset_learning_button = reset_learning
+            reset_learning.clicked.connect(self._reset_learning)
+            page_layout.addWidget(reset_adaptations)
+            page_layout.addWidget(reset_learning)
+            self._normal_action_widgets.extend(
+                [
+                    save_language,
+                    self._language_refresh,
+                    save_personalization,
+                    self._personalization_refresh,
+                    reset_adaptations,
+                    reset_learning,
+                ]
+            )
+
+            self._pins_heading = QLabel()
+            self._pins_heading.setObjectName("r3f-pins-heading")
+            self._pins = QListWidget()
+            self._pins.setObjectName("r3f-pins")
+            self._pin_trait = QComboBox()
+            self._pin_trait.setObjectName("r3f-pin-trait")
+            traits = (
+                ("Formality", "formality"),
+                ("Verbosity", "verbosity"),
+                ("Directness", "directness"),
+                ("Technical depth", "technical_depth"),
+                ("Humor", "humor_level"),
+                ("Initiative", "initiative"),
+                ("Uncertainty detail", "uncertainty_detail"),
+                ("Response length", "response_length"),
+            )
+            for label_text, field in traits:
+                self._pin_trait.addItem(label_text, field)
+            self._pin_value = QComboBox()
+            self._pin_value.setObjectName("r3f-pin-value")
+            self._pin_value.addItems(["0", "1", "2", "3", "4"])
+            pin = QPushButton()
+            pin.setObjectName("r3f-pin")
+            self._pin_button = pin
+            pin.clicked.connect(self._pin_selected_trait)
+            unpin = QPushButton()
+            unpin.setObjectName("r3f-unpin")
+            self._unpin_button = unpin
+            unpin.clicked.connect(self._unpin_selected_trait)
+            pin_actions = QHBoxLayout()
+            pin_actions.addWidget(self._pin_trait)
+            pin_actions.addWidget(self._pin_value)
+            pin_actions.addWidget(pin)
+            pin_actions.addWidget(unpin)
+            page_layout.addWidget(self._pins_heading)
+            page_layout.addWidget(self._pins)
+            page_layout.addLayout(pin_actions)
+            self._normal_action_widgets.extend([pin, unpin])
+
+            self._learned_heading = QLabel()
+            self._learned_heading.setObjectName("r3f-learned-heading")
+            self._learned_state = QTextEdit()
+            self._learned_state.setObjectName("r3f-learned-state")
+            self._learned_state.setReadOnly(True)
+            self._learned_state.setMinimumHeight(180)
+            page_layout.addWidget(self._learned_heading)
+            page_layout.addWidget(self._learned_state)
+            self._apply_ui_language()
+
+        def _refresh_human_adaptation_settings(self) -> None:
+            try:
+                preferences = backend.submit(
+                    lambda service: service.language_preferences()
+                ).result()
+                self._set_combo_data(
+                    self._interface_language, preferences.get("interface_language")
+                )
+                self._locale.setCurrentText(str(preferences.get("locale", "en-US")))
+                self._set_combo_data(
+                    self._conversation_language, preferences.get("conversation_language")
+                )
+                mode = str(
+                    preferences.get("conversation_mode", ConversationLanguageMode.AUTO.value)
+                )
+                self._set_combo_data(self._conversation_mode, mode)
+                self._set_combo_data(self._fallback_language, preferences.get("fallback_language"))
+                self._set_combo_data(self._stt_language, preferences.get("stt_language"))
+                self._set_combo_data(self._tts_language, preferences.get("tts_language"))
+                self._tts_voice.setText(str(preferences.get("tts_voice") or ""))
+                self._ui_language = str(preferences.get("interface_language", "en")).split("-", 1)[
+                    0
+                ]
+                self._apply_ui_language()
+                state = backend.submit(lambda service: service.personalization()).result()
+                settings = state.get("personalization", state.get("settings", {}))
+                if isinstance(settings, dict):
+                    self._set_combo_data(
+                        self._adaptive_persona_mode, settings.get("adaptive_persona")
+                    )
+                    self._set_combo_data(self._personalization_mode, settings.get("mode"))
+                    self._set_combo_data(self._style_fidelity, settings.get("style_fidelity"))
+                    self._set_combo_data(self._observation_scope, settings.get("observation_scope"))
+                    self._routine_learning.setChecked(bool(settings.get("routine_learning", False)))
+                    self._behavioral_learning.setChecked(
+                        bool(settings.get("behavioral_learning", False))
+                    )
+                    self._learning_paused.setChecked(bool(settings.get("learning_paused", True)))
+                    self._adaptive_frozen.setChecked(bool(settings.get("adaptive_frozen", True)))
+                    learning_state = (
+                        "Learning paused" if settings.get("learning_paused") else "Learning active"
+                    )
+                    if settings.get("observation_scope") == "system_wide":
+                        learning_state += "; system-wide observation: UNAVAILABLE"
+                    self._learning_status.setText(learning_state)
+                self._render_adaptation_inspection(state)
+            except (AttributeError, ServiceUnavailableError) as error:
+                self._language_status.setText(
+                    f"Language and personalization state unavailable: {error}"
+                )
+                self._learning_status.setText("Adaptation inspection unavailable")
+
+        def _save_language_preferences(self) -> None:
+            updates = {
+                "interface_language": self._interface_language.currentData(),
+                "locale": self._locale.currentText(),
+                "conversation_language": self._conversation_language.currentData(),
+                "conversation_mode": self._conversation_mode.currentData(),
+                "fallback_language": self._fallback_language.currentData(),
+                "stt_language": self._stt_language.currentData(),
+                "tts_language": self._tts_language.currentData(),
+                "tts_voice": self._tts_voice.text().strip() or None,
+            }
+            if updates["conversation_mode"] == ConversationLanguageMode.AUTO.value:
+                updates["conversation_language"] = None
+            selected_interface = updates["interface_language"]
+            if isinstance(selected_interface, str):
+                self._ui_language = selected_interface.split("-", 1)[0]
+                self._apply_ui_language()
+            future = backend.submit(lambda service: service.save_language_preferences(updates))
+            future.add_done_callback(self._signals.adaptation_finished.emit)
+
+        def _save_personalization_settings(self) -> None:
+            updates = {
+                "adaptive_persona": self._adaptive_persona_mode.currentData(),
+                "mode": self._personalization_mode.currentData(),
+                "style_fidelity": self._style_fidelity.currentData(),
+                "observation_scope": self._observation_scope.currentData(),
+                "routine_learning": self._routine_learning.isChecked(),
+                "behavioral_learning": self._behavioral_learning.isChecked(),
+                "learning_paused": self._learning_paused.isChecked(),
+                "adaptive_frozen": self._adaptive_frozen.isChecked(),
+            }
+            future = backend.submit(lambda service: service.save_personalization(updates))
+            future.add_done_callback(self._signals.adaptation_finished.emit)
+
+        def _adaptation_saved(self, future: Any) -> None:
+            try:
+                future.result()
+                self._refresh_human_adaptation_settings()
+                self._language_status.setText("Language and personalization settings saved")
+            except Exception as error:
+                self._signals.failed.emit(str(error))
+
+        def _reset_adaptations(self) -> None:
+            if not self._confirm_destructive(
+                "Reset personality adaptations", "Reset adaptive changes only?"
+            ):
+                return
+            future = backend.submit(lambda service: service.reset_adaptations())
+            future.add_done_callback(self._signals.adaptation_finished.emit)
+
+        def _reset_learning(self) -> None:
+            if not self._confirm_destructive(
+                "Clear learned behavioral state",
+                "Clear bounded learned behavioral and personalization state?",
+            ):
+                return
+            future = backend.submit(lambda service: service.reset_learning())
+            future.add_done_callback(self._signals.adaptation_finished.emit)
+
+        def _pin_selected_trait(self) -> None:
+            field = self._pin_trait.currentData()
+            if not isinstance(field, str):
+                return
+            future = backend.submit(
+                lambda service: service.pin_persona_trait(field, int(self._pin_value.currentText()))
+            )
+            future.add_done_callback(self._signals.adaptation_finished.emit)
+
+        def _unpin_selected_trait(self) -> None:
+            item = self._pins.currentItem()
+            if item is None:
+                return
+            field = item.data(Qt.ItemDataRole.UserRole)
+            if not isinstance(field, str):
+                return
+            future = backend.submit(lambda service: service.unpin_persona_trait(field))
+            future.add_done_callback(self._signals.adaptation_finished.emit)
+
+        @staticmethod
+        def _set_combo_data(combo: QComboBox, value: object) -> None:
+            index = combo.findData(value)
+            if index >= 0:
+                combo.setCurrentIndex(index)
+
+        def _confirm_destructive(self, title: str, text: str) -> bool:
+            return (
+                QMessageBox.question(
+                    self,
+                    title,
+                    text,
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                    QMessageBox.StandardButton.No,
+                )
+                == QMessageBox.StandardButton.Yes
+            )
+
+        def _render_adaptation_inspection(self, state: object) -> None:
+            if not isinstance(state, dict):
+                return
+            self._pins.clear()
+            pins = state.get("pinned_traits", ())
+            if isinstance(pins, tuple | list):
+                for field in pins:
+                    if isinstance(field, str):
+                        item = QListWidgetItem(field.replace("_", " ").title())
+                        item.setData(Qt.ItemDataRole.UserRole, field)
+                        self._pins.addItem(item)
+            settings = state.get("personalization", state.get("settings", {}))
+            adaptive = state.get("adaptive_persona", {})
+            expression = state.get("expression", ())
+            routines = state.get("routines", ())
+            history = state.get("history", ())
+            lines = [
+                f"Settings: {settings if isinstance(settings, dict) else 'unavailable'}",
+                f"Adaptive traits: {adaptive if isinstance(adaptive, dict) else 'unavailable'}",
+                "Expression attributes: "
+                f"{len(expression) if isinstance(expression, tuple | list) else 0}",
+                f"Routine candidates: {len(routines) if isinstance(routines, tuple | list) else 0}",
+                "Bounded adaptation history entries: "
+                f"{len(history) if isinstance(history, tuple | list) else 0}",
+                "Raw behavioral history and chain-of-thought are not displayed.",
+            ]
+            self._learned_state.setPlainText("\n".join(lines))
+
+        def _apply_ui_language(self) -> None:
+            language = LanguageTag(self._ui_language)
+
+            def t(message_id: str, fallback: str) -> str:
+                translated = self._localizer.translate(message_id, language)
+                return fallback if translated.startswith("[") else translated
+
+            labels = {
+                ShellSection.OVERVIEW: t("nav.overview", "Overview"),
+                ShellSection.CHAT: t("nav.chat", "Chat"),
+                ShellSection.TASKS: t("nav.tasks", "Tasks"),
+                ShellSection.MEMORY: t("nav.memory", "Memory"),
+                ShellSection.CAPABILITIES: t("nav.capabilities", "Capabilities"),
+                ShellSection.TOOLS: t("nav.tools", "Tools"),
+                ShellSection.AUTOMATIONS: t("nav.automations", "Automations"),
+                ShellSection.PERMISSIONS: t("nav.permissions", "Permissions"),
+                ShellSection.ACTIVITY: t("nav.activity", "Activity"),
+                ShellSection.SETTINGS: t("nav.settings", "Settings"),
+            }
+            for section, button in self._nav_buttons.items():
+                button.setText(labels.get(section, section.value.title()))
+            self._language_heading.setText(t("app.language_region", "Language & Region"))
+            self._personalization_heading.setText(
+                t("app.personalization", "Personality & Personalization")
+            )
+            self._pins_heading.setText(t("settings.pins", "Pinned personality traits"))
+            self._learned_heading.setText(t("settings.learned_state", "Learned state inspection"))
+            self._language_status.setText(
+                t("settings.capability_truth", "Capability state is truthful")
+            )
+            self._language_refresh.setText(t("settings.refresh", "Refresh"))
+            self._personalization_refresh.setText(t("settings.refresh", "Refresh"))
+            for message_id, widget in self._r3f_form_labels.items():
+                fallback = widget.text()
+                translated = t(message_id, fallback)
+                widget.setText(translated)
+            self._routine_learning.setText(t("settings.enabled", "Enabled"))
+            self._behavioral_learning.setText(t("settings.enabled", "Enabled"))
+            self._learning_paused.setText(t("settings.pause_learning", "Pause learning"))
+            self._adaptive_frozen.setText(
+                t("settings.freeze_personality", "Freeze adaptive personality")
+            )
+            self._save_language_button.setText(
+                t("settings.save_language", "Save language settings")
+            )
+            self._save_personalization_button.setText(
+                t("settings.save_personalization", "Save personalization")
+            )
+            self._reset_adaptations_button.setText(
+                t("settings.reset_adaptations", "Reset personality adaptations")
+            )
+            self._reset_learning_button.setText(
+                t("settings.reset_learning", "Clear learned behavioral state")
+            )
+            self._pin_button.setText(t("settings.pin", "Pin trait"))
+            self._unpin_button.setText(t("settings.unpin", "Unpin selected"))
 
         def _operation_finished(self, page: str, future: Any) -> None:
             try:
