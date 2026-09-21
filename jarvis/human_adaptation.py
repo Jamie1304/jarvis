@@ -1146,8 +1146,13 @@ class HumanAdaptationStore:
                 version_name = connection.execute(
                     "SELECT name FROM schema_versions WHERE version = 1"
                 ).fetchone()
-                if version_name is None or version_name["name"] != "initial human adaptation schema":
-                    raise HumanAdaptationMigrationError("Human adaptation migration identity mismatch")
+                if (
+                    version_name is None
+                    or version_name["name"] != "initial human adaptation schema"
+                ):
+                    raise HumanAdaptationMigrationError(
+                        "Human adaptation migration identity mismatch"
+                    )
                 tables = {
                     str(row[0])
                     for row in connection.execute(
