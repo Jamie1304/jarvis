@@ -14,11 +14,13 @@ import math
 import re
 import sqlite3
 import string
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from pathlib import Path
+from threading import RLock
 from typing import Final, cast
 from uuid import UUID, uuid4
 
@@ -539,10 +541,39 @@ class Localizer:
     """Data-only message lookup with bounded, named interpolation."""
 
     def __init__(self, bundles: Mapping[str, Mapping[str, str]], *, fallback: str = "en") -> None:
-        self._bundles = {
-            normalize_language_tag(key).split("-", 1)[0]: dict(value)
-            for key, value in bundles.items()
-        }
+        if not isinstance(bundles, Mapping) or not bundles:
+            raise ValueError("Localization bundles are malformed")
+        normalized: dict[str, dict[str, str]] = {}
+        for key, value in bundles.items():
+            if type(key) is not str or not isinstance(value, Mapping):
+                raise ValueError("Localization bundle is malformed")
+            language = normalize_language_tag(key).split("-", 1)[0]
+            messages: dict[str, str] = {}
+            for message_id, template in value.items():
+                if type(message_id) is not str or not re.fullmatch(
+                    r"[a-z0-9_.-]{1,128}", message_id
+                ):
+                    raise ValueError("Localization message ID is malformed")
+                if type(template) is not str or len(template) > 4_096 or "\x00" in template:
+                    raise ValueError("Localization template is malformed")
+                try:
+                    parsed = tuple(string.Formatter().parse(template))
+                except (IndexError, ValueError) as error:
+                    raise ValueError("Localization template is malformed") from error
+                fields = {field for _, field, _, _ in parsed if field}
+                if any(
+                    conversion is not None
+                    or format_spec
+                    or not re.fullmatch(r"[a-z][a-z0-9_]{0,31}", field)
+                    for _, field, format_spec, conversion in parsed
+                    if field
+                ):
+                    raise ValueError("Localization template uses an unsafe field")
+                if len(fields) > 16:
+                    raise ValueError("Localization template has too many fields")
+                messages[message_id] = template
+            normalized[language] = messages
+        self._bundles = normalized
         self._fallback = normalize_language_tag(fallback).split("-", 1)[0]
         if self._fallback not in self._bundles:
             raise ValueError("Localization fallback bundle is missing")
@@ -556,12 +587,13 @@ class Localizer:
         if template is None:
             return f"[{message_id}]"
         fields = {field for _, field, _, _ in string.Formatter().parse(template) if field}
-        if any(not re.fullmatch(r"[a-z][a-z0-9_]{0,31}", field) for field in fields):
-            raise ValueError("Localization template uses an unsafe field")
         if set(params) != fields:
             raise ValueError("Localization interpolation parameters do not match the resource")
         safe = {key: _display_value(value) for key, value in params.items()}
-        return template.format_map(safe)
+        rendered = template.format_map(safe)
+        if len(rendered) > 4_096 or any(ord(char) < 32 for char in rendered):
+            raise ValueError("Localized text is not safe display text")
+        return rendered
 
     def available(self, language: LanguageTag | str) -> bool:
         tag = language if isinstance(language, LanguageTag) else LanguageTag(language)
@@ -585,6 +617,8 @@ def load_default_localizer() -> Localizer:
 
 def _display_value(value: object) -> str:
     if isinstance(value, str | int | float | bool):
+        if isinstance(value, float) and not math.isfinite(value):
+            raise ValueError("Localization parameter is not finite")
         text = str(value)
     elif isinstance(value, LanguageTag):
         text = str(value)
@@ -685,7 +719,12 @@ class AdaptationHistoryEntry:
         _json_value(self.new_value)
         if self.occurred_at.tzinfo is None or not isinstance(self.evidence_class, EvidenceClass):
             raise ValueError("Adaptation history metadata is malformed")
-        if not 0 <= self.confidence <= 1 or not isinstance(self.source, AdaptationSource):
+        if (
+            type(self.confidence) not in {int, float}
+            or not math.isfinite(self.confidence)
+            or not 0 <= self.confidence <= 1
+            or not isinstance(self.source, AdaptationSource)
+        ):
             raise ValueError("Adaptation history confidence/source is malformed")
         if type(self.corrected) is not bool:
             raise ValueError("Adaptation correction flag is malformed")
@@ -703,15 +742,21 @@ class ExpressionAttribute:
 
     def __post_init__(self) -> None:
         _bounded_key(self.name)
-        _json_value(self.value)
-        if not 0 <= self.confidence <= 1 or self.evidence_count < 0:
+        _validate_expression_value(self.name, self.value)
+        if (
+            type(self.confidence) not in {int, float}
+            or not math.isfinite(self.confidence)
+            or not 0 <= self.confidence <= 1
+            or type(self.evidence_count) is not int
+            or not 0 <= self.evidence_count <= HumanAdaptationStore._MAX_COUNTER
+        ):
             raise ValueError("Expression attribute confidence/count is malformed")
         if type(self.provenance) is not str or not self.provenance or len(self.provenance) > 256:
             raise ValueError("Expression provenance is malformed")
         if self.updated_at.tzinfo is None:
             raise ValueError("Expression timestamp must be timezone-aware")
         if self.relationship is not None:
-            _bounded_key(self.relationship, limit=128)
+            _relationship_key(self.relationship)
 
 
 @dataclass(frozen=True, slots=True)
@@ -781,14 +826,29 @@ class HumanAdaptationStore:
     """Versioned local store for preferences, aggregates, and inspection history."""
 
     CURRENT_SCHEMA = 1
+    _MAX_COUNTER = 10_000
+    _REQUIRED_TABLES = frozenset(
+        {
+            "schema_versions",
+            "adaptation_state",
+            "adaptation_history",
+            "adaptation_evidence",
+            "expression_attributes",
+            "routine_candidates",
+        }
+    )
 
     def __init__(self, path: Path) -> None:
         self._path = Path(path)
         self._path.parent.mkdir(parents=True, exist_ok=True)
         self._connection: sqlite3.Connection | None = None
+        self._lock = RLock()
+        self._transaction_depth = 0
         try:
-            connection = sqlite3.connect(self._path)
+            connection = sqlite3.connect(self._path, timeout=5.0, check_same_thread=False)
             connection.row_factory = sqlite3.Row
+            connection.execute("PRAGMA journal_mode=WAL")
+            connection.execute("PRAGMA busy_timeout=5000")
             connection.execute("PRAGMA foreign_keys = ON")
             self._connection = connection
             self._migrate()
@@ -811,229 +871,294 @@ class HumanAdaptationStore:
         self.close()
 
     def close(self) -> None:
-        if self._connection is not None:
-            self._connection.close()
-            self._connection = None
+        with self._lock:
+            if self._connection is not None:
+                self._connection.close()
+                self._connection = None
+                self._transaction_depth = 0
+
+    @contextmanager
+    def transaction(self) -> Iterator[sqlite3.Connection]:
+        """Serialize and atomically group adaptation-store mutations."""
+
+        with self._lock:
+            connection = self._require()
+            outermost = self._transaction_depth == 0
+            self._transaction_depth += 1
+            try:
+                yield connection
+                if outermost:
+                    connection.commit()
+            except Exception:
+                if outermost:
+                    connection.rollback()
+                raise
+            finally:
+                self._transaction_depth -= 1
 
     def schema_version(self) -> int:
-        connection = self._require()
-        row = connection.execute(
-            "SELECT COALESCE(MAX(version), 0) AS version FROM schema_versions"
-        ).fetchone()
-        return int(row["version"] if row else 0)
+        with self._lock:
+            connection = self._require()
+            row = connection.execute(
+                "SELECT COALESCE(MAX(version), 0) AS version FROM schema_versions"
+            ).fetchone()
+            return int(row["version"] if row else 0)
 
     def get_state(self, key: str) -> object | None:
         _bounded_key(key)
-        row = (
-            self._require()
-            .execute("SELECT value FROM adaptation_state WHERE key = ?", (key,))
-            .fetchone()
-        )
-        return json.loads(row["value"]) if row else None
+        with self._lock:
+            row = (
+                self._require()
+                .execute("SELECT value FROM adaptation_state WHERE key = ?", (key,))
+                .fetchone()
+            )
+            return json.loads(row["value"]) if row else None
 
     def set_state(self, key: str, value: object) -> None:
         _bounded_key(key)
         encoded = json.dumps(_json_value(value), sort_keys=True, separators=(",", ":"))
-        connection = self._require()
-        connection.execute(
-            "INSERT INTO adaptation_state(key, value) VALUES (?, ?) "
-            "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-            (key, encoded),
-        )
-        connection.commit()
+        with self._lock:
+            connection = self._require()
+            connection.execute(
+                "INSERT INTO adaptation_state(key, value) VALUES (?, ?) "
+                "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                (key, encoded),
+            )
+            self._commit()
 
     def delete_state(self, key: str) -> None:
         _bounded_key(key)
-        self._require().execute("DELETE FROM adaptation_state WHERE key = ?", (key,))
-        self._require().commit()
+        with self._lock:
+            self._require().execute("DELETE FROM adaptation_state WHERE key = ?", (key,))
+            self._commit()
 
     def append_history(self, entry: AdaptationHistoryEntry) -> None:
         if not isinstance(entry, AdaptationHistoryEntry):
             raise ValueError("Adaptation history entry is malformed")
-        self._require().execute(
-            "INSERT INTO adaptation_history(field, previous_value, new_value, occurred_at, "
-            "evidence_class, confidence, source, corrected) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            (
-                entry.field,
-                json.dumps(entry.previous_value, sort_keys=True, separators=(",", ":")),
-                json.dumps(entry.new_value, sort_keys=True, separators=(",", ":")),
-                _iso(entry.occurred_at),
-                entry.evidence_class.value,
-                entry.confidence,
-                entry.source.value,
-                int(entry.corrected),
-            ),
-        )
-        self._require().commit()
+        with self._lock:
+            self._require().execute(
+                "INSERT INTO adaptation_history(field, previous_value, new_value, occurred_at, "
+                "evidence_class, confidence, source, corrected) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    entry.field,
+                    json.dumps(entry.previous_value, sort_keys=True, separators=(",", ":")),
+                    json.dumps(entry.new_value, sort_keys=True, separators=(",", ":")),
+                    _iso(entry.occurred_at),
+                    entry.evidence_class.value,
+                    entry.confidence,
+                    entry.source.value,
+                    int(entry.corrected),
+                ),
+            )
+            self._commit()
 
     def history(self, *, limit: int = 100) -> tuple[AdaptationHistoryEntry, ...]:
         if not 1 <= limit <= 1_000:
             raise ValueError("History limit is outside its bounds")
-        rows = self._require().execute(
-            "SELECT field, previous_value, new_value, occurred_at, evidence_class, "
-            "confidence, source, corrected "
-            "FROM adaptation_history ORDER BY id DESC LIMIT ?",
-            (limit,),
-        )
-        return tuple(
-            AdaptationHistoryEntry(
-                row["field"],
-                json.loads(row["previous_value"]),
-                json.loads(row["new_value"]),
-                _parse_iso(row["occurred_at"]),
-                EvidenceClass(row["evidence_class"]),
-                float(row["confidence"]),
-                AdaptationSource(row["source"]),
-                bool(row["corrected"]),
+        with self._lock:
+            rows = self._require().execute(
+                "SELECT field, previous_value, new_value, occurred_at, evidence_class, "
+                "confidence, source, corrected "
+                "FROM adaptation_history ORDER BY id DESC LIMIT ?",
+                (limit,),
             )
-            for row in rows
-        )
+            return tuple(
+                AdaptationHistoryEntry(
+                    row["field"],
+                    json.loads(row["previous_value"]),
+                    json.loads(row["new_value"]),
+                    _parse_iso(row["occurred_at"]),
+                    EvidenceClass(row["evidence_class"]),
+                    float(row["confidence"]),
+                    AdaptationSource(row["source"]),
+                    bool(row["corrected"]),
+                )
+                for row in rows
+            )
 
     def upsert_expression(self, attribute: ExpressionAttribute) -> None:
         if not isinstance(attribute, ExpressionAttribute):
             raise ValueError("Expression attribute is malformed")
-        self._require().execute(
-            "INSERT INTO expression_attributes(name, relationship, value, confidence, "
-            "evidence_count, provenance, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?) "
-            "ON CONFLICT(name, relationship) DO UPDATE SET value=excluded.value, "
-            "confidence=excluded.confidence, evidence_count=excluded.evidence_count, "
-            "provenance=excluded.provenance, updated_at=excluded.updated_at",
-            (
-                attribute.name,
-                attribute.relationship,
-                json.dumps(attribute.value, sort_keys=True, separators=(",", ":")),
-                attribute.confidence,
-                attribute.evidence_count,
-                attribute.provenance,
-                _iso(attribute.updated_at),
-            ),
-        )
-        self._require().commit()
+        with self._lock:
+            self._require().execute(
+                "INSERT INTO expression_attributes(name, relationship, value, confidence, "
+                "evidence_count, provenance, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(name, relationship) DO UPDATE SET value=excluded.value, "
+                "confidence=excluded.confidence, evidence_count=excluded.evidence_count, "
+                "provenance=excluded.provenance, updated_at=excluded.updated_at",
+                (
+                    attribute.name,
+                    attribute.relationship,
+                    json.dumps(attribute.value, sort_keys=True, separators=(",", ":")),
+                    attribute.confidence,
+                    attribute.evidence_count,
+                    attribute.provenance,
+                    _iso(attribute.updated_at),
+                ),
+            )
+            self._commit()
 
     def expressions(self) -> tuple[ExpressionAttribute, ...]:
-        rows = self._require().execute(
-            "SELECT name, relationship, value, confidence, evidence_count, provenance, updated_at "
-            "FROM expression_attributes ORDER BY name, relationship"
-        )
-        return tuple(
-            ExpressionAttribute(
-                row["name"],
-                json.loads(row["value"]),
-                float(row["confidence"]),
-                int(row["evidence_count"]),
-                row["provenance"],
-                _parse_iso(row["updated_at"]),
-                row["relationship"],
+        with self._lock:
+            rows = self._require().execute(
+                "SELECT name, relationship, value, confidence, evidence_count, "
+                "provenance, updated_at "
+                "FROM expression_attributes ORDER BY name, relationship"
             )
-            for row in rows
-        )
+            return tuple(
+                ExpressionAttribute(
+                    row["name"],
+                    json.loads(row["value"]),
+                    float(row["confidence"]),
+                    int(row["evidence_count"]),
+                    row["provenance"],
+                    _parse_iso(row["updated_at"]),
+                    row["relationship"],
+                )
+                for row in rows
+            )
 
     def upsert_routine(self, candidate: RoutineCandidate) -> None:
         if not isinstance(candidate, RoutineCandidate):
             raise ValueError("Routine candidate is malformed")
-        self._require().execute(
-            "INSERT INTO routine_candidates(routine_id, pattern, proposed_action, evidence_count, "
-            "confidence, scope, contexts, last_observed) VALUES (?, ?, ?, ?, ?, ?, ?, ?) "
-            "ON CONFLICT(pattern) DO UPDATE SET routine_id=excluded.routine_id, "
-            "proposed_action=excluded.proposed_action, evidence_count=excluded.evidence_count, "
-            "confidence=excluded.confidence, scope=excluded.scope, contexts=excluded.contexts, "
-            "last_observed=excluded.last_observed",
-            (
-                str(candidate.routine_id),
-                candidate.pattern,
-                candidate.proposed_action,
-                candidate.evidence_count,
-                candidate.confidence,
-                candidate.scope.value,
-                json.dumps(candidate.contexts),
-                _iso(candidate.last_observed),
-            ),
-        )
-        self._require().commit()
+        with self._lock:
+            self._require().execute(
+                "INSERT INTO routine_candidates(routine_id, pattern, proposed_action, "
+                "evidence_count, "
+                "confidence, scope, contexts, last_observed) VALUES (?, ?, ?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(pattern) DO UPDATE SET routine_id=excluded.routine_id, "
+                "proposed_action=excluded.proposed_action, evidence_count=excluded.evidence_count, "
+                "confidence=excluded.confidence, scope=excluded.scope, contexts=excluded.contexts, "
+                "last_observed=excluded.last_observed",
+                (
+                    str(candidate.routine_id),
+                    candidate.pattern,
+                    candidate.proposed_action,
+                    candidate.evidence_count,
+                    candidate.confidence,
+                    candidate.scope.value,
+                    json.dumps(candidate.contexts),
+                    _iso(candidate.last_observed),
+                ),
+            )
+            self._commit()
 
     def routines(self) -> tuple[RoutineCandidate, ...]:
-        rows = self._require().execute(
-            "SELECT routine_id, pattern, proposed_action, evidence_count, confidence, scope, "
-            "contexts, last_observed "
-            "FROM routine_candidates ORDER BY last_observed DESC"
-        )
-        return tuple(
-            RoutineCandidate(
-                UUID(row["routine_id"]),
-                row["pattern"],
-                row["proposed_action"],
-                int(row["evidence_count"]),
-                float(row["confidence"]),
-                ObservationScope(row["scope"]),
-                tuple(json.loads(row["contexts"])),
-                _parse_iso(row["last_observed"]),
+        with self._lock:
+            rows = self._require().execute(
+                "SELECT routine_id, pattern, proposed_action, evidence_count, confidence, scope, "
+                "contexts, last_observed "
+                "FROM routine_candidates ORDER BY last_observed DESC"
             )
-            for row in rows
-        )
+            return tuple(
+                RoutineCandidate(
+                    UUID(row["routine_id"]),
+                    row["pattern"],
+                    row["proposed_action"],
+                    int(row["evidence_count"]),
+                    float(row["confidence"]),
+                    ObservationScope(row["scope"]),
+                    tuple(json.loads(row["contexts"])),
+                    _parse_iso(row["last_observed"]),
+                )
+                for row in rows
+            )
 
     def clear_adaptations(self) -> None:
-        connection = self._require()
-        connection.execute("DELETE FROM adaptation_history")
-        connection.execute("DELETE FROM adaptation_evidence")
-        connection.execute(
-            "DELETE FROM adaptation_state WHERE key IN ('adaptive_persona', 'persona_pins')"
-        )
-        connection.commit()
+        with self.transaction() as connection:
+            connection.execute("DELETE FROM adaptation_history")
+            connection.execute("DELETE FROM adaptation_evidence")
+            connection.execute(
+                "DELETE FROM adaptation_state WHERE key IN "
+                "('adaptive_persona', 'persona_pins', 'learning_counters')"
+            )
 
     def clear_learning(self) -> None:
-        connection = self._require()
-        connection.execute("DELETE FROM expression_attributes")
-        connection.execute("DELETE FROM routine_candidates")
-        connection.execute("DELETE FROM adaptation_evidence")
-        connection.execute(
-            "DELETE FROM adaptation_state WHERE key IN ('behavior_aggregates', 'learning_counters')"
-        )
-        connection.commit()
+        with self.transaction() as connection:
+            connection.execute("DELETE FROM expression_attributes")
+            connection.execute("DELETE FROM routine_candidates")
+            connection.execute("DELETE FROM adaptation_evidence")
+            connection.execute(
+                "DELETE FROM adaptation_state WHERE key IN "
+                "('behavior_aggregates', 'learning_counters', 'routine_counters')"
+            )
 
     def _require(self) -> sqlite3.Connection:
         if self._connection is None:
             raise HumanAdaptationError("Human adaptation store is closed")
         return self._connection
 
+    def _commit(self) -> None:
+        if self._transaction_depth == 0:
+            self._require().commit()
+
     def _migrate(self) -> None:
-        connection = self._require()
-        connection.execute(
-            "CREATE TABLE IF NOT EXISTS schema_versions("
-            "version INTEGER PRIMARY KEY, name TEXT NOT NULL, applied_at TEXT NOT NULL)"
-        )
-        current = self.schema_version()
-        if current > self.CURRENT_SCHEMA:
-            raise HumanAdaptationMigrationError("Human adaptation database uses a future schema")
-        if current == 0:
-            with connection:
-                connection.executescript(
-                    "CREATE TABLE adaptation_state(key TEXT PRIMARY KEY, value TEXT NOT NULL);"
+        with self.transaction() as connection:
+            connection.execute(
+                "CREATE TABLE IF NOT EXISTS schema_versions("
+                "version INTEGER PRIMARY KEY, name TEXT NOT NULL, applied_at TEXT NOT NULL)"
+            )
+            row = connection.execute(
+                "SELECT COALESCE(MAX(version), 0) AS version FROM schema_versions"
+            ).fetchone()
+            current = int(row["version"] if row else 0)
+            if current > self.CURRENT_SCHEMA:
+                raise HumanAdaptationMigrationError(
+                    "Human adaptation database uses a future schema"
+                )
+            if current == 0:
+                connection.execute(
+                    "CREATE TABLE adaptation_state(key TEXT PRIMARY KEY, value TEXT NOT NULL)"
+                )
+                connection.execute(
                     "CREATE TABLE adaptation_history("
                     "id INTEGER PRIMARY KEY AUTOINCREMENT, field TEXT NOT NULL, "
                     "previous_value TEXT NOT NULL, new_value TEXT NOT NULL, "
                     "occurred_at TEXT NOT NULL, "
                     "evidence_class TEXT NOT NULL, confidence REAL NOT NULL, source TEXT NOT NULL, "
-                    "corrected INTEGER NOT NULL);"
+                    "corrected INTEGER NOT NULL)"
+                )
+                connection.execute(
                     "CREATE TABLE adaptation_evidence("
                     "id INTEGER PRIMARY KEY AUTOINCREMENT, field TEXT NOT NULL, "
-                    "target_value INTEGER NOT NULL, "
-                    "confidence REAL NOT NULL, evidence_class TEXT NOT NULL, source TEXT NOT NULL, "
-                    "occurred_at TEXT NOT NULL);"
+                    "target_value INTEGER NOT NULL, confidence REAL NOT NULL, "
+                    "evidence_class TEXT NOT NULL, source TEXT NOT NULL, occurred_at TEXT NOT NULL)"
+                )
+                connection.execute(
                     "CREATE TABLE expression_attributes("
                     "name TEXT NOT NULL, relationship TEXT NOT NULL DEFAULT '', "
                     "value TEXT NOT NULL, confidence REAL NOT NULL, "
                     "evidence_count INTEGER NOT NULL, provenance TEXT NOT NULL, "
-                    "updated_at TEXT NOT NULL, PRIMARY KEY(name, relationship));"
+                    "updated_at TEXT NOT NULL, PRIMARY KEY(name, relationship))"
+                )
+                connection.execute(
                     "CREATE TABLE routine_candidates("
                     "routine_id TEXT PRIMARY KEY, pattern TEXT UNIQUE NOT NULL, "
                     "proposed_action TEXT NOT NULL, evidence_count INTEGER NOT NULL, "
                     "confidence REAL NOT NULL, scope TEXT NOT NULL, "
-                    "contexts TEXT NOT NULL, last_observed TEXT NOT NULL);"
+                    "contexts TEXT NOT NULL, last_observed TEXT NOT NULL)"
                 )
                 connection.execute(
                     "INSERT INTO schema_versions(version, name, applied_at) VALUES (?, ?, ?)",
                     (1, "initial human adaptation schema", _iso(datetime.now(UTC))),
                 )
+            else:
+                version_name = connection.execute(
+                    "SELECT name FROM schema_versions WHERE version = 1"
+                ).fetchone()
+                if version_name is None or version_name["name"] != "initial human adaptation schema":
+                    raise HumanAdaptationMigrationError("Human adaptation migration identity mismatch")
+                tables = {
+                    str(row[0])
+                    for row in connection.execute(
+                        "SELECT name FROM sqlite_master WHERE type='table'"
+                    )
+                }
+                missing = self._REQUIRED_TABLES - tables
+                if missing:
+                    raise HumanAdaptationMigrationError(
+                        f"Human adaptation schema is incomplete: {sorted(missing)!r}"
+                    )
 
 
 class HumanAdaptationService:
@@ -1051,10 +1176,21 @@ class HumanAdaptationService:
         minimum_evidence: int = 3,
         confidence_threshold: float = 0.75,
         cooldown: timedelta = timedelta(hours=1),
+        evidence_window: timedelta = timedelta(hours=24),
     ) -> None:
         if not isinstance(store, HumanAdaptationStore):
             raise TypeError("Human adaptation service requires its authoritative store")
-        if minimum_evidence < 2 or not 0 < confidence_threshold <= 1 or cooldown < timedelta(0):
+        if (
+            type(minimum_evidence) is not int
+            or minimum_evidence < 2
+            or type(confidence_threshold) not in {int, float}
+            or not math.isfinite(confidence_threshold)
+            or not 0 < confidence_threshold <= 1
+            or not isinstance(cooldown, timedelta)
+            or cooldown < timedelta(0)
+            or not isinstance(evidence_window, timedelta)
+            or evidence_window < timedelta(0)
+        ):
             raise ValueError("Adaptation bounds are malformed")
         self._store = store
         self._clock = clock or (lambda: datetime.now(UTC))
@@ -1064,6 +1200,7 @@ class HumanAdaptationService:
         self._minimum_evidence = minimum_evidence
         self._confidence_threshold = confidence_threshold
         self._cooldown = cooldown
+        self._evidence_window = evidence_window
 
     @property
     def store(self) -> HumanAdaptationStore:
@@ -1126,6 +1263,7 @@ class HumanAdaptationService:
         }
         if isinstance(value, Mapping):
             defaults.update(value)
+        self._validate_personalization(defaults)
         return defaults
 
     def configure_personalization(self, **updates: object) -> dict[str, object]:
@@ -1149,12 +1287,13 @@ class HumanAdaptationService:
         _persona_field(field)
         if type(value) is not int or not 0 <= value <= 4:
             raise ValueError("Persona trait value is malformed")
-        pins = set(self._pins())
-        pins.add(field)
-        adaptive = self._adaptive_persona()
-        adaptive[field] = value
-        self._store.set_state("persona_pins", sorted(pins))
-        self._store.set_state("adaptive_persona", adaptive)
+        with self._store.transaction():
+            pins = set(self._pins())
+            pins.add(field)
+            adaptive = self._adaptive_persona()
+            adaptive[field] = value
+            self._store.set_state("persona_pins", sorted(pins))
+            self._store.set_state("adaptive_persona", adaptive)
         return tuple(sorted(pins))
 
     def mark_explicit_persona_update(self, updates: Mapping[str, object]) -> tuple[str, ...]:
@@ -1167,28 +1306,29 @@ class HumanAdaptationService:
             if type(value) is not int or not 0 <= value <= 4:
                 raise ValueError("Explicit persona value is malformed")
         typed_updates = {trait: cast(int, value) for trait, value in updates.items()}
-        pins = set(self._pins())
-        adaptive = self._adaptive_persona()
-        now = self._clock().astimezone(UTC)
-        for trait, value in typed_updates.items():
-            previous = adaptive[trait]
-            adaptive[trait] = int(value)
-            pins.add(trait)
-            if previous != value:
-                self._store.append_history(
-                    AdaptationHistoryEntry(
-                        trait,
-                        previous,
-                        value,
-                        now,
-                        EvidenceClass.CORRECTION,
-                        1.0,
-                        AdaptationSource.USER,
-                        True,
+        with self._store.transaction():
+            pins = set(self._pins())
+            adaptive = self._adaptive_persona()
+            now = self._now()
+            for trait, value in typed_updates.items():
+                previous = adaptive[trait]
+                adaptive[trait] = int(value)
+                pins.add(trait)
+                if previous != value:
+                    self._store.append_history(
+                        AdaptationHistoryEntry(
+                            trait,
+                            previous,
+                            value,
+                            now,
+                            EvidenceClass.CORRECTION,
+                            1.0,
+                            AdaptationSource.USER,
+                            True,
+                        )
                     )
-                )
-        self._store.set_state("persona_pins", sorted(pins))
-        self._store.set_state("adaptive_persona", adaptive)
+            self._store.set_state("persona_pins", sorted(pins))
+            self._store.set_state("adaptive_persona", adaptive)
         return tuple(sorted(pins))
 
     def unpin_persona_trait(self, field: str) -> tuple[str, ...]:
@@ -1222,11 +1362,19 @@ class HumanAdaptationService:
         confidence: float,
         evidence_class: EvidenceClass = EvidenceClass.COMMUNICATION,
         provenance: str = "bounded local feedback",
+        occurred_at: datetime | None = None,
     ) -> bool:
         _persona_field(field)
         if type(target_value) is not int or not 0 <= target_value <= 4:
             raise ValueError("Persona evidence value is malformed")
-        if not 0 <= confidence <= 1 or not isinstance(evidence_class, EvidenceClass):
+        if (
+            type(confidence) not in {int, float}
+            or not math.isfinite(confidence)
+            or not 0 <= confidence <= 1
+            or not isinstance(evidence_class, EvidenceClass)
+            or type(provenance) is not str
+            or not provenance.strip()
+        ):
             raise ValueError("Persona evidence metadata is malformed")
         settings = self.personalization_settings()
         mode = PersonalizationMode(str(settings["mode"]))
@@ -1257,43 +1405,70 @@ class HumanAdaptationService:
         if field in self._pins():
             return False
         key = f"{field}:{target_value}:{evidence_class.value}"
-        counters = self._store.get_state("learning_counters")
-        data = dict(counters) if isinstance(counters, Mapping) else {}
-        item = data.get(key, {"count": 0, "confidence": 0.0, "last_adapted": None})
-        count = int(item.get("count", 0)) + 1
-        average = (float(item.get("confidence", 0.0)) * (count - 1) + confidence) / count
-        item = {"count": count, "confidence": average, "last_adapted": item.get("last_adapted")}
-        data[key] = item
-        self._store.set_state("learning_counters", data)
-        if count < self._minimum_evidence or average < self._confidence_threshold:
-            return False
-        last = _parse_iso(item["last_adapted"]) if item.get("last_adapted") else None
-        now = self._clock().astimezone(UTC)
-        if last is not None and now - last < self._cooldown:
-            return False
-        adaptive = self._adaptive_persona()
-        previous = int(adaptive.get(field, 2))
-        if previous == target_value:
-            return False
-        next_value = previous + (1 if target_value > previous else -1)
-        adaptive[field] = next_value
-        item["last_adapted"] = _iso(now)
-        item["count"] = 0
-        item["confidence"] = 0.0
-        self._store.set_state("adaptive_persona", adaptive)
-        self._store.set_state("learning_counters", data)
-        self._store.append_history(
-            AdaptationHistoryEntry(
-                field,
-                previous,
-                next_value,
-                now,
-                evidence_class,
-                average,
-                AdaptationSource.LOCAL_AGGREGATE,
+        now = self._now(occurred_at)
+        with self._store.transaction():
+            counters = self._store.get_state("learning_counters")
+            data = dict(counters) if isinstance(counters, Mapping) else {}
+            raw_item = data.get(key)
+            item = dict(raw_item) if isinstance(raw_item, Mapping) else {}
+            window_started = (
+                _parse_iso(item["window_started"])
+                if isinstance(item.get("window_started"), str)
+                else None
             )
-        )
-        return True
+            if (
+                window_started is None
+                or now < window_started
+                or now - window_started >= self._evidence_window
+            ):
+                count = 0
+                previous_confidence = 0.0
+                window_started = now
+            else:
+                count = _bounded_counter(item.get("count", 0))
+                previous_confidence = _bounded_confidence(item.get("confidence", 0.0))
+            count = min(HumanAdaptationStore._MAX_COUNTER, count + 1)
+            average = (previous_confidence * (count - 1) + confidence) / count
+            item = {
+                "count": count,
+                "confidence": average,
+                "last_adapted": item.get("last_adapted"),
+                "window_started": _iso(window_started),
+            }
+            data[key] = item
+            if count < self._minimum_evidence or average < self._confidence_threshold:
+                self._store.set_state("learning_counters", data)
+                return False
+            last = _parse_iso(item["last_adapted"]) if item.get("last_adapted") else None
+            if last is not None and now - last < self._cooldown:
+                self._store.set_state("learning_counters", data)
+                return False
+            adaptive = self._adaptive_persona()
+            previous = int(adaptive.get(field, 2))
+            if previous == target_value:
+                item["count"] = 0
+                item["confidence"] = 0.0
+                self._store.set_state("learning_counters", data)
+                return False
+            next_value = previous + (1 if target_value > previous else -1)
+            adaptive[field] = next_value
+            item["last_adapted"] = _iso(now)
+            item["count"] = 0
+            item["confidence"] = 0.0
+            self._store.set_state("adaptive_persona", adaptive)
+            self._store.set_state("learning_counters", data)
+            self._store.append_history(
+                AdaptationHistoryEntry(
+                    field,
+                    previous,
+                    next_value,
+                    now,
+                    evidence_class,
+                    average,
+                    AdaptationSource.LOCAL_AGGREGATE,
+                )
+            )
+            return True
 
     def record_expression_feedback(
         self,
@@ -1303,38 +1478,57 @@ class HumanAdaptationService:
         confidence: float,
         provenance: str,
         relationship: str | None = None,
+        secure_input: bool = False,
     ) -> ExpressionAttribute | None:
         _bounded_key(name)
-        if not 0 <= confidence <= 1 or type(provenance) is not str or not provenance.strip():
-            raise ValueError("Expression evidence is malformed")
-        settings = self.personalization_settings()
         if (
-            PersonalizationMode(str(settings["mode"]))
-            in {PersonalizationMode.OFF, PersonalizationMode.EXPLICIT_ONLY}
-            or settings["learning_paused"]
+            type(confidence) not in {int, float}
+            or not math.isfinite(confidence)
+            or not 0 <= confidence <= 1
+            or type(provenance) is not str
+            or not provenance.strip()
         ):
+            raise ValueError("Expression evidence is malformed")
+        if type(secure_input) is not bool:
+            raise ValueError("Expression secure-input metadata is malformed")
+        if secure_input:
             return None
-        existing = next(
-            (
-                item
-                for item in self._store.expressions()
-                if item.name == name and item.relationship == relationship
-            ),
-            None,
+        normalized_relationship = (
+            _relationship_key(relationship) if relationship is not None else None
         )
-        count = (existing.evidence_count if existing else 0) + 1
-        average = ((existing.confidence * (count - 1) if existing else 0.0) + confidence) / count
-        attribute = ExpressionAttribute(
-            name,
-            value,
-            min(1.0, average),
-            count,
-            provenance[:256],
-            self._clock().astimezone(UTC),
-            relationship,
-        )
-        self._store.upsert_expression(attribute)
-        return attribute
+        with self._store.transaction():
+            settings = self.personalization_settings()
+            if (
+                PersonalizationMode(str(settings["mode"]))
+                in {PersonalizationMode.OFF, PersonalizationMode.EXPLICIT_ONLY}
+                or settings["learning_paused"]
+            ):
+                return None
+            existing = next(
+                (
+                    item
+                    for item in self._store.expressions()
+                    if item.name == name and item.relationship == normalized_relationship
+                ),
+                None,
+            )
+            count = min(
+                HumanAdaptationStore._MAX_COUNTER, (existing.evidence_count if existing else 0) + 1
+            )
+            average = (
+                (existing.confidence * (count - 1) if existing else 0.0) + confidence
+            ) / count
+            attribute = ExpressionAttribute(
+                name,
+                value,
+                min(1.0, average),
+                count,
+                provenance[:256],
+                self._now(),
+                normalized_relationship,
+            )
+            self._store.upsert_expression(attribute)
+            return attribute
 
     def expression_profile(self) -> tuple[ExpressionAttribute, ...]:
         return self._store.expressions()
@@ -1342,35 +1536,41 @@ class HumanAdaptationService:
     def record_behavior_event(self, event: BehavioralAggregateEvent) -> bool:
         if not isinstance(event, BehavioralAggregateEvent):
             raise ValueError("Behavioral event is malformed")
-        settings = self.personalization_settings()
-        if (
-            PersonalizationMode(str(settings["mode"])) is not PersonalizationMode.DEEP
-            or not settings["behavioral_learning"]
-            or settings["learning_paused"]
-            or event.secure_input
-            or event.scope is ObservationScope.SYSTEM_WIDE
-            or settings["observation_scope"] == ObservationScope.SYSTEM_WIDE.value
-        ):
-            return False
-        aggregates = self._store.get_state("behavior_aggregates")
-        data = dict(aggregates) if isinstance(aggregates, Mapping) else {}
-        bucket = data.setdefault(
-            event.surface,
-            {
-                "events": 0,
-                "duration_seconds": 0,
-                "corrections": 0,
-                "backspaces": 0,
-                "keystrokes": 0,
-            },
-        )
-        bucket["events"] += 1
-        bucket["duration_seconds"] += event.duration_seconds
-        bucket["corrections"] += event.correction_count
-        bucket["backspaces"] += event.backspace_count
-        bucket["keystrokes"] += event.keystroke_count
-        self._store.set_state("behavior_aggregates", data)
-        return True
+        with self._store.transaction():
+            settings = self.personalization_settings()
+            if (
+                PersonalizationMode(str(settings["mode"])) is not PersonalizationMode.DEEP
+                or not settings["behavioral_learning"]
+                or settings["learning_paused"]
+                or event.secure_input
+                or event.scope is ObservationScope.SYSTEM_WIDE
+                or settings["observation_scope"] == ObservationScope.SYSTEM_WIDE.value
+            ):
+                return False
+            aggregates = self._store.get_state("behavior_aggregates")
+            data = dict(aggregates) if isinstance(aggregates, Mapping) else {}
+            bucket = data.setdefault(
+                event.surface,
+                {
+                    "events": 0,
+                    "duration_seconds": 0,
+                    "corrections": 0,
+                    "backspaces": 0,
+                    "keystrokes": 0,
+                },
+            )
+            for key, amount in (
+                ("events", 1),
+                ("duration_seconds", event.duration_seconds),
+                ("corrections", event.correction_count),
+                ("backspaces", event.backspace_count),
+                ("keystrokes", event.keystroke_count),
+            ):
+                bucket[key] = min(
+                    HumanAdaptationStore._MAX_COUNTER, int(bucket.get(key, 0)) + amount
+                )
+            self._store.set_state("behavior_aggregates", data)
+            return True
 
     def behavioral_aggregates(self) -> dict[str, object]:
         value = self._store.get_state("behavior_aggregates")
@@ -1386,39 +1586,47 @@ class HumanAdaptationService:
     ) -> RoutineCandidate | None:
         if type(pattern) is not str or type(proposed_action) is not str:
             raise ValueError("Routine observation is malformed")
-        settings = self.personalization_settings()
-        if (
-            PersonalizationMode(str(settings["mode"]))
-            not in {PersonalizationMode.CONTEXTUAL, PersonalizationMode.DEEP}
-            or not settings["routine_learning"]
-            or settings["learning_paused"]
-            or scope is ObservationScope.SYSTEM_WIDE
-        ):
-            return None
-        state = self._store.get_state("routine_counters")
-        counters = dict(state) if isinstance(state, Mapping) else {}
-        item = dict(counters.get(pattern, {"count": 0, "contexts": []}))
-        item["count"] = int(item.get("count", 0)) + 1
-        contexts = list(item.get("contexts", []))
-        if context not in contexts and len(contexts) < 16:
-            contexts.append(context)
-        item["contexts"] = contexts
-        counters[pattern] = item
-        self._store.set_state("routine_counters", counters)
-        if item["count"] < self._minimum_evidence:
-            return None
-        candidate = RoutineCandidate(
-            uuid4(),
-            pattern,
-            proposed_action,
-            item["count"],
-            min(0.99, item["count"] / 10),
-            scope,
-            tuple(contexts),
-            self._clock().astimezone(UTC),
-        )
-        self._store.upsert_routine(candidate)
-        return candidate
+        if type(context) is not str or not context.strip() or len(context) > 128:
+            raise ValueError("Routine context is malformed")
+        with self._store.transaction():
+            settings = self.personalization_settings()
+            if (
+                PersonalizationMode(str(settings["mode"]))
+                not in {PersonalizationMode.CONTEXTUAL, PersonalizationMode.DEEP}
+                or not settings["routine_learning"]
+                or settings["learning_paused"]
+                or scope is ObservationScope.SYSTEM_WIDE
+            ):
+                return None
+            state = self._store.get_state("routine_counters")
+            counters = dict(state) if isinstance(state, Mapping) else {}
+            raw_item = counters.get(pattern)
+            item = dict(raw_item) if isinstance(raw_item, Mapping) else {}
+            item["count"] = min(
+                HumanAdaptationStore._MAX_COUNTER, _bounded_counter(item.get("count", 0)) + 1
+            )
+            contexts = [
+                item for item in item.get("contexts", []) if type(item) is str and len(item) <= 128
+            ]
+            if context not in contexts and len(contexts) < 16:
+                contexts.append(context)
+            item["contexts"] = contexts
+            counters[pattern] = item
+            self._store.set_state("routine_counters", counters)
+            if item["count"] < self._minimum_evidence:
+                return None
+            candidate = RoutineCandidate(
+                uuid4(),
+                pattern,
+                proposed_action,
+                item["count"],
+                min(0.99, item["count"] / 10),
+                scope,
+                tuple(contexts),
+                self._now(),
+            )
+            self._store.upsert_routine(candidate)
+            return candidate
 
     def routine_candidates(self) -> tuple[RoutineCandidate, ...]:
         return self._store.routines()
@@ -1428,12 +1636,13 @@ class HumanAdaptationService:
             type(semantic_content) is not str
             or not semantic_content.strip()
             or len(semantic_content) > 8_000
+            or "\x00" in semantic_content
         ):
             raise ValueError("Semantic content is malformed")
         fidelity = StyleFidelity(str(self.personalization_settings()["style_fidelity"]))
         if fidelity is StyleFidelity.OFF or fidelity is StyleFidelity.LIGHT:
             return semantic_content
-        relationship_key = (relationship or "neutral").casefold()
+        relationship_key = _relationship_key(relationship or "neutral")
         greeting = {
             "friend": "Hey",
             "colleague": "Hello",
@@ -1446,18 +1655,19 @@ class HumanAdaptationService:
     def cloud_style_projection(self, *, relationship: str | None = None) -> dict[str, str]:
         """Only bounded abstract style guidance may cross the privacy boundary."""
 
+        relationship_key = _relationship_key(relationship) if relationship is not None else None
         attributes = {
             item.name: str(item.value)
             for item in self.expression_profile()
-            if item.relationship in {None, relationship}
+            if item.relationship in {None, relationship_key}
         }
         result = {
-            "tone": attributes.get("tone", "neutral")[:32],
-            "length": attributes.get("length", "balanced")[:32],
-            "directness": attributes.get("directness", "balanced")[:32],
+            "tone": _style_value("tone", attributes.get("tone")),
+            "length": _style_value("length", attributes.get("length")),
+            "directness": _style_value("directness", attributes.get("directness")),
         }
-        if relationship is not None:
-            result["relationship"] = relationship[:64]
+        if relationship_key is not None:
+            result["relationship"] = relationship_key
         return result
 
     def observation_status(self) -> dict[str, str]:
@@ -1501,6 +1711,19 @@ class HumanAdaptationService:
 
     @staticmethod
     def _validate_personalization(value: Mapping[str, object]) -> None:
+        known = {
+            "mode",
+            "adaptive_persona",
+            "style_fidelity",
+            "routine_learning",
+            "behavioral_learning",
+            "observation_scope",
+            "learning_paused",
+            "adaptive_frozen",
+        }
+        unknown = set(value) - known
+        if unknown:
+            raise ValueError("Unknown personalization setting")
         PersonalizationMode(str(value["mode"]))
         AdaptivePersonaMode(str(value["adaptive_persona"]))
         StyleFidelity(str(value["style_fidelity"]))
@@ -1513,6 +1736,12 @@ class HumanAdaptationService:
         ):
             if type(value[key]) is not bool:
                 raise ValueError(f"Personalization setting {key} is malformed")
+
+    def _now(self, value: datetime | None = None) -> datetime:
+        current = value if value is not None else self._clock()
+        if not isinstance(current, datetime) or current.tzinfo is None:
+            raise ValueError("Adaptation clock must return a timezone-aware timestamp")
+        return current.astimezone(UTC)
 
     def _pins(self) -> tuple[str, ...]:
         value = self._store.get_state("persona_pins")
@@ -1542,10 +1771,71 @@ _PERSONA_FIELDS: Final[frozenset[str]] = frozenset(
     }
 )
 
+_EXPRESSION_VALUES: Final[dict[str, frozenset[str]]] = {
+    "tone": frozenset({"neutral", "formal", "informal", "friendly", "professional"}),
+    "length": frozenset({"short", "balanced", "long", "concise", "detailed"}),
+    "directness": frozenset({"indirect", "balanced", "direct"}),
+    "greeting": frozenset({"none", "brief", "warm", "formal"}),
+    "closing": frozenset({"none", "brief", "warm", "formal"}),
+    "punctuation": frozenset({"minimal", "standard", "expressive"}),
+    "capitalization": frozenset({"lower", "sentence", "title", "upper"}),
+    "abbreviations": frozenset({"none", "rare", "common"}),
+    "emoji": frozenset({"none", "rare", "some", "frequent"}),
+    "vocabulary": frozenset({"simple", "mixed", "technical"}),
+    "sentence_length": frozenset({"short", "balanced", "long"}),
+    "technical_terms": frozenset({"none", "some", "many"}),
+    "channel": frozenset({"desktop", "voice", "text", "api"}),
+    "relationship_style": frozenset({"neutral", "friend", "colleague", "business"}),
+}
+
+_RELATIONSHIPS: Final[frozenset[str]] = frozenset({"neutral", "friend", "colleague", "business"})
+
+
+def _validate_expression_value(name: str, value: object) -> None:
+    if name in _EXPRESSION_VALUES:
+        if type(value) is not str or value not in _EXPRESSION_VALUES[name]:
+            raise ValueError("Expression value is not a bounded aggregate")
+        return
+    if type(value) is bool:
+        return
+    if type(value) is int and 0 <= value <= 1_000_000:
+        return
+    if type(value) is float and math.isfinite(value) and 0 <= value <= 1_000_000:
+        return
+    raise ValueError("Expression value is not a bounded aggregate")
+
+
+def _style_value(name: str, value: str | None) -> str:
+    allowed = _EXPRESSION_VALUES[name]
+    return value if value in allowed else ("neutral" if name == "tone" else "balanced")
+
+
+def _relationship_key(value: str) -> str:
+    if type(value) is not str:
+        raise ValueError("Relationship is malformed")
+    normalized = value.casefold().strip()
+    if normalized not in _RELATIONSHIPS:
+        raise ValueError("Relationship is not an allowed bounded category")
+    return normalized
+
 
 def _persona_field(value: str) -> None:
     if type(value) is not str or value not in _PERSONA_FIELDS:
         raise ValueError("Unknown persona trait")
+
+
+def _bounded_counter(value: object) -> int:
+    if type(value) is not int or not 0 <= value <= HumanAdaptationStore._MAX_COUNTER:
+        return 0
+    return value
+
+
+def _bounded_confidence(value: object) -> float:
+    if type(value) is int:
+        return float(value) if 0 <= value <= 1 else 0.0
+    if type(value) is float:
+        return value if math.isfinite(value) and 0 <= value <= 1 else 0.0
+    return 0.0
 
 
 def _bounded_key(value: str, *, limit: int = 128) -> None:
@@ -1584,7 +1874,10 @@ def _iso(value: datetime) -> str:
 def _parse_iso(value: str | None) -> datetime:
     if not value:
         raise ValueError("Timestamp is missing")
-    return datetime.fromisoformat(value).astimezone(UTC)
+    parsed = datetime.fromisoformat(value)
+    if parsed.tzinfo is None:
+        raise ValueError("Timestamp must be timezone-aware")
+    return parsed.astimezone(UTC)
 
 
 def language_capability(language: LanguageTag | str) -> str:
