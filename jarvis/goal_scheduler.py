@@ -242,7 +242,11 @@ class GoalScheduler:
             current = self._views[goal_id]
             if current.cancellation_requested and goal_status is not GoalStatus.RECOVERING:
                 goal_status = GoalStatus.CANCELLED
-            suspended = goal_status in {GoalStatus.WAITING_FOR_PERMISSION, GoalStatus.RECOVERING}
+            suspended = goal_status in {
+                GoalStatus.WAITING_FOR_PERMISSION,
+                GoalStatus.WAITING_FOR_RESOURCE,
+                GoalStatus.RECOVERING,
+            }
             self._active = max(0, self._active - 1)
             updated = replace(
                 current,
@@ -287,7 +291,11 @@ class GoalScheduler:
                     task_id=state.task_id,
                     stopped_at=view.stopped_at or datetime.now(UTC),
                 )
-            elif state.status in {GoalStatus.RECOVERING, GoalStatus.WAITING_FOR_PERMISSION}:
+            elif state.status in {
+                GoalStatus.RECOVERING,
+                GoalStatus.WAITING_FOR_PERMISSION,
+                GoalStatus.WAITING_FOR_RESOURCE,
+            }:
                 restored = replace(
                     view,
                     status=GoalScheduleStatus.SUSPENDED,

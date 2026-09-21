@@ -53,6 +53,7 @@ class CurrentStewardshipProjection:
     storage_pressure: str = "unknown"
     critical_disk: bool | None = None
     acquisition_active: bool | None = None
+    task_waiting_for_resource: bool = False
     maintenance_deferred: bool = False
     security_state: str = "unknown"
     model_retirement_pending: bool = False
@@ -68,6 +69,8 @@ class CurrentStewardshipProjection:
             raise CurrentContextError("Current critical-disk state is malformed")
         if self.acquisition_active not in {None, True, False}:
             raise CurrentContextError("Current acquisition state is malformed")
+        if type(self.task_waiting_for_resource) is not bool:
+            raise CurrentContextError("Current waiting-resource state is malformed")
         if type(self.maintenance_deferred) is not bool:
             raise CurrentContextError("Current maintenance state is malformed")
         if type(self.model_retirement_pending) is not bool:

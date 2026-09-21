@@ -1282,9 +1282,17 @@ class DesktopApplicationFacade:
             entry.reference,
         )
 
-    @staticmethod
-    def _task_detail(task: Any) -> str:
+    def _task_detail(self, task: Any) -> str:
         if task.error is not None:
+            if task.status.value == "waiting_for_resource":
+                language = LanguageTag(self.current_context().interface_language)
+                translated = self._localizer.translate(
+                    "task.waiting_for_resource",
+                    language,
+                    reason=task.error.message,
+                )
+                if not translated.startswith("["):
+                    return translated
             return f"Task ended with {task.error.failure_kind.value}: {task.error.message}"
         if task.status.value == "completed":
             return "Task completed; terminal outcome is available to the Episode projection."

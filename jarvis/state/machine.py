@@ -136,6 +136,7 @@ _TASK_TRANSITIONS: dict[TaskState, frozenset[TaskState]] = {
     TaskState.PLANNING: frozenset(
         {
             TaskState.WAITING_FOR_PERMISSION,
+            TaskState.WAITING_FOR_RESOURCE,
             TaskState.EXECUTING,
             TaskState.WAITING,
             TaskState.ERROR,
@@ -146,6 +147,7 @@ _TASK_TRANSITIONS: dict[TaskState, frozenset[TaskState]] = {
         {
             TaskState.PLANNING,
             TaskState.EXECUTING,
+            TaskState.WAITING_FOR_RESOURCE,
             TaskState.WAITING,
             TaskState.ERROR,
             TaskState.CANCELLED,
@@ -156,6 +158,7 @@ _TASK_TRANSITIONS: dict[TaskState, frozenset[TaskState]] = {
             TaskState.THINKING,
             TaskState.VERIFYING,
             TaskState.WAITING_FOR_PERMISSION,
+            TaskState.WAITING_FOR_RESOURCE,
             TaskState.WAITING,
             TaskState.RECOVERING,
             TaskState.ERROR,
@@ -169,6 +172,16 @@ _TASK_TRANSITIONS: dict[TaskState, frozenset[TaskState]] = {
             TaskState.COMPLETED,
             TaskState.ERROR,
             TaskState.CANCELLED,
+            TaskState.RECOVERING,
+        }
+    ),
+    TaskState.WAITING_FOR_RESOURCE: frozenset(
+        {
+            TaskState.PLANNING,
+            TaskState.EXECUTING,
+            TaskState.WAITING,
+            TaskState.CANCELLED,
+            TaskState.ERROR,
             TaskState.RECOVERING,
         }
     ),
@@ -194,6 +207,7 @@ _TASK_TO_APP = {
     TaskState.THINKING: ApplicationState.THINKING,
     TaskState.PLANNING: ApplicationState.PLANNING,
     TaskState.WAITING_FOR_PERMISSION: ApplicationState.WAITING_FOR_PERMISSION,
+    TaskState.WAITING_FOR_RESOURCE: ApplicationState.WAITING,
     TaskState.EXECUTING: ApplicationState.EXECUTING,
     TaskState.VERIFYING: ApplicationState.VERIFYING,
     TaskState.WAITING: ApplicationState.WAITING,

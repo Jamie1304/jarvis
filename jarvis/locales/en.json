@@ -7,6 +7,7 @@
   "permission.request": "JARVIS requests {permission} permission to {action}.",
   "task.completed": "Task completed",
   "task.pending": "Task is pending",
+  "task.waiting_for_resource": "Waiting for required resource: {reason}",
   "empty.no_history": "No conversation history yet",
   "nav.overview": "Overview",
   "nav.chat": "Chat",

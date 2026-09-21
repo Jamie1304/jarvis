@@ -68,6 +68,7 @@ class GoalStatus(StrEnum):
     VERIFYING = "verifying"
     REPLANNING = "replanning"
     WAITING_FOR_PERMISSION = "waiting_for_permission"
+    WAITING_FOR_RESOURCE = "waiting_for_resource"
     COMPLETED = "completed"
     BLOCKED = "blocked"
     RECOVERING = "recovering"
@@ -90,6 +91,7 @@ class AlternativeKind(StrEnum):
 class GoalExecutionStatus(StrEnum):
     COMPLETED = "completed"
     WAITING_FOR_PERMISSION = "waiting_for_permission"
+    WAITING_FOR_RESOURCE = "waiting_for_resource"
     RECOVERING = "recovering"
     BUDGET_EXHAUSTED = "budget_exhausted"
     FAILED = "failed"
@@ -579,6 +581,7 @@ class PlanningGoalTaskRunner:
                 PlanningTaskStatus.WAITING_FOR_PERMISSION: (
                     GoalExecutionStatus.WAITING_FOR_PERMISSION
                 ),
+                PlanningTaskStatus.WAITING_FOR_RESOURCE: GoalExecutionStatus.WAITING_FOR_RESOURCE,
                 PlanningTaskStatus.RECOVERING: GoalExecutionStatus.RECOVERING,
                 PlanningTaskStatus.BUDGET_EXHAUSTED: GoalExecutionStatus.BUDGET_EXHAUSTED,
                 PlanningTaskStatus.CANCELLED: GoalExecutionStatus.CANCELLED,
@@ -636,6 +639,7 @@ class PlanningGoalTaskRunner:
         status = {
             PlanningTaskStatus.COMPLETED: GoalExecutionStatus.COMPLETED,
             PlanningTaskStatus.WAITING_FOR_PERMISSION: GoalExecutionStatus.WAITING_FOR_PERMISSION,
+            PlanningTaskStatus.WAITING_FOR_RESOURCE: GoalExecutionStatus.WAITING_FOR_RESOURCE,
             PlanningTaskStatus.RECOVERING: GoalExecutionStatus.RECOVERING,
             PlanningTaskStatus.BUDGET_EXHAUSTED: GoalExecutionStatus.BUDGET_EXHAUSTED,
             PlanningTaskStatus.CANCELLED: GoalExecutionStatus.CANCELLED,
@@ -682,6 +686,7 @@ class PlanningGoalTaskRunner:
         status = {
             PlanningTaskStatus.COMPLETED: GoalExecutionStatus.COMPLETED,
             PlanningTaskStatus.WAITING_FOR_PERMISSION: GoalExecutionStatus.WAITING_FOR_PERMISSION,
+            PlanningTaskStatus.WAITING_FOR_RESOURCE: GoalExecutionStatus.WAITING_FOR_RESOURCE,
             PlanningTaskStatus.RECOVERING: GoalExecutionStatus.RECOVERING,
             PlanningTaskStatus.BUDGET_EXHAUSTED: GoalExecutionStatus.BUDGET_EXHAUSTED,
             PlanningTaskStatus.CANCELLED: GoalExecutionStatus.CANCELLED,
@@ -1072,7 +1077,11 @@ class GoalSupervisor:
                 correlation_id=intent.goal_id,
                 result={"status": current.status.value},
             )
-        if current.status in {GoalStatus.RECOVERING, GoalStatus.WAITING_FOR_PERMISSION}:
+        if current.status in {
+            GoalStatus.RECOVERING,
+            GoalStatus.WAITING_FOR_PERMISSION,
+            GoalStatus.WAITING_FOR_RESOURCE,
+        }:
             return current
         if current.cancellation_requested:
             return self._finish(
@@ -1180,6 +1189,10 @@ class GoalSupervisor:
                     return self._finish(
                         current, GoalStatus.WAITING_FOR_PERMISSION, report.detail, report.evidence
                     )
+                if report.status is GoalExecutionStatus.WAITING_FOR_RESOURCE:
+                    return self._finish(
+                        current, GoalStatus.WAITING_FOR_RESOURCE, report.detail, report.evidence
+                    )
                 if (
                     report.status is GoalExecutionStatus.RECOVERING
                     or report.effect_outcome is EffectOutcome.UNKNOWN_OUTCOME
@@ -1284,6 +1297,8 @@ class GoalSupervisor:
             target = GoalStatus.RECOVERING
         elif task.status is PlanningTaskStatus.WAITING_FOR_PERMISSION:
             target = GoalStatus.WAITING_FOR_PERMISSION
+        elif task.status is PlanningTaskStatus.WAITING_FOR_RESOURCE:
+            target = GoalStatus.WAITING_FOR_RESOURCE
         elif task.status is PlanningTaskStatus.COMPLETED:
             target = GoalStatus.COMPLETED
         elif task.status is PlanningTaskStatus.CANCELLED:
@@ -1324,7 +1339,10 @@ class GoalSupervisor:
         state = self._store.load(goal_id)
         if state is None:
             raise GoalSupervisorError("Unknown goal")
-        if state.status is GoalStatus.WAITING_FOR_PERMISSION:
+        if state.status in {
+            GoalStatus.WAITING_FOR_PERMISSION,
+            GoalStatus.WAITING_FOR_RESOURCE,
+        }:
             if state.task_id is None:
                 return state
             resume_task = getattr(self._runner, "resume_task", None)
@@ -1341,6 +1359,10 @@ class GoalSupervisor:
             if report.status is GoalExecutionStatus.WAITING_FOR_PERMISSION:
                 return self._finish(
                     state, GoalStatus.WAITING_FOR_PERMISSION, report.detail, report.evidence
+                )
+            if report.status is GoalExecutionStatus.WAITING_FOR_RESOURCE:
+                return self._finish(
+                    state, GoalStatus.WAITING_FOR_RESOURCE, report.detail, report.evidence
                 )
             return self._finish_blocked(state, report.detail or "Resumed goal failed")
         if state.status is GoalStatus.RECOVERING and not reconciled:

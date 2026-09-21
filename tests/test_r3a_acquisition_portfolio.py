@@ -1368,6 +1368,8 @@ def _usable_replacement(_identity: object) -> ModelUsabilityEvidence:
 
 def _portfolio_fixture(
     tmp_path: Path,
+    *,
+    include_specialist: bool = False,
 ) -> tuple[
     LocalModelManager,
     ModelKnowledgeService,
@@ -1377,18 +1379,21 @@ def _portfolio_fixture(
 ]:
     root = tmp_path / "provider"
     root.mkdir()
+    model_ids = ("old", "new", "specialist") if include_specialist else ("old", "new")
     metadata = tuple(
         ModelMetadata(
             model_id,
             8_192,
-            capabilities=frozenset({"coding"}),
+            capabilities=frozenset({"coding", "vision"})
+            if model_id == "specialist"
+            else frozenset({"coding"}),
             roles=frozenset({ModelRole.GENERAL}),
             modalities=frozenset({"text"}),
-            storage_bytes=16 if model_id == "old" else 12,
+            storage_bytes={"old": 16, "new": 12, "specialist": 20}[model_id],
             ram_bytes=1,
             source="fixture.provider",
         )
-        for model_id in ("old", "new")
+        for model_id in model_ids
     )
     specs = tuple(
         LocalModelSpec(
@@ -1674,6 +1679,59 @@ async def test_portfolio_dominance_specialist_alias_and_minimality_are_evidence_
     assert aliases[0].classification is DominanceClassification.NOT_REDUNDANT
     assert aliases[0].physical_alias is True
     assert registry.definition("fixture").metadata.explicitly_local
+    await optimizer.aclose()
+    await manager.aclose()
+    knowledge.close()
+
+
+@pytest.mark.asyncio
+async def test_portfolio_preserves_unique_capability_and_proposes_only_dominated_model(
+    tmp_path: Path,
+) -> None:
+    manager, knowledge, _registry, _provider, optimizer = _portfolio_fixture(
+        tmp_path, include_specialist=True
+    )
+    await manager.discover()
+    _record_cookbook(knowledge, manager, "old", successes=2)
+    _record_cookbook(knowledge, manager, "new", successes=3)
+    _record_cookbook(knowledge, manager, "specialist", successes=1)
+    measured_at = datetime.now(UTC)
+    for model_id, storage_bytes, throughput in (
+        ("old", 16, 40.0),
+        ("new", 12, 60.0),
+        ("specialist", 20, 20.0),
+    ):
+        knowledge.record_measurement(
+            identity_for("fixture", manager.inspect(model_id).spec.metadata),
+            ModelMeasurement(
+                model_id,
+                measured_at,
+                "controlled-portfolio-benchmark",
+                storage_bytes=storage_bytes,
+                load_seconds=1.0,
+                throughput=throughput,
+            ),
+        )
+
+    evidence = await optimizer.current_evidence(task_classes=("coding",))
+    assert {item.identity.model_id for item in evidence} == {"old", "new", "specialist"}
+    analysis = optimizer.analyze(evidence, task_classes=("coding",))
+    by_model = {item.candidate.identity.model_id: item for item in analysis}
+    assert by_model["old"].classification is DominanceClassification.REDUNDANT_CANDIDATE
+    assert by_model["old"].replacement is not None
+    assert by_model["old"].replacement.identity.model_id == "new"
+    assert by_model["specialist"].classification is DominanceClassification.SPECIALIST
+    assert "vision" in by_model["specialist"].unique_dimensions
+    assert by_model["new"].classification is not DominanceClassification.REDUNDANT_CANDIDATE
+
+    retirement = optimizer.propose_retirement(
+        by_model["old"], RetirementProtection(reacquisition_known=True), retention_seconds=1
+    )
+    assert retirement.model.model_id == "old"
+    with pytest.raises(InsufficientPortfolioEvidence):
+        optimizer.propose_retirement(
+            by_model["specialist"], RetirementProtection(reacquisition_known=True)
+        )
     await optimizer.aclose()
     await manager.aclose()
     knowledge.close()

@@ -249,6 +249,7 @@ class ProgressState(StrEnum):
     PLANNING = "planning"
     EXECUTING = "executing"
     WAITING_FOR_PERMISSION = "waiting_for_permission"
+    WAITING_FOR_RESOURCE = "waiting_for_resource"
     VERIFYING = "verifying"
     REPLANNING = "replanning"
     RECOVERING = "recovering"
@@ -433,6 +434,7 @@ def _state_from_task(status: PlanningTaskStatus) -> ProgressState:
         PlanningTaskStatus.READY: ProgressState.PLANNING,
         PlanningTaskStatus.EXECUTING: ProgressState.EXECUTING,
         PlanningTaskStatus.WAITING_FOR_PERMISSION: ProgressState.WAITING_FOR_PERMISSION,
+        PlanningTaskStatus.WAITING_FOR_RESOURCE: ProgressState.WAITING_FOR_RESOURCE,
         PlanningTaskStatus.VERIFYING: ProgressState.VERIFYING,
         PlanningTaskStatus.REPLANNING: ProgressState.REPLANNING,
         PlanningTaskStatus.RECOVERING: ProgressState.RECOVERING,
@@ -507,6 +509,9 @@ def project_progress(
     reason = {
         ProgressState.WAITING_FOR_PERMISSION: (
             "Permission is required before execution can continue."
+        ),
+        ProgressState.WAITING_FOR_RESOURCE: (
+            "Waiting for a required resource before execution can continue."
         ),
         ProgressState.RECOVERING: (
             "Operator resolution is required because the effect outcome is uncertain."

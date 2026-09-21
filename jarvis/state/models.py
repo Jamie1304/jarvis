@@ -35,6 +35,7 @@ class TaskState(StrEnum):
     THINKING = "thinking"
     PLANNING = "planning"
     WAITING_FOR_PERMISSION = "waiting_for_permission"
+    WAITING_FOR_RESOURCE = "waiting_for_resource"
     EXECUTING = "executing"
     VERIFYING = "verifying"
     WAITING = "waiting"

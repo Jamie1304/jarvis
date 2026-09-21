@@ -63,6 +63,7 @@ class AutomationRunStatus(StrEnum):
     QUEUED = "queued"
     RUNNING = "running"
     WAITING_FOR_PERMISSION = "waiting_for_permission"
+    WAITING_FOR_RESOURCE = "waiting_for_resource"
     COMPLETED = "completed"
     FAILED = "failed"
     DROPPED = "dropped"
@@ -1011,6 +1012,8 @@ class AutomationService:
                 self._finish(run, AutomationRunStatus.FAILED, "restart_task_missing")
             elif task.status is PlanningTaskStatus.WAITING_FOR_PERMISSION:
                 self._finish(run, AutomationRunStatus.WAITING_FOR_PERMISSION, None)
+            elif task.status is PlanningTaskStatus.WAITING_FOR_RESOURCE:
+                self._finish(run, AutomationRunStatus.WAITING_FOR_RESOURCE, None)
             elif task.status in {
                 PlanningTaskStatus.EXECUTING,
                 PlanningTaskStatus.VERIFYING,
@@ -1048,6 +1051,7 @@ def _run_status(status: PlanningTaskStatus) -> AutomationRunStatus:
     return {
         PlanningTaskStatus.COMPLETED: AutomationRunStatus.COMPLETED,
         PlanningTaskStatus.WAITING_FOR_PERMISSION: AutomationRunStatus.WAITING_FOR_PERMISSION,
+        PlanningTaskStatus.WAITING_FOR_RESOURCE: AutomationRunStatus.WAITING_FOR_RESOURCE,
         PlanningTaskStatus.CANCELLED: AutomationRunStatus.CANCELLED,
     }.get(status, AutomationRunStatus.FAILED)
 
