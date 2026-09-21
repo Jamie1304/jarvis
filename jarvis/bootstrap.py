@@ -56,7 +56,15 @@ def create_provider_registry(
                     ModelMetadata(
                         model_id,
                         context_limit,
-                        frozenset({"chat", "tool_use", "structured_output"}),
+                        frozenset(
+                            {
+                                "chat",
+                                "tool_use",
+                                "structured_output",
+                                "language:en",
+                                "language:nl",
+                            }
+                        ),
                         roles=frozenset({ModelRole.GENERAL, ModelRole.TOOL_USE}),
                         modalities=frozenset({"text"}),
                         runtime="ollama",
@@ -155,6 +163,7 @@ def create_assistant_from_runtime(runtime: ApplicationRuntime) -> JarvisAssistan
         memory_control=container.memory_control,
         ollama_runtime=container.ollama_runtime,
         environment_settings=EnvironmentSettingsService(app_data_dir=container.paths.root),
+        human_adaptation=container.human_adaptation,
     )
 
 

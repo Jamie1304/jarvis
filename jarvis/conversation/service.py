@@ -1,7 +1,7 @@
 """Process-local typed conversation orchestration."""
 
 import threading
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from enum import StrEnum
@@ -28,6 +28,7 @@ from jarvis.ai.sessions import AgentSessionStore, AgentSessionType
 from jarvis.context_projection import ConversationContextEnvelope
 from jarvis.conversation.store import ConversationStore, DurableTurn, DurableTurnStatus
 from jarvis.core.errors import ConversationCancelledError
+from jarvis.human_adaptation import LanguageContext, language_capability
 
 
 class ConversationTurnStatus(StrEnum):
@@ -48,6 +49,7 @@ class ConversationTurn:
     logical_role: LogicalModelRole
     status: ConversationTurnStatus
     cancellation_requested: bool = False
+    language_context: LanguageContext | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -229,6 +231,8 @@ class ConversationService:
         *,
         privacy_context: PrivacyContext | None = None,
         context: ConversationContextEnvelope | None = None,
+        language_context: LanguageContext | None = None,
+        style_projection: Mapping[str, str] | None = None,
     ) -> AsyncIterator[ConversationUpdate]:
         """Store a user message then yield and retain one assistant response.
 
@@ -274,6 +278,8 @@ class ConversationService:
             generation,
             LogicalModelRole.CONVERSATION,
             ConversationTurnStatus.ACTIVE,
+            False,
+            language_context,
         )
         if self._conversation_store is not None:
             self._conversation_store.begin_turn(
@@ -300,6 +306,11 @@ class ConversationService:
                 context_tokens=sum(len(item.content) for item in messages) // 4,
                 policy=self._routing_policy,
                 privacy_context=provided_privacy,
+                required_capabilities=(
+                    frozenset({language_capability(language_context.output.language)})
+                    if language_context is not None
+                    else frozenset()
+                ),
             ).to_route_request()
             decision = self._dispatcher.route(intent)
             if decision.primary is None:
@@ -312,13 +323,50 @@ class ConversationService:
         else:
             session_id = self._ensure_session(conversation_id)
         projected_messages = self._within_context(messages)
+        trusted_projection_ids: list[UUID] = []
         if context is not None:
+            context_message_id = uuid4()
+            trusted_projection_ids.append(context_message_id)
             projected_messages = (
                 ChatMessage(
-                    uuid4(),
+                    context_message_id,
                     conversation_id,
                     MessageRole.SYSTEM,
                     context.model_text(),
+                    datetime.now(UTC),
+                ),
+                *projected_messages,
+            )
+        if language_context is not None:
+            language_message_id = uuid4()
+            trusted_projection_ids.append(language_message_id)
+            projected_messages = (
+                ChatMessage(
+                    language_message_id,
+                    conversation_id,
+                    MessageRole.SYSTEM,
+                    language_context.prompt_projection(),
+                    datetime.now(UTC),
+                ),
+                *projected_messages,
+            )
+        if style_projection is not None:
+            if type(style_projection) is not dict or any(
+                type(key) is not str or type(value) is not str
+                for key, value in style_projection.items()
+            ):
+                raise ValueError("Style projection is malformed")
+            style_message_id = uuid4()
+            trusted_projection_ids.append(style_message_id)
+            style_text = "Style presentation context only; " + ", ".join(
+                f"{key}={value}" for key, value in sorted(style_projection.items())
+            )
+            projected_messages = (
+                ChatMessage(
+                    style_message_id,
+                    conversation_id,
+                    MessageRole.SYSTEM,
+                    style_text,
                     datetime.now(UTC),
                 ),
                 *projected_messages,
@@ -330,7 +378,7 @@ class ConversationService:
             privacy_context=PrivacyContext(
                 provided_privacy.classification,
                 provided_privacy.known_private_values,
-                allowed_message_ids=(messages[-1].id,),
+                allowed_message_ids=(messages[-1].id, *trusted_projection_ids),
             ),
         )
         try:

@@ -10,6 +10,7 @@ from uuid import UUID
 
 from jarvis.actor_persona import ActorContext, ActorContextService, PersonaKernel, PersonaProfile
 from jarvis.conversation.service import ConversationService
+from jarvis.human_adaptation import HumanAdaptationService
 from jarvis.planning.models import PlanningTaskStatus
 from jarvis.presence import PresenceSnapshot, PresenceState
 from jarvis.task_controller import TaskController
@@ -60,6 +61,11 @@ class CurrentContextModelProjection:
     safe_mode: bool
     provider_id: str | None
     model_id: str | None
+    interface_language: str = "en"
+    conversation_language: str = "en"
+    locale: str = "en-US"
+    personalization_mode: str = "explicit_only"
+    learning_paused: bool = True
 
 
 @dataclass(frozen=True, slots=True)
@@ -79,6 +85,11 @@ class CurrentContextSnapshot:
     safe_mode: bool
     provider: CurrentProviderProjection
     provenance: tuple[tuple[str, str], ...]
+    interface_language: str = "en"
+    conversation_language: str = "en"
+    locale: str = "en-US"
+    personalization_mode: str = "explicit_only"
+    learning_paused: bool = True
 
     def __post_init__(self) -> None:
         if type(self.revision) is not int or self.revision < 0:
@@ -107,6 +118,11 @@ class CurrentContextSnapshot:
             self.safe_mode,
             self.provider.provider_id,
             self.provider.model_id,
+            self.interface_language,
+            self.conversation_language,
+            self.locale,
+            self.personalization_mode,
+            self.learning_paused,
         )
 
     @classmethod
@@ -132,6 +148,11 @@ class CurrentContextSnapshot:
                 ("runtime", "ApplicationRuntime"),
                 ("provider", "not available in Safe Mode"),
             ),
+            "en",
+            "en",
+            "en-US",
+            "explicit_only",
+            True,
         )
 
 
@@ -151,6 +172,7 @@ class CurrentContextService:
         safe_mode: bool,
         provider_id: str | None,
         model_id: str | None,
+        human_adaptation: HumanAdaptationService | None = None,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
         self._actor_context_service = actor_context_service
@@ -163,6 +185,7 @@ class CurrentContextService:
         self._safe_mode = safe_mode
         self._provider_id = provider_id
         self._model_id = model_id
+        self._human_adaptation = human_adaptation
         self._clock = clock or (lambda: datetime.now(UTC))
         self._active_conversation_id: UUID | None = None
         self._active_task_id: UUID | None = None
@@ -195,6 +218,12 @@ class CurrentContextService:
         task = self._tasks.get_task(task_id) if task_id is not None else None
         actor = self._actor_projection()
         presence = self._presence()
+        if self._human_adaptation is None:
+            preferences = None
+            personalization = None
+        else:
+            preferences = self._human_adaptation.language_preferences()
+            personalization = self._human_adaptation.personalization_settings()
         return CurrentContextSnapshot(
             self._revision,
             self._clock().astimezone(UTC),
@@ -223,6 +252,13 @@ class CurrentContextService:
                 ("runtime", "ApplicationRuntime"),
                 ("provider", "Runtime configuration; readiness not probed by snapshot"),
             ),
+            str(preferences.interface_language) if preferences else "en",
+            str(self._human_adaptation.resolve_language().conversation.language)
+            if self._human_adaptation
+            else "en",
+            preferences.locale if preferences else "en-US",
+            str(personalization["mode"]) if personalization else "explicit_only",
+            bool(personalization["learning_paused"]) if personalization else True,
         )
 
     def _actor_projection(self) -> CurrentActorProjection | None:

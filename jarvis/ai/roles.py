@@ -28,6 +28,7 @@ class LogicalRoleRequirements:
     complexity: str = "medium"
     requires_tools: bool = False
     latency_budget_ms: float | None = None
+    required_capabilities: frozenset[str] = frozenset()
 
     def __post_init__(self) -> None:
         if not isinstance(self.role, LogicalModelRole):
@@ -42,6 +43,11 @@ class LogicalRoleRequirements:
             raise ValueError("Logical role routing policy is invalid")
         if type(self.requires_tools) is not bool:
             raise ValueError("Logical role tool requirement is invalid")
+        if type(self.required_capabilities) is not frozenset or any(
+            type(value) is not str or not value.strip() or len(value) > 128
+            for value in self.required_capabilities
+        ):
+            raise ValueError("Logical role capabilities are invalid")
 
     def to_route_request(self) -> RouteRequest:
         """Build the existing router request without selecting a provider/model."""
@@ -60,6 +66,7 @@ class LogicalRoleRequirements:
             responsibility=self.role.value,
             privacy_context=self.privacy_context,
             latency_budget_ms=self.latency_budget_ms,
+            required_capabilities=self.required_capabilities,
         )
 
 

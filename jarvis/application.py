@@ -36,6 +36,11 @@ from jarvis.desktop_shell import (
     TestDriveReport,
     WarmupResult,
 )
+from jarvis.human_adaptation import (
+    HumanAdaptationService,
+    LanguageOverrides,
+    LanguageTag,
+)
 from jarvis.memory.control import (
     MemoryControlEntry,
     MemoryControlQuery,
@@ -110,6 +115,7 @@ class JarvisAssistantService:
         memory_control: MemoryControlService | None = None,
         ollama_runtime: OllamaRuntimeManager | None = None,
         environment_settings: EnvironmentSettingsService | None = None,
+        human_adaptation: HumanAdaptationService | None = None,
     ) -> None:
         self._conversation = conversation
         self._normalizer = normalizer or InputNormalizer()
@@ -129,6 +135,7 @@ class JarvisAssistantService:
         self._memory_control = memory_control
         self._ollama_runtime = ollama_runtime
         self._environment_settings = environment_settings
+        self._human_adaptation = human_adaptation
 
     @property
     def launch_profiles(self) -> LaunchProfileRegistry:
@@ -219,6 +226,18 @@ class JarvisAssistantService:
         if self._environment_settings is None:
             raise ServiceUnavailableError("Environment settings are not configured")
         return self._environment_settings.save(updates)
+
+    @property
+    def human_adaptation(self) -> HumanAdaptationService:
+        if self._human_adaptation is None:
+            raise ServiceUnavailableError("Human adaptation is not configured")
+        return self._human_adaptation
+
+    def language_preferences(self) -> dict[str, object]:
+        return self.human_adaptation.language_preferences().as_dict()
+
+    def personalization(self) -> dict[str, object]:
+        return self.human_adaptation.inspect()
 
     def output_profile(self, medium: OutputMedium) -> OutputMediumProfile:
         return self._output_profiles.get(medium)
@@ -392,6 +411,7 @@ class JarvisAssistantService:
         *,
         medium: OutputMedium = OutputMedium.DESKTOP,
         privacy_context: PrivacyContext | None = None,
+        output_language: LanguageTag | None = None,
     ) -> AsyncIterator[AssistantEvent]:
         """Stream text and begin TTS as soon as a safe sentence is available."""
 
@@ -399,6 +419,12 @@ class JarvisAssistantService:
         profile = self.output_profile(medium)
         yield AssistantEvent(AssistantEventKind.STREAMING, "Assistant is responding")
         response = ""
+        language_context = None
+        if self._human_adaptation is not None:
+            detection = self._human_adaptation.detect_language(normalized)
+            language_context = self._human_adaptation.resolve_language(
+                LanguageOverrides(requested_output=output_language), detected=detection
+            )
         tts_queue: asyncio.Queue[str | None] | None = None
         tts_task: asyncio.Task[None] | None = None
         if self._tts is not None and self._tts.enabled:
@@ -418,7 +444,15 @@ class JarvisAssistantService:
             tts_task = self._tts.start_incremental(speakable_chunks())
         try:
             async for update in self._conversation.stream_reply(
-                conversation_id, normalized, privacy_context=privacy_context
+                conversation_id,
+                normalized,
+                privacy_context=privacy_context,
+                language_context=language_context,
+                style_projection=(
+                    self._human_adaptation.cloud_style_projection()
+                    if self._human_adaptation is not None
+                    else None
+                ),
             ):
                 response += update.content
                 formatted_content = profile.format(update.content)

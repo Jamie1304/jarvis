@@ -21,6 +21,7 @@ from jarvis.core.environment_settings import (
 )
 from jarvis.core.errors import ServiceUnavailableError
 from jarvis.current_context import CurrentContextSnapshot
+from jarvis.human_adaptation import LanguagePreferences
 from jarvis.memory.control import MemoryControlReference, MemoryCorrection
 from jarvis.memory.episodes import Episode
 from jarvis.memory.models import RetentionPolicy
@@ -208,6 +209,30 @@ class DesktopApplicationFacade:
             else self._settings.save(updates)
         )
 
+    def language_preferences(self) -> dict[str, object]:
+        """Return typed language state through the application service boundary."""
+
+        return self._require_assistant().language_preferences()
+
+    def save_language_preferences(self, updates: dict[str, object]) -> dict[str, object]:
+        """Persist language preferences without exposing SQLite to Qt."""
+
+        assistant = self._require_assistant()
+        current = assistant.human_adaptation.language_preferences().as_dict()
+        current.update(updates)
+        return assistant.human_adaptation.set_language_preferences(
+            LanguagePreferences.from_dict(current)
+        ).as_dict()
+
+    def personalization(self) -> dict[str, object]:
+        """Return inspectable bounded adaptation state for the settings surface."""
+
+        return self._require_assistant().personalization()
+
+    def save_personalization(self, updates: dict[str, object]) -> dict[str, object]:
+        assistant = self._require_assistant()
+        return assistant.human_adaptation.configure_personalization(**updates)
+
     def actor_context(self) -> DesktopActorView:
         context = self._require_container().actor_context
         return DesktopActorView(
@@ -228,7 +253,10 @@ class DesktopApplicationFacade:
         return DesktopPersonaView(self._require_container().persona_kernel.get())
 
     def update_persona(self, updates: dict[str, object]) -> DesktopPersonaView:
-        return DesktopPersonaView(self._require_container().persona_kernel.update(**updates))
+        container = self._require_container()
+        profile = container.persona_kernel.update(**updates)
+        container.human_adaptation.mark_explicit_persona_update(updates)
+        return DesktopPersonaView(profile)
 
     def reset_persona(self) -> DesktopPersonaView:
         return DesktopPersonaView(self._require_container().persona_kernel.reset())

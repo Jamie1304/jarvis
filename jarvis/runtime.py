@@ -176,6 +176,7 @@ from jarvis.goal_supervisor import (
     RegistryGoalAnalyzer,
 )
 from jarvis.hardware import HardwareInventoryService, ModelPlanner, SystemHardwareProbe
+from jarvis.human_adaptation import HumanAdaptationService, HumanAdaptationStore
 from jarvis.integration_package import IntegrationPackage
 from jarvis.interruption import InterruptionIntelligence, context_from_current_context
 from jarvis.knowledge import KnowledgeLibrary, KnowledgeLibraryMigrationError
@@ -454,6 +455,7 @@ class RuntimePaths:
     conversation_database: Path
     memory_database: Path
     user_model_database: Path
+    human_adaptation_database: Path
     knowledge_library_database: Path
     model_knowledge_database: Path
     routing_fitness_database: Path
@@ -498,6 +500,7 @@ class RuntimePaths:
             base / "conversations.sqlite3",
             base / "memory.sqlite3",
             base / "user-model.sqlite3",
+            base / "human-adaptation.sqlite3",
             base / "knowledge-library.sqlite3",
             base / "model-knowledge.sqlite3",
             base / "routing-fitness.sqlite3",
@@ -579,6 +582,7 @@ class RuntimePaths:
             self.conversation_database,
             self.memory_database,
             self.user_model_database,
+            self.human_adaptation_database,
             self.knowledge_library_database,
             self.model_knowledge_database,
             self.routing_fitness_database,
@@ -773,6 +777,8 @@ class RuntimeContainer:
     vm_execution_service: VMExecutionService
     memory_store: SQLiteMemoryStore
     user_model_store: UserModelStore
+    human_adaptation_store: HumanAdaptationStore
+    human_adaptation: HumanAdaptationService
     actor_context_service: ActorContextService
     actor_context: ActorContext
     persona_kernel: PersonaKernel
@@ -1092,6 +1098,7 @@ class RuntimeContainer:
                 self.storage_history,
                 self.memory_store,
                 self.user_model_store,
+                self.human_adaptation_store,
                 self.knowledge_library,
                 self.trace_store,
                 self.golden_workflow_store,
@@ -1357,6 +1364,7 @@ class ApplicationRuntime:
         planning_store: SQLitePlanningStore | None = None
         memory_store: SQLiteMemoryStore | None = None
         user_model_store: UserModelStore | None = None
+        human_adaptation_store: HumanAdaptationStore | None = None
         knowledge_library: KnowledgeLibrary | None = None
         model_knowledge: ModelKnowledgeService | None = None
         acquisition_broker: AcquisitionBroker | None = None
@@ -1721,6 +1729,8 @@ class ApplicationRuntime:
             paths.validate_storage_layout()
             memory_store = SQLiteMemoryStore(paths.memory_database)
             user_model_store = UserModelStore(paths.user_model_database)
+            human_adaptation_store = HumanAdaptationStore(paths.human_adaptation_database)
+            human_adaptation = HumanAdaptationService(human_adaptation_store)
             actor_context_service = ActorContextService()
             actor_context = actor_context_service.create_trusted(
                 session_id=uuid4(),
@@ -2547,6 +2557,7 @@ class ApplicationRuntime:
                 safe_mode=False,
                 provider_id=settings.ai_provider,
                 model_id=settings.ai_model,
+                human_adaptation=human_adaptation,
             )
             interruption_intelligence = InterruptionIntelligence(
                 semantic_events,
@@ -3047,6 +3058,8 @@ class ApplicationRuntime:
                 vm_execution_service=vm_execution_service,
                 memory_store=memory_store,
                 user_model_store=user_model_store,
+                human_adaptation_store=human_adaptation_store,
+                human_adaptation=human_adaptation,
                 actor_context_service=actor_context_service,
                 actor_context=actor_context,
                 persona_kernel=persona_kernel,
@@ -3244,6 +3257,7 @@ class ApplicationRuntime:
                 automation_store,
                 memory_store,
                 user_model_store,
+                human_adaptation_store,
                 knowledge_library,
                 model_knowledge,
                 retirement_store,
@@ -3292,6 +3306,7 @@ class ApplicationRuntime:
                 automation_store,
                 memory_store,
                 user_model_store,
+                human_adaptation_store,
                 knowledge_library,
                 model_knowledge,
                 retirement_store,
