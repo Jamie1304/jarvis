@@ -5,17 +5,22 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 import pytest
+from jarvis.actor_persona import ActorContext, ActorContextService, ActorContextSource
 from jarvis.bootstrap import create_provider_registry
 from jarvis.human_adaptation import (
     AdaptivePersonaMode,
     BehavioralAggregateEvent,
+    DeterministicLanguageDetector,
     HumanAdaptationMigrationError,
     HumanAdaptationService,
     HumanAdaptationStore,
+    LanguageTag,
     Localizer,
     PersonalizationMode,
+    normalize_language_tag,
 )
 
 
@@ -34,6 +39,36 @@ def test_store_transaction_rolls_back_and_reopens(tmp_path: Path) -> None:
         assert store.schema_version() == 1
     with HumanAdaptationStore(path) as reopened:
         assert reopened.schema_version() == 1
+
+
+def test_language_normalization_and_detector_remain_bounded() -> None:
+    assert normalize_language_tag(" nl-nl ") == "nl-NL"
+    assert normalize_language_tag("EN_gb") == "en-GB"
+    assert LanguageTag("en-US").base == "en"
+    detector = DeterministicLanguageDetector()
+    assert detector.detect("https://example.invalid/a?b=1").language is None
+    assert detector.detect("def calculate_total(value): return value").language is None
+    assert detector.detect("graag write dit").language is None
+
+
+def test_behavioral_resemblance_cannot_mint_actor_authority(tmp_path: Path) -> None:
+    service = _service(tmp_path / "human.sqlite3")
+    service.configure_personalization(
+        mode=PersonalizationMode.COMMUNICATION.value,
+        adaptive_persona=AdaptivePersonaMode.ADAPTIVE.value,
+    )
+    for _ in range(3):
+        service.record_persona_evidence("formality", 4, confidence=1.0)
+    unknown = ActorContext(
+        uuid4(),
+        uuid4(),
+        "known-owner",
+        ActorContextSource.LOCAL_DESKTOP_SESSION,
+        datetime(2026, 9, 21, tzinfo=UTC),
+    )
+    with pytest.raises(PermissionError):
+        ActorContextService().approval_identity(unknown)
+    service.store.close()
 
 
 def test_future_and_incomplete_schemas_fail_closed(tmp_path: Path) -> None:
