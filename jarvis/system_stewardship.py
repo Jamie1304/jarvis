@@ -12,7 +12,7 @@ import asyncio
 import hashlib
 import json
 import sys
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
@@ -20,6 +20,21 @@ from pathlib import Path
 from typing import Final, Protocol
 from uuid import UUID, uuid4
 
+from jarvis.acquisition import (
+    AcquisitionBroker,
+    AcquisitionPresentation,
+    AcquisitionRequest,
+    AcquisitionResult,
+    AcquisitionResultStatus,
+    build_acquisition_presentation,
+)
+from jarvis.ai.portfolio import (
+    DominanceAnalysis,
+    ModelPortfolioEvidence,
+    ModelPortfolioOptimizer,
+    RetirementPlan,
+    RetirementProtection,
+)
 from jarvis.applications.manager import ApplicationManager
 from jarvis.applications.models import (
     ApplicationHealthEvidence,
@@ -35,10 +50,30 @@ from jarvis.applications.providers import (
     WingetPackageProvider,
 )
 from jarvis.applications.runtime import WindowsApplicationRuntime
+from jarvis.resources import ResourceGovernor, ResourceSnapshot
 from jarvis.security.startup import (
     IntegrityEvidenceError,
     IntegrityEvidenceProvider,
     SourceCheckoutIntegrityEvidenceProvider,
+)
+from jarvis.storage import (
+    CleanupCandidate,
+    CleanupClassifier,
+    DuplicateDetector,
+    DuplicateGroup,
+    FileClassification,
+    FileClassifier,
+    PlacementStatus,
+    ResourcePlacementRequest,
+    Reversibility,
+    StorageDeferred,
+    StorageForecast,
+    StorageHistoryStore,
+    StorageInventoryService,
+    StoragePlanner,
+    StoragePressureState,
+    VolumeObservation,
+    forecast_storage_pressure,
 )
 
 
@@ -923,6 +958,187 @@ class SystemHealthProjection:
     startup_effect: StartupEffectStatus = StartupEffectStatus.NOT_YET_TRUSTED
 
 
+class StewardshipLifecycleState(StrEnum):
+    """Application projection of the lifecycle without replacing effect states."""
+
+    OBSERVED = "observed"
+    CLASSIFIED = "classified"
+    PLANNED = "planned"
+    AWAITING_AUTHORITY = "awaiting_authority"
+    EXECUTING = "executing"
+    VERIFYING = "verifying"
+    VERIFIED = "verified"
+    FAILED = "failed"
+    UNKNOWN_OUTCOME = "unknown_outcome"
+    ROLLBACK_REQUIRED = "rollback_required"
+    ROLLED_BACK = "rolled_back"
+
+
+class StewardshipOperation(StrEnum):
+    OBSERVE = "observe"
+    ACQUISITION = "acquisition"
+    MODEL_RETIREMENT = "model_retirement"
+    STORAGE_RELOCATION = "storage_relocation"
+    STORAGE_CLEANUP = "storage_cleanup"
+    STARTUP_MUTATION = "startup_mutation"
+    UPDATE = "update"
+
+
+class StewardshipLifecycleRecorder(Protocol):
+    """The existing secret-safe audit sink is the lifecycle journal."""
+
+    def record_lifecycle(
+        self, kind: str, *, task_id: UUID | None, detail: dict[str, str]
+    ) -> None: ...
+
+
+@dataclass(frozen=True, slots=True)
+class StorageStewardshipReport:
+    """Truthful storage facts and proposals; no field implies execution."""
+
+    volumes: tuple[VolumeObservation, ...]
+    pressure: tuple[tuple[str, StoragePressureState], ...]
+    forecasts: tuple[StorageForecast, ...]
+    cleanup_candidates: tuple[CleanupCandidate, ...]
+    duplicate_groups: tuple[DuplicateGroup, ...]
+    detected_bytes: int
+    safe_candidate_bytes: int
+    protected_bytes: int
+    scan_truncated: bool = False
+    duplicate_scan_state: str = "not_requested"
+
+    def __post_init__(self) -> None:
+        if any(not isinstance(item, VolumeObservation) for item in self.volumes):
+            raise StewardshipError("Storage report contains malformed volume evidence")
+        if any(
+            type(volume_id) is not str
+            or not volume_id
+            or not isinstance(state, StoragePressureState)
+            for volume_id, state in self.pressure
+        ):
+            raise StewardshipError("Storage report pressure evidence is malformed")
+        if any(not isinstance(item, StorageForecast) for item in self.forecasts):
+            raise StewardshipError("Storage report forecast evidence is malformed")
+        if any(not isinstance(item, CleanupCandidate) for item in self.cleanup_candidates):
+            raise StewardshipError("Storage report cleanup evidence is malformed")
+        if any(not isinstance(item, DuplicateGroup) for item in self.duplicate_groups):
+            raise StewardshipError("Storage report duplicate evidence is malformed")
+        if any(
+            type(value) is not int or value < 0
+            for value in (self.detected_bytes, self.safe_candidate_bytes, self.protected_bytes)
+        ):
+            raise StewardshipError("Storage report byte totals are malformed")
+        _text(self.duplicate_scan_state, "Duplicate scan state", 128)
+
+
+@dataclass(frozen=True, slots=True)
+class CleanupStewardshipPlan:
+    """A grouped, inert cleanup proposal that requires a trusted file effect."""
+
+    candidates: tuple[CleanupCandidate, ...]
+    detected_bytes: int
+    safe_candidate_bytes: int
+    recovery: str
+
+
+@dataclass(frozen=True, slots=True)
+class AcquisitionStewardshipPlan:
+    request: AcquisitionRequest
+    presentation: AcquisitionPresentation
+
+
+@dataclass(frozen=True, slots=True)
+class MissingResourceRequirement:
+    """Trusted requirement evidence that can be converted into one formal request."""
+
+    requirement_id: str
+    source: str
+    evidence_reference: str
+    request: AcquisitionRequest
+    observed_missing: bool = True
+
+    def __post_init__(self) -> None:
+        _text(self.requirement_id, "Missing-resource requirement identity", 256)
+        _text(self.source, "Missing-resource requirement source", 256)
+        _text(self.evidence_reference, "Missing-resource evidence reference", 1_024)
+        if not isinstance(self.request, AcquisitionRequest):
+            raise StewardshipError("Missing-resource formal request is malformed")
+        if type(self.observed_missing) is not bool or not self.observed_missing:
+            raise StewardshipError("Missing-resource evidence must establish absence")
+
+
+@dataclass(frozen=True, slots=True)
+class StewardshipPlan:
+    plan_id: UUID
+    operation: StewardshipOperation
+    lifecycle: StewardshipLifecycleState
+    observation_fingerprint: str
+    created_at: datetime
+    expires_at: datetime
+    reversibility: Reversibility
+    payload: object
+    detail: str
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.plan_id, UUID):
+            raise StewardshipError("Stewardship plan identity is malformed")
+        if not isinstance(self.operation, StewardshipOperation):
+            raise StewardshipError("Stewardship plan operation is malformed")
+        if self.lifecycle is not StewardshipLifecycleState.PLANNED:
+            raise StewardshipError("Only planned stewardship records can be issued")
+        if len(self.observation_fingerprint) != 64:
+            raise StewardshipError("Stewardship plan observation binding is malformed")
+        created = _timestamp(self.created_at, "Stewardship plan creation time")
+        if _timestamp(self.expires_at, "Stewardship plan expiry") <= created:
+            raise StewardshipError("Stewardship plan expiry is invalid")
+        if not isinstance(self.reversibility, Reversibility):
+            raise StewardshipError("Stewardship plan reversibility is malformed")
+        _text(self.detail, "Stewardship plan detail", 2_000)
+
+
+@dataclass(frozen=True, slots=True)
+class StewardshipObservation:
+    observation_id: UUID
+    observed_at: datetime
+    lifecycle: StewardshipLifecycleState
+    system: SystemHealthProjection
+    storage: StorageStewardshipReport
+    resources: ResourceSnapshot | None
+    models: tuple[ModelPortfolioEvidence, ...]
+    model_analysis: tuple[DominanceAnalysis, ...]
+    model_error: str | None
+    fingerprint: str
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.observation_id, UUID):
+            raise StewardshipError("Stewardship observation identity is malformed")
+        _timestamp(self.observed_at, "Stewardship observation time")
+        if self.lifecycle is not StewardshipLifecycleState.CLASSIFIED:
+            raise StewardshipError("Stewardship observations must be classified")
+        if not isinstance(self.system, SystemHealthProjection):
+            raise StewardshipError("Stewardship system projection is malformed")
+        if not isinstance(self.storage, StorageStewardshipReport):
+            raise StewardshipError("Stewardship storage projection is malformed")
+        if self.resources is not None and not isinstance(self.resources, ResourceSnapshot):
+            raise StewardshipError("Stewardship resource projection is malformed")
+        if any(not isinstance(item, ModelPortfolioEvidence) for item in self.models):
+            raise StewardshipError("Stewardship model evidence is malformed")
+        if any(not isinstance(item, DominanceAnalysis) for item in self.model_analysis):
+            raise StewardshipError("Stewardship model analysis is malformed")
+        if self.model_error is not None:
+            _text(self.model_error, "Stewardship model error", 512)
+        if len(self.fingerprint) != 64:
+            raise StewardshipError("Stewardship observation fingerprint is malformed")
+
+
+@dataclass(frozen=True, slots=True)
+class StewardshipRecoveryReport:
+    startup: tuple[object, ...]
+    storage: tuple[object, ...]
+    acquisition_pending: tuple[object, ...]
+    detail: str
+
+
 class StartupMutationCapability(Protocol):
     async def plan_disable(self, entry_id: str) -> StartupMutationPlan: ...
 
@@ -988,6 +1204,506 @@ class SystemStewardshipComposition:
         if self.startup_mutation is None:
             raise StewardshipError("startup effect provider is not composed")
         return await self.startup_mutation.reconcile()
+
+
+class SystemStewardshipCoordinator:
+    """Application-owned stewardship projection over existing trusted owners.
+
+    This coordinator owns sequencing, stale-observation binding, and the
+    operator-facing projection. It deliberately has no filesystem, package,
+    model, registry, or startup mutation implementation of its own.
+    """
+
+    def __init__(
+        self,
+        system: SystemStewardshipComposition,
+        *,
+        storage_inventory: StorageInventoryService,
+        storage_planner: StoragePlanner,
+        resource_governor: ResourceGovernor | None = None,
+        acquisition: AcquisitionBroker | None = None,
+        portfolio: ModelPortfolioOptimizer | None = None,
+        storage_history: StorageHistoryStore | None = None,
+        file_steward: object | None = None,
+        lifecycle_recorder: StewardshipLifecycleRecorder | None = None,
+        cleanup_roots: Iterable[Path] = (),
+        duplicate_roots: Iterable[Path] = (),
+        jarvis_roots: Iterable[Path] = (),
+        protected_roots: Iterable[Path] = (),
+        classifier: Callable[[Path], FileClassification] | None = None,
+        clock: Callable[[], datetime] | None = None,
+    ) -> None:
+        if not isinstance(system, SystemStewardshipComposition):
+            raise StewardshipError("System stewardship composition is malformed")
+        if not isinstance(storage_inventory, StorageInventoryService) or not isinstance(
+            storage_planner, StoragePlanner
+        ):
+            raise StewardshipError("Storage stewardship owners are malformed")
+        if resource_governor is not None and not isinstance(resource_governor, ResourceGovernor):
+            raise StewardshipError("Resource governor is malformed")
+        if acquisition is not None and not isinstance(acquisition, AcquisitionBroker):
+            raise StewardshipError("Acquisition owner is malformed")
+        if portfolio is not None and not isinstance(portfolio, ModelPortfolioOptimizer):
+            raise StewardshipError("Model portfolio owner is malformed")
+        self.system = system
+        self.storage_inventory = storage_inventory
+        self.storage_planner = storage_planner
+        self.resource_governor = resource_governor
+        self.acquisition = acquisition
+        self.portfolio = portfolio
+        self.storage_history = storage_history
+        self.file_steward = file_steward
+        self.lifecycle_recorder = lifecycle_recorder
+        self._cleanup_roots = tuple(Path(item) for item in cleanup_roots)
+        self._duplicate_roots = tuple(Path(item) for item in duplicate_roots)
+        self._jarvis_roots = tuple(Path(item) for item in jarvis_roots)
+        self._protected_roots = tuple(Path(item) for item in protected_roots)
+        self._classifier = classifier
+        self._clock = clock or (lambda: datetime.now(UTC))
+        self._last: StewardshipObservation | None = None
+
+    @property
+    def last_observation(self) -> StewardshipObservation | None:
+        return self._last
+
+    async def observe(
+        self,
+        *,
+        task_classes: tuple[str, ...] = (),
+        cleanup_roots: Iterable[Path] | None = None,
+        duplicate_roots: Iterable[Path] | None = None,
+    ) -> StewardshipObservation:
+        """Observe all configured domains and classify without executing effects."""
+
+        system_result = await self.system.refresh()
+        storage_result = self._observe_storage(
+            tuple(cleanup_roots) if cleanup_roots is not None else self._cleanup_roots,
+            tuple(duplicate_roots) if duplicate_roots is not None else self._duplicate_roots,
+        )
+        models: tuple[ModelPortfolioEvidence, ...] = ()
+        model_analysis: tuple[DominanceAnalysis, ...] = ()
+        model_error: str | None = None
+        if self.portfolio is not None:
+            try:
+                models = await self.portfolio.current_evidence(task_classes=task_classes)
+                model_analysis = self.portfolio.analyze(models, task_classes=task_classes)
+            except Exception as error:
+                model_error = f"model portfolio unavailable: {type(error).__name__}"
+        resources = self.resource_governor.snapshot() if self.resource_governor else None
+        observed_at = _timestamp(self._clock(), "Stewardship clock")
+        fingerprint = self._observation_fingerprint(
+            system_result, storage_result, resources, models
+        )
+        observation = StewardshipObservation(
+            uuid4(),
+            observed_at,
+            StewardshipLifecycleState.CLASSIFIED,
+            system_result,
+            storage_result,
+            resources,
+            models,
+            model_analysis,
+            model_error,
+            fingerprint,
+        )
+        self._last = observation
+        self._record(
+            StewardshipOperation.OBSERVE,
+            StewardshipLifecycleState.CLASSIFIED,
+            fingerprint,
+            detail="trusted provider observations classified",
+        )
+        return observation
+
+    def plan_cleanup(
+        self, observation: StewardshipObservation, *, ttl: timedelta = timedelta(minutes=5)
+    ) -> StewardshipPlan:
+        self._validate_observation(observation)
+        if ttl <= timedelta(0):
+            raise StewardshipError("Cleanup plan lifetime is invalid")
+        candidates = tuple(item for item in observation.storage.cleanup_candidates if item.eligible)
+        payload = CleanupStewardshipPlan(
+            candidates,
+            observation.storage.detected_bytes,
+            sum(item.expected_reclaimed_bytes for item in candidates),
+            "trusted FileSteward recovery is required for any effect",
+        )
+        return self._plan(
+            StewardshipOperation.STORAGE_CLEANUP,
+            observation,
+            payload,
+            Reversibility.REVERSIBLE_WITH_BACKUP,
+            ttl,
+            "grouped cleanup proposal; no deletion authority granted",
+        )
+
+    def plan_relocation(
+        self,
+        observation: StewardshipObservation,
+        request: ResourcePlacementRequest,
+        *,
+        ttl: timedelta = timedelta(minutes=5),
+    ) -> StewardshipPlan:
+        self._validate_observation(observation)
+        if ttl <= timedelta(0):
+            raise StewardshipError("Relocation plan lifetime is invalid")
+        placement = self.storage_planner.plan(request, volumes=observation.storage.volumes)
+        reversibility = (
+            Reversibility.FULLY_REVERSIBLE
+            if placement.status is PlacementStatus.ALREADY_SUITABLE
+            else Reversibility.REVERSIBLE_WITH_BACKUP
+        )
+        return self._plan(
+            StewardshipOperation.STORAGE_RELOCATION,
+            observation,
+            placement,
+            reversibility,
+            ttl,
+            "bounded placement proposal; trusted file effect remains separate",
+        )
+
+    def plan_acquisition(
+        self,
+        observation: StewardshipObservation,
+        request: AcquisitionRequest,
+        *,
+        ttl: timedelta = timedelta(minutes=5),
+    ) -> StewardshipPlan:
+        self._validate_observation(observation)
+        if not isinstance(request, AcquisitionRequest):
+            raise StewardshipError("Acquisition plan request is malformed")
+        if ttl <= timedelta(0):
+            raise StewardshipError("Acquisition plan lifetime is invalid")
+        payload = AcquisitionStewardshipPlan(request, build_acquisition_presentation(request))
+        reversibility = (
+            Reversibility.REINSTALL_REQUIRED
+            if request.rollback_plan is None
+            else Reversibility.REVERSIBLE_WITH_BACKUP
+        )
+        return self._plan(
+            StewardshipOperation.ACQUISITION,
+            observation,
+            payload,
+            reversibility,
+            ttl,
+            "formal acquisition request prepared; trusted broker authority remains required",
+        )
+
+    def prepare_missing_resource(
+        self,
+        observation: StewardshipObservation,
+        requirement: MissingResourceRequirement,
+        *,
+        ttl: timedelta = timedelta(minutes=5),
+    ) -> StewardshipPlan:
+        """Convert trusted absence evidence into the existing acquisition contract."""
+
+        if not isinstance(requirement, MissingResourceRequirement):
+            raise StewardshipError("Missing-resource requirement is malformed")
+        return self.plan_acquisition(observation, requirement.request, ttl=ttl)
+
+    def plan_model_retirement(
+        self,
+        observation: StewardshipObservation,
+        analysis: DominanceAnalysis,
+        protection: RetirementProtection,
+    ) -> RetirementPlan:
+        self._validate_observation(observation)
+        if self.portfolio is None:
+            raise StewardshipError("Model portfolio owner is unavailable")
+        plan = self.portfolio.propose_retirement(analysis, protection)
+        self._record(
+            StewardshipOperation.MODEL_RETIREMENT,
+            StewardshipLifecycleState.PLANNED,
+            observation.fingerprint,
+            detail=f"retirement plan {plan.plan_id} created by portfolio authority",
+        )
+        return plan
+
+    async def acquire(
+        self,
+        plan: StewardshipPlan,
+        *,
+        task_id: UUID | None = None,
+        user_id: str | None = None,
+    ) -> AcquisitionResult:
+        if plan.operation is not StewardshipOperation.ACQUISITION:
+            raise StewardshipError("Plan is not an acquisition plan")
+        current = await self.assert_current(plan)
+        if self.acquisition is None or not isinstance(plan.payload, AcquisitionStewardshipPlan):
+            raise StewardshipError("Acquisition owner is unavailable")
+        self._record(
+            StewardshipOperation.ACQUISITION,
+            StewardshipLifecycleState.AWAITING_AUTHORITY,
+            current.fingerprint,
+            detail="delegating formal request to the existing acquisition broker",
+            task_id=task_id,
+        )
+        self._record(
+            StewardshipOperation.ACQUISITION,
+            StewardshipLifecycleState.EXECUTING,
+            current.fingerprint,
+            detail="acquisition broker execution began",
+            task_id=task_id,
+        )
+        try:
+            result = await self.acquisition.acquire(
+                plan.payload.request, task_id=task_id, user_id=user_id
+            )
+        except Exception as error:
+            state = (
+                StewardshipLifecycleState.UNKNOWN_OUTCOME
+                if type(error).__name__ in {"AcquisitionUnknownOutcome", "AcquisitionStaleTarget"}
+                else StewardshipLifecycleState.FAILED
+            )
+            self._record(
+                StewardshipOperation.ACQUISITION,
+                state,
+                current.fingerprint,
+                detail=f"acquisition broker returned {type(error).__name__}",
+                task_id=task_id,
+            )
+            raise
+        terminal = (
+            StewardshipLifecycleState.VERIFIED
+            if result.status
+            in {AcquisitionResultStatus.REGISTERED, AcquisitionResultStatus.DUPLICATE}
+            else StewardshipLifecycleState.UNKNOWN_OUTCOME
+            if result.status is AcquisitionResultStatus.UNKNOWN_OUTCOME
+            else StewardshipLifecycleState.VERIFYING
+        )
+        self._record(
+            StewardshipOperation.ACQUISITION,
+            terminal,
+            current.fingerprint,
+            detail=f"acquisition result {result.status.value}",
+            task_id=task_id,
+        )
+        return result
+
+    async def assert_current(
+        self, plan: StewardshipPlan, observation: StewardshipObservation | None = None
+    ) -> StewardshipObservation:
+        if not isinstance(plan, StewardshipPlan):
+            raise StewardshipError("Stewardship plan is malformed")
+        if _timestamp(self._clock(), "Stewardship clock") >= plan.expires_at:
+            raise StaleStewardshipPlan("stewardship plan has expired")
+        current = observation or await self.observe()
+        if current.fingerprint != plan.observation_fingerprint:
+            raise StaleStewardshipPlan("stewardship observation changed after planning")
+        return current
+
+    async def reconcile(self) -> StewardshipRecoveryReport:
+        """Reconcile known uncertainty without retrying an uncertain effect."""
+
+        startup: tuple[object, ...] = ()
+        if self.system.startup_mutation is not None:
+            startup = await self.system.reconcile_startup()
+        storage: tuple[object, ...] = ()
+        if self.file_steward is not None:
+            reconcile_pending = getattr(self.file_steward, "reconcile_pending", None)
+            if not callable(reconcile_pending):
+                raise StewardshipError("File stewardship recovery owner is malformed")
+            storage = tuple(reconcile_pending())
+        pending: tuple[object, ...] = ()
+        if self.acquisition is not None:
+            pending = tuple(
+                item
+                for item in self.acquisition.ledger.records()
+                if getattr(item.state, "value", "")
+                in {"active", "verification_required", "placement_pending"}
+            )
+        report = StewardshipRecoveryReport(
+            startup,
+            storage,
+            pending,
+            "uncertain effect records remain pending until provider evidence closes them",
+        )
+        self._record(
+            StewardshipOperation.OBSERVE,
+            StewardshipLifecycleState.UNKNOWN_OUTCOME
+            if pending
+            else StewardshipLifecycleState.VERIFIED,
+            self._last.fingerprint if self._last is not None else "0" * 64,
+            detail="restart reconciliation completed without blind replay",
+        )
+        return report
+
+    def _observe_storage(
+        self, cleanup_roots: tuple[Path, ...], duplicate_roots: tuple[Path, ...]
+    ) -> StorageStewardshipReport:
+        volumes = tuple(self.storage_inventory.inspect())
+        pressure = tuple(
+            (item.volume_id, self.storage_inventory.pressure(item.volume_id)) for item in volumes
+        )
+        snapshots = self.storage_history.snapshots() if self.storage_history is not None else ()
+        forecasts = tuple(forecast_storage_pressure(snapshots, item.volume_id) for item in volumes)
+        default_classifier = FileClassifier(
+            protected_roots=self._protected_roots,
+            jarvis_roots=self._jarvis_roots,
+        )
+        classify = self._classifier or default_classifier.classify
+        candidates: list[CleanupCandidate] = []
+        truncated = False
+        for path in self._bounded_files(cleanup_roots):
+            if len(candidates) >= 10_000:
+                truncated = True
+                break
+            try:
+                candidates.append(CleanupClassifier().candidate(path, classify(path)))
+            except (OSError, ValueError):
+                continue
+        duplicates: tuple[DuplicateGroup, ...] = ()
+        duplicate_scan_state = "not_requested"
+        if duplicate_roots:
+            try:
+                duplicates = DuplicateDetector(resource_governor=self.resource_governor).scan(
+                    duplicate_roots, classifier=classify
+                )
+            except StorageDeferred:
+                duplicate_scan_state = "deferred"
+            else:
+                duplicate_scan_state = "verified"
+        return StorageStewardshipReport(
+            volumes,
+            pressure,
+            forecasts,
+            tuple(candidates),
+            duplicates,
+            sum(item.size_bytes for item in candidates),
+            sum(item.expected_reclaimed_bytes for item in candidates if item.eligible),
+            sum(item.size_bytes for item in candidates if item.state.value == "protected"),
+            truncated,
+            duplicate_scan_state,
+        )
+
+    @staticmethod
+    def _bounded_files(roots: tuple[Path, ...]) -> Iterable[Path]:
+        count = 0
+        for root_value in roots:
+            root = Path(root_value)
+            if not root.is_dir() or root.is_symlink():
+                continue
+            try:
+                paths = root.rglob("*")
+                for path in paths:
+                    if count >= 10_001:
+                        return
+                    if path.is_file() and not path.is_symlink():
+                        count += 1
+                        yield path
+            except OSError:
+                continue
+
+    def _plan(
+        self,
+        operation: StewardshipOperation,
+        observation: StewardshipObservation,
+        payload: object,
+        reversibility: Reversibility,
+        ttl: timedelta,
+        detail: str,
+    ) -> StewardshipPlan:
+        created = _timestamp(self._clock(), "Stewardship clock")
+        plan = StewardshipPlan(
+            uuid4(),
+            operation,
+            StewardshipLifecycleState.PLANNED,
+            observation.fingerprint,
+            created,
+            created + ttl,
+            reversibility,
+            payload,
+            detail,
+        )
+        self._record(operation, StewardshipLifecycleState.PLANNED, observation.fingerprint, detail)
+        return plan
+
+    def _validate_observation(self, observation: StewardshipObservation) -> None:
+        if not isinstance(observation, StewardshipObservation):
+            raise StewardshipError("Stewardship observation is malformed")
+        if self._last is not None and observation.observation_id != self._last.observation_id:
+            raise StaleStewardshipPlan("stewardship observation is not the current projection")
+
+    def _record(
+        self,
+        operation: StewardshipOperation,
+        state: StewardshipLifecycleState,
+        fingerprint: str,
+        detail: str,
+        *,
+        task_id: UUID | None = None,
+    ) -> None:
+        if self.lifecycle_recorder is None:
+            return
+        self.lifecycle_recorder.record_lifecycle(
+            "system_stewardship",
+            task_id=task_id,
+            detail={
+                "operation": operation.value,
+                "state": state.value,
+                "observation_fingerprint": fingerprint,
+                "detail": detail,
+            },
+        )
+
+    @staticmethod
+    def _observation_fingerprint(
+        system: SystemHealthProjection,
+        storage: StorageStewardshipReport,
+        resources: ResourceSnapshot | None,
+        models: tuple[ModelPortfolioEvidence, ...],
+    ) -> str:
+        payload = {
+            "software": tuple(
+                (item.application_id, item.state.value) for item in system.software.applications
+            ),
+            "security": tuple(
+                (item.provider, item.target, item.state.value) for item in system.security.findings
+            ),
+            "startup": tuple(
+                (item.entry_id, item.enabled, item.state.value) for item in system.startup.entries
+            ),
+            "updates": tuple(
+                (
+                    item.application_id,
+                    item.current_version,
+                    item.candidate_version,
+                    item.state.value,
+                )
+                for item in system.updates
+            ),
+            "volumes": tuple(
+                (
+                    item.volume_id,
+                    item.capacity_bytes,
+                    item.used_bytes,
+                    item.free_bytes,
+                    item.read_only,
+                )
+                for item in storage.volumes
+            ),
+            "models": tuple(
+                (
+                    item.identity.storage_key,
+                    item.available,
+                    repr(item.measurement),
+                    item.actual_router_use,
+                )
+                for item in models
+            ),
+            "resources": None
+            if resources is None
+            else (
+                resources.cpu_utilization,
+                resources.ram_available_bytes,
+                resources.gpu_vram_available_bytes,
+                resources.disk_free_bytes,
+                resources.user_active,
+                resources.heavy_foreground_workload,
+            ),
+        }
+        return _fingerprint(payload)
 
 
 def create_system_stewardship_composition(
@@ -1080,6 +1796,9 @@ __all__ = [
     "TrustedSecurityProviderRegistry",
     "SoftwareHealthReport",
     "SoftwareHealthService",
+    "AcquisitionStewardshipPlan",
+    "CleanupStewardshipPlan",
+    "MissingResourceRequirement",
     "StaleStewardshipPlan",
     "StartupEntryEvidence",
     "StartupEntryState",
@@ -1090,6 +1809,14 @@ __all__ = [
     "StartupProvider",
     "StartupProviderError",
     "StewardshipError",
+    "StewardshipLifecycleRecorder",
+    "StewardshipLifecycleState",
+    "StewardshipObservation",
+    "StewardshipOperation",
+    "StewardshipPlan",
+    "StewardshipRecoveryReport",
+    "StorageStewardshipReport",
+    "SystemStewardshipCoordinator",
     "SystemHealthProjection",
     "SystemStewardshipComposition",
     "UpdateCoordinationPlan",
