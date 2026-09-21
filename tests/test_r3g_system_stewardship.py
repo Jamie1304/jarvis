@@ -17,6 +17,8 @@ from jarvis.applications.runtime import ApplicationRuntime as ManagedApplication
 from jarvis.computer.models import LaunchInfo
 from jarvis.core.config import Settings
 from jarvis.desktop_facade import DesktopApplicationFacade
+from jarvis.goal_scheduler import GoalScheduleStatus
+from jarvis.goal_supervisor import GoalStatus
 from jarvis.resources import ResourceGovernor, ResourceSnapshot
 from jarvis.runtime import ApplicationRuntime
 from jarvis.storage import (
@@ -44,6 +46,7 @@ from jarvis.system_stewardship import (
     StaleStewardshipPlan,
     StartupEntryEvidence,
     StartupHealthService,
+    StewardshipError,
     StewardshipLifecycleState,
     StewardshipOperation,
     SystemStewardshipComposition,
@@ -251,6 +254,8 @@ async def test_stewardship_plan_rejects_changed_volume_evidence(tmp_path: Path) 
     )
     assert plan.operation is StewardshipOperation.STORAGE_RELOCATION
     volumes[0] = _volume(free=1_000)
+    changed = await coordinator.observe()
+    assert changed.fingerprint != observation.fingerprint
     with pytest.raises(StaleStewardshipPlan):
         await coordinator.assert_current(plan)
 
@@ -296,3 +301,62 @@ async def test_runtime_exposes_system_health_projection_without_effects(tmp_path
         assert view.observation_id
     finally:
         await runtime.aclose()
+
+
+@pytest.mark.asyncio
+async def test_goal_supervisor_reaches_brokered_stewardship_tool_and_localized_page(
+    tmp_path: Path,
+) -> None:
+    runtime = ApplicationRuntime.create(
+        Settings(app_data_dir=tmp_path / "runtime-data", ai_provider="ollama")
+    )
+    try:
+        assert runtime.container is not None
+        facade = DesktopApplicationFacade(runtime)
+        conversation_id = facade.create_conversation()
+        schedule = await facade.submit_goal(conversation_id, "observe system stewardship")
+        terminal = await runtime.container.goal_scheduler.wait(UUID(schedule.identifier))
+        assert terminal.status is GoalScheduleStatus.TERMINAL
+        assert terminal.goal_status is GoalStatus.COMPLETED
+        assert terminal.task_id is not None
+        assert runtime.container.tool_registry.inspect("stewardship.observe").manifest.tool_id == (
+            "stewardship.observe"
+        )
+
+        english_rows = await facade.refresh_rows("system-health")
+        assert any(row.title == "Stewardship observation" for row in english_rows)
+        projection = facade.current_context().stewardship
+        assert projection.storage_pressure != "unknown"
+
+        facade.save_language_preferences({"interface_language": "nl", "locale": "nl-NL"})
+        dutch_rows = await facade.refresh_rows("system-health")
+        assert any(row.title == "Beheerobservatie" for row in dutch_rows)
+    finally:
+        await runtime.aclose()
+
+
+@pytest.mark.asyncio
+async def test_unknown_stewardship_state_closes_only_through_reconciliation(
+    tmp_path: Path,
+) -> None:
+    coordinator, recorder = _coordinator(tmp_path, [_volume()])
+    observation = await coordinator.observe()
+    coordinator._record(  # noqa: SLF001 - exact lifecycle boundary under review
+        StewardshipOperation.ACQUISITION,
+        StewardshipLifecycleState.UNKNOWN_OUTCOME,
+        observation.fingerprint,
+        "controlled provider outcome is uncertain",
+    )
+    with pytest.raises(StewardshipError):
+        coordinator._record(  # noqa: SLF001 - exact lifecycle boundary under review
+            StewardshipOperation.ACQUISITION,
+            StewardshipLifecycleState.VERIFIED,
+            observation.fingerprint,
+            "incorrect direct verification",
+        )
+    await coordinator.reconcile()
+    assert any(
+        entry[1]["operation"] == StewardshipOperation.ACQUISITION.value
+        and entry[1]["state"] == StewardshipLifecycleState.VERIFIED.value
+        for entry in recorder.entries
+    )

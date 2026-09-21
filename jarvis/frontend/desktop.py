@@ -521,6 +521,10 @@ def run_desktop_app(
                     "Canonical task and plan status is available through the runtime."
                 ),
                 ShellSection.MEMORY: "Trusted memory controls are available through the runtime.",
+                ShellSection.SYSTEM_HEALTH: (
+                    "Trusted system, storage, acquisition, and model evidence is available "
+                    "through the runtime."
+                ),
                 ShellSection.CAPABILITIES: "Capability lifecycle state is owned by the runtime.",
                 ShellSection.TOOLS: "Trusted registered tools are owned by the runtime.",
                 ShellSection.AUTOMATIONS: (
@@ -1412,6 +1416,7 @@ def run_desktop_app(
                 ShellSection.CHAT: t("nav.chat", "Chat"),
                 ShellSection.TASKS: t("nav.tasks", "Tasks"),
                 ShellSection.MEMORY: t("nav.memory", "Memory"),
+                ShellSection.SYSTEM_HEALTH: t("nav.system-health", "System Health"),
                 ShellSection.CAPABILITIES: t("nav.capabilities", "Capabilities"),
                 ShellSection.TOOLS: t("nav.tools", "Tools"),
                 ShellSection.AUTOMATIONS: t("nav.automations", "Automations"),

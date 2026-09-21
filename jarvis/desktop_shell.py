@@ -67,6 +67,7 @@ class ShellSection(StrEnum):
     CHAT = "chat"
     TASKS = "tasks"
     MEMORY = "memory"
+    SYSTEM_HEALTH = "system-health"
     CAPABILITIES = "capabilities"
     TOOLS = "tools"
     AUTOMATIONS = "automations"
@@ -153,6 +154,7 @@ class DesktopShellService:
         ShellNavigationItem(ShellSection.CHAT, "Chat"),
         ShellNavigationItem(ShellSection.TASKS, "Tasks"),
         ShellNavigationItem(ShellSection.MEMORY, "Memory"),
+        ShellNavigationItem(ShellSection.SYSTEM_HEALTH, "System Health"),
         ShellNavigationItem(ShellSection.CAPABILITIES, "Capabilities"),
         ShellNavigationItem(ShellSection.TOOLS, "Tools"),
         ShellNavigationItem(ShellSection.AUTOMATIONS, "Automations"),

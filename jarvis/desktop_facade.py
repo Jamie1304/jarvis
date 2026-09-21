@@ -21,7 +21,7 @@ from jarvis.core.environment_settings import (
 )
 from jarvis.core.errors import ServiceUnavailableError
 from jarvis.current_context import CurrentContextSnapshot
-from jarvis.human_adaptation import LanguagePreferences
+from jarvis.human_adaptation import LanguagePreferences, LanguageTag, load_default_localizer
 from jarvis.memory.control import MemoryControlReference, MemoryCorrection
 from jarvis.memory.episodes import Episode
 from jarvis.memory.models import RetentionPolicy
@@ -169,6 +169,14 @@ class DesktopStewardshipView:
     duplicate_groups: int
     model_count: int
     model_error: str | None
+    security_findings: tuple[tuple[str, str, str, str], ...]
+    startup_entries: tuple[tuple[str, bool, str, str], ...]
+    updates: tuple[tuple[str, str, str, str, str], ...]
+    acquisition_records: tuple[tuple[str, str, str, str], ...]
+    acquisition_requests: tuple[tuple[str, str, str, str, str, str, str, str, str, str], ...]
+    cleanup_candidates: tuple[tuple[str, int, str, str, bool], ...]
+    models: tuple[tuple[str, bool, str, str], ...]
+    model_analysis: tuple[tuple[str, str, str, str], ...]
 
 
 class DesktopApplicationFacade:
@@ -179,6 +187,7 @@ class DesktopApplicationFacade:
         self._settings = EnvironmentSettingsService(
             app_data_dir=(runtime.container.paths.root if runtime.container is not None else None)
         )
+        self._localizer = load_default_localizer()
         self._assistant: JarvisAssistantService | None = None
         if runtime.container is not None:
             from jarvis.bootstrap import create_assistant_from_runtime
@@ -561,6 +570,15 @@ class DesktopApplicationFacade:
         self._require_container().current_context.select_task(task.task_id)
         return DesktopRow(str(task.task_id), task.goal, task.status.value, "Task created")
 
+    async def submit_goal(self, conversation_id: UUID, goal: str) -> DesktopRow:
+        schedule = await self._require_assistant().submit_goal(conversation_id, goal)
+        return DesktopRow(
+            str(schedule.goal_id),
+            goal,
+            schedule.status.value,
+            "Goal submitted through GoalSupervisor and the canonical planning runner",
+        )
+
     async def cancel_task(self, task_id: UUID) -> DesktopRow:
         self._require_container().current_context.select_task(task_id)
         task = await self._require_assistant().cancel_task(task_id)
@@ -657,45 +675,299 @@ class DesktopApplicationFacade:
             len(observation.storage.duplicate_groups),
             len(observation.models),
             observation.model_error,
+            tuple(
+                (item.provider, item.target, item.state.value, item.evidence_ref)
+                for item in observation.system.security.findings
+            ),
+            tuple(
+                (item.entry_id, item.enabled, item.state.value, item.detail)
+                for item in observation.system.startup.entries
+            ),
+            tuple(
+                (
+                    item.application_id,
+                    item.current_version,
+                    item.candidate_version or "unknown",
+                    item.state.value,
+                    item.provider,
+                )
+                for item in observation.system.updates
+            ),
+            tuple(
+                (
+                    item.resource_id,
+                    item.state.value,
+                    item.target_location or "unknown",
+                    str(item.size_bytes) if item.size_bytes is not None else "unknown",
+                )
+                for item in observation.acquisition_records
+            ),
+            tuple(
+                (
+                    request.resource_id,
+                    request.purpose,
+                    request.required_for or "unknown",
+                    request.source or "unknown",
+                    str(request.download_size_bytes or request.installed_size_bytes or "unknown"),
+                    request.target_location or "unknown",
+                    request.security_risk.value,
+                    (
+                        "administrator approval"
+                        if request.administrator_required
+                        else "broker authority"
+                    ),
+                    next(
+                        (
+                            record.state.value
+                            for record in observation.acquisition_records
+                            if record.request_fingerprint == request.fingerprint
+                        ),
+                        "planned",
+                    ),
+                    request.verification_plan or "unknown",
+                )
+                for request in observation.acquisition_requests
+            ),
+            tuple(
+                (
+                    item.path.name,
+                    item.size_bytes,
+                    item.classification.category.value,
+                    item.state.value,
+                    item.eligible,
+                )
+                for item in observation.storage.cleanup_candidates
+            ),
+            tuple(
+                (
+                    item.identity.storage_key,
+                    item.available,
+                    ", ".join(sorted(item.capability_dimensions)) or "unknown",
+                    str(item.actual_router_use)
+                    if item.actual_router_use is not None
+                    else "unknown",
+                )
+                for item in observation.models
+            ),
+            tuple(
+                (
+                    item.candidate.identity.storage_key,
+                    item.classification.value,
+                    ", ".join(sorted(item.unique_dimensions)) or "none",
+                    item.reason,
+                )
+                for item in observation.model_analysis
+            ),
         )
 
-    @staticmethod
-    def _stewardship_rows(view: DesktopStewardshipView) -> tuple[DesktopRow, ...]:
+    def _stewardship_rows(self, view: DesktopStewardshipView) -> tuple[DesktopRow, ...]:
+        language = LanguageTag(self.current_context().interface_language)
+
+        def t(message_id: str, fallback: str, **params: object) -> str:
+            translated = self._localizer.translate(message_id, language, **params)
+            return fallback if translated.startswith("[") else translated
+
         pressure = "; ".join(f"{volume}: {state}" for volume, state in view.storage_pressure)
-        return (
+        rows = [
             DesktopRow(
                 "stewardship-lifecycle",
-                "Stewardship observation",
+                t("stewardship.observation", "Stewardship observation"),
                 view.lifecycle.upper(),
-                f"Observation: {view.observation_id}; fingerprint: {view.fingerprint}",
+                t(
+                    "stewardship.observation_detail",
+                    f"Observation: {view.observation_id}; fingerprint: {view.fingerprint}",
+                    observation_id=str(view.observation_id),
+                    fingerprint=view.fingerprint,
+                ),
             ),
             DesktopRow(
                 "stewardship-security",
-                "Security",
+                t("stewardship.security", "Security"),
                 view.security.upper(),
-                "Trusted provider projection",
+                t("stewardship.provider_projection", "Trusted provider projection"),
             ),
             DesktopRow(
                 "stewardship-startup",
-                "Startup",
+                t("stewardship.startup", "Startup"),
                 view.startup.upper(),
-                "Trusted startup observation",
+                t("stewardship.startup_detail", "Trusted startup observation"),
             ),
             DesktopRow(
                 "stewardship-storage",
-                "Storage",
+                t("stewardship.storage", "Storage"),
                 "OBSERVED",
-                f"Pressure: {pressure or 'UNKNOWN'}; detected={view.detected_bytes}; "
-                f"safe candidate={view.safe_candidate_bytes}; duplicates={view.duplicate_groups}",
+                t(
+                    "stewardship.storage_detail",
+                    f"Pressure: {pressure or 'UNKNOWN'}; detected={view.detected_bytes}; "
+                    f"safe candidate={view.safe_candidate_bytes}; "
+                    f"duplicates={view.duplicate_groups}",
+                    pressure=pressure or "UNKNOWN",
+                    detected=view.detected_bytes,
+                    safe_candidate=view.safe_candidate_bytes,
+                    duplicates=view.duplicate_groups,
+                ),
             ),
             DesktopRow(
                 "stewardship-models",
-                "Model portfolio",
+                t("stewardship.models", "Model portfolio"),
                 "OBSERVED" if view.model_error is None else "UNKNOWN",
-                f"Measured inventory entries: {view.model_count}"
-                + (f"; {view.model_error}" if view.model_error else ""),
+                t(
+                    "stewardship.models_detail",
+                    f"Measured inventory entries: {view.model_count}"
+                    + (f"; {view.model_error}" if view.model_error else ""),
+                    count=view.model_count,
+                    error=view.model_error or "none",
+                ),
             ),
+        ]
+        rows.extend(
+            DesktopRow(
+                f"stewardship-security-{index}",
+                t("stewardship.security_evidence", "Security evidence"),
+                state.upper(),
+                t(
+                    "stewardship.security_evidence_detail",
+                    f"Provider: {provider}; target: {target}; evidence: {evidence}",
+                    provider=provider,
+                    target=target,
+                    evidence=evidence,
+                ),
+            )
+            for index, (provider, target, state, evidence) in enumerate(view.security_findings)
         )
+        rows.extend(
+            DesktopRow(
+                f"stewardship-startup-{index}",
+                t("stewardship.startup_evidence", "Startup evidence"),
+                state.upper(),
+                t(
+                    "stewardship.startup_evidence_detail",
+                    f"Entry: {entry}; enabled={enabled}; detail: {detail}",
+                    entry=entry,
+                    enabled=enabled,
+                    detail=detail,
+                ),
+            )
+            for index, (entry, enabled, state, detail) in enumerate(view.startup_entries)
+        )
+        rows.extend(
+            DesktopRow(
+                f"stewardship-update-{index}",
+                t("stewardship.update", "Update evidence"),
+                state.upper(),
+                t(
+                    "stewardship.update_detail",
+                    f"{application}: {current} -> {candidate}; provider={provider}",
+                    application=application,
+                    current=current,
+                    candidate=candidate,
+                    provider=provider,
+                ),
+            )
+            for index, (application, current, candidate, state, provider) in enumerate(view.updates)
+        )
+        rows.extend(
+            DesktopRow(
+                f"stewardship-acquisition-{index}",
+                t("stewardship.acquisition", "Acquisition evidence"),
+                state.upper(),
+                t(
+                    "stewardship.acquisition_detail",
+                    f"Resource: {resource}; target={target}; size={size}",
+                    resource=resource,
+                    target=target,
+                    size=size,
+                ),
+            )
+            for index, (resource, state, target, size) in enumerate(view.acquisition_records)
+        )
+        rows.extend(
+            DesktopRow(
+                f"stewardship-acquisition-request-{index}",
+                t("stewardship.acquisition_request", "Acquisition request"),
+                status.upper(),
+                t(
+                    "stewardship.acquisition_request_detail",
+                    (
+                        f"{resource}: purpose={purpose}; required-for={required_for}; "
+                        f"source={source}; size={size}; target={target}; risk={risk}; "
+                        f"authority={authority}; verification={verification}"
+                    ),
+                    resource=resource,
+                    purpose=purpose,
+                    required_for=required_for,
+                    source=source,
+                    size=size,
+                    target=target,
+                    risk=risk,
+                    authority=authority,
+                    status=status,
+                    verification=verification,
+                ),
+            )
+            for index, (
+                resource,
+                purpose,
+                required_for,
+                source,
+                size,
+                target,
+                risk,
+                authority,
+                status,
+                verification,
+            ) in enumerate(view.acquisition_requests)
+        )
+        rows.extend(
+            DesktopRow(
+                f"stewardship-cleanup-{index}",
+                t("stewardship.cleanup", "Cleanup candidate"),
+                state.upper(),
+                t(
+                    "stewardship.cleanup_detail",
+                    f"{name}: category={category}; bytes={size}; eligible={eligible}",
+                    name=name,
+                    category=category,
+                    size=size,
+                    state=state,
+                    eligible=eligible,
+                ),
+            )
+            for index, (name, size, category, state, eligible) in enumerate(view.cleanup_candidates)
+        )
+        rows.extend(
+            DesktopRow(
+                f"stewardship-model-{index}",
+                t("stewardship.model", "Model evidence"),
+                "AVAILABLE" if available else "UNAVAILABLE",
+                t(
+                    "stewardship.model_detail",
+                    f"{identity}: dimensions={dimensions}; router use={router_use}",
+                    identity=identity,
+                    dimensions=dimensions,
+                    router_use=router_use,
+                ),
+            )
+            for index, (identity, available, dimensions, router_use) in enumerate(view.models)
+        )
+        rows.extend(
+            DesktopRow(
+                f"stewardship-model-analysis-{index}",
+                t("stewardship.model_analysis", "Model analysis"),
+                classification.upper(),
+                t(
+                    "stewardship.model_analysis_detail",
+                    f"Candidate: {candidate}; classification={classification}; "
+                    f"unique={unique}; reason={reason}",
+                    candidate=candidate,
+                    classification=classification,
+                    unique=unique,
+                    reason=reason,
+                ),
+            )
+            for index, (candidate, classification, unique, reason) in enumerate(view.model_analysis)
+        )
+        return tuple(rows)
 
     @staticmethod
     def _interruption_rank(value: str | None) -> int:
