@@ -453,6 +453,70 @@ async def test_concurrent_goals_share_registered_resource_without_duplicate_acqu
 
 
 @pytest.mark.asyncio
+async def test_restart_before_acquisition_preserves_waiting_requirement(tmp_path: Path) -> None:
+    _Handler.hits = 0
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        root = tmp_path / "downloads"
+        ledger_path = tmp_path / "acquisition.sqlite3"
+        ledger = SQLiteAcquisitionLedger(ledger_path)
+        deferred_broker = AcquisitionBroker(
+            BoundedDownloadTransport(root),
+            AcquisitionPolicy(
+                mode=AcquisitionPolicyMode.JARVIS_MANAGED,
+                trusted_sources_only=True,
+                require_known_disk_capacity=True,
+            ),
+            ledger,
+        )
+        deferred_bridge = AcquisitionResourceBridge(deferred_broker)
+        deferred_bridge.register_descriptor(
+            _descriptor(f"http://127.0.0.1:{server.server_port}/resource.bin")
+        )
+        engine, store, consumer = _engine_for_bridge(tmp_path, deferred_bridge)
+
+        waiting = await engine.submit_proposal(_proposal("consume acceptance resource"))
+
+        assert waiting.status is PlanningTaskStatus.WAITING_FOR_RESOURCE
+        assert not consumer.consumed
+        assert _Handler.hits == 0
+        store.close()
+        await deferred_broker.aclose()
+
+        resumed_ledger = SQLiteAcquisitionLedger(ledger_path)
+        resumed_broker = AcquisitionBroker(
+            BoundedDownloadTransport(root),
+            AcquisitionPolicy(
+                mode=AcquisitionPolicyMode.JARVIS_MANAGED,
+                trusted_sources_only=True,
+                require_known_disk_capacity=True,
+            ),
+            resumed_ledger,
+        )
+        resumed_bridge = AcquisitionResourceBridge(
+            resumed_broker,
+            disk_free_bytes=lambda: 100_000,
+        )
+        resumed_bridge.register_descriptor(
+            _descriptor(f"http://127.0.0.1:{server.server_port}/resource.bin")
+        )
+        resumed_engine, _, resumed_consumer = _engine_for_bridge(tmp_path, resumed_bridge)
+
+        resumed = await resumed_engine.resume(waiting.task_id)
+
+        assert resumed.status is PlanningTaskStatus.COMPLETED
+        assert resumed_consumer.consumed == [PAYLOAD]
+        assert _Handler.hits == 1
+        await resumed_broker.aclose()
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+@pytest.mark.asyncio
 async def test_interrupted_acquisition_stays_uncertain_until_reconciliation(
     tmp_path: Path,
 ) -> None:
