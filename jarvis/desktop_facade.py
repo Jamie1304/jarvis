@@ -603,6 +603,8 @@ class DesktopApplicationFacade:
                         (
                             f"{provider.provider_id}; policy={provider.policy}; "
                             f"models={provider.model_count}; support={provider.support_status}; "
+                            f"connectable={provider.connectable}; "
+                            f"setup={','.join(provider.setup_fields) or 'vault-only'}; "
                             "discovery="
                             f"{'available' if provider.dynamic_discovery else 'not implemented'}"
                         ),

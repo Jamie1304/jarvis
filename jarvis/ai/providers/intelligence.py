@@ -77,6 +77,9 @@ class ProtocolFamily(StrEnum):
 
 
 class PackageSupportStatus(StrEnum):
+    CATALOG_ONLY = "catalog_only"
+    SOURCE_EXECUTABLE = "source_executable"
+    CONTROLLED_PROTOCOL_TESTED = "controlled_protocol_tested"
     CONTRACT_ONLY = "contract_only"
     CONTROLLED_FIXTURE = "controlled_fixture"
     PHYSICAL_VALIDATED = "physical_validated"
@@ -235,6 +238,9 @@ class ProviderPackageManifest:
     lifecycle: ProviderLifecycle = ProviderLifecycle.AVAILABLE
     support_status: PackageSupportStatus = PackageSupportStatus.CONTRACT_ONLY
     package_version: str = "1"
+    adapter_owner: str = ""
+    discovery_mode: str = "NOT_SUPPORTED"
+    official_protocol_sources: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         _text(self.provider_id, "Provider ID", 128)
@@ -287,6 +293,25 @@ class ProviderPackageManifest:
         ):
             raise ValueError("Provider lifecycle metadata is invalid")
         _text(self.package_version, "Provider package version", 64)
+        _text(self.adapter_owner, "Provider adapter owner", 256, empty=True)
+        _text(self.discovery_mode, "Provider discovery mode", 64)
+        if type(self.official_protocol_sources) is not tuple or any(
+            type(value) is not str or not value.startswith(("https://", "http://"))
+            for value in self.official_protocol_sources
+        ):
+            raise ValueError("Provider protocol sources are invalid")
+
+    @property
+    def package_present(self) -> bool:
+        return True
+
+    @property
+    def adapter_present(self) -> bool:
+        return self.support_status is PackageSupportStatus.CONTROLLED_PROTOCOL_TESTED
+
+    @property
+    def source_executable(self) -> bool:
+        return self.adapter_present
 
 
 @dataclass(frozen=True, slots=True)

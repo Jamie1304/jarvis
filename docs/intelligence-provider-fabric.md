@@ -56,7 +56,9 @@ and reject secret/local-only input. `ProviderOnboardingService` stores raw
 credentials only through the existing `CredentialVault`; returned connection
 projections contain credential IDs and non-secret configuration only.
 
-The `openai-compatible` package is first class. Remote endpoints require TLS,
+The `openai-compatible` package is first class. Named providers with official
+OpenAI-shaped APIs use the same shared adapter through fixed package presets.
+Remote endpoints require TLS,
 loopback endpoints require explicitly trusted `LOCAL` metadata, and the
 adapter accepts only typed configuration plus an injected transport—never
 user-supplied executable hooks.
@@ -67,8 +69,9 @@ truthful projection and never enables cloud or credential use.
 
 ## Zero Cloud and physical status
 
-The catalog is descriptive and controlled-fixture qualified in development.
-`CONTRACT_ONLY` and `EXTERNAL_PROTOCOL_FACT_NOT_PROVEN` are truthful package
+The catalog distinguishes `CATALOG_ONLY`, `SOURCE_EXECUTABLE`, and
+`CONTROLLED_PROTOCOL_TESTED` from physical validation.
+`EXTERNAL_PROTOCOL_FACT_NOT_PROVEN` remains a truthful package
 statuses; no real provider account, quota, billing, region, or outage result is
 claimed by source tests. Local Ollama remains the existing runtime path, and
 the generic routing/privacy contracts do not require any cloud provider.

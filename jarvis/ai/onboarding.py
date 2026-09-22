@@ -158,6 +158,12 @@ class ProviderOnboardingService:
         label: str | None = None,
     ) -> ProviderConnection:
         manifest = self.help(provider_id)
+        from jarvis.ai.providers.intelligence import PackageSupportStatus
+
+        if manifest.support_status is not PackageSupportStatus.CONTROLLED_PROTOCOL_TESTED:
+            raise ValueError(
+                f"Provider package is not connectable: {manifest.support_status.value}"
+            )
         missing = self.validate_configuration(
             provider_id, configuration, secret_provided=secret is not None
         )

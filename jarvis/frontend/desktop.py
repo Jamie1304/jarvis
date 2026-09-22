@@ -300,6 +300,8 @@ def run_desktop_app(
                     self._intelligence_endpoint = QLineEdit()
                     self._intelligence_endpoint.setObjectName("intelligence-endpoint")
                     self._intelligence_endpoint.setPlaceholderText("Optional HTTPS endpoint")
+                    self._intelligence_setup_form = QFormLayout()
+                    self._intelligence_extra_fields: dict[str, QLineEdit] = {}
                     self._intelligence_policy = QComboBox()
                     self._intelligence_policy.addItems(
                         ["auto_allowed", "guarded", "manual_only", "blocked"]
@@ -317,6 +319,7 @@ def run_desktop_app(
                         lambda _checked=False: self._refresh_page("intelligence")
                     )
                     connect_provider = QPushButton("Connect Provider")
+                    self._intelligence_connect_button = connect_provider
                     connect_provider.clicked.connect(self._connect_intelligence_provider)
                     disable_provider = QPushButton("Disable Routing")
                     disable_provider.clicked.connect(
@@ -338,6 +341,7 @@ def run_desktop_app(
                     intelligence_form.addRow("Provider", self._intelligence_provider)
                     intelligence_form.addRow("Credential", self._intelligence_secret)
                     intelligence_form.addRow("Endpoint", self._intelligence_endpoint)
+                    intelligence_form.addRow(self._intelligence_setup_form)
                     intelligence_form.addRow("Model policy", self._intelligence_policy)
                     intelligence_form.addRow("Task budget", self._intelligence_budget_task)
                     intelligence_form.addRow("Daily cloud budget", self._intelligence_budget_daily)
@@ -373,6 +377,10 @@ def run_desktop_app(
                             self._intelligence_budget_apply,
                         )
                     )
+                    self._intelligence_provider.currentTextChanged.connect(
+                        self._update_intelligence_provider_form
+                    )
+                    self._update_intelligence_provider_form()
                 else:
                     rows = QListWidget()
                     rows.setObjectName(f"{section.value}-records")
@@ -788,7 +796,29 @@ def run_desktop_app(
             provider = self._intelligence_provider.currentText().strip()
             secret = self._intelligence_secret.text()
             endpoint = self._intelligence_endpoint.text().strip()
-            configuration = {"base_url": endpoint} if endpoint else {}
+            configuration: dict[str, object] = {}
+            from jarvis.ai.providers.catalog import provider_manifest
+
+            try:
+                setup_names = {
+                    field.name
+                    for field in provider_manifest(provider).required_fields
+                    + provider_manifest(provider).optional_fields
+                }
+            except KeyError:
+                setup_names = set()
+            if endpoint and self._intelligence_endpoint.isVisible():
+                if "base_url" in setup_names:
+                    configuration["base_url"] = endpoint
+                if "endpoint" in setup_names:
+                    configuration["endpoint"] = endpoint
+            configuration.update(
+                {
+                    name: field.text().strip()
+                    for name, field in self._intelligence_extra_fields.items()
+                    if field.text().strip()
+                }
+            )
             future = backend.submit(
                 lambda service: service.connect_provider(
                     provider, secret=secret, configuration=configuration
@@ -798,6 +828,48 @@ def run_desktop_app(
                 lambda result: self._signals.operation_finished.emit("intelligence", result)
             )
             self._intelligence_secret.clear()
+
+        def _update_intelligence_provider_form(self, _provider: str = "") -> None:
+            """Show only the typed setup fields owned by the selected package."""
+
+            from jarvis.ai.providers.catalog import provider_manifest
+
+            provider = self._intelligence_provider.currentText().strip()
+            try:
+                manifest = provider_manifest(provider)
+            except KeyError:
+                self._intelligence_endpoint.hide()
+                self._intelligence_connect_button.setEnabled(False)
+                return
+            self._intelligence_connect_button.setEnabled(manifest.adapter_present)
+            endpoint_required = any(
+                field.name in {"base_url", "endpoint"}
+                for field in (*manifest.required_fields, *manifest.optional_fields)
+            )
+            self._intelligence_endpoint.setVisible(endpoint_required)
+            endpoint_label = self._intelligence_setup_form.labelForField(
+                self._intelligence_endpoint
+            )
+            if endpoint_label is not None:
+                endpoint_label.setVisible(endpoint_required)
+            existing = set(self._intelligence_extra_fields)
+            wanted = {
+                field.name: field
+                for field in (*manifest.required_fields, *manifest.optional_fields)
+                if not field.secret and field.name not in {"base_url", "endpoint"}
+            }
+            for name in existing - set(wanted):
+                field = self._intelligence_extra_fields.pop(name)
+                self._intelligence_setup_form.removeWidget(field)
+                field.deleteLater()
+            for name, definition in wanted.items():
+                if name in self._intelligence_extra_fields:
+                    continue
+                field = QLineEdit()
+                field.setObjectName(f"intelligence-{name}")
+                field.setPlaceholderText(definition.description or definition.label)
+                self._intelligence_setup_form.addRow(definition.label, field)
+                self._intelligence_extra_fields[name] = field
 
         def _set_intelligence_provider_policy(self, policy: str) -> None:
             row = self._selected_intelligence_row()

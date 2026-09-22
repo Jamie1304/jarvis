@@ -233,10 +233,29 @@ class ProviderRegistry:
 
         if not isinstance(manifest, ProviderPackageManifest):
             raise ValueError("Provider package manifest is invalid")
-        provider_id = manifest.provider_id.casefold()
+        package_manifest = manifest
+        provider_id = package_manifest.provider_id.casefold()
         if provider_id in self._packages:
             raise ValueError(f"Provider package is already registered: {provider_id}")
-        self._packages[provider_id] = manifest
+        self._packages[provider_id] = package_manifest
+        if package_manifest.adapter_present and provider_id not in self._definitions:
+            from jarvis.ai.providers.catalog import create_standard_provider
+
+            def factory(
+                configuration: Mapping[str, Any],
+                selected_provider_id: str = package_manifest.provider_id,
+            ) -> Provider:
+                return create_standard_provider(selected_provider_id, configuration)
+
+            self._definitions[provider_id] = ProviderDefinition(
+                ProviderMetadata(
+                    package_manifest.provider_id,
+                    package_manifest.display_name,
+                    package_manifest.package_version,
+                    locality=package_manifest.locality,
+                ),
+                factory,
+            )
 
     def package(self, provider_id: str) -> object:
         try:
@@ -333,7 +352,14 @@ class ProviderRegistry:
     update_models = replace_models
 
     def create(self, provider_id: str, configuration: Mapping[str, Any]) -> Provider:
-        return self.definition(provider_id).factory(configuration)
+        try:
+            definition = self.definition(provider_id)
+        except KeyError:
+            provider = self.create_intelligence(provider_id, configuration)
+            if not isinstance(provider, AIProvider):
+                raise TypeError("Configured provider package is not generative") from None
+            return provider
+        return definition.factory(configuration)
 
     async def health(self, provider_id: str, provider: Provider) -> ProviderHealth:
         self.definition(provider_id)

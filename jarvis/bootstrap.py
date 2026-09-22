@@ -7,7 +7,10 @@ from typing import TYPE_CHECKING, Any, cast
 
 from jarvis.ai.models import ModelRole
 from jarvis.ai.providers.base import AIProvider
-from jarvis.ai.providers.catalog import standard_provider_catalog
+from jarvis.ai.providers.catalog import (
+    register_standard_provider_factories,
+    standard_provider_catalog,
+)
 from jarvis.ai.providers.ollama import OllamaProvider
 from jarvis.ai.providers.registry import (
     ModelMetadata,
@@ -80,6 +83,7 @@ def create_provider_registry(
     )
     for manifest in standard_provider_catalog():
         registry.register_package(manifest)
+    register_standard_provider_factories(registry)
     return registry
 
 

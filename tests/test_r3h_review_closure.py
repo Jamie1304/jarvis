@@ -9,6 +9,7 @@ import sqlite3
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from uuid import uuid4
 
 import pytest
 from jarvis.ai.governance import (
@@ -30,15 +31,17 @@ from jarvis.ai.knowledge import (
 )
 from jarvis.ai.model_intelligence import ModelIntelligenceProjection
 from jarvis.ai.models import (
+    ChatMessage,
     EvidenceKind,
     GenerationRequest,
     GenerationResult,
+    MessageRole,
     ModelRole,
     PrivacyClassification,
     PrivacyContext,
 )
 from jarvis.ai.onboarding import ProviderOnboardingService
-from jarvis.ai.providers.catalog import provider_support_matrix
+from jarvis.ai.providers.catalog import create_standard_provider, provider_support_matrix
 from jarvis.ai.providers.discovery import ModelDiscoveryService
 from jarvis.ai.providers.intelligence import (
     CostEvidence,
@@ -63,6 +66,7 @@ from jarvis.ai.routing import (
     RouteStatus,
     RoutingPolicy,
 )
+from jarvis.ai.usability import evidence_for_success
 from jarvis.core.config import Settings
 from jarvis.credentials import CredentialVault, TestOnlyInMemorySecretBackend
 from jarvis.runtime import ApplicationRuntime, RuntimeStatus
@@ -343,12 +347,22 @@ def test_disconnect_and_delete_credential_are_distinct(tmp_path: Path) -> None:
     assert "synthetic-secret" not in json.dumps(deleted.configuration)
 
 
-def test_provider_matrix_is_complete_and_does_not_claim_catalog_execution() -> None:
+def test_provider_matrix_is_complete_and_reports_source_execution_truthfully() -> None:
     matrix = provider_support_matrix()
     assert len(matrix) == 28
     assert all(item.catalog_present for item in matrix)
     assert all(item.physical_status == "PHYSICAL_VALIDATION_REQUIRED" for item in matrix)
-    assert sum(item.source_adapter_present for item in matrix) == 1
+    assert sum(item.source_adapter_present for item in matrix) >= 17
+    assert all(item.source_adapter_present == item.controlled_protocol_tested for item in matrix)
+    assert all(
+        item.source_adapter_present
+        or item.source_support_level
+        in {
+            "catalog_only",
+            "external_protocol_fact_not_proven",
+        }
+        for item in matrix
+    )
 
 
 async def test_manual_only_has_zero_autonomous_calls_and_allows_exact_selection() -> None:
@@ -386,34 +400,29 @@ async def test_manual_only_has_zero_autonomous_calls_and_allows_exact_selection(
 async def test_h2_one_key_setup_runs_vault_probe_discovery_and_registration(
     tmp_path: Path,
 ) -> None:
-    model = _model("discovered", endpoint="https://provider.example")
+    class NamedOpenAITransport:
+        async def request(
+            self,
+            method: str,
+            path: str,
+            payload: dict[str, object] | None,
+            headers: dict[str, str],
+        ) -> dict[str, object]:
+            del headers
+            if method == "GET" and path == "/models":
+                return {"data": [{"id": "discovered", "context_length": 4096}]}
+            if method == "POST" and path == "/chat/completions":
+                return {"model": "discovered", "choices": [{"message": {"content": "ok"}}]}
+            raise AssertionError(f"unexpected named OpenAI request: {method} {path} {payload}")
 
-    class DiscoveringProvider(FakeAIProvider):
-        async def discover_models(self) -> ProviderCatalogSnapshot:
-            provider = ProviderMetadata(
-                "openai-compatible", "Controlled", "1", locality=ProviderLocality.REMOTE
-            )
-            observed = datetime.now(UTC)
-            return ProviderCatalogSnapshot(
-                provider,
-                (
-                    ModelObservation(
-                        identity_for(provider.provider_id, model), model, observed, "fixture"
-                    ),
-                ),
-                observed,
-                "fixture",
-                True,
-            )
+    async def resolve_async(_reference: object) -> str:
+        return "synthetic-key"
 
-    provider = DiscoveringProvider()
     registry = ProviderRegistry(
         (
             ProviderDefinition(
-                ProviderMetadata(
-                    "openai-compatible", "Controlled", "1", locality=ProviderLocality.REMOTE
-                ),
-                lambda _: provider,
+                ProviderMetadata("openai", "OpenAI", "1", locality=ProviderLocality.REMOTE),
+                lambda configuration: create_standard_provider("openai", configuration),
             ),
         )
     )
@@ -429,16 +438,42 @@ async def test_h2_one_key_setup_runs_vault_probe_discovery_and_registration(
         discovery=ModelDiscoveryService(registry),
     )
     connection = service.connect(
-        "openai-compatible",
-        configuration={"base_url": "https://provider.example"},
+        "openai",
+        configuration={},
         secret="synthetic-key",
     )
     assert connection.credential_id is not None
-    probed = await service.probe("openai-compatible", provider)
+    provider = registry.create(
+        "openai",
+        {
+            "model": "discovered",
+            "credential_ref": connection.credential_id,
+            "transport": NamedOpenAITransport(),
+            "credential_resolver": resolve_async,
+        },
+    )
+    probed = await service.probe("openai", provider)
     assert probed.authentication_state == "authenticated"
     assert probed.discovery_state == "discovered"
     assert probed.usable is True
-    assert registry.definition("openai-compatible").models[0].model_id == "discovered"
+    assert registry.definition("openai").models[0].model_id == "discovered"
+    await provider.generate(
+        GenerationRequest(
+            (ChatMessage(uuid4(), uuid4(), MessageRole.USER, "hello", datetime.now(UTC)),),
+            "discovered",
+            4096,
+        )
+    )
+    decision = ProviderRouter(registry).route(
+        RouteRequest(
+            "answer",
+            "test",
+            privacy_context=PrivacyContext(PrivacyClassification.SAFE_PUBLIC),
+            usability_evidence=(evidence_for_success("openai", "discovered"),),
+        )
+    )
+    assert decision.primary is not None
+    assert decision.primary.provider_id == "openai"
 
 
 def test_old_cheap_route_wins_over_premium_when_both_clear_quality_floor() -> None:

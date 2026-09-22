@@ -26,6 +26,8 @@ class ProviderIntelligenceRow:
     support_status: str = "unknown"
     authentication: str = "unknown"
     connection_status: str = "unknown"
+    connectable: bool = False
+    setup_fields: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -108,6 +110,8 @@ class ModelIntelligenceProjection:
                     manifest.support_status.value,
                     manifest.authentication.value,
                     "configured" if definition is not None else "not_configured",
+                    manifest.adapter_present,
+                    tuple(field.name for field in manifest.required_fields if not field.secret),
                 )
             )
             if definition is not None:
