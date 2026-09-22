@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 import os
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 from uuid import UUID, uuid4
 
 import pytest
@@ -26,7 +26,7 @@ from jarvis.runtime import ApplicationRuntime, RuntimeStatus
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 PySide6 = pytest.importorskip("PySide6")
-from PySide6.QtCore import QTimer  # noqa: E402
+from PySide6.QtCore import QObject, QThread, QTimer, Slot  # noqa: E402
 from PySide6.QtWidgets import (  # noqa: E402
     QApplication,
     QLabel,
@@ -44,6 +44,35 @@ def _application() -> QApplication:
         return QApplication([])
     assert isinstance(application, QApplication)
     return application
+
+
+def _qt_object_slot(function: Callable[..., Any]) -> Callable[..., Any]:
+    """Apply PySide's slot decorator without weakening the repository's mypy run."""
+
+    return cast(Callable[..., Any], Slot(object)(cast(Any, function)))
+
+
+class _QtCompletionObserver(QObject):
+    """Receive backend completion signals through the Qt application's thread."""
+
+    def __init__(
+        self,
+        on_persona_finished: Callable[[object], None],
+        on_context_updated: Callable[[object], None],
+    ) -> None:
+        super().__init__()
+        self._on_persona_finished = on_persona_finished
+        self._on_context_updated = on_context_updated
+
+    @_qt_object_slot
+    def persona_finished(self, future: object) -> None:
+        assert QThread.currentThread() == self.thread()
+        self._on_persona_finished(future)
+
+    @_qt_object_slot
+    def context_updated(self, future: object) -> None:
+        assert QThread.currentThread() == self.thread()
+        self._on_context_updated(future)
 
 
 class _RuntimeDouble(ApplicationRuntime):
@@ -418,23 +447,68 @@ def test_persona_save_and_reset_completion_stays_on_qt_thread() -> None:
     backend = DesktopBackendHost(lambda: _RuntimeDouble(), create_service)
     observed: dict[str, object] = {}
 
-    def finish() -> None:
+    def drive() -> None:
         window: Any = next(
             widget
             for widget in app.topLevelWidgets()
             if isinstance(widget, QMainWindow) and widget.isVisible()
         )
         defaults = PersonaProfile.defaults()
-        observed["saved"] = service_holder[0].profile.verbosity == 4
-        context = window.findChild(QLabel, "current-context-persona")
-        assert context is not None
-        observed["saved_context"] = "verbosity 4/4" in context.text()
         reset: QPushButton = next(
             button
             for button in window.findChildren(QPushButton)
             if button.text() == "Reset Persona Defaults"
         )
-        reset.click()
+
+        active_operation = "save"
+        completion_counts = {"save": 0, "reset": 0}
+        waiting_for: tuple[int, str, Callable[[], None]] | None = None
+        next_wait_id = 0
+        check_scheduled = False
+        failures: list[str] = []
+
+        def stop_with_failure(message: str) -> None:
+            nonlocal waiting_for
+            if failures:
+                return
+            failures.append(message)
+            waiting_for = None
+            window.close()
+            app.quit()
+
+        def check_context(wait_id: int) -> None:
+            nonlocal check_scheduled, waiting_for
+            check_scheduled = False
+            if waiting_for is None or waiting_for[0] != wait_id:
+                return
+            _wait_id, expected, continuation = waiting_for
+            context = window.findChild(QLabel, "current-context-persona")
+            if context is None:
+                stop_with_failure("current-context-persona was destroyed before completion")
+                return
+            if expected in context.text():
+                waiting_for = None
+                continuation()
+
+        def timeout(wait_id: int) -> None:
+            if waiting_for is not None and waiting_for[0] == wait_id:
+                stop_with_failure("timed out waiting for the authoritative Qt context update")
+
+        def wait_for_context(expected: str, continuation: Callable[[], None]) -> None:
+            nonlocal next_wait_id, waiting_for
+            next_wait_id += 1
+            wait_id = next_wait_id
+            waiting_for = (wait_id, expected, continuation)
+            check_context(wait_id)
+            if waiting_for is not None:
+                # The completion signal is authoritative; this only bounds a broken delivery.
+                QTimer.singleShot(5000, lambda: timeout(wait_id))
+
+        def on_context_updated(_future: object) -> None:
+            nonlocal check_scheduled
+            if waiting_for is not None and not check_scheduled:
+                check_scheduled = True
+                QTimer.singleShot(0, lambda: check_context(waiting_for[0]) if waiting_for else None)
 
         def verify_reset() -> None:
             observed["reset"] = service_holder[0].profile == defaults
@@ -444,17 +518,31 @@ def test_persona_save_and_reset_completion_stays_on_qt_thread() -> None:
                 backend.submit(lambda service: service.current_context()).result(timeout=1).persona
                 == defaults
             )
-            window.close()
-            app.quit()
+            QTimer.singleShot(0, finish)
 
-        QTimer.singleShot(150, verify_reset)
+        def begin_reset() -> None:
+            nonlocal active_operation
+            observed["saved"] = service_holder[0].profile.verbosity == 4
+            context = window.findChild(QLabel, "current-context-persona")
+            observed["saved_context"] = context is not None and "verbosity 4/4" in context.text()
+            active_operation = "reset"
+            reset.click()
 
-    def drive() -> None:
-        window: Any = next(
-            widget
-            for widget in app.topLevelWidgets()
-            if isinstance(widget, QMainWindow) and widget.isVisible()
-        )
+        def on_persona_finished(_future: object) -> None:
+            completion_counts[active_operation] += 1
+            if completion_counts[active_operation] != 1:
+                stop_with_failure(f"{active_operation} completion delivered more than once")
+                return
+            if active_operation == "save":
+                wait_for_context("verbosity 4/4", begin_reset)
+            else:
+                wait_for_context("verbosity 2/4", verify_reset)
+
+        observer = _QtCompletionObserver(on_persona_finished, on_context_updated)
+        observer.setParent(window)
+        window._signals.persona_finished.connect(observer.persona_finished)
+        window._signals.context_updated.connect(observer.context_updated)
+
         settings: QPushButton = next(
             button for button in window.findChildren(QPushButton) if button.text() == "Settings"
         )
@@ -465,14 +553,24 @@ def test_persona_save_and_reset_completion_stays_on_qt_thread() -> None:
             button for button in window.findChildren(QPushButton) if button.text() == "Save Persona"
         )
         save.click()
-        QTimer.singleShot(150, finish)
+
+        def finish() -> None:
+            observed["save_completions"] = completion_counts["save"]
+            observed["reset_completions"] = completion_counts["reset"]
+            if failures:
+                observed["failure"] = failures[0]
+            window.close()
+            app.quit()
 
     QTimer.singleShot(0, drive)
     assert run_desktop_app(backend) == 0
+    assert observed.get("failure") is None, observed.get("failure")
     assert observed == {
         "saved": True,
         "saved_context": True,
         "reset": True,
         "reset_context": True,
         "backend_responsive": True,
+        "save_completions": 1,
+        "reset_completions": 1,
     }
