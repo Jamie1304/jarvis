@@ -285,6 +285,94 @@ def run_desktop_app(
                     self._refresh_settings()
                     self._refresh_persona()
                     self._refresh_human_adaptation_settings()
+                elif section is ShellSection.INTELLIGENCE:
+                    intelligence_rows = QListWidget()
+                    intelligence_rows.setObjectName("intelligence-records")
+                    intelligence_rows.setMinimumHeight(180)
+                    page_layout.addWidget(intelligence_rows, 1)
+                    self._page_lists[section.value] = intelligence_rows
+                    self._intelligence_provider = QComboBox()
+                    self._intelligence_provider.setObjectName("intelligence-provider")
+                    self._intelligence_secret = QLineEdit()
+                    self._intelligence_secret.setObjectName("intelligence-credential")
+                    self._intelligence_secret.setEchoMode(QLineEdit.EchoMode.Password)
+                    self._intelligence_secret.setPlaceholderText("Credential (stored in Vault)")
+                    self._intelligence_endpoint = QLineEdit()
+                    self._intelligence_endpoint.setObjectName("intelligence-endpoint")
+                    self._intelligence_endpoint.setPlaceholderText("Optional HTTPS endpoint")
+                    self._intelligence_policy = QComboBox()
+                    self._intelligence_policy.addItems(
+                        ["auto_allowed", "guarded", "manual_only", "blocked"]
+                    )
+                    self._intelligence_budget_task = QLineEdit()
+                    self._intelligence_budget_task.setObjectName("intelligence-budget-task")
+                    self._intelligence_budget_daily = QLineEdit()
+                    self._intelligence_budget_daily.setObjectName("intelligence-budget-daily")
+                    self._intelligence_budget_monthly = QLineEdit()
+                    self._intelligence_budget_monthly.setObjectName("intelligence-budget-monthly")
+                    self._intelligence_budget_approval = QLineEdit()
+                    self._intelligence_budget_approval.setObjectName("intelligence-budget-approval")
+                    self._intelligence_refresh = QPushButton("Refresh Intelligence")
+                    self._intelligence_refresh.clicked.connect(
+                        lambda _checked=False: self._refresh_page("intelligence")
+                    )
+                    connect_provider = QPushButton("Connect Provider")
+                    connect_provider.clicked.connect(self._connect_intelligence_provider)
+                    disable_provider = QPushButton("Disable Routing")
+                    disable_provider.clicked.connect(
+                        lambda _checked=False: self._set_intelligence_provider_policy(
+                            "routing_disabled"
+                        )
+                    )
+                    enable_provider = QPushButton("Enable Routing")
+                    enable_provider.clicked.connect(
+                        lambda _checked=False: self._set_intelligence_provider_policy("enabled")
+                    )
+                    delete_credential = QPushButton("Delete Credential")
+                    delete_credential.clicked.connect(self._delete_intelligence_credential)
+                    set_model_policy = QPushButton("Set Model Policy")
+                    set_model_policy.clicked.connect(self._set_intelligence_model_policy)
+                    self._intelligence_budget_apply = QPushButton("Save Budget Controls")
+                    self._intelligence_budget_apply.clicked.connect(self._set_intelligence_budget)
+                    intelligence_form = QFormLayout()
+                    intelligence_form.addRow("Provider", self._intelligence_provider)
+                    intelligence_form.addRow("Credential", self._intelligence_secret)
+                    intelligence_form.addRow("Endpoint", self._intelligence_endpoint)
+                    intelligence_form.addRow("Model policy", self._intelligence_policy)
+                    intelligence_form.addRow("Task budget", self._intelligence_budget_task)
+                    intelligence_form.addRow("Daily cloud budget", self._intelligence_budget_daily)
+                    intelligence_form.addRow(
+                        "Monthly cloud budget", self._intelligence_budget_monthly
+                    )
+                    intelligence_form.addRow(
+                        "Approval threshold", self._intelligence_budget_approval
+                    )
+                    page_layout.addLayout(intelligence_form)
+                    page_layout.addWidget(self._intelligence_refresh)
+                    page_layout.addWidget(connect_provider)
+                    page_layout.addWidget(disable_provider)
+                    page_layout.addWidget(enable_provider)
+                    page_layout.addWidget(delete_credential)
+                    page_layout.addWidget(set_model_policy)
+                    page_layout.addWidget(self._intelligence_budget_apply)
+                    self._normal_action_widgets.extend(
+                        (
+                            self._intelligence_provider,
+                            self._intelligence_secret,
+                            self._intelligence_endpoint,
+                            self._intelligence_policy,
+                            self._intelligence_budget_task,
+                            self._intelligence_budget_daily,
+                            self._intelligence_budget_monthly,
+                            self._intelligence_budget_approval,
+                            connect_provider,
+                            disable_provider,
+                            enable_provider,
+                            delete_credential,
+                            set_model_policy,
+                            self._intelligence_budget_apply,
+                        )
+                    )
                 else:
                     rows = QListWidget()
                     rows.setObjectName(f"{section.value}-records")
@@ -532,6 +620,10 @@ def run_desktop_app(
                 ),
                 ShellSection.PERMISSIONS: "Permission requests use the trusted approval surface.",
                 ShellSection.ACTIVITY: "Bounded operational activity is owned by the runtime.",
+                ShellSection.INTELLIGENCE: (
+                    "Provider setup, exact model routes, policy, credential, and usability "
+                    "state are controlled by application services."
+                ),
                 ShellSection.SETTINGS: (
                     "Configuration is read and saved through the JARVIS environment service."
                 ),
@@ -689,6 +781,75 @@ def run_desktop_app(
             if page == ShellSection.MEMORY.value:
                 self._refresh_page("episodes")
 
+        def _selected_intelligence_row(self) -> DesktopRow | None:
+            return self._selected_row(ShellSection.INTELLIGENCE.value)
+
+        def _connect_intelligence_provider(self) -> None:
+            provider = self._intelligence_provider.currentText().strip()
+            secret = self._intelligence_secret.text()
+            endpoint = self._intelligence_endpoint.text().strip()
+            configuration = {"base_url": endpoint} if endpoint else {}
+            future = backend.submit(
+                lambda service: service.connect_provider(
+                    provider, secret=secret, configuration=configuration
+                )
+            )
+            future.add_done_callback(
+                lambda result: self._signals.operation_finished.emit("intelligence", result)
+            )
+            self._intelligence_secret.clear()
+
+        def _set_intelligence_provider_policy(self, policy: str) -> None:
+            row = self._selected_intelligence_row()
+            if row is None or not row.row_id.startswith("provider:"):
+                self._show_error("Select a provider row first")
+                return
+            provider_id = row.row_id.removeprefix("provider:")
+            future = backend.submit(
+                lambda service: service.set_provider_routing_policy(provider_id, policy)
+            )
+            future.add_done_callback(
+                lambda result: self._signals.operation_finished.emit("intelligence", result)
+            )
+
+        def _delete_intelligence_credential(self) -> None:
+            row = self._selected_intelligence_row()
+            if row is None or not row.row_id.startswith("provider:"):
+                self._show_error("Select a provider row first")
+                return
+            provider_id = row.row_id.removeprefix("provider:")
+            future = backend.submit(lambda service: service.delete_provider_credential(provider_id))
+            future.add_done_callback(
+                lambda result: self._signals.operation_finished.emit("intelligence", result)
+            )
+
+        def _set_intelligence_model_policy(self) -> None:
+            row = self._selected_intelligence_row()
+            if row is None or not row.row_id.startswith("model:"):
+                self._show_error("Select a model row first")
+                return
+            route_key = row.row_id.removeprefix("model:")
+            policy = self._intelligence_policy.currentText()
+            future = backend.submit(lambda service: service.set_model_policy(route_key, policy))
+            future.add_done_callback(
+                lambda result: self._signals.operation_finished.emit("intelligence", result)
+            )
+
+        def _set_intelligence_budget(self) -> None:
+            future = backend.submit(
+                lambda service: service.set_intelligence_budget(
+                    {
+                        "task": self._intelligence_budget_task.text().strip(),
+                        "daily": self._intelligence_budget_daily.text().strip(),
+                        "monthly": self._intelligence_budget_monthly.text().strip(),
+                        "approval_threshold": self._intelligence_budget_approval.text().strip(),
+                    }
+                )
+            )
+            future.add_done_callback(
+                lambda result: self._signals.operation_finished.emit("intelligence", result)
+            )
+
         def _projection_updated(self, _update: object) -> None:
             if self._safe_mode:
                 return
@@ -715,6 +876,13 @@ def run_desktop_app(
                 return
             page_rows: tuple[DesktopRow, ...] = rows
             self._page_rows[page] = page_rows
+            if page == ShellSection.INTELLIGENCE.value:
+                self._intelligence_provider.clear()
+                self._intelligence_provider.addItems(
+                    row.row_id.removeprefix("provider:")
+                    for row in page_rows
+                    if row.row_id.startswith("provider:")
+                )
             target.clear()
             target.setAccessibleName(f"{page.title()} records")
             target.setWordWrap(True)
@@ -1422,10 +1590,24 @@ def run_desktop_app(
                 ShellSection.AUTOMATIONS: t("nav.automations", "Automations"),
                 ShellSection.PERMISSIONS: t("nav.permissions", "Permissions"),
                 ShellSection.ACTIVITY: t("nav.activity", "Activity"),
+                ShellSection.INTELLIGENCE: t("nav.intelligence", "Intelligence"),
                 ShellSection.SETTINGS: t("nav.settings", "Settings"),
             }
             for section, button in self._nav_buttons.items():
                 button.setText(labels.get(section, section.value.title()))
+            if hasattr(self, "_intelligence_refresh"):
+                self._intelligence_refresh.setText(
+                    t("intelligence.refresh", "Refresh Intelligence")
+                )
+                self._intelligence_secret.setPlaceholderText(
+                    t("intelligence.credential_placeholder", "Credential (stored in Vault)")
+                )
+                self._intelligence_endpoint.setPlaceholderText(
+                    t("intelligence.endpoint_placeholder", "Optional HTTPS endpoint")
+                )
+                self._intelligence_budget_apply.setText(
+                    t("intelligence.budget_apply", "Save Budget Controls")
+                )
             self._language_heading.setText(t("app.language_region", "Language & Region"))
             self._personalization_heading.setText(
                 t("app.personalization", "Personality & Personalization")

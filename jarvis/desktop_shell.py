@@ -73,6 +73,7 @@ class ShellSection(StrEnum):
     AUTOMATIONS = "automations"
     PERMISSIONS = "permissions"
     ACTIVITY = "activity"
+    INTELLIGENCE = "intelligence"
     SETTINGS = "settings"
 
 
@@ -160,6 +161,7 @@ class DesktopShellService:
         ShellNavigationItem(ShellSection.AUTOMATIONS, "Automations"),
         ShellNavigationItem(ShellSection.PERMISSIONS, "Permissions"),
         ShellNavigationItem(ShellSection.ACTIVITY, "Activity"),
+        ShellNavigationItem(ShellSection.INTELLIGENCE, "Intelligence"),
         ShellNavigationItem(ShellSection.SETTINGS, "Settings"),
     )
 

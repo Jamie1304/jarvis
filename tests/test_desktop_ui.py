@@ -215,6 +215,62 @@ def test_desktop_constructs_all_navigation_pages_offscreen(
     assert pages == len(DesktopShellService().navigation)
 
 
+def test_r3h_intelligence_page_exposes_real_masked_and_budget_controls() -> None:
+    app = _application()
+    backend = DesktopBackendHost(lambda: _RuntimeDouble(), lambda _runtime: _DesktopServiceDouble())
+    observed: dict[str, bool] = {}
+
+    def inspect_page() -> None:
+        window: QMainWindow = next(
+            widget
+            for widget in app.topLevelWidgets()
+            if isinstance(widget, QMainWindow) and widget.isVisible()
+        )
+        intelligence: QPushButton | None = None
+        buttons: list[QPushButton] = list(window.findChildren(QPushButton))
+        for candidate in buttons:
+            if candidate.text() == "Intelligence":
+                intelligence = candidate
+                break
+        assert intelligence is not None
+        intelligence.click()
+
+        def inspect_controls() -> None:
+            records = window.findChild(QListWidget, "intelligence-records")
+            secret = window.findChild(QLineEdit, "intelligence-credential")
+            observed["records"] = records is not None
+            observed["masked"] = (
+                secret is not None and secret.echoMode() == QLineEdit.EchoMode.Password
+            )
+            observed["task_budget"] = (
+                window.findChild(QLineEdit, "intelligence-budget-task") is not None
+            )
+            observed["daily_budget"] = (
+                window.findChild(QLineEdit, "intelligence-budget-daily") is not None
+            )
+            observed["monthly_budget"] = (
+                window.findChild(QLineEdit, "intelligence-budget-monthly") is not None
+            )
+            observed["approval_threshold"] = (
+                window.findChild(QLineEdit, "intelligence-budget-approval") is not None
+            )
+            window.close()
+            app.quit()
+
+        QTimer.singleShot(100, inspect_controls)
+
+    QTimer.singleShot(0, inspect_page)
+    assert run_desktop_app(backend) == 0
+    assert observed == {
+        "records": True,
+        "masked": True,
+        "task_budget": True,
+        "daily_budget": True,
+        "monthly_budget": True,
+        "approval_threshold": True,
+    }
+
+
 def test_desktop_send_uses_typed_input_not_qt_clicked_boolean() -> None:
     app = _application()
     service_holder: list[_DesktopServiceDouble] = []

@@ -36,7 +36,7 @@ from jarvis.system_stewardship import StewardshipObservation, SystemStewardshipC
 from jarvis.trace import TraceEvent, TraceEventType
 
 if TYPE_CHECKING:
-    from jarvis.runtime import ApplicationRuntime
+    from jarvis.runtime import ApplicationRuntime, RuntimeContainer
 
 
 @dataclass(frozen=True, slots=True)
@@ -230,8 +230,97 @@ class DesktopApplicationFacade:
         container = self._runtime.container
         if container is None:
             return ModelIntelligenceProjection(ProviderRegistry()).page()
-        router = container.provider_router
-        return ModelIntelligenceProjection(router.registry, router.policy_engine).page()
+        return container.model_intelligence.page()
+
+    def set_provider_routing_policy(self, provider_id: str, policy: str) -> str:
+        """Change provider routing only through the runtime onboarding owner."""
+
+        from jarvis.ai.providers.intelligence import ProviderPolicy
+
+        container = self._require_container()
+        if self.safe_mode:
+            raise ServiceUnavailableError("Provider controls are unavailable in Safe Mode")
+        updated = container.provider_onboarding.set_routing_policy(
+            provider_id, ProviderPolicy(policy)
+        )
+        return str(updated.routing_policy.value)
+
+    def connect_provider(
+        self, provider_id: str, *, secret: str, configuration: dict[str, object] | None = None
+    ) -> str:
+        if self.safe_mode:
+            raise ServiceUnavailableError("Provider controls are unavailable in Safe Mode")
+        if type(secret) is not str or not secret:
+            raise ValueError("Provider credential is required")
+        connection = self._require_container().provider_onboarding.connect(
+            provider_id, configuration=configuration or {}, secret=secret
+        )
+        return str(connection.status)
+
+    def delete_provider_credential(self, provider_id: str) -> str:
+        if self.safe_mode:
+            raise ServiceUnavailableError("Credential controls are unavailable in Safe Mode")
+        return str(
+            self._require_container().provider_onboarding.delete_credential(provider_id).status
+        )
+
+    def set_model_policy(self, route_key: str, policy: str) -> str:
+        from jarvis.ai.knowledge import ModelIdentity
+        from jarvis.ai.providers.intelligence import ModelPolicy
+
+        if self.safe_mode:
+            raise ServiceUnavailableError("Model controls are unavailable in Safe Mode")
+        identity = ModelIdentity.from_storage_key(route_key)
+        value = ModelPolicy(policy)
+        container = self._require_container()
+        container.intelligence_policy_store.set_model_policy(identity, value)
+        return str(value.value)
+
+    def intelligence_budget(self) -> dict[str, object]:
+        if self.safe_mode:
+            return {"task": None, "daily": None, "monthly": None, "approval_threshold": None}
+        policy = self._require_container().intelligence_budget.policy
+        return {
+            "task": policy.max_task_cost,
+            "daily": policy.daily_cloud_budget,
+            "monthly": policy.monthly_cloud_budget,
+            "approval_threshold": policy.approval_threshold,
+        }
+
+    def set_intelligence_budget(self, values: Mapping[str, object]) -> dict[str, object]:
+        """Persist bounded cloud-budget controls through the runtime owner."""
+
+        from jarvis.ai.governance import BudgetPolicy
+
+        if self.safe_mode:
+            raise ServiceUnavailableError("Budget controls are unavailable in Safe Mode")
+        if not isinstance(values, Mapping):
+            raise ValueError("Budget values are invalid")
+
+        def amount(name: str) -> float | None:
+            raw = values.get(name)
+            if raw is None or raw == "":
+                return None
+            if isinstance(raw, bool):
+                raise ValueError(f"Budget {name} is invalid")
+            if not isinstance(raw, str | int | float):
+                raise ValueError(f"Budget {name} is invalid")
+            try:
+                return float(raw)
+            except (TypeError, ValueError) as error:
+                raise ValueError(f"Budget {name} is invalid") from error
+
+        current = self._require_container().intelligence_budget.policy
+        policy = BudgetPolicy(
+            current.max_request_cost,
+            amount("task"),
+            amount("daily"),
+            current.weekly_cloud_budget,
+            amount("monthly"),
+            amount("approval_threshold"),
+        )
+        self._require_container().intelligence_budget.set_policy(policy)
+        return self.intelligence_budget()
 
     def settings_descriptors(self) -> tuple[EnvironmentSettingDescriptor, ...]:
         return (
@@ -502,6 +591,37 @@ class DesktopApplicationFacade:
             return self._episode_rows(self.episode_views())
         if page == "activity":
             return self._activity_rows(self.activity_view())
+        if page == "intelligence":
+            page_view = self.model_intelligence_view()
+            rows: list[DesktopRow] = []
+            for provider in page_view.providers:
+                rows.append(
+                    DesktopRow(
+                        f"provider:{provider.provider_id}",
+                        provider.display_name,
+                        provider.connection_status.upper(),
+                        (
+                            f"{provider.provider_id}; policy={provider.policy}; "
+                            f"models={provider.model_count}; support={provider.support_status}; "
+                            "discovery="
+                            f"{'available' if provider.dynamic_discovery else 'not implemented'}"
+                        ),
+                    )
+                )
+            for model in page_view.models:
+                rows.append(
+                    DesktopRow(
+                        f"model:{model.route_key}",
+                        f"{model.provider_id}/{model.model_id}",
+                        model.policy.upper(),
+                        (
+                            f"route={model.route_key}; kind={model.inference_kind}; "
+                            f"usability={model.usability}; cost={model.cost}; "
+                            f"endpoint={model.endpoint}; region={model.region}"
+                        ),
+                    )
+                )
+            return tuple(rows)
         assistant = self._require_assistant()
         if page == "tasks":
             return tuple(
@@ -1339,7 +1459,7 @@ class DesktopApplicationFacade:
             )
         return tuple(rows)
 
-    def _require_container(self) -> Any:
+    def _require_container(self) -> RuntimeContainer:
         container = self._runtime.container
         if container is None:
             raise ServiceUnavailableError("Normal desktop actions are unavailable in Safe Mode")

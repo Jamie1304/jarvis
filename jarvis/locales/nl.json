@@ -72,5 +72,15 @@
   "settings.behavioral_learning": "Gedrag leren",
   "settings.pause_learning": "Leren pauzeren",
   "settings.freeze_personality": "Adaptieve persoonlijkheid bevriezen",
-  "settings.enabled": "Ingeschakeld"
+  "settings.enabled": "Ingeschakeld",
+  "nav.intelligence": "Intelligentie",
+  "intelligence.refresh": "Intelligentie vernieuwen",
+  "intelligence.connect": "Provider verbinden",
+  "intelligence.disable": "Routering uitschakelen",
+  "intelligence.enable": "Routering inschakelen",
+  "intelligence.delete_credential": "Referentie verwijderen",
+  "intelligence.set_policy": "Modelbeleid instellen",
+  "intelligence.credential_placeholder": "Referentie (opgeslagen in Kluis)",
+  "intelligence.endpoint_placeholder": "Optioneel HTTPS-eindpunt",
+  "intelligence.budget_apply": "Budgetinstellingen opslaan"
 }

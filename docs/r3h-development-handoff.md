@@ -1,6 +1,9 @@
-# V1-I-R3H development handoff
+# V1-I-R3H source handoff (superseded development note)
 
-This worktree implements the provider-neutral fabric on top of the qualified
+This file is retained as the development history. The repaired source closure
+and its current evidence boundary are documented in `docs/r3h-review-closure.md`.
+
+The repaired source implements the provider-neutral fabric on top of the qualified
 R3G source. The focused source cases are in
 `tests/test_r3h_intelligence_fabric.py`; they cover catalog completeness,
 dynamic model registration, route identity, lifecycle, policy inheritance,
@@ -8,11 +11,11 @@ guarded approvals, budget unknown-cost behavior, task quarantine, decision
 authority isolation, remote privacy, endpoint containment, and credential
 secrecy.
 
-The development catalog and adapters are controlled-fixture contracts. They do
+The catalog and adapters are controlled-fixture contracts. They do
 not prove real account authentication, billing, quota, regional entitlement,
 provider outage, or physical Jev behavior. Those remain independent
-qualification work. Full canonical quality is intentionally deferred by the
-R3H development contract.
+qualification work. The review policy leaves full canonical quality
+unexecuted: `CANONICAL_FULL_QUALITY: NOT_EXECUTED_BY_REVIEW_POLICY`.
 
 ## Architecture audit
 
@@ -29,5 +32,4 @@ R3H development contract.
 | Onboarding/UI | production partial | Vault-backed onboarding and real registry/policy model projection |
 | Zero Cloud | production partial | no cloud dependency added; local Ollama path remains the existing authority |
 
-Recommended next action: independent R3H architecture/security/provider-contract
-review, focused repair, then frozen qualification.
+Recommended next action: `V1-I-R3H-Q — new-worktree exact-SHA frozen qualification + push + hosted CI`.

@@ -41,20 +41,40 @@ from jarvis.adoption import (
     WindowsSignerVerifier,
 )
 from jarvis.agent_runtime import AgentLoop
+from jarvis.ai.decision import DecisionRouteCandidate, DecisionRouter
 from jarvis.ai.fitness import (
     RoutingFitnessProjection,
     RoutingResilienceService,
     SQLiteRoutingFitnessStore,
 )
+from jarvis.ai.governance import (
+    BudgetLedger,
+    BudgetPolicy,
+    TaskQuarantine,
+)
+from jarvis.ai.governance import (
+    PolicyEngine as IntelligencePolicyEngine,
+)
+from jarvis.ai.governance import (
+    PolicyStore as IntelligencePolicyStore,
+)
 from jarvis.ai.knowledge import ModelKnowledgeService, ModelKnowledgeStore
 from jarvis.ai.local_ai import LocalAIControlPlane, LocalAIUserPolicy
+from jarvis.ai.model_intelligence import ModelIntelligenceProjection
 from jarvis.ai.model_manager import LocalModelManager
+from jarvis.ai.onboarding import ProviderOnboardingService
 from jarvis.ai.portfolio import (
     BrokerModelRemovalAuthorizer,
     ModelPortfolioOptimizer,
     SQLiteRetirementStore,
 )
 from jarvis.ai.providers.base import AIProvider
+from jarvis.ai.providers.discovery import ModelDiscoveryService
+from jarvis.ai.providers.intelligence import (
+    CallableDecisionProvider,
+    DecisionRequest,
+    DecisionResult,
+)
 from jarvis.ai.providers.ollama_runtime import OllamaModelAdapter, OllamaRuntimeManager
 from jarvis.ai.providers.registry import ProviderRegistry
 from jarvis.ai.routing import InferenceDispatcher, ProviderRouter, RoutingFeedbackRecorder
@@ -471,6 +491,10 @@ class RuntimePaths:
     human_adaptation_database: Path
     knowledge_library_database: Path
     model_knowledge_database: Path
+    intelligence_policy_database: Path
+    intelligence_budget_database: Path
+    intelligence_quarantine_database: Path
+    provider_connections_database: Path
     routing_fitness_database: Path
     automation_database: Path
     trace_database: Path
@@ -516,6 +540,10 @@ class RuntimePaths:
             base / "human-adaptation.sqlite3",
             base / "knowledge-library.sqlite3",
             base / "model-knowledge.sqlite3",
+            base / "intelligence-policy.sqlite3",
+            base / "intelligence-budget.sqlite3",
+            base / "intelligence-quarantine.sqlite3",
+            base / "provider-connections.sqlite3",
             base / "routing-fitness.sqlite3",
             base / "automations.sqlite3",
             base / "trace.sqlite3",
@@ -598,6 +626,10 @@ class RuntimePaths:
             self.human_adaptation_database,
             self.knowledge_library_database,
             self.model_knowledge_database,
+            self.intelligence_policy_database,
+            self.intelligence_budget_database,
+            self.intelligence_quarantine_database,
+            self.provider_connections_database,
             self.routing_fitness_database,
             self.automation_database,
             self.trace_database,
@@ -792,6 +824,15 @@ class RuntimeContainer:
     model_planner: ModelPlanner
     local_ai: LocalAIControlPlane
     model_knowledge: ModelKnowledgeService
+    intelligence_policy_store: IntelligencePolicyStore
+    intelligence_policy: IntelligencePolicyEngine
+    intelligence_budget: BudgetLedger
+    intelligence_quarantine: TaskQuarantine
+    model_discovery: ModelDiscoveryService
+    provider_onboarding: ProviderOnboardingService
+    model_intelligence: ModelIntelligenceProjection
+    decision_router: DecisionRouter
+    provider_catalog: tuple[object, ...]
     routing_fitness_store: SQLiteRoutingFitnessStore
     routing_fitness: RoutingFitnessProjection
     routing_resilience: RoutingResilienceService
@@ -1822,6 +1863,40 @@ class ApplicationRuntime:
             model_knowledge = ModelKnowledgeService(
                 ModelKnowledgeStore(paths.model_knowledge_database)
             )
+            intelligence_policy_store = IntelligencePolicyStore(paths.intelligence_policy_database)
+            intelligence_policy = IntelligencePolicyEngine(intelligence_policy_store)
+            intelligence_budget = BudgetLedger(BudgetPolicy(), paths.intelligence_budget_database)
+            intelligence_quarantine = TaskQuarantine(path=paths.intelligence_quarantine_database)
+            model_discovery = ModelDiscoveryService(configured_provider_registry, model_knowledge)
+            provider_onboarding = ProviderOnboardingService(
+                credential_vault,
+                registry=configured_provider_registry,
+                policies=intelligence_policy_store,
+                path=paths.provider_connections_database,
+                discovery=model_discovery,
+            )
+
+            async def _offline_decision(request: DecisionRequest) -> DecisionResult:
+                del request
+                return DecisionResult(
+                    "local_fallback",
+                    confidence=0.0,
+                    evidence=("deterministic local decision fallback",),
+                )
+
+            decision_router = DecisionRouter(
+                (
+                    DecisionRouteCandidate(
+                        "local-decision",
+                        CallableDecisionProvider(_offline_decision),
+                        local=True,
+                        priority=0,
+                    ),
+                )
+            )
+            model_intelligence = ModelIntelligenceProjection(
+                configured_provider_registry, intelligence_policy, knowledge=model_knowledge
+            )
             session_store = AgentSessionStore(paths.sessions_database)
             paths.validate_storage_layout()
             artifact_store = ArtifactStore(paths.artifacts, event_bus=events)
@@ -1858,6 +1933,9 @@ class ApplicationRuntime:
                 model_knowledge,
                 hardware_profile=hardware_inventory.inspect(),
                 routing_store=routing_fitness_store,
+                policy_engine=intelligence_policy,
+                budget_ledger=intelligence_budget,
+                task_quarantine=intelligence_quarantine,
             )
             model_knowledge.refresh_registry(
                 configured_provider_registry,
@@ -3182,6 +3260,17 @@ class ApplicationRuntime:
                 model_planner=model_planner,
                 local_ai=local_ai,
                 model_knowledge=model_knowledge,
+                intelligence_policy_store=intelligence_policy_store,
+                intelligence_policy=intelligence_policy,
+                intelligence_budget=intelligence_budget,
+                intelligence_quarantine=intelligence_quarantine,
+                model_discovery=model_discovery,
+                provider_onboarding=provider_onboarding,
+                model_intelligence=model_intelligence,
+                decision_router=decision_router,
+                provider_catalog=tuple(
+                    manifest for _, manifest in configured_provider_registry.packages()
+                ),
                 routing_fitness_store=routing_fitness_store,
                 routing_fitness=routing_fitness,
                 routing_resilience=routing_resilience,

@@ -72,5 +72,15 @@
   "settings.behavioral_learning": "Behavioral learning",
   "settings.pause_learning": "Pause learning",
   "settings.freeze_personality": "Freeze adaptive personality",
-  "settings.enabled": "Enabled"
+  "settings.enabled": "Enabled",
+  "nav.intelligence": "Intelligence",
+  "intelligence.refresh": "Refresh Intelligence",
+  "intelligence.connect": "Connect Provider",
+  "intelligence.disable": "Disable Routing",
+  "intelligence.enable": "Enable Routing",
+  "intelligence.delete_credential": "Delete Credential",
+  "intelligence.set_policy": "Set Model Policy",
+  "intelligence.credential_placeholder": "Credential (stored in Vault)",
+  "intelligence.endpoint_placeholder": "Optional HTTPS endpoint",
+  "intelligence.budget_apply": "Save Budget Controls"
 }

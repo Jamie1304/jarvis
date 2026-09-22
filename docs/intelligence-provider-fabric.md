@@ -34,7 +34,9 @@ policy. `PolicyEngine` resolves the most restrictive applicable policy. A
 newly discovered model is evaluated through the same path immediately. A
 `GuardedApproval` binds actor, task, exact route, purpose, scope, cost ceiling,
 and expiry. `BudgetLedger` stores actual usage receipts separately from
-pre-call estimates; `COST_UNKNOWN` is never treated as zero.
+pre-call estimates; it also retains route-bound trusted price observations,
+their provenance/history, and expiry. The newest non-stale price drives later
+routing; `COST_UNKNOWN` is never treated as zero.
 
 `TaskQuarantine` records narrow task-family failures. Learned state changes
 ranking only and cannot loosen explicit user policy.
