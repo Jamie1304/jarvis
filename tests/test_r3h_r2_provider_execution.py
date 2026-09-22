@@ -214,6 +214,7 @@ async def test_cohere_and_ai21_protocol_shapes() -> None:
         "alibaba-dashscope",
         "moonshot-kimi",
         "zhipu-glm",
+        "minimax",
         "openai-compatible",
     ),
 )
@@ -349,7 +350,10 @@ def test_generic_endpoint_requires_trusted_locality() -> None:
             "openai-compatible",
             {"base_url": "http://localhost:8080", "locality": ProviderLocality.REMOTE},
         )
-    assert provider_manifest("minimax").support_status is PackageSupportStatus.CATALOG_ONLY
+    assert (
+        provider_manifest("minimax").support_status
+        is PackageSupportStatus.CONTROLLED_PROTOCOL_TESTED
+    )
     local = create_standard_provider(
         "openai-compatible",
         {"base_url": "http://127.0.0.1:11434", "locality": ProviderLocality.LOCAL},

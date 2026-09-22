@@ -38,7 +38,14 @@ class ModelDiscoveryService:
         if len(snapshot.models) > self.MAX_MODELS:
             raise ValueError("Discovery snapshot exceeds model bound")
         models = tuple(item.metadata for item in snapshot.models)
-        self._registry.replace_models(snapshot.provider.provider_id, models)
+        provider_key = snapshot.provider.provider_id.casefold()
+        if (
+            provider_key in self._registry.intelligence_provider_ids()
+            and provider_key not in self._registry.provider_ids()
+        ):
+            self._registry.replace_intelligence_models(snapshot.provider.provider_id, models)
+        else:
+            self._registry.replace_models(snapshot.provider.provider_id, models)
         if self._knowledge is not None:
             self._knowledge.refresh(snapshot)
         return DiscoveryResult(

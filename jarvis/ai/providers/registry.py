@@ -220,6 +220,7 @@ class ProviderRegistry:
         self._definitions: dict[str, ProviderDefinition] = {}
         self._packages: dict[str, object] = {}
         self._intelligence_factories: dict[str, Callable[[Mapping[str, Any]], object]] = {}
+        self._intelligence_models: dict[str, tuple[ModelMetadata, ...]] = {}
         self._voice_definitions: dict[VoiceProviderKind, dict[str, VoiceProviderDefinition]] = {
             kind: {} for kind in VoiceProviderKind
         }
@@ -238,7 +239,13 @@ class ProviderRegistry:
         if provider_id in self._packages:
             raise ValueError(f"Provider package is already registered: {provider_id}")
         self._packages[provider_id] = package_manifest
-        if package_manifest.adapter_present and provider_id not in self._definitions:
+        from jarvis.ai.providers.intelligence import IntelligenceKind
+
+        if (
+            package_manifest.adapter_present
+            and IntelligenceKind.GENERATIVE in package_manifest.kinds
+            and provider_id not in self._definitions
+        ):
             from jarvis.ai.providers.catalog import create_standard_provider
 
             def factory(
@@ -277,9 +284,15 @@ class ProviderRegistry:
         if key in self._intelligence_factories:
             raise ValueError(f"Intelligence provider is already registered: {provider_id}")
         self._intelligence_factories[key] = factory
+        self._intelligence_models.setdefault(key, ())
 
     def intelligence_provider_ids(self) -> tuple[str, ...]:
         return tuple(sorted(self._intelligence_factories))
+
+    def intelligence_models(self) -> tuple[tuple[str, tuple[ModelMetadata, ...]], ...]:
+        """Return descriptive models owned by non-generative providers."""
+
+        return tuple(sorted(self._intelligence_models.items()))
 
     def create_intelligence(
         self, provider_id: str, configuration: Mapping[str, Any]
@@ -321,6 +334,26 @@ class ProviderRegistry:
         never introduces provider- or model-specific Core branches.
         """
 
+        self._validate_model_advertisement(models)
+        current = self.definition(provider_id)
+        updated = ProviderDefinition(current.metadata, current.factory, models)
+        self._definitions[provider_id.casefold()] = updated
+        return updated
+
+    def replace_intelligence_models(
+        self, provider_id: str, models: tuple[ModelMetadata, ...]
+    ) -> tuple[ModelMetadata, ...]:
+        """Replace discovery metadata for a non-generative intelligence provider."""
+
+        self._validate_model_advertisement(models)
+        key = provider_id.casefold()
+        if key not in self._intelligence_factories or key in self._definitions:
+            raise KeyError(f"Unknown intelligence provider: {provider_id}")
+        self._intelligence_models[key] = models
+        return models
+
+    @staticmethod
+    def _validate_model_advertisement(models: tuple[ModelMetadata, ...]) -> None:
         if (
             type(models) is not tuple
             or len(models) > 1_024
@@ -344,10 +377,6 @@ class ProviderRegistry:
             }
         ) != len(models):
             raise ValueError("Provider model advertisement contains duplicates")
-        current = self.definition(provider_id)
-        updated = ProviderDefinition(current.metadata, current.factory, models)
-        self._definitions[provider_id.casefold()] = updated
-        return updated
 
     update_models = replace_models
 

@@ -84,9 +84,15 @@ class ModelIntelligenceProjection:
         providers: list[ProviderIntelligenceRow] = []
         models: list[ModelIntelligenceRow] = []
         definitions = dict(self._registry.definitions())
+        intelligence_models = dict(self._registry.intelligence_models())
         package_ids = {provider_id for provider_id, _ in self._registry.packages()}
-        for provider_id in sorted((*package_ids, *definitions)):
+        for provider_id in sorted((*package_ids, *definitions, *intelligence_models)):
             definition = definitions.get(provider_id)
+            provider_models = (
+                definition.models
+                if definition is not None
+                else intelligence_models.get(provider_id, ())
+            )
             manifest = self._manifest_or_unknown(provider_id)
             provider_policy = (
                 self._policies.store.provider_policy(provider_id).value
@@ -105,7 +111,7 @@ class ModelIntelligenceProjection:
                     manifest.lifecycle.value,
                     provider_policy,
                     definition is not None,
-                    len(definition.models) if definition is not None else 0,
+                    len(provider_models),
                     manifest.dynamic_model_discovery,
                     manifest.support_status.value,
                     manifest.authentication.value,
@@ -114,9 +120,8 @@ class ModelIntelligenceProjection:
                     tuple(field.name for field in manifest.required_fields if not field.secret),
                 )
             )
-            if definition is not None:
-                for metadata in definition.models:
-                    models.append(self._model_row(provider_id, metadata))
+            for metadata in provider_models:
+                models.append(self._model_row(provider_id, metadata))
         return ModelIntelligencePage(datetime.now(UTC), tuple(providers), tuple(models))
 
     def _model_row(self, provider_id: str, metadata: ModelMetadata) -> ModelIntelligenceRow:

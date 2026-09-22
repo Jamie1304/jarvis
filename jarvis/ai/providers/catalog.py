@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import math
 import re
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
@@ -178,7 +179,8 @@ STANDARD_PROVIDER_MANIFESTS: tuple[ProviderPackageManifest, ...] = (
         auth=AuthenticationType.API_KEY,
         protocol=ProtocolFamily.DECISION_TYPED,
         fields=_OPENAI_FIELDS,
-        website="https://docs.typesafe.ai",
+        website="https://api.typesafe.ai/docs",
+        console="https://typesafe.ai/",
         dynamic=True,
         probe=True,
         status=PackageSupportStatus.EXTERNAL_PROTOCOL_FACT_NOT_PROVEN,
@@ -293,9 +295,10 @@ STANDARD_PROVIDER_MANIFESTS: tuple[ProviderPackageManifest, ...] = (
     _manifest(
         "minimax",
         "MiniMax",
-        protocol=ProtocolFamily.NATIVE,
+        protocol=ProtocolFamily.OPENAI_COMPATIBLE,
         fields=_OPENAI_FIELDS,
-        website="https://www.minimaxi.com/document",
+        website="https://platform.minimax.io/docs",
+        console="https://platform.minimax.io/user-center/basic-information/interface-key",
         dynamic=True,
         probe=True,
     ),
@@ -395,6 +398,7 @@ _SOURCE_EXECUTABLE_IDS = frozenset(
         "google-gemini",
         "cohere",
         "ai21",
+        "typesafe-jev",
         "xai-grok",
         "mistral",
         "deepseek",
@@ -409,6 +413,7 @@ _SOURCE_EXECUTABLE_IDS = frozenset(
         "alibaba-dashscope",
         "moonshot-kimi",
         "zhipu-glm",
+        "minimax",
         "baidu-qianfan",
         "tencent-hunyuan",
         "bytedance-volcengine",
@@ -423,6 +428,11 @@ _PROTOCOL_SOURCES: dict[str, tuple[str, ...]] = {
     "openai": ("https://platform.openai.com/docs/api-reference/models",),
     "anthropic": ("https://platform.claude.com/docs/en/api/overview",),
     "google-gemini": ("https://ai.google.dev/api/models",),
+    "typesafe-jev": (
+        "https://api.typesafe.ai/docs",
+        "https://api.typesafe.ai/openapi.json",
+        "https://typesafe.ai/blog/introducing-system-one-models-and-jev",
+    ),
     "cohere": (
         "https://docs.cohere.com/reference/list-models",
         "https://docs.cohere.com/reference/chat",
@@ -444,6 +454,11 @@ _PROTOCOL_SOURCES: dict[str, tuple[str, ...]] = {
     ),
     "moonshot-kimi": ("https://platform.moonshot.cn/docs/api",),
     "zhipu-glm": ("https://open.bigmodel.cn/dev/api",),
+    "minimax": (
+        "https://platform.minimax.io/docs/api-reference/text-openai-api.md",
+        "https://platform.minimax.io/docs/api-reference/models/openai/list-models.md",
+        "https://platform.minimax.io/docs/api-reference/text/api/openapi-chat-openai.json",
+    ),
     "baidu-qianfan": ("https://cloud.baidu.com/doc/qianfan-api/s/Dmba8k71y",),
     "tencent-hunyuan": ("https://cloud.tencent.com/document/product/1729/111007",),
     "bytedance-volcengine": ("https://docs.volcengine.com/docs/ark/chat-api",),
@@ -456,6 +471,7 @@ _PROTOCOL_SOURCES: dict[str, tuple[str, ...]] = {
 _ADAPTER_OWNERS: dict[str, str] = {
     "cohere": "CohereProvider",
     "ai21": "AI21Provider",
+    "typesafe-jev": "JevDecisionProvider",
     "azure-openai": "AzureOpenAIProvider",
     "amazon-bedrock": "BedrockProvider",
     "google-vertex": "VertexAIProvider",
@@ -490,11 +506,7 @@ def _finalize_manifests(
             result.append(
                 replace(
                     manifest,
-                    support_status=(
-                        PackageSupportStatus.EXTERNAL_PROTOCOL_FACT_NOT_PROVEN
-                        if manifest.provider_id == "typesafe-jev"
-                        else PackageSupportStatus.CATALOG_ONLY
-                    ),
+                    support_status=PackageSupportStatus.CATALOG_ONLY,
                     dynamic_model_discovery=False,
                     usability_probe=False,
                     adapter_owner="",
@@ -694,6 +706,8 @@ class HttpxJSONTransport:
     the small protocol above and therefore exercise the same adapter code.
     """
 
+    MAX_RESPONSE_BYTES = 4 * 1024 * 1024
+
     def __init__(
         self,
         base_url: str,
@@ -770,6 +784,19 @@ class HttpxJSONTransport:
                     _classify_status(response.status_code),
                     status_code=response.status_code,
                     detail="provider request failed",
+                )
+            content_length = response.headers.get("content-length")
+            if content_length is not None and (
+                not content_length.isdigit() or int(content_length) > self.MAX_RESPONSE_BYTES
+            ):
+                raise ProviderAdapterError(
+                    ProviderErrorReason.MALFORMED_RESPONSE,
+                    detail="provider response is oversized",
+                )
+            if len(response.content) > self.MAX_RESPONSE_BYTES:
+                raise ProviderAdapterError(
+                    ProviderErrorReason.MALFORMED_RESPONSE,
+                    detail="provider response is oversized",
                 )
             try:
                 value = response.json()
@@ -852,6 +879,7 @@ class OpenAICompatibleConfiguration:
     credential_prefix: str = "Bearer"
     extra_headers: tuple[tuple[str, str], ...] = ()
     page_limit: int = 1000
+    credential_required: bool = False
 
     def __post_init__(self) -> None:
         if (
@@ -908,6 +936,8 @@ class OpenAICompatibleConfiguration:
             raise ValueError("OpenAI-compatible headers are invalid")
         if type(self.page_limit) is not int or not 1 <= self.page_limit <= 1_000:
             raise ValueError("OpenAI-compatible page limit is invalid")
+        if type(self.credential_required) is not bool:
+            raise ValueError("OpenAI-compatible credential requirement is invalid")
         if self.locality is ProviderLocality.LOCAL and not local_model_endpoint_is_safe(
             self.base_url
         ):
@@ -944,6 +974,8 @@ class OpenAICompatibleProvider(AIProvider):
     async def _headers(self) -> dict[str, str]:
         headers = {"accept": "application/json", "content-type": "application/json"}
         ref = self.configuration.credential_ref
+        if ref is None and self.configuration.credential_required:
+            raise PermissionError("Credential reference is required")
         if ref is not None:
             if self._credential_resolver is None:
                 raise PermissionError("Credential resolver is required")
@@ -1382,6 +1414,11 @@ STANDARD_OPENAI_PRESETS: dict[str, StandardOpenAIPreset] = {
         "https://ark.cn-beijing.volces.com/api/v3",
         "https://docs.volcengine.com/docs/ark/chat-api",
     ),
+    "minimax": StandardOpenAIPreset(
+        "minimax",
+        "https://api.minimax.io/v1",
+        "https://platform.minimax.io/docs/api-reference/text-openai-api.md",
+    ),
 }
 
 
@@ -1445,6 +1482,7 @@ def _standard_openai_provider(
             credential_header=preset.credential_header,
             credential_prefix=preset.credential_prefix,
             extra_headers=preset.extra_headers,
+            credential_required=True,
         ),
         _transport_for(preset.base_url, configuration, transport),
         credential_resolver=credential_resolver,
@@ -2164,6 +2202,22 @@ def create_standard_provider(
         return _standard_openai_provider(
             key, configuration, transport=transport, credential_resolver=credential_resolver
         )
+    if key == "typesafe-jev":
+        model = configuration.get("model", "")
+        if type(model) is not str:
+            raise ValueError("Jev model is invalid")
+        base_url = "https://api.typesafe.ai"
+        return cast(
+            AIProvider,
+            JevDecisionProvider(
+                JevConfiguration(
+                    model=model,
+                    credential_ref=_credential_ref(configuration),
+                ),
+                _transport_for(base_url, configuration, transport),
+                credential_resolver=credential_resolver,
+            ),
+        )
     if key == "ai21":
         model = configuration.get("model", "")
         if type(model) is not str:
@@ -2333,25 +2387,384 @@ def register_standard_provider_factories(registry: object) -> None:
         registry.register_intelligence(provider_id, factory)
 
 
+@dataclass(frozen=True, slots=True)
+class JevConfiguration:
+    """Fixed TypeSafe API configuration; the standard package owns its host."""
+
+    provider_id: str = "typesafe-jev"
+    base_url: str = "https://api.typesafe.ai"
+    model: str = ""
+    credential_ref: object | None = None
+    page_limit: int = 256
+
+    def __post_init__(self) -> None:
+        if self.provider_id != "typesafe-jev":
+            raise ValueError("Jev provider identity is invalid")
+        if self.base_url != "https://api.typesafe.ai":
+            raise ValueError("Jev endpoint is fixed by the standard package")
+        if type(self.model) is not str or len(self.model) > 256 or "\x00" in self.model:
+            raise ValueError("Jev model is invalid")
+        if type(self.page_limit) is not int or not 1 <= self.page_limit <= 256:
+            raise ValueError("Jev model page limit is invalid")
+
+
+def _jev_number(value: object, *, field: str) -> float:
+    if type(value) is int:
+        number = float(value)
+    elif type(value) is float:
+        number = value
+    else:
+        raise ValueError(f"Jev {field} is invalid")
+    if not math.isfinite(number):
+        raise ValueError(f"Jev {field} is invalid")
+    return number
+
+
+def _jev_probability(value: object, *, field: str) -> float:
+    number = _jev_number(value, field=field)
+    if not 0.0 <= number <= 1.0:
+        raise ValueError(f"Jev {field} is invalid")
+    return number
+
+
+def _jev_text(value: object, *, field: str, limit: int = 256) -> str:
+    if (
+        type(value) is not str
+        or not value.strip()
+        or len(value) > limit
+        or any(ord(char) < 32 for char in value)
+    ):
+        raise ValueError(f"Jev {field} is invalid")
+    return value.strip()
+
+
+def _jev_control_values(request: DecisionRequest) -> dict[str, str]:
+    return {
+        key.casefold(): value
+        for key, value in request.inputs
+        if key.casefold() in {"choices", "criteria", "rubric"}
+    }
+
+
+def _jev_string_list(raw: str, *, field: str) -> list[str]:
+    try:
+        decoded = json.loads(raw)
+    except json.JSONDecodeError:
+        decoded = [item.strip() for item in raw.split(",") if item.strip()]
+    if not isinstance(decoded, list) or not decoded or len(decoded) > 255:
+        raise ValueError(f"Jev {field} is invalid")
+    result = [_jev_text(item, field=f"{field} item") for item in decoded]
+    if len(set(result)) != len(result):
+        raise ValueError(f"Jev {field} contains duplicates")
+    return result
+
+
+def _jev_state(request: DecisionRequest, control_keys: set[str]) -> dict[str, str]:
+    state = {"task": request.task}
+    state.update(
+        {key: value for key, value in request.inputs if key.casefold() not in control_keys}
+    )
+    return state
+
+
+def _jev_question(request: DecisionRequest) -> tuple[dict[str, object], str, tuple[str, ...]]:
+    schema = request.output_schema.casefold().strip()
+    controls = _jev_control_values(request)
+    if schema in {"choice", "choices"}:
+        raw = controls.get("choices") or controls.get("criteria")
+        choices = _jev_string_list(raw, field="choice criteria") if raw else ["yes", "no"]
+        return (
+            {
+                "type": "choice",
+                "instructions": request.task,
+                "criteria": {choice: choice for choice in choices},
+            },
+            "choice",
+            tuple(choices),
+        )
+    if schema in {"score", "rating"}:
+        raw = controls.get("criteria") or controls.get("rubric")
+        score_criteria = (
+            _jev_string_list(raw, field="score criteria") if raw else ["low", "medium", "high"]
+        )
+        return (
+            {"type": "score", "instructions": request.task, "criteria": score_criteria},
+            "score",
+            tuple(str(index) for index in range(len(score_criteria))),
+        )
+    if schema in {"noul", "yes_no", "yes-no", "label_and_score"}:
+        raw = controls.get("criteria")
+        noul_criteria: dict[str, str] | None = None
+        if raw:
+            try:
+                decoded = json.loads(raw)
+            except json.JSONDecodeError as error:
+                raise ValueError("Jev Noul criteria must be a JSON object") from error
+            if not isinstance(decoded, Mapping) or any(
+                type(key) is not str or key not in {"true", "false"} or type(value) is not str
+                for key, value in decoded.items()
+            ):
+                raise ValueError("Jev Noul criteria is invalid")
+            noul_criteria = {str(key): str(value) for key, value in decoded.items()}
+        return (
+            {"type": "noul", "instructions": request.task, "criteria": noul_criteria},
+            "noul",
+            (),
+        )
+    raise ValueError("Jev output schema must be Choice, Score, or Noul")
+
+
+_JEV_AUTHORITY_FIELDS = frozenset(
+    {
+        "permission",
+        "approval",
+        "permission_granted",
+        "security_verdict",
+        "release_approval",
+        "update_authority",
+        "effect_verification",
+        "identity_verification",
+    }
+)
+
+
+def _jev_contains_authority(value: object) -> bool:
+    if isinstance(value, Mapping):
+        if any(str(key).casefold() in _JEV_AUTHORITY_FIELDS for key in value):
+            return True
+        return any(_jev_contains_authority(item) for item in value.values())
+    if isinstance(value, Sequence) and not isinstance(value, str | bytes):
+        return any(_jev_contains_authority(item) for item in value)
+    return False
+
+
 class JevDecisionProvider(DecisionProvider):
-    """Typed Jev adapter boundary; transport is injected and optional offline."""
+    """Concrete TypeSafe System One adapter for bounded advisory decisions."""
 
     def __init__(
-        self, transport: Callable[[DecisionRequest], Awaitable[DecisionResult]] | None = None
+        self,
+        configuration: JevConfiguration | None = None,
+        transport: OpenAICompatibleTransport
+        | Callable[[DecisionRequest], Awaitable[DecisionResult]]
+        | None = None,
+        *,
+        credential_resolver: CredentialResolver | None = None,
+        legacy_transport: Callable[[DecisionRequest], Awaitable[DecisionResult]] | None = None,
     ) -> None:
-        self._transport = transport
+        self.configuration = configuration or JevConfiguration()
+        self._transport = (
+            cast(OpenAICompatibleTransport, transport)
+            if callable(getattr(transport, "request", None))
+            else None
+        )
+        self._credential_resolver = credential_resolver
+        self._legacy_transport = legacy_transport or (
+            transport
+            if callable(transport) and not callable(getattr(transport, "request", None))
+            else None
+        )
 
     @property
     def provider_id(self) -> str:
-        return "typesafe-jev"
+        return self.configuration.provider_id
 
-    async def decide(self, request: DecisionRequest) -> DecisionResult:
+    @property
+    def intelligence_kinds(self) -> frozenset[str]:
+        return frozenset({IntelligenceKind.DECISION.value})
+
+    async def _headers(self) -> dict[str, str]:
+        if self._credential_resolver is None or self.configuration.credential_ref is None:
+            raise PermissionError("Credential resolver and Jev credential are required")
+        secret = await self._credential_resolver(self.configuration.credential_ref)
+        raw = secret.decode() if isinstance(secret, bytes) else secret
+        if not raw or len(raw) > 16_384 or any(ord(char) < 32 for char in raw):
+            raise PermissionError("Credential material is invalid")
+        return {
+            "accept": "application/json",
+            "content-type": "application/json",
+            "authorization": f"Bearer {raw}",
+        }
+
+    def _require_transport(self) -> OpenAICompatibleTransport:
         if self._transport is None:
             raise ConnectionError("Jev decision provider is unavailable")
-        result = await self._transport(request)
-        if not isinstance(result, DecisionResult):
-            raise ValueError("Jev returned malformed decision output")
-        return result
+        return self._transport
 
-    async def health_check(self) -> bool:
-        return self._transport is not None
+    async def decide(self, request: DecisionRequest) -> DecisionResult:
+        if not isinstance(request, DecisionRequest):
+            raise ValueError("Jev decision request is invalid")
+        if self._legacy_transport is not None:
+            result = await self._legacy_transport(request)
+            if not isinstance(result, DecisionResult):
+                raise ValueError("Jev returned malformed decision output")
+            return result
+        question, kind, criteria = _jev_question(request)
+        model = self.configuration.model or "jev-latest"
+        payload = {
+            "model": model,
+            "state": _jev_state(request, set(_jev_control_values(request))),
+            "questions": {"decision": question},
+        }
+        try:
+            response = await self._require_transport().request(
+                "POST", "/v1/systemone", payload, await self._headers()
+            )
+        except ProviderAdapterError as error:
+            if error.reason is ProviderErrorReason.TIMEOUT:
+                raise TimeoutError("Jev request timed out") from error
+            raise ConnectionError(error.reason.value) from error
+        if _jev_contains_authority(response):
+            raise ValueError("Jev output attempted to assert authority")
+        if not isinstance(response, Mapping):
+            raise ValueError("Jev response is malformed")
+        response_model = _jev_text(response.get("model"), field="model")
+        answers = response.get("answers")
+        if not isinstance(answers, Mapping) or set(answers) != {"decision"}:
+            raise ValueError("Jev response answers are malformed")
+        answer = answers.get("decision")
+        if not isinstance(answer, Mapping) or answer.get("type") != kind:
+            raise ValueError("Jev decision answer type is malformed")
+        observed_at = datetime.now(UTC)
+        if kind == "choice":
+            choice = _jev_text(answer.get("choice"), field="choice")
+            if choice not in criteria:
+                raise ValueError("Jev choice is not in the requested criteria")
+            confidence = _jev_probability(answer.get("confidence"), field="confidence")
+            raw_probabilities = answer.get("probabilities")
+            if not isinstance(raw_probabilities, Mapping) or set(raw_probabilities) != set(
+                criteria
+            ):
+                raise ValueError("Jev choice probabilities are malformed")
+            probabilities = tuple(
+                (str(name), _jev_probability(value, field="choice probability"))
+                for name, value in raw_probabilities.items()
+            )
+            return DecisionResult(
+                choice,
+                confidence,
+                probabilities,
+                provider_id=self.provider_id,
+                model_id=response_model,
+                observed_at=observed_at,
+            )
+        if kind == "score":
+            raw_score = answer.get("score")
+            score = _jev_number(raw_score, field="score")
+            if not 0.0 <= score <= float(len(criteria) - 1):
+                raise ValueError("Jev score is outside the requested rubric")
+            confidence = _jev_probability(answer.get("confidence"), field="confidence")
+            raw_probabilities = answer.get("probabilities")
+            expected_keys = {str(index) for index in range(len(criteria))}
+            if (
+                not isinstance(raw_probabilities, Mapping)
+                or set(raw_probabilities) != expected_keys
+            ):
+                raise ValueError("Jev score probabilities are malformed")
+            probabilities = tuple(
+                (str(name), _jev_probability(value, field="score probability"))
+                for name, value in raw_probabilities.items()
+            )
+            return DecisionResult(
+                "score",
+                confidence,
+                (("score", score),) + probabilities,
+                provider_id=self.provider_id,
+                model_id=response_model,
+                observed_at=observed_at,
+            )
+        probability = answer.get("noul")
+        bounded = _jev_probability(probability, field="Noul probability")
+        return DecisionResult(
+            "yes" if bounded >= 0.5 else "no",
+            max(bounded, 1.0 - bounded),
+            (("yes", bounded), ("no", 1.0 - bounded)),
+            provider_id=self.provider_id,
+            model_id=response_model,
+            observed_at=observed_at,
+        )
+
+    async def health_check(self) -> ProviderHealth:
+        if self._legacy_transport is not None and self._transport is None:
+            return ProviderHealth(True, "injected decision fixture available")
+        try:
+            await self._require_transport().request(
+                "GET", "/v1/models", None, await self._headers()
+            )
+        except PermissionError:
+            return ProviderHealth(False, ProviderErrorReason.AUTHENTICATION_FAILED.value)
+        except ProviderAdapterError as error:
+            return ProviderHealth(False, error.reason.value)
+        except Exception:
+            return ProviderHealth(False, ProviderErrorReason.PROVIDER_UNAVAILABLE.value)
+        return ProviderHealth(True, "model endpoint reachable")
+
+    async def discover_models(self) -> ProviderCatalogSnapshot:
+        try:
+            response = await self._require_transport().request(
+                "GET", "/v1/models", None, await self._headers()
+            )
+        except PermissionError:
+            raise
+        except ProviderAdapterError:
+            raise
+        raw_models = response.get("models") if isinstance(response, Mapping) else None
+        if not isinstance(raw_models, list) or len(raw_models) > self.configuration.page_limit:
+            raise ProviderAdapterError(
+                ProviderErrorReason.MALFORMED_RESPONSE, detail="Jev model list is malformed"
+            )
+        now = datetime.now(UTC)
+        observations: list[ModelObservation] = []
+        seen: set[str] = set()
+        for item in raw_models:
+            if not isinstance(item, Mapping):
+                raise ProviderAdapterError(
+                    ProviderErrorReason.MALFORMED_RESPONSE, detail="Jev model item is malformed"
+                )
+            model_id = _jev_text(item.get("name"), field="model ID")
+            if model_id in seen:
+                raise ProviderAdapterError(
+                    ProviderErrorReason.MALFORMED_RESPONSE, detail="Jev model IDs are duplicated"
+                )
+            seen.add(model_id)
+            release_date = item.get("release_date", "")
+            version = release_date if type(release_date) is str and len(release_date) <= 128 else ""
+            metadata = ModelMetadata(
+                model_id,
+                1,
+                roles=frozenset({ModelRole.GENERAL}),
+                version=version,
+                source="provider_discovery",
+                endpoint=self.configuration.base_url,
+                account_scope="unknown",
+                inference_kind=IntelligenceKind.DECISION.value,
+            )
+            provider = ProviderMetadata(
+                self.provider_id,
+                "TypeSafe AI / Jev",
+                "standard",
+                locality=ProviderLocality.REMOTE,
+            )
+            observations.append(
+                ModelObservation(
+                    identity_for(provider.provider_id, metadata),
+                    metadata,
+                    now,
+                    "provider_discovery",
+                )
+            )
+        provider = ProviderMetadata(
+            self.provider_id,
+            "TypeSafe AI / Jev",
+            "standard",
+            locality=ProviderLocality.REMOTE,
+        )
+        return ProviderCatalogSnapshot(
+            provider, tuple(observations), now, "provider_discovery", True
+        )
+
+    async def aclose(self) -> None:
+        close = getattr(self._transport, "aclose", None)
+        if callable(close):
+            result = close()
+            if hasattr(result, "__await__"):
+                await result

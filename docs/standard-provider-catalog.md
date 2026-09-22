@@ -14,7 +14,9 @@ enterprise, decision, and OpenAI-compatible families:
 | Generic | `openai-compatible` |
 
 OpenAI-shaped packages share `OpenAICompatibleProvider` where their official
-protocol permits it; native packages retain their own adapter boundary.
+protocol permits it, including MiniMax at its fixed official endpoint;
+TypeSafe/Jev retains its own typed `DecisionProvider` boundary. Native packages
+retain their own adapter boundary.
 Provider help, setup fields, authentication type, discovery capability, and
 physical support status remain package metadata rather than Core UI constants.
 

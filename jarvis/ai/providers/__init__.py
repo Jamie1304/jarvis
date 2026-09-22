@@ -42,6 +42,7 @@ def __getattr__(name: str) -> object:
 
     if name in {
         "JevDecisionProvider",
+        "JevConfiguration",
         "AI21Provider",
         "AnthropicProvider",
         "AnthropicConfiguration",
@@ -110,6 +111,7 @@ __all__ = [
     "IntelligenceKind",
     "IntelligenceProvider",
     "JevDecisionProvider",
+    "JevConfiguration",
     "LearnedModelState",
     "ModelDiscoveryService",
     "ModelLifecycle",
