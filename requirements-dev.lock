@@ -5,6 +5,7 @@ iniconfig==2.0.0
 mypy==1.14.1
 mypy-extensions==1.0.0
 packaging==24.2
+PySide6==6.8.1
 pathspec==0.12.1
 pluggy==1.5.0
 pygments==2.19.1
