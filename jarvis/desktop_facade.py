@@ -9,6 +9,8 @@ from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
 from jarvis.actor_persona import PersonaProfile
+from jarvis.ai.model_intelligence import ModelIntelligencePage, ModelIntelligenceProjection
+from jarvis.ai.providers.registry import ProviderRegistry
 from jarvis.application import JarvisAssistantService
 from jarvis.attention import (
     AttentionItem,
@@ -221,6 +223,15 @@ class DesktopApplicationFacade:
             "ready" if container.stt is not None else "disabled",
             "ready" if container.tts is not None and container.tts.enabled else "disabled",
         )
+
+    def model_intelligence_view(self) -> ModelIntelligencePage:
+        """Expose real provider/model state without exposing runtime internals to Qt."""
+
+        container = self._runtime.container
+        if container is None:
+            return ModelIntelligenceProjection(ProviderRegistry()).page()
+        router = container.provider_router
+        return ModelIntelligenceProjection(router.registry, router.policy_engine).page()
 
     def settings_descriptors(self) -> tuple[EnvironmentSettingDescriptor, ...]:
         return (

@@ -10,7 +10,7 @@ from enum import StrEnum
 from typing import Any
 
 from jarvis.ai.models import EvidenceRecord, ModelInfo, ModelRole, ProviderHealth
-from jarvis.ai.providers.base import AIProvider
+from jarvis.ai.providers.base import AIProvider, IntelligenceProvider
 from jarvis.ai.usability import ModelUsabilityEvidence, UsabilityReason
 from jarvis.speech.stt import SttProvider
 from jarvis.speech.tts import TtsProvider
@@ -219,6 +219,7 @@ class ProviderRegistry:
     def __init__(self, definitions: tuple[ProviderDefinition, ...] = ()) -> None:
         self._definitions: dict[str, ProviderDefinition] = {}
         self._packages: dict[str, object] = {}
+        self._intelligence_factories: dict[str, Callable[[Mapping[str, Any]], object]] = {}
         self._voice_definitions: dict[VoiceProviderKind, dict[str, VoiceProviderDefinition]] = {
             kind: {} for kind in VoiceProviderKind
         }
@@ -245,6 +246,32 @@ class ProviderRegistry:
 
     def packages(self) -> tuple[tuple[str, object], ...]:
         return tuple(sorted(self._packages.items()))
+
+    def register_intelligence(
+        self, provider_id: str, factory: Callable[[Mapping[str, Any]], object]
+    ) -> None:
+        """Register a non-generative capability through the same registry owner."""
+
+        if type(provider_id) is not str or not provider_id.strip() or not callable(factory):
+            raise ValueError("Intelligence provider registration is invalid")
+        key = provider_id.casefold()
+        if key in self._intelligence_factories:
+            raise ValueError(f"Intelligence provider is already registered: {provider_id}")
+        self._intelligence_factories[key] = factory
+
+    def intelligence_provider_ids(self) -> tuple[str, ...]:
+        return tuple(sorted(self._intelligence_factories))
+
+    def create_intelligence(
+        self, provider_id: str, configuration: Mapping[str, Any]
+    ) -> IntelligenceProvider:
+        try:
+            provider = self._intelligence_factories[provider_id.casefold()](configuration)
+        except KeyError as error:
+            raise KeyError(f"Unknown intelligence provider: {provider_id}") from error
+        if not isinstance(provider, IntelligenceProvider):
+            raise TypeError("Intelligence provider factory returned an invalid provider")
+        return provider
 
     def register(self, definition: ProviderDefinition) -> None:
         provider_id = definition.metadata.provider_id.casefold()

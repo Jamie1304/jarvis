@@ -39,6 +39,12 @@ pre-call estimates; `COST_UNKNOWN` is never treated as zero.
 `TaskQuarantine` records narrow task-family failures. Learned state changes
 ranking only and cannot loosen explicit user policy.
 
+`DecisionRouter` evaluates typed decision providers generically, routes through
+the same remote privacy gateway, and retains a local/deterministic fallback
+when Jev or another remote decision provider is offline. The existing
+`ProviderRegistry` owns non-generative registrations as well as generative
+definitions; no second provider registry is introduced.
+
 ## Privacy and credentials
 
 `RemoteIntelligencePrivacyGateway` handles bounded non-generative payloads.
@@ -52,6 +58,10 @@ The `openai-compatible` package is first class. Remote endpoints require TLS,
 loopback endpoints require explicitly trusted `LOCAL` metadata, and the
 adapter accepts only typed configuration plus an injected transport—never
 user-supplied executable hooks.
+
+The desktop facade exposes `model_intelligence_view()` as a read-only
+projection from the existing router registry. Safe Mode returns an empty,
+truthful projection and never enables cloud or credential use.
 
 ## Zero Cloud and physical status
 

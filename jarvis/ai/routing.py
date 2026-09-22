@@ -18,7 +18,7 @@ from jarvis.ai.fitness import (
     SemanticOutcome,
     SQLiteRoutingFitnessStore,
 )
-from jarvis.ai.governance import GuardedApproval, PolicyEngine
+from jarvis.ai.governance import BudgetLedger, GuardedApproval, PolicyEngine, TaskQuarantine
 from jarvis.ai.knowledge import (
     CookbookObservation,
     CookbookOutcome,
@@ -207,6 +207,8 @@ class RouteRequest:
     purpose: str = "inference"
     approval_scope: str = "inference"
     guarded_approval: GuardedApproval | None = None
+    estimated_cost: float | None = None
+    budget_ledger: BudgetLedger | None = None
 
     def __post_init__(self) -> None:
         for name, value, limit in (
@@ -346,6 +348,14 @@ class RouteRequest:
             self.guarded_approval, GuardedApproval
         ):
             raise ValueError("Route guarded approval is invalid")
+        if self.estimated_cost is not None and (
+            type(self.estimated_cost) not in {int, float}
+            or not math.isfinite(self.estimated_cost)
+            or self.estimated_cost < 0
+        ):
+            raise ValueError("Route estimated cost is invalid")
+        if self.budget_ledger is not None and not isinstance(self.budget_ledger, BudgetLedger):
+            raise ValueError("Route budget ledger is invalid")
 
     def effective_privacy_context(self) -> PrivacyContext:
         """Return typed privacy input, adapting only legacy callers."""
@@ -472,6 +482,8 @@ class ProviderRouter:
         rate_limit_cooldown_seconds: float = 30.0,
         routing_store: SQLiteRoutingFitnessStore | None = None,
         policy_engine: PolicyEngine | None = None,
+        budget_ledger: BudgetLedger | None = None,
+        task_quarantine: TaskQuarantine | None = None,
     ) -> None:
         self._registry = registry
         self._resource_governor = resource_governor
@@ -482,6 +494,12 @@ class ProviderRouter:
         if policy_engine is not None and not isinstance(policy_engine, PolicyEngine):
             raise TypeError("Routing policy engine is invalid")
         self._policy_engine = policy_engine
+        if budget_ledger is not None and not isinstance(budget_ledger, BudgetLedger):
+            raise TypeError("Routing budget ledger is invalid")
+        if task_quarantine is not None and not isinstance(task_quarantine, TaskQuarantine):
+            raise TypeError("Routing task quarantine is invalid")
+        self._budget_ledger = budget_ledger
+        self._task_quarantine = task_quarantine
         self._hardware_profile = hardware_profile
         if type(usability_evidence) is not tuple or any(
             not isinstance(item, ModelUsabilityEvidence) for item in usability_evidence
@@ -633,6 +651,16 @@ class ProviderRouter:
     @property
     def routing_store(self) -> SQLiteRoutingFitnessStore | None:
         return self._routing_store
+
+    @property
+    def registry(self) -> ProviderRegistry:
+        """Expose the existing registry to read-only application projections."""
+
+        return self._registry
+
+    @property
+    def policy_engine(self) -> PolicyEngine | None:
+        return self._policy_engine
 
     def decision_view(self, decision_id: str) -> RoutingDecisionView | None:
         return (
@@ -1218,6 +1246,17 @@ class ProviderRouter:
             )
             if not policy_decision.allowed:
                 return policy_decision.reason, False
+        if self._task_quarantine is not None and self._task_quarantine.is_quarantined(
+            candidate.identity, request.task_class
+        ):
+            return "route is quarantined for this task family", False
+        budget = request.budget_ledger or self._budget_ledger
+        if budget is not None:
+            estimated = request.estimated_cost
+            if estimated is None:
+                estimated = candidate.cost
+            if not budget.estimated_allowed(estimated, now=self._clock()):
+                return "cloud budget gate rejected route", False
         privacy = request.effective_privacy_context()
         if request.policy in {RoutingPolicy.LOCAL_ONLY, RoutingPolicy.PRIVACY_STRICT}:
             if not candidate.local:

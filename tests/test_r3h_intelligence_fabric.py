@@ -5,6 +5,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
+from jarvis.ai.decision import DecisionRouteCandidate, DecisionRouter
 from jarvis.ai.governance import (
     BudgetLedger,
     BudgetPolicy,
@@ -31,15 +32,18 @@ from jarvis.ai.providers import (
     ProviderDefinition,
     ProviderLocality,
     ProviderMetadata,
+    ProviderPolicy,
     ProviderRegistry,
     RemoteIntelligencePrivacyGateway,
 )
 from jarvis.ai.providers.catalog import (
+    JevDecisionProvider,
     OpenAICompatibleConfiguration,
     OpenAICompatibleProvider,
     standard_provider_catalog,
 )
 from jarvis.ai.providers.discovery import ModelDiscoveryService
+from jarvis.ai.providers.intelligence import CallableDecisionProvider, DecisionRequest
 from jarvis.ai.routing import ProviderRouter, RouteRequest, RouteStatus
 from jarvis.credentials import CredentialVault, TestOnlyInMemorySecretBackend
 
@@ -137,6 +141,18 @@ def test_policy_is_most_restrictive_and_applies_to_future_models() -> None:
     assert not engine.evaluate(identity, metadata).allowed
 
 
+def test_policy_state_survives_restart_without_secret_material(tmp_path: Path) -> None:
+    path = tmp_path / "policies.sqlite"
+    identity = _identity()
+    store = PolicyStore(path)
+    store.set_provider_policy("fixture", ProviderPolicy.ROUTING_DISABLED)
+    store.set_model_policy(identity, ModelPolicy.BLOCKED)
+    reopened = PolicyStore(path)
+    assert reopened.provider_policy("fixture") is ProviderPolicy.ROUTING_DISABLED
+    assert reopened.model_policy(identity) is ModelPolicy.BLOCKED
+    assert b"super-secret" not in path.read_bytes()
+
+
 def test_guarded_approval_is_exactly_bound_and_expired() -> None:
     store = PolicyStore()
     identity = _identity()
@@ -191,6 +207,32 @@ def test_task_quarantine_is_narrow_not_global() -> None:
 def test_decision_provider_output_cannot_claim_authority() -> None:
     with pytest.raises(ValueError, match="authority"):
         DecisionResult.from_mapping({"label": "allow", "permission_granted": True})
+
+
+async def test_jev_offline_fails_over_to_local_decision_path() -> None:
+    async def local_decision(request: DecisionRequest) -> DecisionResult:
+        return DecisionResult("local", 0.9)
+
+    registry = ProviderRegistry()
+    registry.register_intelligence("typesafe-jev", lambda _: JevDecisionProvider())
+    assert registry.intelligence_provider_ids() == ("typesafe-jev",)
+    router = DecisionRouter(
+        (
+            DecisionRouteCandidate("typesafe-jev", JevDecisionProvider(), False, 0),
+            DecisionRouteCandidate("local", CallableDecisionProvider(local_decision), True, 1),
+        ),
+        privacy_gateway=RemoteIntelligencePrivacyGateway(local_values=("private",)),
+    )
+    result = await router.decide(
+        DecisionRequest(
+            "classify",
+            (("text", "public"),),
+            privacy_context=PrivacyContext(PrivacyClassification.SAFE_PUBLIC),
+        )
+    )
+    assert result.provider_id == "local"
+    assert result.used_offline_fallback is True
+    assert result.attempted_provider_ids == ("typesafe-jev", "local")
 
 
 def test_remote_decision_payload_is_minimized_and_redacted() -> None:
@@ -280,3 +322,28 @@ def test_blocked_route_is_excluded_before_router_optimization() -> None:
     )
     assert decision.status is RouteStatus.UNAVAILABLE
     assert decision.primary is None
+
+
+def test_router_budget_and_task_quarantine_are_hard_gates() -> None:
+    registry = ProviderRegistry(
+        (
+            ProviderDefinition(
+                ProviderMetadata("fixture", "Fixture", "1", local_only=True),
+                lambda _: FakeAIProvider(),
+                (_metadata("model"),),
+            ),
+        )
+    )
+    ledger = BudgetLedger(BudgetPolicy(max_request_cost=0.5))
+    router = ProviderRouter(registry, budget_ledger=ledger)
+    budget_decision = router.route(
+        RouteRequest("answer", "test", estimated_cost=1.0, budget_ledger=ledger)
+    )
+    assert budget_decision.primary is None
+    quarantine = TaskQuarantine(threshold=2)
+    quarantine.record_failure(ModelIdentity("fixture", "model"), "general")
+    quarantine.record_failure(ModelIdentity("fixture", "model"), "general")
+    quarantined = ProviderRouter(registry, task_quarantine=quarantine).route(
+        RouteRequest("answer", "test", task_class="general")
+    )
+    assert quarantined.primary is None
