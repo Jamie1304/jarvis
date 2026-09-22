@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -48,6 +49,8 @@ from jarvis.ai.routing import ProviderRouter, RouteRequest, RouteStatus
 from jarvis.credentials import CredentialVault, TestOnlyInMemorySecretBackend
 
 from tests.fakes import FakeAIProvider
+
+NOW = datetime(2026, 9, 22, 12, tzinfo=UTC)
 
 
 def _identity(provider: str = "fixture", model: str = "model") -> ModelIdentity:
@@ -158,7 +161,7 @@ def test_guarded_approval_is_exactly_bound_and_expired() -> None:
     identity = _identity()
     store.set_model_policy(identity, ModelPolicy.GUARDED)
     engine = PolicyEngine(store)
-    expiry = datetime.now(UTC) + timedelta(minutes=5)
+    expiry = NOW + timedelta(minutes=5)
     approval = GuardedApproval(
         "actor", "task", identity.storage_key, "inference", 2.0, "chat", expiry
     )
@@ -170,6 +173,17 @@ def test_guarded_approval_is_exactly_bound_and_expired() -> None:
         task_id="task",
         scope="chat",
         estimated_cost=1.0,
+        now=NOW,
+    ).allowed
+    assert not engine.evaluate(
+        identity,
+        _metadata(),
+        approval=approval,
+        actor_id="actor",
+        task_id="task",
+        scope="chat",
+        estimated_cost=1.0,
+        now=expiry,
     ).allowed
     assert not engine.evaluate(
         identity,
@@ -179,6 +193,18 @@ def test_guarded_approval_is_exactly_bound_and_expired() -> None:
         task_id="task",
         scope="chat",
         estimated_cost=1.0,
+        now=NOW,
+    ).allowed
+    wrong_route = replace(approval, route_key="other/provider/model")
+    assert not engine.evaluate(
+        identity,
+        _metadata(),
+        approval=wrong_route,
+        actor_id="actor",
+        task_id="task",
+        scope="chat",
+        estimated_cost=1.0,
+        now=NOW,
     ).allowed
 
 

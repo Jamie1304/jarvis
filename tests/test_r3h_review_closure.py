@@ -669,7 +669,11 @@ async def test_h29_guarded_failover_never_calls_unapproved_fallback() -> None:
     fallback_identity = identity_for("fallback", fallback_model)
     policies.set_model_policy(fallback_identity, ModelPolicy.GUARDED)
     dispatcher = InferenceDispatcher(
-        ProviderRouter(registry, policy_engine=PolicyEngine(policies)),
+        ProviderRouter(
+            registry,
+            policy_engine=PolicyEngine(policies),
+            clock=lambda: NOW,
+        ),
         registry,
         providers={"primary": primary, "fallback": fallback},
     )
@@ -697,6 +701,12 @@ async def test_h29_guarded_failover_never_calls_unapproved_fallback() -> None:
         "inference",
         NOW + timedelta(minutes=5),
     )
+    with pytest.raises(InferenceDispatchError):
+        await dispatcher.generate(
+            GenerationRequest((), "primary", 4096),
+            replace(intent, guarded_approval=replace(approval, expires_at=NOW)),
+        )
+    assert fallback.requests == []
     approved = await dispatcher.generate(
         GenerationRequest((), "primary", 4096), replace(intent, guarded_approval=approval)
     )
