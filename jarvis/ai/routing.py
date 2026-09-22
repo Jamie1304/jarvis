@@ -18,6 +18,7 @@ from jarvis.ai.fitness import (
     SemanticOutcome,
     SQLiteRoutingFitnessStore,
 )
+from jarvis.ai.governance import GuardedApproval, PolicyEngine
 from jarvis.ai.knowledge import (
     CookbookObservation,
     CookbookOutcome,
@@ -41,6 +42,7 @@ from jarvis.ai.models import (
 )
 from jarvis.ai.privacy import PrivacyGuardedProvider
 from jarvis.ai.providers.registry import (
+    ModelLifecycle,
     ModelMetadata,
     ProviderLocality,
     ProviderMetadata,
@@ -200,6 +202,11 @@ class RouteRequest:
     current_quality: float | None = None
     switching_cost_budget_ms: float | None = None
     minimum_quality_gain_to_switch: float = 0.05
+    explicit_selection: bool = False
+    actor_id: str = "system"
+    purpose: str = "inference"
+    approval_scope: str = "inference"
+    guarded_approval: GuardedApproval | None = None
 
     def __post_init__(self) -> None:
         for name, value, limit in (
@@ -326,6 +333,19 @@ class RouteRequest:
             or not 0.0 <= self.minimum_quality_gain_to_switch <= 1.0
         ):
             raise ValueError("Route switching quality threshold is invalid")
+        if type(self.explicit_selection) is not bool:
+            raise ValueError("Route selection mode is invalid")
+        for name, value, limit in (
+            ("actor ID", self.actor_id, 256),
+            ("route purpose", self.purpose, 256),
+            ("approval scope", self.approval_scope, 256),
+        ):
+            if type(value) is not str or not value.strip() or len(value) > limit or "\x00" in value:
+                raise ValueError(f"Route {name} is invalid")
+        if self.guarded_approval is not None and not isinstance(
+            self.guarded_approval, GuardedApproval
+        ):
+            raise ValueError("Route guarded approval is invalid")
 
     def effective_privacy_context(self) -> PrivacyContext:
         """Return typed privacy input, adapting only legacy callers."""
@@ -451,6 +471,7 @@ class ProviderRouter:
         failure_cooldown_seconds: float = 300.0,
         rate_limit_cooldown_seconds: float = 30.0,
         routing_store: SQLiteRoutingFitnessStore | None = None,
+        policy_engine: PolicyEngine | None = None,
     ) -> None:
         self._registry = registry
         self._resource_governor = resource_governor
@@ -458,6 +479,9 @@ class ProviderRouter:
         if routing_store is not None and not isinstance(routing_store, SQLiteRoutingFitnessStore):
             raise TypeError("Routing decision store is invalid")
         self._routing_store = routing_store
+        if policy_engine is not None and not isinstance(policy_engine, PolicyEngine):
+            raise TypeError("Routing policy engine is invalid")
+        self._policy_engine = policy_engine
         self._hardware_profile = hardware_profile
         if type(usability_evidence) is not tuple or any(
             not isinstance(item, ModelUsabilityEvidence) for item in usability_evidence
@@ -1168,6 +1192,8 @@ class ProviderRouter:
         health: dict[str, ProviderHealthSnapshot],
     ) -> tuple[str | None, bool]:
         model = _effective_model(candidate)
+        if model.lifecycle is ModelLifecycle.RETIRED:
+            return "model lifecycle is retired", False
         if request.pinned_provider_id is not None and (
             candidate.provider_id.casefold() != request.pinned_provider_id.casefold()
         ):
@@ -1176,6 +1202,22 @@ class ProviderRouter:
             candidate.model_id.casefold() != request.pinned_model_id.casefold()
         ):
             return "model is excluded by the per-step model pin", False
+        if self._policy_engine is not None:
+            policy_decision = self._policy_engine.evaluate(
+                candidate.identity,
+                model,
+                explicit_selection=request.explicit_selection,
+                approval=request.guarded_approval,
+                actor_id=request.actor_id,
+                task_id=request.task_class,
+                purpose=request.purpose,
+                scope=request.approval_scope,
+                estimated_cost=candidate.cost,
+                unverified=not candidate.reliability_sufficient,
+                now=self._clock(),
+            )
+            if not policy_decision.allowed:
+                return policy_decision.reason, False
         privacy = request.effective_privacy_context()
         if request.policy in {RoutingPolicy.LOCAL_ONLY, RoutingPolicy.PRIVACY_STRICT}:
             if not candidate.local:
