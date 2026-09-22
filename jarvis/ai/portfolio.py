@@ -513,8 +513,10 @@ class SQLiteRetirementStore:
 
     @staticmethod
     def _identity(value: str) -> ModelIdentity:
-        provider, model, version, quantization, runtime = json.loads(value)
-        return ModelIdentity(provider, model, version, quantization, runtime)
+        try:
+            return ModelIdentity.from_storage_key(value)
+        except (TypeError, ValueError, json.JSONDecodeError) as error:
+            raise PortfolioError("Retirement model identity is malformed") from error
 
     @classmethod
     def _from_row(cls, row: tuple[object, ...]) -> RetirementPlan:

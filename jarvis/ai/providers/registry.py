@@ -309,7 +309,20 @@ class ProviderRegistry:
         ):
             raise ValueError("Provider model advertisement is malformed")
         if len(
-            {(model.model_id, model.version, model.quantization, model.runtime) for model in models}
+            {
+                (
+                    model.model_id,
+                    model.version,
+                    model.quantization,
+                    model.runtime,
+                    model.endpoint,
+                    model.region,
+                    model.deployment,
+                    model.account_scope,
+                    model.inference_kind,
+                )
+                for model in models
+            }
         ) != len(models):
             raise ValueError("Provider model advertisement contains duplicates")
         current = self.definition(provider_id)

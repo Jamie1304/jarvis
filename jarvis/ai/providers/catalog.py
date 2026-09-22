@@ -6,6 +6,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Protocol
+from urllib.parse import urlsplit
 
 from jarvis.ai.knowledge import ModelObservation, ProviderCatalogSnapshot, identity_for
 from jarvis.ai.models import (
@@ -29,6 +30,7 @@ from jarvis.ai.providers.intelligence import (
     ProviderSetupField,
 )
 from jarvis.ai.providers.registry import ProviderLocality, ProviderMetadata
+from jarvis.security import local_model_endpoint_is_safe
 
 
 def _key(name: str, label: str = "API credential") -> ProviderSetupField:
@@ -49,6 +51,11 @@ def _manifest(
     probe: bool = False,
     status: PackageSupportStatus = PackageSupportStatus.CONTRACT_ONLY,
 ) -> ProviderPackageManifest:
+    # A catalog declaration is descriptive.  Only the generic openai-compatible
+    # package has a bounded source adapter in this candidate; all other remote
+    # packages remain honest contract metadata until an adapter is installed and
+    # tested for that protocol family.
+    executable_discovery = provider_id == "openai-compatible"
     return ProviderPackageManifest(
         provider_id,
         display_name,
@@ -59,8 +66,8 @@ def _manifest(
         developer_console=console,
         credential_management_url=console,
         protocol_family=protocol,
-        dynamic_model_discovery=dynamic,
-        usability_probe=probe,
+        dynamic_model_discovery=dynamic and executable_discovery,
+        usability_probe=probe and executable_discovery,
         support_status=status,
     )
 
@@ -367,6 +374,47 @@ STANDARD_PROVIDER_MANIFESTS: tuple[ProviderPackageManifest, ...] = (
     ),
 )
 
+
+@dataclass(frozen=True, slots=True)
+class ProviderSupportRecord:
+    """Truthful support facts; catalog presence never implies execution."""
+
+    provider_id: str
+    intelligence_kinds: tuple[str, ...]
+    protocol_family: str
+    catalog_present: bool
+    source_adapter_present: bool
+    controlled_protocol_tested: bool
+    discovery_mode: str
+    credential_type: str
+    required_fields: tuple[str, ...]
+    external_protocol_status: str
+    physical_status: str
+
+
+def provider_support_matrix() -> tuple[ProviderSupportRecord, ...]:
+    """Return the complete 28-entry provider support classification."""
+
+    return tuple(
+        ProviderSupportRecord(
+            manifest.provider_id,
+            tuple(sorted(kind.value for kind in manifest.kinds)),
+            manifest.protocol_family.value,
+            True,
+            manifest.provider_id == "openai-compatible",
+            manifest.provider_id == "openai-compatible",
+            "bounded_dynamic" if manifest.dynamic_model_discovery else "not_implemented",
+            manifest.authentication.value,
+            tuple(field.name for field in manifest.required_fields),
+            "PROVEN"
+            if manifest.provider_id == "openai-compatible"
+            else "EXTERNAL_PROTOCOL_FACT_NOT_PROVEN",
+            "PHYSICAL_VALIDATION_REQUIRED",
+        )
+        for manifest in STANDARD_PROVIDER_MANIFESTS
+    )
+
+
 _ALIASES = {
     "google": "google-gemini",
     "gemini": "google-gemini",
@@ -419,16 +467,43 @@ class OpenAICompatibleConfiguration:
     credential_ref: object | None = None
 
     def __post_init__(self) -> None:
-        if not self.provider_id.strip() or not self.model.strip():
-            raise ValueError("OpenAI-compatible identity is invalid")
-        if "\x00" in self.base_url or not self.base_url.startswith(("https://", "http://")):
-            raise ValueError("OpenAI-compatible base URL is invalid")
-        if self.locality is not ProviderLocality.LOCAL and any(
-            host in self.base_url.casefold() for host in ("localhost", "127.0.0.1", "[::1]")
+        if (
+            type(self.provider_id) is not str
+            or type(self.model) is not str
+            or not self.provider_id.strip()
+            or not self.model.strip()
+            or len(self.provider_id) > 128
+            or len(self.model) > 256
         ):
+            raise ValueError("OpenAI-compatible identity is invalid")
+        if type(self.base_url) is not str or len(self.base_url) > 2_048:
+            raise ValueError("OpenAI-compatible base URL is invalid")
+        parsed = urlsplit(self.base_url)
+        if (
+            "\x00" in self.base_url
+            or parsed.scheme not in {"https", "http"}
+            or not parsed.hostname
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.query
+            or parsed.fragment
+        ):
+            raise ValueError("OpenAI-compatible base URL is invalid")
+        if not isinstance(self.locality, ProviderLocality):
+            raise ValueError("OpenAI-compatible locality is invalid")
+        if self.locality is ProviderLocality.LOCAL and not local_model_endpoint_is_safe(
+            self.base_url
+        ):
+            raise ValueError("LOCAL endpoint must be a trusted literal loopback")
+        if self.locality is not ProviderLocality.LOCAL and parsed.hostname.casefold() in {
+            "localhost",
+            "127.0.0.1",
+            "::1",
+        }:
             raise ValueError("Loopback endpoint requires trusted LOCAL metadata")
-        if self.locality is ProviderLocality.REMOTE and not self.base_url.startswith("https://"):
+        if self.locality is ProviderLocality.REMOTE and parsed.scheme != "https":
             raise ValueError("Remote OpenAI-compatible routes require HTTPS")
+        object.__setattr__(self, "base_url", self.base_url.rstrip("/"))
 
 
 class OpenAICompatibleProvider(AIProvider):
@@ -532,6 +607,11 @@ class OpenAICompatibleProvider(AIProvider):
                 roles=frozenset({ModelRole.GENERAL}),
                 modalities=frozenset({"text"}),
                 source="provider_discovery",
+                endpoint=self.configuration.base_url,
+                region="unknown",
+                deployment="unknown",
+                account_scope="unknown",
+                inference_kind=IntelligenceKind.GENERATIVE.value,
             )
             observations.append(
                 ModelObservation(

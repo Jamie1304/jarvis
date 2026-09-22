@@ -11,6 +11,7 @@ import hashlib
 import json
 import sqlite3
 import threading
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
@@ -18,6 +19,7 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from jarvis.ai.models import EvidenceKind, EvidenceRecord, ModelRole
+from jarvis.ai.providers.intelligence import IntelligenceKind
 from jarvis.ai.providers.registry import (
     ModelLifecycle,
     ModelMetadata,
@@ -114,6 +116,11 @@ class ModelIdentity:
     version: str = ""
     quantization: str = ""
     runtime: str = ""
+    endpoint: str = "unknown"
+    region: str = "unknown"
+    deployment: str = "unknown"
+    account_scope: str = "unknown"
+    inference_kind: str = IntelligenceKind.GENERATIVE.value
 
     def __post_init__(self) -> None:
         _bounded_text(self.provider_id, "Provider ID", 256)
@@ -123,17 +130,61 @@ class ModelIdentity:
             ("Model version", self.version, 128),
             ("Model quantization", self.quantization, 128),
             ("Model runtime", self.runtime, 128),
+            ("Model endpoint", self.endpoint, 2_048),
+            ("Model region", self.region, 128),
+            ("Model deployment", self.deployment, 256),
+            ("Model account scope", self.account_scope, 256),
+            ("Model inference kind", self.inference_kind, 64),
         ):
             _bounded_text(value, name, limit, allow_empty=True)
+        for name in ("endpoint", "region", "deployment", "account_scope"):
+            if not getattr(self, name):
+                object.__setattr__(self, name, "unknown")
+        if not self.inference_kind:
+            object.__setattr__(self, "inference_kind", IntelligenceKind.GENERATIVE.value)
 
     @property
     def provider_model(self) -> str:
         return f"{self.provider_id}/{self.model_id}"
 
+    @classmethod
+    def from_storage_key(cls, value: str) -> ModelIdentity:
+        try:
+            raw = json.loads(value)
+        except (TypeError, json.JSONDecodeError) as error:
+            raise ModelKnowledgeError("Model route key is malformed") from error
+        if not isinstance(raw, list) or len(raw) not in {5, 10}:
+            raise ModelKnowledgeError("Model route key is malformed")
+        if len(raw) == 5:
+            return cls(*(str(item) for item in raw))
+        return cls(
+            str(raw[0]),
+            str(raw[3]),
+            str(raw[4]),
+            str(raw[8]),
+            str(raw[9]),
+            str(raw[1]),
+            str(raw[2]),
+            str(raw[5]),
+            str(raw[6]),
+            str(raw[7]),
+        )
+
     @property
     def storage_key(self) -> str:
         return json.dumps(
-            [self.provider_id, self.model_id, self.version, self.quantization, self.runtime],
+            [
+                self.provider_id,
+                self.endpoint,
+                self.region,
+                self.model_id,
+                self.version,
+                self.deployment,
+                self.account_scope,
+                self.inference_kind,
+                self.quantization,
+                self.runtime,
+            ],
             ensure_ascii=False,
             separators=(",", ":"),
         )
@@ -142,12 +193,68 @@ class ModelIdentity:
 def identity_for(provider_id: str, metadata: ModelMetadata) -> ModelIdentity:
     if not isinstance(metadata, ModelMetadata):
         raise ModelKnowledgeError("Model metadata is malformed")
+    # An alias is a name, not an evidence identity.  Persist the resolved
+    # target so a later alias retarget creates a new route instead of inheriting
+    # historical measurements or cookbook results.
+    model_id = metadata.alias_target or metadata.model_id
     return ModelIdentity(
         provider_id,
-        metadata.model_id,
+        model_id,
         metadata.version,
         metadata.quantization,
         metadata.runtime,
+        metadata.endpoint or "unknown",
+        metadata.region or "unknown",
+        metadata.deployment or "unknown",
+        metadata.account_scope or "unknown",
+        metadata.inference_kind or IntelligenceKind.GENERATIVE.value,
+    )
+
+
+def _legacy_identity(parts: object, metadata: Mapping[str, Any] | None) -> ModelIdentity:
+    """Map a v1 five-part row without inventing missing route facts."""
+
+    if not isinstance(parts, tuple | list):
+        raise ModelKnowledgeError("Legacy model identity is malformed")
+    values = tuple(str(value) for value in parts)
+    if len(values) != 5:
+        raise ModelKnowledgeError("Legacy model identity is malformed")
+    # v1 did not persist these route dimensions as identity.  Even if a
+    # later metadata payload happens to contain them, treating them as known
+    # would fabricate a join key for old evidence.  Keep every missing
+    # dimension explicit and deterministic instead.
+    del metadata
+    return ModelIdentity(
+        values[0],
+        values[1],
+        values[2],
+        values[3],
+        values[4],
+        "unknown",
+        "unknown",
+        "unknown",
+        "unknown",
+        IntelligenceKind.GENERATIVE.value,
+    )
+
+
+def _route_values(identity: ModelIdentity) -> tuple[str, ...]:
+    """Return the complete persisted route identity in schema order."""
+
+    if not isinstance(identity, ModelIdentity):
+        raise ModelKnowledgeError("Model identity is malformed")
+    return (
+        identity.storage_key,
+        identity.provider_id,
+        identity.endpoint,
+        identity.region,
+        identity.model_id,
+        identity.version,
+        identity.deployment,
+        identity.account_scope,
+        identity.inference_kind,
+        identity.quantization,
+        identity.runtime,
     )
 
 
@@ -167,7 +274,7 @@ class ModelObservation:
             self.metadata, ModelMetadata
         ):
             raise ModelKnowledgeError("Model observation identity or metadata is malformed")
-        if self.identity.model_id != self.metadata.model_id:
+        if self.identity.model_id not in {self.metadata.model_id, self.metadata.alias_target}:
             raise ModelKnowledgeError("Model observation identity does not match metadata")
         _timestamp(self.observed_at, "Model observation timestamp")
         _bounded_text(self.source, "Model observation source", 512)
@@ -444,8 +551,10 @@ class CookbookSummary:
 class ModelKnowledgeStore:
     """Versioned SQLite store for bounded descriptive model knowledge."""
 
-    _SCHEMA_VERSION = 1
+    _SCHEMA_VERSION = 2
     _MIGRATION_NAME = "create_model_knowledge"
+    _MIGRATION_V2_NAME = "exact_route_identity"
+    _UNKNOWN_COMPONENT = "unknown"
 
     def __init__(self, path: Path) -> None:
         if not isinstance(path, Path):
@@ -456,13 +565,24 @@ class ModelKnowledgeStore:
         self._connection.execute("PRAGMA foreign_keys=ON")
         self._connection.execute("PRAGMA journal_mode=WAL")
         self._lock = threading.RLock()
+        original = sqlite3.connect(":memory:")
+        self._connection.backup(original)
         try:
             self._migrate()
         except (sqlite3.DatabaseError, ModelKnowledgeError) as error:
+            try:
+                self._connection.rollback()
+                original.backup(self._connection)
+                self._connection.commit()
+            except sqlite3.DatabaseError:
+                pass
             self._connection.close()
+            original.close()
             if isinstance(error, ModelKnowledgeError):
                 raise
             raise ModelKnowledgeError("Model knowledge database is unavailable") from error
+        else:
+            original.close()
 
     def _migrate(self) -> None:
         with self._connection:
@@ -478,6 +598,8 @@ class ModelKnowledgeStore:
                 raise ModelKnowledgeError("Model knowledge database uses a future schema")
             if versions and versions.get(1) != self._MIGRATION_NAME:
                 raise ModelKnowledgeError("Model knowledge migration identity mismatch")
+            if versions.get(2) is not None and versions[2] != self._MIGRATION_V2_NAME:
+                raise ModelKnowledgeError("Model knowledge migration identity mismatch")
             if not versions:
                 self._connection.executescript(
                     """
@@ -490,75 +612,272 @@ class ModelKnowledgeStore:
                         source TEXT,
                         last_observed TEXT
                     );
-                    CREATE TABLE models (
-                        provider_id TEXT NOT NULL,
-                        model_id TEXT NOT NULL,
-                        model_version TEXT NOT NULL,
-                        quantization TEXT NOT NULL,
-                        runtime TEXT NOT NULL,
-                        metadata_json TEXT NOT NULL,
-                        availability TEXT NOT NULL,
-                        first_seen TEXT,
-                        last_seen TEXT,
-                        last_source TEXT,
-                        last_evidence_kind TEXT,
-                        stale_since TEXT,
-                        PRIMARY KEY(provider_id, model_id, model_version, quantization, runtime),
-                        FOREIGN KEY(provider_id) REFERENCES providers(provider_id)
-                    );
-                    CREATE TABLE model_observations (
-                        observation_key TEXT PRIMARY KEY,
-                        provider_id TEXT NOT NULL,
-                        model_id TEXT NOT NULL,
-                        model_version TEXT NOT NULL,
-                        quantization TEXT NOT NULL,
-                        runtime TEXT NOT NULL,
-                        metadata_json TEXT NOT NULL,
-                        observed_at TEXT NOT NULL,
-                        source TEXT NOT NULL,
-                        evidence_kind TEXT NOT NULL,
-                        evidence_detail TEXT NOT NULL,
-                        availability TEXT NOT NULL,
-                        machine_scope TEXT
-                    );
-                    CREATE TABLE model_evidence (
-                        evidence_key TEXT PRIMARY KEY,
-                        provider_id TEXT NOT NULL,
-                        model_id TEXT NOT NULL,
-                        model_version TEXT NOT NULL,
-                        quantization TEXT NOT NULL,
-                        runtime TEXT NOT NULL,
-                        evidence_json TEXT NOT NULL
-                    );
-                    CREATE TABLE model_measurements (
-                        measurement_key TEXT PRIMARY KEY,
-                        provider_id TEXT NOT NULL,
-                        model_id TEXT NOT NULL,
-                        model_version TEXT NOT NULL,
-                        quantization TEXT NOT NULL,
-                        runtime TEXT NOT NULL,
-                        measured_at TEXT NOT NULL,
-                        source TEXT NOT NULL,
-                        machine_scope TEXT NOT NULL,
-                        metrics_json TEXT NOT NULL
-                    );
-                    CREATE TABLE cookbook_observations (
-                        observation_id TEXT PRIMARY KEY,
-                        provider_id TEXT NOT NULL,
-                        model_id TEXT NOT NULL,
-                        model_version TEXT NOT NULL,
-                        quantization TEXT NOT NULL,
-                        runtime TEXT NOT NULL,
-                        task_class TEXT NOT NULL,
-                        observation_json TEXT NOT NULL
-                    );
-                    CREATE INDEX cookbook_identity_task ON cookbook_observations(
-                        provider_id, model_id, model_version, quantization, runtime, task_class
-                    );
-                    INSERT INTO model_knowledge_schema(version, name)
-                    VALUES (1, 'create_model_knowledge');
                     """
                 )
+                self._create_exact_route_tables()
+                self._connection.execute(
+                    "INSERT INTO model_knowledge_schema(version, name) VALUES (1, ?)",
+                    (self._MIGRATION_NAME,),
+                )
+                self._connection.execute(
+                    "INSERT INTO model_knowledge_schema(version, name) VALUES (2, ?)",
+                    (self._MIGRATION_V2_NAME,),
+                )
+            elif 2 not in versions:
+                self._migrate_v1_to_v2()
+
+    def _create_exact_route_tables(self) -> None:
+        """Create the route-keyed v2 schema used for all model evidence."""
+
+        self._connection.executescript(
+            """
+            CREATE TABLE models (
+                route_key TEXT PRIMARY KEY,
+                provider_id TEXT NOT NULL,
+                endpoint TEXT NOT NULL,
+                region TEXT NOT NULL,
+                model_id TEXT NOT NULL,
+                model_version TEXT NOT NULL,
+                deployment TEXT NOT NULL,
+                account_scope TEXT NOT NULL,
+                inference_kind TEXT NOT NULL,
+                quantization TEXT NOT NULL,
+                runtime TEXT NOT NULL,
+                metadata_json TEXT NOT NULL,
+                availability TEXT NOT NULL,
+                first_seen TEXT,
+                last_seen TEXT,
+                last_source TEXT,
+                last_evidence_kind TEXT,
+                stale_since TEXT
+            );
+            CREATE TABLE model_observations (
+                observation_key TEXT PRIMARY KEY,
+                route_key TEXT NOT NULL,
+                provider_id TEXT NOT NULL,
+                endpoint TEXT NOT NULL,
+                region TEXT NOT NULL,
+                model_id TEXT NOT NULL,
+                model_version TEXT NOT NULL,
+                deployment TEXT NOT NULL,
+                account_scope TEXT NOT NULL,
+                inference_kind TEXT NOT NULL,
+                quantization TEXT NOT NULL,
+                runtime TEXT NOT NULL,
+                metadata_json TEXT NOT NULL,
+                observed_at TEXT NOT NULL,
+                source TEXT NOT NULL,
+                evidence_kind TEXT NOT NULL,
+                evidence_detail TEXT NOT NULL,
+                availability TEXT NOT NULL,
+                machine_scope TEXT
+            );
+            CREATE TABLE model_evidence (
+                evidence_key TEXT PRIMARY KEY,
+                route_key TEXT NOT NULL,
+                provider_id TEXT NOT NULL,
+                endpoint TEXT NOT NULL,
+                region TEXT NOT NULL,
+                model_id TEXT NOT NULL,
+                model_version TEXT NOT NULL,
+                deployment TEXT NOT NULL,
+                account_scope TEXT NOT NULL,
+                inference_kind TEXT NOT NULL,
+                quantization TEXT NOT NULL,
+                runtime TEXT NOT NULL,
+                evidence_json TEXT NOT NULL
+            );
+            CREATE TABLE model_measurements (
+                measurement_key TEXT PRIMARY KEY,
+                route_key TEXT NOT NULL,
+                provider_id TEXT NOT NULL,
+                endpoint TEXT NOT NULL,
+                region TEXT NOT NULL,
+                model_id TEXT NOT NULL,
+                model_version TEXT NOT NULL,
+                deployment TEXT NOT NULL,
+                account_scope TEXT NOT NULL,
+                inference_kind TEXT NOT NULL,
+                quantization TEXT NOT NULL,
+                runtime TEXT NOT NULL,
+                measured_at TEXT NOT NULL,
+                source TEXT NOT NULL,
+                machine_scope TEXT NOT NULL,
+                metrics_json TEXT NOT NULL
+            );
+            CREATE TABLE cookbook_observations (
+                observation_id TEXT PRIMARY KEY,
+                route_key TEXT NOT NULL,
+                provider_id TEXT NOT NULL,
+                endpoint TEXT NOT NULL,
+                region TEXT NOT NULL,
+                model_id TEXT NOT NULL,
+                model_version TEXT NOT NULL,
+                deployment TEXT NOT NULL,
+                account_scope TEXT NOT NULL,
+                inference_kind TEXT NOT NULL,
+                quantization TEXT NOT NULL,
+                runtime TEXT NOT NULL,
+                task_class TEXT NOT NULL,
+                observation_json TEXT NOT NULL
+            );
+            CREATE INDEX cookbook_identity_task ON cookbook_observations(route_key, task_class);
+            CREATE INDEX model_evidence_route ON model_evidence(route_key);
+            CREATE INDEX model_measurements_route ON model_measurements(route_key);
+            """
+        )
+
+    def _migrate_v1_to_v2(self) -> None:
+        """Atomically promote the old five-part identity to explicit routes."""
+
+        table_names = (
+            "models",
+            "model_observations",
+            "model_evidence",
+            "model_measurements",
+            "cookbook_observations",
+        )
+        for name in table_names:
+            exists = self._connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (name,)
+            ).fetchone()
+            if exists is None:
+                raise ModelKnowledgeError("Model knowledge database is missing a required table")
+            self._connection.execute(f"ALTER TABLE {name} RENAME TO {name}_v1")
+        self._create_exact_route_tables()
+
+        rows = self._connection.execute(
+            "SELECT provider_id, model_id, model_version, quantization, runtime, "
+            "metadata_json, availability, first_seen, last_seen, last_source, "
+            "last_evidence_kind, stale_since FROM models_v1"
+        ).fetchall()
+        for row in rows:
+            metadata = json.loads(str(row[5]))
+            identity = _legacy_identity(row[:5], metadata)
+            self._connection.execute(
+                """INSERT INTO models(
+                   route_key, provider_id, endpoint, region, model_id, model_version,
+                   deployment, account_scope, inference_kind, quantization, runtime,
+                   metadata_json, availability, first_seen, last_seen, last_source,
+                   last_evidence_kind, stale_since) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    identity.storage_key,
+                    identity.provider_id,
+                    identity.endpoint,
+                    identity.region,
+                    identity.model_id,
+                    identity.version,
+                    identity.deployment,
+                    identity.account_scope,
+                    identity.inference_kind,
+                    identity.quantization,
+                    identity.runtime,
+                    *row[5:],
+                ),
+            )
+
+        for row in self._connection.execute("SELECT * FROM model_observations_v1"):
+            identity = _legacy_identity(row[1:6], json.loads(str(row[6])))
+            self._connection.execute(
+                """INSERT INTO model_observations(
+                   observation_key, route_key, provider_id, endpoint, region, model_id,
+                   model_version, deployment, account_scope, inference_kind, quantization,
+                   runtime, metadata_json, observed_at, source, evidence_kind,
+                   evidence_detail, availability, machine_scope)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    row[0],
+                    identity.storage_key,
+                    identity.provider_id,
+                    identity.endpoint,
+                    identity.region,
+                    identity.model_id,
+                    identity.version,
+                    identity.deployment,
+                    identity.account_scope,
+                    identity.inference_kind,
+                    identity.quantization,
+                    identity.runtime,
+                    *row[6:],
+                ),
+            )
+        for row in self._connection.execute("SELECT * FROM model_evidence_v1"):
+            identity = _legacy_identity(row[1:6], None)
+            self._connection.execute(
+                """INSERT INTO model_evidence(
+                   evidence_key, route_key, provider_id, endpoint, region, model_id,
+                   model_version, deployment, account_scope, inference_kind, quantization,
+                   runtime, evidence_json) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    row[0],
+                    identity.storage_key,
+                    identity.provider_id,
+                    identity.endpoint,
+                    identity.region,
+                    identity.model_id,
+                    identity.version,
+                    identity.deployment,
+                    identity.account_scope,
+                    identity.inference_kind,
+                    identity.quantization,
+                    identity.runtime,
+                    row[6],
+                ),
+            )
+        for row in self._connection.execute("SELECT * FROM model_measurements_v1"):
+            identity = _legacy_identity(row[1:6], None)
+            self._connection.execute(
+                """INSERT INTO model_measurements(
+                   measurement_key, route_key, provider_id, endpoint, region, model_id,
+                   model_version, deployment, account_scope, inference_kind, quantization,
+                   runtime, measured_at, source, machine_scope, metrics_json)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    row[0],
+                    identity.storage_key,
+                    identity.provider_id,
+                    identity.endpoint,
+                    identity.region,
+                    identity.model_id,
+                    identity.version,
+                    identity.deployment,
+                    identity.account_scope,
+                    identity.inference_kind,
+                    identity.quantization,
+                    identity.runtime,
+                    *row[6:],
+                ),
+            )
+        for row in self._connection.execute("SELECT * FROM cookbook_observations_v1"):
+            payload = json.loads(str(row[7]))
+            identity_values = payload.get("identity", row[1:6])
+            identity = _legacy_identity(identity_values[:5], None)
+            self._connection.execute(
+                """INSERT INTO cookbook_observations(
+                   observation_id, route_key, provider_id, endpoint, region, model_id,
+                   model_version, deployment, account_scope, inference_kind, quantization,
+                   runtime, task_class, observation_json) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    row[0],
+                    identity.storage_key,
+                    identity.provider_id,
+                    identity.endpoint,
+                    identity.region,
+                    identity.model_id,
+                    identity.version,
+                    identity.deployment,
+                    identity.account_scope,
+                    identity.inference_kind,
+                    identity.quantization,
+                    identity.runtime,
+                    row[6],
+                    row[7],
+                ),
+            )
+        self._connection.execute(
+            "INSERT INTO model_knowledge_schema(version, name) VALUES (2, ?)",
+            (self._MIGRATION_V2_NAME,),
+        )
 
     def register_provider(
         self,
@@ -633,25 +952,32 @@ class ModelKnowledgeStore:
         current = {item.identity.storage_key for item in snapshot.models}
         with self._lock, self._connection:
             rows = self._connection.execute(
-                "SELECT provider_id, model_id, model_version, quantization, runtime "
+                "SELECT route_key, provider_id, endpoint, region, model_id, model_version, "
+                "deployment, account_scope, inference_kind, quantization, runtime "
                 "FROM models WHERE provider_id=?",
                 (snapshot.provider.provider_id.casefold(),),
             ).fetchall()
             for row in rows:
-                identity = ModelIdentity(*[str(value) for value in row])
+                identity = ModelIdentity(
+                    str(row[1]),
+                    str(row[4]),
+                    str(row[5]),
+                    str(row[9]),
+                    str(row[10]),
+                    str(row[2]),
+                    str(row[3]),
+                    str(row[6]),
+                    str(row[7]),
+                    str(row[8]),
+                )
                 if identity.storage_key not in current:
                     self._connection.execute(
                         "UPDATE models SET availability=?, stale_since=COALESCE(stale_since, ?) "
-                        "WHERE provider_id=? AND model_id=? AND model_version=? "
-                        "AND quantization=? AND runtime=?",
+                        "WHERE route_key=?",
                         (
                             KnowledgeAvailability.STALE.value,
                             _timestamp(snapshot.observed_at, "Refresh timestamp").isoformat(),
-                            identity.provider_id,
-                            identity.model_id,
-                            identity.version,
-                            identity.quantization,
-                            identity.runtime,
+                            identity.storage_key,
                         ),
                     )
             for observation in snapshot.models:
@@ -693,16 +1019,15 @@ class ModelKnowledgeStore:
             ).encode("utf-8")
         ).hexdigest()
         self._connection.execute(
-            """INSERT OR IGNORE INTO model_observations VALUES (
-               ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
-            )""",
+            """INSERT OR IGNORE INTO model_observations(
+               observation_key, route_key, provider_id, endpoint, region, model_id,
+               model_version, deployment, account_scope, inference_kind, quantization,
+               runtime, metadata_json, observed_at, source, evidence_kind,
+               evidence_detail, availability, machine_scope)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 observation_key,
-                identity.provider_id,
-                identity.model_id,
-                identity.version,
-                identity.quantization,
-                identity.runtime,
+                *_route_values(identity),
                 json.dumps(_metadata_json(observation.metadata), sort_keys=True),
                 observed.isoformat(),
                 observation.source,
@@ -713,36 +1038,31 @@ class ModelKnowledgeStore:
             ),
         )
         self._connection.execute(
-            "INSERT OR IGNORE INTO model_evidence VALUES (?, ?, ?, ?, ?, ?, ?)",
+            """INSERT OR IGNORE INTO model_evidence(
+               evidence_key, route_key, provider_id, endpoint, region, model_id,
+               model_version, deployment, account_scope, inference_kind, quantization,
+               runtime, evidence_json) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 observation_key,
-                identity.provider_id,
-                identity.model_id,
-                identity.version,
-                identity.quantization,
-                identity.runtime,
+                *_route_values(identity),
                 json.dumps(_evidence_json(evidence), sort_keys=True),
             ),
         )
-        key_args = (
-            identity.provider_id,
-            identity.model_id,
-            identity.version,
-            identity.quantization,
-            identity.runtime,
-        )
         current = self._connection.execute(
             "SELECT first_seen, last_seen, last_evidence_kind, last_source FROM models "
-            "WHERE provider_id=? AND model_id=? AND model_version=? "
-            "AND quantization=? AND runtime=?",
-            key_args,
+            "WHERE route_key=?",
+            (identity.storage_key,),
         ).fetchone()
         replace_current = current is None or _observation_wins(observation, current)
         if current is None:
             self._connection.execute(
-                """INSERT INTO models VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                """INSERT INTO models(
+                   route_key, provider_id, endpoint, region, model_id, model_version,
+                   deployment, account_scope, inference_kind, quantization, runtime,
+                   metadata_json, availability, first_seen, last_seen, last_source,
+                   last_evidence_kind, stale_since) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (
-                    *key_args,
+                    *_route_values(identity),
                     json.dumps(_metadata_json(observation.metadata), sort_keys=True),
                     observation.availability.value,
                     observed.isoformat(),
@@ -758,8 +1078,7 @@ class ModelKnowledgeStore:
             self._connection.execute(
                 """UPDATE models SET metadata_json=?, availability=?, last_seen=?, last_source=?,
                    last_evidence_kind=?, stale_since=?
-                   WHERE provider_id=? AND model_id=? AND model_version=?
-                   AND quantization=? AND runtime=?""",
+                   WHERE route_key=?""",
                 (
                     json.dumps(_metadata_json(observation.metadata), sort_keys=True),
                     observation.availability.value,
@@ -769,7 +1088,7 @@ class ModelKnowledgeStore:
                     observed.isoformat()
                     if observation.availability is KnowledgeAvailability.STALE
                     else None,
-                    *key_args,
+                    identity.storage_key,
                 ),
             )
 
@@ -811,27 +1130,19 @@ class ModelKnowledgeStore:
         ).hexdigest()
         with self._lock, self._connection:
             exists = self._connection.execute(
-                "SELECT 1 FROM models WHERE provider_id=? AND model_id=? AND model_version=? "
-                "AND quantization=? AND runtime=?",
-                (
-                    identity.provider_id,
-                    identity.model_id,
-                    identity.version,
-                    identity.quantization,
-                    identity.runtime,
-                ),
+                "SELECT 1 FROM models WHERE route_key=?", (identity.storage_key,)
             ).fetchone()
             if exists is None:
                 raise ModelKnowledgeError("Model must be known before recording measurement")
             self._connection.execute(
-                "INSERT OR IGNORE INTO model_measurements VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                """INSERT OR IGNORE INTO model_measurements(
+                   measurement_key, route_key, provider_id, endpoint, region, model_id,
+                   model_version, deployment, account_scope, inference_kind, quantization,
+                   runtime, measured_at, source, machine_scope, metrics_json)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (
                     measurement_key,
-                    identity.provider_id,
-                    identity.model_id,
-                    identity.version,
-                    identity.quantization,
-                    identity.runtime,
+                    *_route_values(identity),
                     measured.isoformat(),
                     measurement.source,
                     machine_scope,
@@ -852,14 +1163,13 @@ class ModelKnowledgeStore:
                 ).encode()
             ).hexdigest()
             self._connection.execute(
-                "INSERT OR IGNORE INTO model_evidence VALUES (?, ?, ?, ?, ?, ?, ?)",
+                """INSERT OR IGNORE INTO model_evidence(
+                   evidence_key, route_key, provider_id, endpoint, region, model_id,
+                   model_version, deployment, account_scope, inference_kind, quantization,
+                   runtime, evidence_json) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (
                     evidence_key,
-                    identity.provider_id,
-                    identity.model_id,
-                    identity.version,
-                    identity.quantization,
-                    identity.runtime,
+                    *_route_values(identity),
                     json.dumps(_evidence_json(evidence), sort_keys=True),
                 ),
             )
@@ -881,15 +1191,10 @@ class ModelKnowledgeStore:
         with self._lock:
             rows = self._connection.execute(
                 "SELECT measured_at, source, machine_scope, metrics_json "
-                "FROM model_measurements WHERE provider_id=? AND model_id=? "
-                "AND model_version=? AND quantization=? AND runtime=? AND machine_scope=? "
+                "FROM model_measurements WHERE route_key=? AND machine_scope=? "
                 "ORDER BY measured_at DESC, source ASC, rowid DESC LIMIT ?",
                 (
-                    identity.provider_id,
-                    identity.model_id,
-                    identity.version,
-                    identity.quantization,
-                    identity.runtime,
+                    identity.storage_key,
                     machine_scope,
                     limit,
                 ),
@@ -945,20 +1250,24 @@ class ModelKnowledgeStore:
             raise ModelKnowledgeError("Model query limit is invalid")
         cutoff = _timestamp(as_of, "Query timestamp") if as_of else datetime.now(UTC)
         query = (
-            "SELECT provider_id, model_id, model_version, quantization, runtime, "
-            "metadata_json, availability, first_seen, last_seen, last_source FROM models"
+            "SELECT route_key, provider_id, endpoint, region, model_id, model_version, "
+            "deployment, account_scope, inference_kind, quantization, runtime, metadata_json, "
+            "availability, first_seen, last_seen, last_source FROM models"
         )
         args: list[object] = []
         if provider_id:
             query += " WHERE provider_id=?"
             args.append(provider_id)
-        query += " ORDER BY provider_id, model_id, model_version, quantization, runtime LIMIT 1024"
+        query += (
+            " ORDER BY provider_id, model_id, model_version, quantization, runtime, "
+            "route_key LIMIT 1024"
+        )
         with self._lock:
             rows = self._connection.execute(query, args).fetchall()
             result: list[ModelKnowledgeView] = []
             for row in rows:
-                metadata = _metadata_from_json(json.loads(str(row[5])))
-                availability = KnowledgeAvailability(str(row[6]))
+                metadata = _metadata_from_json(json.loads(str(row[11])))
+                availability = KnowledgeAvailability(str(row[12]))
                 if not include_stale and availability is KnowledgeAvailability.STALE:
                     continue
                 if role is not None and role not in metadata.roles:
@@ -968,39 +1277,34 @@ class ModelKnowledgeStore:
                 if modality is not None and modality not in metadata.modalities:
                     continue
                 identity = ModelIdentity(
-                    str(row[0]), str(row[1]), str(row[2]), str(row[3]), str(row[4])
+                    str(row[1]),
+                    str(row[4]),
+                    str(row[5]),
+                    str(row[9]),
+                    str(row[10]),
+                    str(row[2]),
+                    str(row[3]),
+                    str(row[6]),
+                    str(row[7]),
+                    str(row[8]),
                 )
                 evidence_count = self._connection.execute(
-                    "SELECT COUNT(*) FROM model_evidence WHERE provider_id=? AND model_id=? "
-                    "AND model_version=? AND quantization=? AND runtime=?",
-                    (
-                        identity.provider_id,
-                        identity.model_id,
-                        identity.version,
-                        identity.quantization,
-                        identity.runtime,
-                    ),
+                    "SELECT COUNT(*) FROM model_evidence WHERE route_key=?",
+                    (identity.storage_key,),
                 ).fetchone()[0]
                 measurement_count = self._connection.execute(
-                    "SELECT COUNT(*) FROM model_measurements WHERE provider_id=? AND model_id=? "
-                    "AND model_version=? AND quantization=? AND runtime=?",
-                    (
-                        identity.provider_id,
-                        identity.model_id,
-                        identity.version,
-                        identity.quantization,
-                        identity.runtime,
-                    ),
+                    "SELECT COUNT(*) FROM model_measurements WHERE route_key=?",
+                    (identity.storage_key,),
                 ).fetchone()[0]
-                last_seen = datetime.fromisoformat(str(row[8])) if row[8] else None
+                last_seen = datetime.fromisoformat(str(row[14])) if row[14] else None
                 result.append(
                     ModelKnowledgeView(
                         identity,
                         metadata,
                         availability,
-                        datetime.fromisoformat(str(row[7])) if row[7] else None,
+                        datetime.fromisoformat(str(row[13])) if row[13] else None,
                         last_seen,
-                        str(row[9]) if row[9] is not None else None,
+                        str(row[15]) if row[15] is not None else None,
                         int(evidence_count),
                         int(measurement_count),
                         _freshness(last_seen, cutoff),
@@ -1029,15 +1333,8 @@ class ModelKnowledgeStore:
             raise ModelKnowledgeError("Model identity is malformed")
         with self._lock:
             rows = self._connection.execute(
-                "SELECT evidence_json FROM model_evidence WHERE provider_id=? AND model_id=? "
-                "AND model_version=? AND quantization=? AND runtime=? ORDER BY evidence_key",
-                (
-                    identity.provider_id,
-                    identity.model_id,
-                    identity.version,
-                    identity.quantization,
-                    identity.runtime,
-                ),
+                "SELECT evidence_json FROM model_evidence WHERE route_key=? ORDER BY evidence_key",
+                (identity.storage_key,),
             ).fetchall()
         return tuple(_evidence_from_json(json.loads(str(row[0]))) for row in rows)
 
@@ -1047,27 +1344,19 @@ class ModelKnowledgeStore:
         payload = _cookbook_json(observation)
         with self._lock, self._connection:
             known = self._connection.execute(
-                "SELECT 1 FROM models WHERE provider_id=? AND model_id=? "
-                "AND model_version=? AND quantization=? AND runtime=?",
-                (
-                    observation.identity.provider_id,
-                    observation.identity.model_id,
-                    observation.identity.version,
-                    observation.identity.quantization,
-                    observation.identity.runtime,
-                ),
+                "SELECT 1 FROM models WHERE route_key=?",
+                (observation.identity.storage_key,),
             ).fetchone()
             if known is None:
                 raise ModelKnowledgeError("Cookbook model must be known")
             cursor = self._connection.execute(
-                "INSERT OR IGNORE INTO cookbook_observations VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                """INSERT OR IGNORE INTO cookbook_observations(
+                   observation_id, route_key, provider_id, endpoint, region, model_id,
+                   model_version, deployment, account_scope, inference_kind, quantization,
+                   runtime, task_class, observation_json) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (
                     observation.dedupe_key,
-                    observation.identity.provider_id,
-                    observation.identity.model_id,
-                    observation.identity.version,
-                    observation.identity.quantization,
-                    observation.identity.runtime,
+                    *_route_values(observation.identity),
                     observation.task_class,
                     json.dumps(payload, sort_keys=True),
                 ),
@@ -1081,17 +1370,8 @@ class ModelKnowledgeStore:
             raise ModelKnowledgeError("Model identity is malformed")
         if task_class is not None:
             _bounded_text(task_class, "Task class", 128)
-        query = (
-            "SELECT observation_json FROM cookbook_observations WHERE provider_id=? "
-            "AND model_id=? AND model_version=? AND quantization=? AND runtime=?"
-        )
-        args: list[object] = [
-            identity.provider_id,
-            identity.model_id,
-            identity.version,
-            identity.quantization,
-            identity.runtime,
-        ]
+        query = "SELECT observation_json FROM cookbook_observations WHERE route_key=?"
+        args: list[object] = [identity.storage_key]
         if task_class is not None:
             query += " AND task_class=?"
             args.append(task_class)
@@ -1458,6 +1738,11 @@ def _cookbook_json(observation: CookbookObservation) -> dict[str, object]:
             observation.identity.version,
             observation.identity.quantization,
             observation.identity.runtime,
+            observation.identity.endpoint,
+            observation.identity.region,
+            observation.identity.deployment,
+            observation.identity.account_scope,
+            observation.identity.inference_kind,
         ],
         "task_class": observation.task_class,
         "operation_class": observation.operation_class,
@@ -1485,8 +1770,25 @@ def _cookbook_json(observation: CookbookObservation) -> dict[str, object]:
 
 def _cookbook_from_json(value: dict[str, Any]) -> CookbookObservation:
     identity_values = [str(item) for item in value["identity"]]
+    if len(identity_values) == 5:
+        identity = ModelIdentity(*identity_values)
+    elif len(identity_values) == 10:
+        identity = ModelIdentity(
+            identity_values[0],
+            identity_values[1],
+            identity_values[2],
+            identity_values[3],
+            identity_values[4],
+            identity_values[5],
+            identity_values[6],
+            identity_values[7],
+            identity_values[8],
+            identity_values[9],
+        )
+    else:
+        raise ModelKnowledgeError("Cookbook identity is malformed")
     return CookbookObservation(
-        ModelIdentity(*identity_values),
+        identity,
         str(value["task_class"]),
         CookbookOutcome(str(value["outcome"])),
         datetime.fromisoformat(str(value["observed_at"])),

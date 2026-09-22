@@ -165,6 +165,27 @@ class ExactRouteIdentity:
             separators=(",", ":"),
         )
 
+    @classmethod
+    def from_model_identity(cls, identity: object) -> ExactRouteIdentity:
+        """Adapt the compatibility knowledge value to the canonical route type."""
+
+        from jarvis.ai.knowledge import ModelIdentity
+
+        if not isinstance(identity, ModelIdentity):
+            raise ValueError("Model identity is malformed")
+        return cls(
+            identity.provider_id,
+            identity.endpoint,
+            identity.model_id,
+            region=identity.region,
+            version=identity.version,
+            deployment=identity.deployment,
+            account_scope=identity.account_scope,
+            inference_kind=IntelligenceKind(identity.inference_kind),
+            quantization=identity.quantization,
+            runtime=identity.runtime,
+        )
+
 
 ModelRouteIdentity = ExactRouteIdentity
 
@@ -523,6 +544,7 @@ class UsageReceipt:
     currency: str = "USD"
     observed_at: datetime = datetime.min.replace(tzinfo=UTC)
     source: str = "provider_receipt"
+    receipt_id: str = ""
 
     def __post_init__(self) -> None:
         _text(self.route_key, "Usage route key", 1_024)
@@ -540,6 +562,8 @@ class UsageReceipt:
             raise ValueError("Actual usage cost is invalid")
         _text(self.currency, "Usage currency", 16)
         _text(self.source, "Usage source", 256)
+        if self.receipt_id:
+            _text(self.receipt_id, "Usage receipt ID", 256)
         if self.observed_at.tzinfo is None:
             raise ValueError("Usage timestamp must be timezone-aware")
 
