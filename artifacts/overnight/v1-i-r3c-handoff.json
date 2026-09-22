@@ -1,0 +1,55 @@
+{
+  "schema": "v1-i-r3c-handoff-2",
+  "status": "IMPLEMENTED_LOCAL_QUALIFIED",
+  "authoritative_start_remote": "762bd56d04f99e6c0f7340575b07d1ea0bc8cd5f",
+  "authoritative_branch": "agent/v1-integration",
+  "baseline_tree": "a85e42de59290891ee8a4f8c40e075ab08e1de41",
+  "local_reconciliation": {
+    "primary_head": "580be1279e8c332e6073f44bd970f2c5eaa7b635",
+    "preserved_primary_worktree_changes": [".gitignore", "weppy-project-sync/.gitignore"],
+    "r3c_worktree": "D:/JARVIS-r3c",
+    "r3c_branch": "agent/v1-r3c-integration",
+    "discarded_local_commits": []
+  },
+  "r3b": "COMPLETE",
+  "p3a": "INTEGRATED_SUPERSEDED_BY_GREEN_DESCENDANT",
+  "known_wsl_signal": "ENVIRONMENT_BLOCKED",
+  "r3c_c": {
+    "scope": "trusted reversible current-user Windows Run disable and restore",
+    "permissions": ["startup.write"],
+    "safety_class": "SYSTEM_CONFIGURATION",
+    "host_bridge_operations": ["HOST_STARTUP_ENTRY_DISABLE", "HOST_STARTUP_ENTRY_RESTORE"],
+    "effect_authority": "PermissionBroker plus receipt-backed HostBridge plus trusted provider",
+    "durability": "pre-effect record, verified terminal state, restart reconciliation, unknown-outcome quarantine",
+    "unsupported_mutation_sources": ["current-user RunOnce", "machine Run", "machine RunOnce"],
+    "generic_registry_editor": "NOT_IMPLEMENTED",
+    "raw_command_in_artifacts": "OMITTED"
+  },
+  "focused_verification": {
+    "tests": "184 passed, 3 skipped",
+    "changed_statement_coverage": "505/554 = 91.155235%",
+    "canonical_quality": "2402 passed, 9 skipped, 3 deselected; exact 49751/53664 = 90.08842307474998%",
+    "test_strength": "PASS; all weakening flags NO",
+    "package_smoke": "PASS; RECORD tamper matrix and artifact-only composition PASS"
+  },
+  "real_host": {"status": "PASS", "artifact": "build/r3c-c-real-host-startup.json", "states": ["DISABLED", "RESTORED"], "cleanup": "PASS"},
+  "standalone_v1_acceptance": {
+    "status": "PASS",
+    "run_id": "6d4d1f28-0822-4e25-b6b1-8a6d669a46cd",
+    "passed": 174,
+    "skipped": 2,
+    "source_sha256": "204217dc46c343751f457fa48f781ce91f9dab508cb2af5a0c4d38340405f61b",
+    "bound_file_count": 419,
+    "tested_tree": "cdb0101f73b02c02327aec0520a1cb0dd30a8e7",
+    "native_result_artifact": {"path": "build/system-test-artifacts/6d4d1f28-0822-4e25-b6b1-8a6d669a46cd/stdout.log", "role": "system-result", "sha256": "c48f60f4aaa4a2eac49131f2666d5ffcf24ef75efe509f532a0f5268b4a7dfdd"}
+  },
+  "candidate_15": "NOT_CREATED",
+  "source_freeze": {
+    "qualification_source_sha256": "204217dc46c343751f457fa48f781ce91f9dab508cb2af5a0c4d38340405f61b",
+    "qualification_bound_file_count": 419,
+    "prospective_tree": "cdb0101f73b02c02327aec0520a1cb0dd30a8e7",
+    "implementation_commit": "614671bf277a117e387e2f7d5ba90345333e5801",
+    "handoff_parent_commit": "70e18d620df4ace93352a0393e186811799135b4"
+  },
+  "hosted_ci": {"baseline_lookup": "35429308350 exact baseline SHA in_progress; no credit claimed", "final_child_lookup": "PENDING_PUSH"}
+}

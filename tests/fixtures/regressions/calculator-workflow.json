@@ -1,0 +1,9 @@
+{
+  "fixture_id": "calculator-workflow-200",
+  "title": "Calculator workflow verifies 25 percent of 800",
+  "category": "agent_workflows",
+  "suite_id": "deterministic-workflows",
+  "scenario_id": "calculator-workflow",
+  "expected_status": "passed",
+  "source_issue": "internal:workflow-calculator"
+}

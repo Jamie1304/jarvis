@@ -1,5 +1,152 @@
-"""Provider interfaces and adapters."""
+"""Provider interfaces, packages, and adapters."""
 
-from jarvis.ai.providers.base import AIProvider
+from jarvis.ai.models import EvidenceKind, EvidenceRecord, ModelRole
+from jarvis.ai.providers.base import AIProvider, IntelligenceProvider
+from jarvis.ai.providers.intelligence import (
+    AuthenticationType,
+    CostEvidence,
+    CostStatus,
+    DecisionProvider,
+    DecisionRequest,
+    DecisionResult,
+    ExactRouteIdentity,
+    IntelligenceKind,
+    LearnedModelState,
+    ModelPolicy,
+    ModelRouteIdentity,
+    PackageSupportStatus,
+    ProtocolFamily,
+    ProviderLifecycle,
+    ProviderPackageManifest,
+    ProviderPolicy,
+    ProviderSetupField,
+    RemoteIntelligencePrivacyGateway,
+    RemoteSafePayload,
+    UsageReceipt,
+)
+from jarvis.ai.providers.registry import (
+    ModelLifecycle,
+    ModelMetadata,
+    Provider,
+    ProviderDefinition,
+    ProviderLocality,
+    ProviderMetadata,
+    ProviderRegistry,
+    VoiceProviderDefinition,
+    VoiceProviderKind,
+)
 
-__all__ = ["AIProvider"]
+
+def __getattr__(name: str) -> object:
+    """Load optional catalog/discovery adapters without creating import cycles."""
+
+    if name in {
+        "JevDecisionProvider",
+        "JevConfiguration",
+        "AI21Provider",
+        "AnthropicProvider",
+        "AnthropicConfiguration",
+        "CohereConfiguration",
+        "CohereProvider",
+        "AzureOpenAIConfiguration",
+        "AzureOpenAIProvider",
+        "BedrockConfiguration",
+        "BedrockProvider",
+        "AwsSigV4Credentials",
+        "AwsSigV4Signer",
+        "GeminiConfiguration",
+        "GeminiProvider",
+        "HttpxJSONTransport",
+        "OpenAICompatibleConfiguration",
+        "OpenAICompatibleProvider",
+        "ProviderAdapterError",
+        "ProviderErrorReason",
+        "STANDARD_OPENAI_PRESETS",
+        "VertexAIConfiguration",
+        "VertexAIProvider",
+        "create_standard_provider",
+        "register_standard_provider_factories",
+        "STANDARD_PROVIDER_MANIFESTS",
+        "provider_manifest",
+        "provider_execution_matrix",
+        "provider_support_matrix",
+        "standard_provider_catalog",
+    }:
+        from importlib import import_module
+
+        return getattr(import_module("jarvis.ai.providers.catalog"), name)
+    if name in {"DiscoveryResult", "ModelDiscoveryService"}:
+        from importlib import import_module
+
+        return getattr(import_module("jarvis.ai.providers.discovery"), name)
+    raise AttributeError(name)
+
+
+__all__ = [
+    "AIProvider",
+    "AI21Provider",
+    "AnthropicConfiguration",
+    "AnthropicProvider",
+    "AuthenticationType",
+    "CostEvidence",
+    "CostStatus",
+    "AzureOpenAIConfiguration",
+    "AzureOpenAIProvider",
+    "BedrockConfiguration",
+    "BedrockProvider",
+    "AwsSigV4Credentials",
+    "AwsSigV4Signer",
+    "DecisionProvider",
+    "DecisionRequest",
+    "DecisionResult",
+    "CohereConfiguration",
+    "CohereProvider",
+    "DiscoveryResult",
+    "EvidenceKind",
+    "EvidenceRecord",
+    "ExactRouteIdentity",
+    "GeminiConfiguration",
+    "GeminiProvider",
+    "HttpxJSONTransport",
+    "IntelligenceKind",
+    "IntelligenceProvider",
+    "JevDecisionProvider",
+    "JevConfiguration",
+    "LearnedModelState",
+    "ModelDiscoveryService",
+    "ModelLifecycle",
+    "ModelMetadata",
+    "ModelPolicy",
+    "ModelRouteIdentity",
+    "ModelRole",
+    "OpenAICompatibleConfiguration",
+    "OpenAICompatibleProvider",
+    "PackageSupportStatus",
+    "ProviderAdapterError",
+    "ProviderErrorReason",
+    "ProtocolFamily",
+    "Provider",
+    "ProviderDefinition",
+    "ProviderLifecycle",
+    "ProviderLocality",
+    "ProviderMetadata",
+    "ProviderPackageManifest",
+    "ProviderPolicy",
+    "ProviderRegistry",
+    "ProviderSetupField",
+    "RemoteIntelligencePrivacyGateway",
+    "RemoteSafePayload",
+    "STANDARD_OPENAI_PRESETS",
+    "STANDARD_PROVIDER_MANIFESTS",
+    "UsageReceipt",
+    "VertexAIConfiguration",
+    "VertexAIProvider",
+    "VoiceProviderDefinition",
+    "VoiceProviderKind",
+    "provider_manifest",
+    "provider_execution_matrix",
+    "provider_support_matrix",
+    "standard_provider_catalog",
+    "create_standard_provider",
+    "register_standard_provider_factories",
+]

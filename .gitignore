@@ -1,5 +1,6 @@
 .venv/
 venv/
+.jarvis/
 __pycache__/
 *.py[cod]
 .pytest_cache/
@@ -23,3 +24,11 @@ Thumbs.db
 Desktop.ini
 .idea/
 .vscode/
+
+# Generated local acceptance, diagnostic, and visual evidence.
+artifacts/acceptance/**
+artifacts/development/**
+artifacts/desktop-visual-candidates/**
+artifacts/desktop-visual-native/**
+artifacts/*.json
+artifacts/*.png

@@ -59,11 +59,17 @@ class ProbeOutput(BaseModel):
 
 class ProbeTool(Tool[ProbeInput, ProbeOutput]):
     def __init__(
-        self, *, delay_seconds: float = 0, timeout_seconds: float = 1, raises: bool = False
+        self,
+        *,
+        delay_seconds: float = 0,
+        timeout_seconds: float = 1,
+        raises: bool = False,
+        error_message: str = "test implementation failure",
     ) -> None:
         self.delay_seconds = delay_seconds
         self.timeout_seconds = timeout_seconds
         self.raises = raises
+        self.error_message = error_message
         self.executions = 0
 
     @property
@@ -87,7 +93,7 @@ class ProbeTool(Tool[ProbeInput, ProbeOutput]):
     def input_model(self) -> type[ProbeInput]:
         return ProbeInput
 
-    async def execute(
+    async def _execute_authorized(
         self, context: ToolExecutionContext, validated_input: ProbeInput
     ) -> ToolResult:
         del context
@@ -95,7 +101,7 @@ class ProbeTool(Tool[ProbeInput, ProbeOutput]):
         if self.delay_seconds:
             await asyncio.sleep(self.delay_seconds)
         if self.raises:
-            raise RuntimeError("test implementation failure")
+            raise RuntimeError(self.error_message)
         return ToolResult.success(ProbeOutput(value=validated_input.value))
 
 
@@ -201,12 +207,17 @@ async def test_local_time_tool_returns_typed_local_time() -> None:
 
 
 @pytest.mark.asyncio
-async def test_raw_tool_failure_becomes_structured_internal_failure() -> None:
-    result = await ToolHarness().invoke(ProbeTool(raises=True), {"value": "fail"})
+async def test_raw_tool_failure_becomes_structured_internal_failure(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    secret = "credential-value-must-not-be-logged"
+    tool = ProbeTool(raises=True, error_message=secret)
+    result = await ToolHarness().invoke(tool, {"value": "fail"})
 
     assert result.status is ToolResultStatus.INTERNAL_FAILURE
     assert result.error is not None
     assert result.error.code == "tool_internal_failure"
+    assert secret not in caplog.text
 
 
 @pytest.mark.asyncio
@@ -225,12 +236,13 @@ async def test_orchestrator_executes_registered_calculator_and_verifies_200() ->
             ],
         }
     )
+    registry = ToolRegistry((CalculatorTool(),))
     orchestrator = AgentOrchestrator(
         store=InMemoryTaskStore(),
         interpreter=DefaultRequestInterpreter(),
         planner=SchemaValidatedPlanner(advisor),
-        selector=RegistryCapabilitySelector(ToolRegistry((CalculatorTool(),))),
-        executor=DefaultToolExecutor(),
+        selector=RegistryCapabilitySelector(registry),
+        executor=DefaultToolExecutor(registry.permission_broker),
         observer=DefaultObservationService(),
         verifier=EvidenceVerifier(),
         response_generator=DefaultTaskResponseGenerator(),

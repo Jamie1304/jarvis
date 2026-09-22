@@ -3,6 +3,7 @@
 import json
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime
 from typing import Any
 
 import httpx
@@ -15,6 +16,7 @@ from jarvis.ai.models import (
     ProviderHealth,
 )
 from jarvis.ai.providers.base import AIProvider
+from jarvis.ai.usability import ModelUsabilityEvidence, UsabilityReason
 from jarvis.core.errors import (
     ModelUnavailableError,
     ProviderError,
@@ -22,6 +24,9 @@ from jarvis.core.errors import (
     ProviderUnavailableError,
     StreamingInterruptedError,
 )
+
+_MAX_RESPONSE_BYTES = 4 * 1024 * 1024
+_MAX_STREAM_LINE_BYTES = 1 * 1024 * 1024
 
 
 class OllamaProvider(AIProvider):
@@ -48,13 +53,15 @@ class OllamaProvider(AIProvider):
             async with self._request_client() as client:
                 response = await client.post(f"{self._endpoint}/api/chat", json=payload)
                 self._raise_for_ollama_error(response)
+                if len(response.content) > _MAX_RESPONSE_BYTES:
+                    raise ProviderError("Ollama response exceeded its safety bound")
                 body = response.json()
                 content = self._message_content(body)
         except httpx.TimeoutException as error:
             raise ProviderTimeoutError("Ollama generation timed out") from error
         except httpx.ConnectError as error:
             raise ProviderUnavailableError("Ollama server is unavailable") from error
-        return GenerationResult(content=content, model=self._model)
+        return GenerationResult(content=content, model=request.model)
 
     async def stream(self, request: GenerationRequest) -> AsyncIterator[GenerationChunk]:
         payload = self._payload(request, stream=True)
@@ -68,8 +75,17 @@ class OllamaProvider(AIProvider):
                     async for line in response.aiter_lines():
                         if not line:
                             continue
+                        if len(line.encode("utf-8")) > _MAX_STREAM_LINE_BYTES:
+                            raise StreamingInterruptedError(
+                                "Ollama stream event exceeded its safety bound"
+                            )
                         body = self._parse_stream_line(line)
-                        done = bool(body.get("done", False))
+                        done_value = body.get("done", False)
+                        if type(done_value) is not bool:
+                            raise StreamingInterruptedError(
+                                "Ollama stream completion flag is malformed"
+                            )
+                        done = done_value
                         content = self._message_content(body)
                         if content or done:
                             yield GenerationChunk(content=content, done=done)
@@ -96,6 +112,117 @@ class OllamaProvider(AIProvider):
             return ProviderHealth(available=False, detail=str(error))
         return ProviderHealth(available=True, detail="Ollama is reachable")
 
+    async def probe_usability(self) -> ModelUsabilityEvidence:
+        """Observe local server/model state without loading or generating."""
+
+        observed_at = datetime.now(UTC)
+        try:
+            async with self._request_client() as client:
+                response = await client.get(f"{self._endpoint}/api/tags")
+        except httpx.TimeoutException:
+            return ModelUsabilityEvidence(
+                configured=True,
+                connected=None,
+                reachable=False,
+                request_usable=False,
+                reason=UsabilityReason.NETWORK_UNAVAILABLE,
+                source="ollama.api.tags",
+                observed_at=observed_at,
+                detail="Ollama status probe timed out",
+                model_id=self._model,
+            )
+        except httpx.ConnectError:
+            return ModelUsabilityEvidence(
+                configured=True,
+                connected=False,
+                reachable=False,
+                request_usable=False,
+                reason=UsabilityReason.NETWORK_UNAVAILABLE,
+                source="ollama.api.tags",
+                observed_at=observed_at,
+                detail="Ollama status endpoint is unreachable",
+                model_id=self._model,
+            )
+        if response.status_code == 401:
+            return ModelUsabilityEvidence(
+                configured=True,
+                connected=True,
+                reachable=True,
+                authenticated=False,
+                request_usable=False,
+                reason=UsabilityReason.INVALID_CREDENTIALS,
+                source="ollama.api.tags",
+                observed_at=observed_at,
+                detail="Ollama status endpoint rejected authentication",
+                model_id=self._model,
+            )
+        if response.status_code >= 500:
+            return ModelUsabilityEvidence(
+                configured=True,
+                connected=False,
+                reachable=True,
+                request_usable=False,
+                reason=UsabilityReason.PROVIDER_OUTAGE,
+                source="ollama.api.tags",
+                observed_at=observed_at,
+                detail="Ollama status endpoint reported provider failure",
+                model_id=self._model,
+            )
+        if response.status_code >= 400:
+            return ModelUsabilityEvidence(
+                configured=True,
+                connected=True,
+                reachable=True,
+                request_usable=False,
+                reason=UsabilityReason.MODEL_UNAVAILABLE,
+                source="ollama.api.tags",
+                observed_at=observed_at,
+                detail="Ollama status endpoint rejected the probe",
+                model_id=self._model,
+            )
+        try:
+            body = response.json()
+        except ValueError:
+            body = None
+        models = body.get("models") if isinstance(body, dict) else None
+        if not isinstance(models, list):
+            return ModelUsabilityEvidence(
+                configured=True,
+                connected=True,
+                reachable=True,
+                authenticated=True,
+                request_usable=False,
+                reason=UsabilityReason.UNKNOWN,
+                source="ollama.api.tags",
+                observed_at=observed_at,
+                detail="Ollama model catalog was not sufficient to prove usability",
+                model_id=self._model,
+            )
+        installed = any(
+            isinstance(item, dict)
+            and (item.get("name") == self._model or item.get("model") == self._model)
+            for item in models
+        )
+        return ModelUsabilityEvidence(
+            configured=True,
+            connected=True,
+            reachable=True,
+            authenticated=True,
+            entitled=True if installed else None,
+            quota_usable=True,
+            model_usable=installed,
+            request_usable=None if installed else False,
+            reason=UsabilityReason.UNKNOWN if installed else UsabilityReason.MODEL_NOT_FOUND,
+            source="ollama.api.tags",
+            observed_at=observed_at,
+            detail=(
+                "Ollama model is installed and provider-native status is healthy"
+                if installed
+                else "Ollama provider is reachable but the requested model is not installed"
+            ),
+            model_id=self._model,
+        )
+
     async def model_info(self) -> ModelInfo:
         request = GenerationRequest(
             messages=(), model=self._model, context_limit=self._context_limit
@@ -112,7 +239,9 @@ class OllamaProvider(AIProvider):
         if self._client is not None:
             yield self._client
         else:
-            async with httpx.AsyncClient(timeout=httpx.Timeout(self._timeout_seconds)) as client:
+            async with httpx.AsyncClient(
+                timeout=httpx.Timeout(self._timeout_seconds), trust_env=False
+            ) as client:
                 yield client
 
     def _payload(self, request: GenerationRequest, *, stream: bool) -> dict[str, Any]:
@@ -126,9 +255,16 @@ class OllamaProvider(AIProvider):
         }
 
     @staticmethod
-    def _message_content(body: dict[str, Any]) -> str:
-        message = body.get("message", {})
-        return str(message.get("content", "")) if isinstance(message, dict) else ""
+    def _message_content(body: object) -> str:
+        if not isinstance(body, dict):
+            raise ProviderError("Ollama response schema is malformed")
+        message = body.get("message")
+        if not isinstance(message, dict):
+            raise ProviderError("Ollama response message is malformed")
+        content = message.get("content", "")
+        if type(content) is not str:
+            raise ProviderError("Ollama response content is malformed")
+        return content
 
     @staticmethod
     def _parse_stream_line(line: str) -> dict[str, Any]:
@@ -144,7 +280,8 @@ class OllamaProvider(AIProvider):
     def _raise_for_ollama_error(response: httpx.Response) -> None:
         if response.status_code < 400:
             return
-        detail = response.text
-        if response.status_code == 404 or "not found" in detail.lower():
-            raise ModelUnavailableError(f"Ollama model is unavailable: {detail}")
-        raise ProviderError(f"Ollama returned HTTP {response.status_code}: {detail}")
+        # Response bodies can echo prompts, credentials, or malicious server text.
+        # Preserve only trusted protocol metadata in application exceptions.
+        if response.status_code == 404:
+            raise ModelUnavailableError("Ollama model is unavailable")
+        raise ProviderError(f"Ollama returned HTTP {response.status_code}")

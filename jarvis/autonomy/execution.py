@@ -10,6 +10,7 @@ from jarvis.autonomy.models import (
     VerificationStatus,
 )
 from jarvis.core.errors import CapabilityUnavailableError, ToolExecutionError
+from jarvis.permissions.broker import PermissionBroker
 from jarvis.tools.base import Tool
 from jarvis.tools.models import (
     ToolExecutionContext,
@@ -53,13 +54,16 @@ class ToolExecutor(ABC):
 class DefaultToolExecutor(ToolExecutor):
     """Small execution adapter that converts unexpected tool errors into task errors."""
 
+    def __init__(self, broker: PermissionBroker) -> None:
+        self._broker = broker
+
     async def execute(
         self,
         tool: Tool[Any, Any],
         context: ToolExecutionContext,
         raw_input: dict[str, object],
     ) -> ToolResult:
-        return await tool.invoke(context, raw_input)
+        return await tool.invoke(context, raw_input, self._broker)
 
 
 class ObservationService(ABC):

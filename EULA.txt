@@ -1,0 +1,236 @@
+JARVIS END USER LICENSE AGREEMENT
+
+Effective as of the date this version is first made commercially available.
+
+JARVIS is currently in private-use/pre-commercial development and is not
+currently offered for sale or under a paid subscription. This agreement
+describes the intended proprietary licensing framework and does not itself
+mean that a commercial offering has begun. A geographic business/contact
+address and any other information legally required for a commercial offering
+will be provided in legally operative commercial distribution materials
+before JARVIS is offered commercially.
+
+1. Parties and acceptance
+
+This agreement is between Jamie Kanbier, The Netherlands (the “Licensor”) and
+the person or organization accepting it (the “Licensee”). The Licensor’s
+contact email is jamiekanbier@gmail.com. By installing, accessing,
+or using JARVIS, the Licensee accepts this agreement to the extent permitted
+by applicable law. If the Licensee accepts for an organization, it represents
+that it has authority to bind that organization.
+
+2. Definitions
+
+“JARVIS” means the first-party software, documentation, updates, and related
+materials supplied by the Licensor. “Core” includes the Trusted Core,
+frameworks, and first-party templates. “Entitlement” means the applicable
+paid or otherwise valid commercial right to use the relevant version or
+feature. “User Data” means data and content supplied by or created for the
+Licensee, excluding the Core and third-party materials.
+
+3. License grant
+
+Subject to this agreement and a valid Entitlement, the Licensor grants the
+Licensee a limited, non-exclusive, non-transferable license to install and use
+JARVIS for the permitted purpose and scope of that Entitlement. The license
+is licensed, not sold, and does not transfer ownership.
+
+4. Subscription and commercial entitlement
+
+Use is limited to the version, features, seats, installations, duration, and
+other limits of the applicable order, subscription, or entitlement. No
+technical license server, account mechanism, or digital-rights control is
+implied by this agreement unless separately provided and documented.
+
+5. Permitted use
+
+The Licensee may use JARVIS for its internal lawful purposes, including
+conversation, planning, approved automation, and creation of User Data and
+user-specific configuration, within the Entitlement and applicable law.
+
+6. Restrictions
+
+Except where this agreement or mandatory law permits it, the Licensee must
+not copy, redistribute, resell, sublicense, publish, rent, or make JARVIS
+available as a service; remove proprietary notices; circumvent access or
+security controls; or create a competing redistributed version of JARVIS.
+
+7. Ownership and intellectual property
+
+Jamie Kanbier and the Licensor’s licensors retain all rights in JARVIS, the Core,
+first-party documentation, reusable templates, and underlying technology.
+All rights not expressly granted are reserved. This agreement grants no
+rights in third-party software, services, brands, or content.
+
+8. User data and user-created content
+
+As between the parties, the Licensee retains its rights in User Data, subject
+to third-party rights. The Licensor receives only the rights reasonably
+necessary to provide, secure, maintain, and support JARVIS as configured by
+the Licensee. JARVIS is designed to be local-first; this agreement does not
+promise or authorize cloud processing that is not actually provided.
+
+9. Generated capabilities, integrations, and automation
+
+JARVIS may produce capability packages, integrations, workflows, procedures,
+UI components, configuration, or automation logic. The Core and reusable
+first-party templates remain the Licensor’s property. User Data, credentials,
+and user-provided content remain the Licensee’s. User-specific generated
+configuration and workflow outputs may be used as part of the licensed
+installation. The Licensor does not promise exclusive intellectual-property
+ownership of AI-generated output where law does not support that promise.
+Generated output grants no rights in third-party software, protocols, brands,
+services, or content.
+
+10. Third-party software and services
+
+Third-party components may be supplied with or used by JARVIS under separate
+licenses. Those terms govern the relevant components and are preserved. An
+integration may also depend on an external service whose terms apply to that
+service. Reference or donor projects are not thereby included as required
+JARVIS runtime components.
+
+11. External accounts, APIs, and credentials
+
+The Licensee is responsible for lawful authorization of external accounts and
+APIs. JARVIS does not grant access to a third-party service. Credentials must
+be handled through the supported secure credential boundary; a commercial
+Entitlement is not permission, owner approval, or CredentialVault authority.
+
+12. Updates and changes to JARVIS
+
+The Licensor may provide bug fixes, compatibility changes, security updates,
+and feature updates subject to the applicable Entitlement and law. Nothing
+here excludes mandatory statutory software or digital-content duties, and no
+perpetual-update promise is made.
+
+13. Security and automated actions
+
+JARVIS can act on user instructions and configured automations. The Licensee
+is responsible for reviewing permissions, configuration, and lawful use.
+High-impact actions remain subject to JARVIS security and permission controls.
+No clause in this agreement expands JARVIS authority or bypasses its
+PermissionBroker, policy, approval, verification, or safety boundaries.
+
+14. Availability and external dependencies
+
+The Licensor does not control the uptime, APIs, pricing, terms,
+compatibility, account availability, or content of external services. JARVIS
+may be unavailable or degraded because of local resources, devices, providers,
+networks, or other dependencies.
+
+15. Fees and subscription relationship
+
+Fees, billing, renewal, cancellation, taxes, and subscription terms are those
+in the applicable order or commercial plan. This agreement does not invent or
+modify pricing or cancellation rights.
+
+16. Term and termination
+
+This agreement begins on acceptance and continues while the Licensee has a
+valid Entitlement, unless terminated earlier under the applicable order or
+law. The Licensor may terminate for material breach after any legally required
+notice and opportunity to cure.
+
+17. Effect of termination
+
+On termination or expiry, the Licensee must stop using and remove JARVIS to
+the extent required by the applicable Entitlement. Rights that by their nature
+should survive, including ownership, restrictions, accrued payment duties,
+disclaimers, liability limits, and dispute provisions, survive. User Data
+handling remains subject to applicable law and documented export/deletion
+processes.
+
+18. Warranty and statutory conformity
+
+JARVIS is provided with the warranties expressly stated in the applicable
+commercial terms. To the maximum extent permitted for a business user, other
+warranties are disclaimed. Nothing excludes mandatory conformity, warranty,
+or remedy rights that cannot lawfully be excluded.
+
+19. Limitation of liability
+
+To the maximum extent permitted by law, neither party is liable for indirect,
+incidental, special, consequential, exemplary, or loss-of-profit damages.
+For Business Users, to the maximum extent permitted by applicable law, the
+Licensor’s aggregate liability arising out of or in connection with JARVIS is
+limited to the greater of (a) EUR 500 or (b) the total fees actually paid by
+that Business User for JARVIS during the twelve (12) months immediately
+preceding the event giving rise to the claim. To the maximum extent permitted
+by applicable law, the Licensor is not liable to Business Users for indirect or
+consequential loss, loss of profits, loss of revenue, loss of business, loss
+of anticipated savings, or loss of goodwill. These limitations do not apply
+where liability cannot legally be excluded or limited, including applicable
+intentional misconduct or deliberate recklessness. No Business User is
+represented as having paid fees while JARVIS is not commercially offered.
+
+20. Indemnity
+
+Any indemnity applies only if expressly stated in the applicable commercial
+terms and only to the extent legally supportable. The parties will cooperate
+reasonably in handling a covered claim. No indemnity transfers liability that
+cannot lawfully be transferred.
+
+21. Consumer rights
+
+Nothing in this agreement excludes, restricts, or modifies rights or remedies
+that cannot lawfully be excluded under applicable consumer law. Where the
+Licensee is a consumer, mandatory protections of that consumer’s habitual
+residence apply where required; business terms apply only to the extent lawful.
+
+22. Privacy and data protection
+
+JARVIS privacy and data-protection practices are described in the applicable
+privacy documentation. A separate privacy policy is [REQUIRED BEFORE
+COMMERCIAL PUBLICATION if personal-data processing makes one legally
+required]. The local-first design does not remove any applicable data-protection
+obligations.
+
+23. Export and sanctions compliance
+
+The Licensee must comply with applicable export-control and sanctions laws and
+must not use or transfer JARVIS in violation of them. This section does not
+create a representation about any particular country, classification, or
+authorization.
+
+24. Governing law and jurisdiction
+
+This Agreement is governed by the laws of The Netherlands, subject to
+mandatory applicable law. For Business Users, the competent court in The
+Netherlands for the district in which the Licensor is domiciled has exclusive
+jurisdiction, except where mandatory law requires otherwise. For Consumers,
+nothing in this Agreement restricts the Consumer from bringing proceedings
+before a court available to that Consumer under mandatory applicable law.
+
+25. Changes to the agreement
+
+The Licensor may update this agreement for future versions or entitlements
+with reasonable notice where required. Changes do not retroactively remove
+mandatory rights or alter the terms governing an already-paid period except
+as lawfully agreed.
+
+26. Severability
+
+If a provision is unenforceable, it will be enforced to the maximum lawful
+extent and the remainder will remain effective.
+
+27. Entire agreement
+
+This agreement and the applicable order, commercial terms, and incorporated
+third-party notices are the entire agreement concerning JARVIS and replace
+prior agreements on that subject, except for rights that cannot lawfully be
+waived.
+
+28. Contact information
+
+Licensor: Jamie Kanbier
+Country: The Netherlands
+Email: jamiekanbier@gmail.com
+Geographic/legal address: intentionally not published in the public
+repository during private-use/pre-commercial development. A geographic
+business/contact address and other legally required commercial details will
+be supplied before commercial launch.
+
+This document is the current private-use/pre-commercial repository version of
+the intended proprietary framework and remains subject to appropriate legal
+review before commercial publication.

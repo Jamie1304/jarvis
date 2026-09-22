@@ -5,3 +5,106 @@ Tests live under `tests/` and use `pytest`. Unit and fake-provider integration t
 Phase 3 tool tests cover successful calculator execution, strict unknown-field and type rejection, timeout, cancellation, unavailable weather, structured internal failure, typed local-time output, and orchestration of `25 procent van 800` through the registered calculator tool.
 
 New code should test normal behavior and security-relevant failure paths. Tests must not require network access, machine-specific paths, cloud credentials, microphones, speakers, Ollama, or privileged host capabilities. Desktop and physical audio hardware smoke tests remain manual.
+
+Phase 5 security tests use a non-mutating privileged probe tool. They cover fail-
+closed unknown/malformed permissions and tools, missing/disabled policy, filesystem
+traversal and scope/link escape, trusted approval data, expiry, one-time replay,
+argument mutation, model-forged grants, cancellation, deny-once, bounded remembered
+grants, hard-safety overrides, reserved tool entry points, and secret-safe audit
+evidence. Link-escape coverage skips only when the test identity cannot create a
+Windows symlink/junction.
+
+Phase 6 deterministic tests use mock computer, filesystem, screenshot, and command
+adapters. They cover broker denial before adapter invocation, catalogued application
+launch, semantic input, labelled mouse fallback, separate clipboard permissions,
+filesystem scope denial, secure screenshot-reference lifecycle, command timeout,
+and cancellation. Real Windows desktop tests are marked `windows_integration` and
+are skipped unless `JARVIS_WINDOWS_INTEGRATION=true`; they are not part of ordinary
+CI and must never be reported as a successful UI interaction when skipped.
+
+Phase 7 uses static screenshot-reference and accessibility-tree fixtures with mock
+computer adapters and a provider stub. The deterministic suite covers target finding,
+semantic/vision agreement, dimensions and DPI conversion, screenshot-content stale
+state, verification success/failure/uncertainty, broker denial after identifying a
+sensitive Send target, and a capped revised retry loop. No test treats a successful
+tool result as visual success without a new observation and verification result.
+
+Phase 8 camera tests use a mock provider/session exclusively in CI. They cover no
+device, permission denial before provider open, successful one-shot capture,
+busy/failure state, timeout and cancellation cleanup, shutdown cleanup, serialized
+concurrent access, ephemeral frame release, and handoff to the existing vision
+provider. Real camera hardware is not claimed or exercised by these tests.
+
+Phase 9 application-manager tests use fake inventory, package-provider, and runtime
+adapters exclusively. They cover already-installed idempotency, ambiguous/missing
+package search, denied trusted approval before provider invocation, provider failure,
+post-install identity mismatch, independent identity/version/launch verification,
+separate updates with downgrade rejection, and launch failure. Windows registry,
+winget, and process integration are optional manual checks; CI never installs or
+updates software.
+
+Phase 10 discovery tests use static catalog and research-evidence providers only.
+They cover no candidates, one clear candidate, conflicting/ranked candidates,
+prompt-injection text isolated as a digest, excessive requested permissions,
+incompatible platform fit, provenance retention, a trusted internal manifest catalog,
+and data-only future-adapter scaffolding. No test performs a web fetch, registration,
+installation, setup, API call, or generated-code execution.
+
+Phase 11 deterministic tests use fake Git/worktree, coding-agent, sandbox-process,
+protected-metric, and proposal-store adapters. They cover structured candidate
+generation, the normal no-worthwhile-improvement outcome, explainable prioritization
+and trusted risk escalation, detached-worktree ownership, rejection of production or
+out-of-boundary writes, failed or missing gates, evaluation regression, default-deny
+dependency changes, external prompt-injection content isolation, and the mandatory
+awaiting-trusted-approval proposal state with known-good rollback metadata.
+Adversarial cases also cover ambiguous/traversing paths, forged handles, nested gate
+configuration and baseline-test mutation, malformed enum directions, unapproved
+setup/requirements manifests, no-op and oversized change sets, incomplete sandbox
+attestation, cancellation, and proposal task/workspace/expiry fingerprint tampering.
+
+These tests do not claim that a real coding model improved JARVIS, that a Windows Git
+worktree resisted an OS-level attack, that a concrete process sandbox enforced its
+attestation, or that merge/deployment occurred. Real integration testing must use a
+dedicated disposable clone and workspace parent, a reviewed Git executable, no
+credentials, no production secrets, network disabled, strict resource limits, and a
+platform sandbox capable of denying production/shared-Git access. Verify the
+production revision and status before and after; retain evidence digests, then remove
+the disposable environment through a trusted maintenance procedure. No real
+merge/deployment approval test belongs in Phase 11.
+
+Phase 13 adds controlled system-level self-testing above individual pytest cases.
+`ControlledTestRunner` accepts only catalogued executable/argument vectors with
+project-scoped working directories, timeout/cancellation, capped redacted artifacts,
+and a machine-readable `TestRun`. Runner tests cover success, assertion failure,
+launch crash, timeout, malformed structured output, cancellation, partial suites,
+hardware gating, and path/unknown-suite rejection. Deterministic workflow evaluations
+use fake planners/tools for calculator, approval pause, bounded retry, cancellation,
+and verification failure. Optional startup smoke coverage uses fake process and health
+adapters in CI; real localhost startup and hardware/manual suites are not claimed as
+executed. See `docs/system-testing.md`.
+
+Phase 14 memory tests use temporary SQLite databases and fake clocks. They cover
+ordered migrations, write/read provenance, retention cleanup, individual/category
+deletion, explicit long-term eligibility, secret rejection, compact episodic records,
+bounded conversation summary/clear lifecycle, source-separated retrieval, stale-aware
+project knowledge handoff, untrusted remembered-content labels, and malformed
+migration rejection. They do not persist real user data or invoke a secret store.
+
+Phase 15 planning tests use fake advisors/executors plus real registry/schema and
+permission-broker integration. They cover a simple plan, dependency DAG ordering,
+cycle and unresolved-dependency rejection, missing tools/capabilities/permissions,
+strict arguments, bounded steps and all execution budgets, durable permission
+pause/resume, restart fail-closed behavior, active/downstream cancellation, transient
+retry, evidence-bound replan, malformed persisted state, and goal-verification
+failure after all steps succeed. The deterministic `meeting-preparation` workflow
+uses three fake brokered tools and no external services or hardware.
+
+Phase 16 tests keep the feature disabled by default and cover correct/minimal-context
+delegation, unnecessary-delegation fallback, independent parallel execution with a
+concurrency cap, dependency ordering, partial failure, cancellation, node/global
+timeouts, unavailable-agent fallback, recursive-spawn rejection, child privilege
+escalation, reservation/runtime budget exhaustion, cycles, malformed worker output,
+and strict contract/persistence-free graph records. The deterministic comparison runs
+the same fixture in single- and multi-agent modes and reports measured latency plus
+equal abstract resource cost; it uses sleeps and fake workers, not real models or OS
+capabilities.

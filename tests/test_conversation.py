@@ -1,14 +1,24 @@
 import pytest
+from jarvis.ai.providers.registry import ProviderLocality, ProviderMetadata
 from jarvis.conversation.service import ConversationService
 from jarvis.core.errors import ConversationCancelledError
 
 from tests.fakes import FakeAIProvider
 
+_LOCAL_METADATA = ProviderMetadata(
+    "test-local", "Test local", "test", locality=ProviderLocality.LOCAL
+)
+
 
 @pytest.mark.asyncio
 async def test_conversation_keeps_typed_process_local_history() -> None:
     provider = FakeAIProvider(("200",))
-    service = ConversationService(provider, model="fake-model", context_limit=1024)
+    service = ConversationService(
+        provider,
+        model="fake-model",
+        context_limit=1024,
+        provider_metadata=_LOCAL_METADATA,
+    )
     conversation_id = service.create_conversation("Be concise")
 
     updates = [
@@ -24,7 +34,12 @@ async def test_conversation_keeps_typed_process_local_history() -> None:
 @pytest.mark.asyncio
 async def test_conversation_cancellation_stops_stream() -> None:
     provider = FakeAIProvider(("first", "second"))
-    service = ConversationService(provider, model="fake-model", context_limit=1024)
+    service = ConversationService(
+        provider,
+        model="fake-model",
+        context_limit=1024,
+        provider_metadata=_LOCAL_METADATA,
+    )
     conversation_id = service.create_conversation()
     stream = service.stream_reply(conversation_id, "cancel me")
 

@@ -25,6 +25,18 @@ class ProviderError(JarvisError):
     code = "provider_error"
 
 
+class PrivacyBlockedError(ProviderError):
+    """A remote inference request was deterministically blocked for privacy."""
+
+    code = "CLOUD_ROUTE_BLOCKED_PRIVACY"
+
+
+class RemoteOutputRejectedError(ProviderError):
+    """Remote output failed the local untrusted-output boundary."""
+
+    code = "remote_output_rejected"
+
+
 class ProviderUnavailableError(ProviderError):
     """Raised when a configured provider cannot be reached."""
 

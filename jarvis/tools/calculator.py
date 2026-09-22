@@ -79,7 +79,7 @@ class CalculatorTool(Tool[CalculatorInput, CalculatorOutput]):
     def input_model(self) -> type[CalculatorInput]:
         return CalculatorInput
 
-    async def execute(
+    async def _execute_authorized(
         self, context: ToolExecutionContext, validated_input: CalculatorInput
     ) -> ToolResult:
         del context

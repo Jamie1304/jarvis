@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable
+import re
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -12,8 +13,12 @@ from jarvis.core.errors import (
     DuplicateToolError,
     ToolRegistrationError,
 )
+from jarvis.permissions.broker import PermissionBroker
+from jarvis.permissions.models import Permission
+from jarvis.permissions.policy import PolicyEngine
 from jarvis.tools.base import Tool
 from jarvis.tools.models import (
+    SemanticVersion,
     ToolHealth,
     ToolHealthStatus,
     ToolManifest,
@@ -63,18 +68,82 @@ class InitializationFailure:
 ToolFactory = Callable[[], Tool[Any, Any]]
 
 
+class TrustedToolRegistrationPort:
+    """Private application port for certified generated-tool swaps.
+
+    The ordinary registry and broker remain sealed after startup.  Only the
+    activation service receives this port, and the registry still validates
+    the adapter type and exact package identity before changing its records.
+    Generated package processes never receive this object.
+    """
+
+    def __init__(self, registry: ToolRegistry, authority: object) -> None:
+        self._registry = registry
+        self._authority = authority
+
+    def activate(
+        self,
+        package_id: str,
+        version: SemanticVersion,
+        package_hash: str,
+        certification: object,
+        tools: Sequence[Tool[Any, Any]],
+    ) -> None:
+        self._registry._activate_generated(  # noqa: SLF001
+            self._authority,
+            package_id,
+            version,
+            package_hash,
+            certification,
+            tools,
+        )
+
+    def deactivate(self, package_id: str) -> None:
+        self._registry._deactivate_generated(self._authority, package_id)  # noqa: SLF001
+
+
 class ToolRegistry:
     """Resolve only explicitly registered tools; never scan or import directories."""
 
-    def __init__(self, tools: tuple[Tool[Any, Any], ...] = ()) -> None:
+    def __init__(
+        self,
+        tools: tuple[Tool[Any, Any], ...] = (),
+        *,
+        permission_broker: PermissionBroker | None = None,
+    ) -> None:
         self._records: dict[str, ToolRecord] = {}
         self._initialization_failures: dict[str, InitializationFailure] = {}
+        self._permission_broker = permission_broker or PermissionBroker(PolicyEngine())
+        self._sealed = False
+        self._generated_tool_ids: dict[str, tuple[str, ...]] = {}
+        self._trusted_application_port = TrustedToolRegistrationPort(
+            self,
+            self._permission_broker._trusted_registration_authority,  # noqa: SLF001
+        )
         for tool in tools:
             self.register(tool)
+
+    @property
+    def permission_broker(self) -> PermissionBroker:
+        """Return the broker bound to every tool instance in this registry."""
+
+        return self._permission_broker
 
     def register(self, tool: Tool[Any, Any]) -> ToolRecord:
         """Register a tool without replacing any existing implementation."""
 
+        # Generated adapters are application-owned projections.  Even before
+        # startup sealing, accepting one through the ordinary public method
+        # would let a package/fixture bypass certification and lifecycle
+        # validation.  The activation-only port is the sole registration path.
+        from jarvis.generated_capability import GeneratedCapabilityToolAdapter
+
+        if isinstance(tool, GeneratedCapabilityToolAdapter):
+            raise ToolRegistrationError(
+                "Generated adapters require the trusted activation registration port"
+            )
+        if self._sealed:
+            raise ToolRegistrationError("Tool registry is sealed")
         try:
             manifest = tool.manifest
             self._validate_manifest(manifest)
@@ -104,6 +173,14 @@ class ToolRegistry:
                 detail,
             ),
         )
+        try:
+            self._permission_broker.register_tool(
+                tool_id,
+                tool,
+                manifest.declared_permissions,
+            )
+        except ValueError as error:
+            raise ToolRegistrationError(f"Permission registration failed: {error}") from error
         self._records[tool_id] = record
         return record
 
@@ -114,6 +191,8 @@ class ToolRegistry:
         silently treated as a missing capability.
         """
 
+        if self._sealed:
+            raise ToolRegistrationError("Tool registry is sealed")
         if tool_id in self._records or tool_id in self._initialization_failures:
             raise DuplicateToolError(f"Tool ID is already registered: {tool_id}")
         try:
@@ -126,13 +205,169 @@ class ToolRegistry:
         except Exception as error:
             self._initialization_failures[tool_id] = InitializationFailure(
                 tool_id=tool_id,
-                detail=str(error),
+                detail=(
+                    f"Tool factory failed ({type(error).__name__}); provider details were withheld"
+                ),
             )
 
     def unregister(self, tool_id: str) -> bool:
         """Remove an explicitly registered tool and report whether it existed."""
 
-        return self._records.pop(tool_id, None) is not None
+        if self._sealed:
+            raise ToolRegistrationError("Tool registry is sealed")
+        record = self._records.pop(tool_id, None)
+        if record is None:
+            return False
+        self._permission_broker.unregister_tool(tool_id, record.tool)
+        return True
+
+    def _trusted_application_registration_port(self) -> TrustedToolRegistrationPort:
+        """Return the narrow activation-only port to the composition root.
+
+        This is deliberately not part of the public registry API.  The package
+        activation service receives the port during trusted composition; package
+        code and ordinary callers only see the sealed registry's read/invoke
+        surface.
+        """
+
+        return self._trusted_application_port
+
+    def _activate_generated(
+        self,
+        authority: object,
+        package_id: str,
+        version: SemanticVersion,
+        package_hash: str,
+        certification: object,
+        tools: Sequence[Tool[Any, Any]],
+    ) -> None:
+        from jarvis.generated_capability import GeneratedCapabilityToolAdapter
+        from jarvis.package_certification import CertificationRecord
+
+        if authority is not self._trusted_application_port._authority:  # noqa: SLF001
+            raise ToolRegistrationError("Untrusted generated-tool registration authority")
+        if not self._sealed:
+            raise ToolRegistrationError("Generated tools require a sealed startup registry")
+        if (
+            type(package_id) is not str
+            or not package_id.strip()
+            or not isinstance(version, SemanticVersion)
+            or not re.fullmatch(r"[0-9a-fA-F]{64}", package_hash)
+            or not isinstance(certification, CertificationRecord)
+            or certification.package_id != package_id
+            or certification.version != version
+            or certification.package_hash != package_hash
+        ):
+            raise ToolRegistrationError("Generated tool registration identity is malformed")
+        adapters = tuple(tools)
+        if not adapters or len(adapters) > 64:
+            raise ToolRegistrationError("Generated package must declare semantic actions")
+        for tool in adapters:
+            if not isinstance(tool, GeneratedCapabilityToolAdapter):
+                raise ToolRegistrationError("Only the trusted generated adapter may be registered")
+            if (
+                tool.package_id != package_id
+                or tool.package_version != version
+                or tool.package_hash != package_hash
+            ):
+                raise ToolRegistrationError("Generated adapter identity does not match package")
+            self._validate_manifest(tool.manifest)
+
+        tool_ids = tuple(tool.manifest.tool_id for tool in adapters)
+        if len(set(tool_ids)) != len(tool_ids):
+            raise DuplicateToolError("Generated action tool IDs must be unique")
+        old_ids = self._generated_tool_ids.get(package_id, ())
+        old_records = {
+            tool_id: self._records[tool_id] for tool_id in old_ids if tool_id in self._records
+        }
+        for tool_id in tool_ids:
+            existing = self._records.get(tool_id)
+            if existing is not None and tool_id not in old_records:
+                raise DuplicateToolError(
+                    f"Generated action collides with an existing tool: {tool_id}"
+                )
+            if tool_id in self._initialization_failures:
+                raise DuplicateToolError(f"Generated action has a failed registration: {tool_id}")
+
+        # Validate the complete new set before changing either registry.  The
+        # old package actions are removed only for this exact package so a
+        # built-in/trusted tool can never be replaced by a generated one.
+        for old_id, old_record in old_records.items():
+            self._permission_broker._unregister_tool_for_trusted_application(  # noqa: SLF001
+                authority, old_id, old_record.tool
+            )
+            del self._records[old_id]
+        try:
+            records = tuple(self._record_for(tool) for tool in adapters)
+            for record in records:
+                self._permission_broker._register_tool_for_trusted_application(  # noqa: SLF001
+                    authority,
+                    record.manifest.tool_id,
+                    record.tool,
+                    record.manifest.declared_permissions,
+                )
+                self._records[record.manifest.tool_id] = record
+        except Exception as error:
+            for tool_id in tool_ids:
+                registered = self._records.get(tool_id)
+                if registered is not None:
+                    del self._records[tool_id]
+                    self._permission_broker._unregister_tool_for_trusted_application(  # noqa: SLF001
+                        authority, tool_id, registered.tool
+                    )
+            for old_id, old_record in old_records.items():
+                self._permission_broker._register_tool_for_trusted_application(  # noqa: SLF001
+                    authority,
+                    old_id,
+                    old_record.tool,
+                    old_record.manifest.declared_permissions,
+                )
+                self._records[old_id] = old_record
+            raise ToolRegistrationError("Generated action registration swap failed") from error
+        self._generated_tool_ids[package_id] = tool_ids
+
+    def _deactivate_generated(self, authority: object, package_id: str) -> None:
+        if authority is not self._trusted_application_port._authority:  # noqa: SLF001
+            raise ToolRegistrationError("Untrusted generated-tool registration authority")
+        tool_ids = self._generated_tool_ids.pop(package_id, ())
+        for tool_id in tool_ids:
+            record = self._records.pop(tool_id, None)
+            if record is not None:
+                self._permission_broker._unregister_tool_for_trusted_application(  # noqa: SLF001
+                    authority, tool_id, record.tool
+                )
+
+    def _record_for(self, tool: Tool[Any, Any]) -> ToolRecord:
+        manifest = tool.manifest
+        status = manifest.status
+        detail = "Registered; health has not been actively probed"
+        if not manifest.enabled:
+            status = ToolRegistrationStatus.DISABLED
+            detail = "Tool is disabled by its manifest"
+        elif not self._supports_current_platform(manifest):
+            status = ToolRegistrationStatus.UNSUPPORTED_PLATFORM
+            detail = "Tool does not support the current platform"
+        return ToolRecord(
+            tool=tool,
+            manifest=manifest,
+            registration_status=status,
+            health=ToolHealth(
+                ToolHealthStatus.AVAILABLE
+                if status is ToolRegistrationStatus.REGISTERED
+                else ToolHealthStatus.UNAVAILABLE,
+                detail,
+            ),
+        )
+
+    def seal(self) -> None:
+        """Make the trusted startup registry immutable for the runtime lifetime."""
+
+        self._sealed = True
+        self._permission_broker.seal_registration()
+
+    @property
+    def sealed(self) -> bool:
+        return self._sealed
 
     def get(self, tool_id: str) -> Tool[Any, Any]:
         """Return a registered tool, even when it is currently unusable."""
@@ -200,8 +435,9 @@ class ToolRegistry:
                 health = await record.tool.health_check()
             except Exception:
                 health = ToolHealth(ToolHealthStatus.UNAVAILABLE, "Health check failed")
-                logging.getLogger(__name__).exception(
-                    "Tool health check failed for %s", record.manifest.tool_id
+                logging.getLogger(__name__).error(
+                    "Tool health check failed for %s; provider details were withheld",
+                    record.manifest.tool_id,
                 )
             self._records[record.manifest.tool_id] = ToolRecord(
                 tool=record.tool,
@@ -266,6 +502,10 @@ class ToolRegistry:
             raise ValueError("Tool must declare at least one capability")
         if manifest.timeout_seconds <= 0:
             raise ValueError("Tool timeout guidance must be positive")
+        if any(
+            not isinstance(permission, Permission) for permission in manifest.declared_permissions
+        ):
+            raise ValueError("Tool permissions must use the granular Permission enum")
 
     @staticmethod
     def _supports_current_platform(manifest: ToolManifest) -> bool:
