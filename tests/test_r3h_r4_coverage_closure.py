@@ -1958,6 +1958,7 @@ def test_provider_contract_validation_rejects_untrusted_metadata() -> None:
         UsageReceipt("route", input_tokens=-1)
     with pytest.raises(ValueError):
         UsageReceipt("route", actual_cost=float("inf"))
+    assert UsageReceipt("route", observed_at=now).route_key == "route"
     with pytest.raises(ValueError):
         UsageReceipt("route", observed_at=datetime(2026, 9, 22))
     with pytest.raises(ValueError):
