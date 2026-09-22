@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
+import math
 import sqlite3
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -13,6 +15,7 @@ from typing import Any
 from jarvis.ai.knowledge import ModelIdentity
 from jarvis.ai.providers.intelligence import (
     CostEvidence,
+    CostStatus,
     LearnedModelState,
     ModelPolicy,
     ProviderPolicy,
@@ -47,7 +50,9 @@ class BulkPolicyRule:
             if value is not None:
                 _text(value, f"Bulk policy {name}", 256)
         if self.max_cost_per_million is not None and (
-            type(self.max_cost_per_million) not in {int, float} or self.max_cost_per_million < 0
+            type(self.max_cost_per_million) not in {int, float}
+            or not math.isfinite(self.max_cost_per_million)
+            or self.max_cost_per_million < 0
         ):
             raise ValueError("Bulk policy cost is invalid")
         if self.lifecycle is not None and not isinstance(self.lifecycle, ModelLifecycle):
@@ -101,7 +106,11 @@ class GuardedApproval:
             (self.scope, "approval scope", 256),
         ):
             _text(value, name, limit)
-        if self.estimated_cost is not None and self.estimated_cost < 0:
+        if self.estimated_cost is not None and (
+            type(self.estimated_cost) not in {int, float}
+            or not math.isfinite(self.estimated_cost)
+            or self.estimated_cost < 0
+        ):
             raise ValueError("Approval cost is invalid")
         if self.expires_at.tzinfo is None or type(self.allow_once) is not bool:
             raise ValueError("Approval expiry or mode is invalid")
@@ -282,9 +291,7 @@ class PolicyEngine:
         provider = self.store.provider_policy(identity.provider_id)
         values = [
             ModelPolicy.BLOCKED
-            if provider is ProviderPolicy.BLOCKED
-            else ModelPolicy.MANUAL_ONLY
-            if provider is ProviderPolicy.ROUTING_DISABLED
+            if provider in {ProviderPolicy.BLOCKED, ProviderPolicy.ROUTING_DISABLED}
             else ModelPolicy.AUTO_ALLOWED
         ]
         values.append(self.store.model_policy(identity) or ModelPolicy.AUTO_ALLOWED)
@@ -346,29 +353,231 @@ class BudgetPolicy:
     approval_threshold: float | None = None
 
     def __post_init__(self) -> None:
-        for name, value in self.__dict__.items() if hasattr(self, "__dict__") else ():
+        for item in fields(self):
+            name = item.name
+            value = getattr(self, name)
             if value is not None and (type(value) not in {int, float} or value < 0):
+                raise ValueError(f"Budget {name} is invalid")
+            if value is not None and not math.isfinite(value):
                 raise ValueError(f"Budget {name} is invalid")
 
 
 class BudgetLedger:
     """Local-only budget accounting with separate estimates and receipts."""
 
-    def __init__(self, policy: BudgetPolicy) -> None:
+    def __init__(self, policy: BudgetPolicy, path: Path | None = None) -> None:
+        if not isinstance(policy, BudgetPolicy):
+            raise ValueError("Budget policy is invalid")
         self.policy = policy
-        self._receipts: list[UsageReceipt] = []
+        self._path = path
+        self._receipts: dict[str, UsageReceipt] = {}
+        self._prices: dict[str, list[CostEvidence]] = {}
+        self._lock = threading.RLock()
+        if path is not None:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with sqlite3.connect(path) as connection:
+                connection.execute(
+                    "CREATE TABLE IF NOT EXISTS usage_receipts "
+                    "(receipt_id TEXT PRIMARY KEY, route_key TEXT NOT NULL, "
+                    "input_tokens INTEGER, output_tokens INTEGER, actual_cost REAL, "
+                    "currency TEXT NOT NULL, observed_at TEXT NOT NULL, source TEXT NOT NULL)"
+                )
+                connection.execute(
+                    "CREATE TABLE IF NOT EXISTS budget_policy ("
+                    "id INTEGER PRIMARY KEY CHECK(id=1), max_request_cost REAL, "
+                    "max_task_cost REAL, daily_cloud_budget REAL, weekly_cloud_budget REAL, "
+                    "monthly_cloud_budget REAL, approval_threshold REAL)"
+                )
+                connection.execute(
+                    "CREATE TABLE IF NOT EXISTS cost_evidence ("
+                    "price_id TEXT PRIMARY KEY, route_key TEXT NOT NULL, status TEXT NOT NULL, "
+                    "input_per_million REAL, output_per_million REAL, currency TEXT NOT NULL, "
+                    "source TEXT NOT NULL, observed_at TEXT, expires_at TEXT, "
+                    "user_override INTEGER NOT NULL)"
+                )
+                policy_row = connection.execute(
+                    "SELECT max_request_cost, max_task_cost, daily_cloud_budget, "
+                    "weekly_cloud_budget, monthly_cloud_budget, approval_threshold "
+                    "FROM budget_policy WHERE id=1"
+                ).fetchone()
+                if policy_row is None:
+                    connection.execute(
+                        "INSERT INTO budget_policy VALUES (1, ?, ?, ?, ?, ?, ?)",
+                        tuple(getattr(policy, item.name) for item in fields(policy)),
+                    )
+                else:
+                    self.policy = BudgetPolicy(*policy_row)
+                for row in connection.execute("SELECT * FROM usage_receipts"):
+                    receipt = UsageReceipt(
+                        str(row[1]),
+                        row[2],
+                        row[3],
+                        row[4],
+                        str(row[5]),
+                        datetime.fromisoformat(str(row[6])),
+                        str(row[7]),
+                        str(row[0]),
+                    )
+                    self._receipts[str(row[0])] = receipt
+                for row in connection.execute("SELECT * FROM cost_evidence"):
+                    evidence = CostEvidence(
+                        CostStatus(str(row[2])),
+                        row[3],
+                        row[4],
+                        str(row[5]),
+                        str(row[6]),
+                        datetime.fromisoformat(str(row[7])) if row[7] else None,
+                        datetime.fromisoformat(str(row[8])) if row[8] else None,
+                        bool(row[9]),
+                    )
+                    self._prices.setdefault(str(row[1]), []).append(evidence)
+
+    def set_policy(self, policy: BudgetPolicy) -> None:
+        if not isinstance(policy, BudgetPolicy):
+            raise ValueError("Budget policy is invalid")
+        with self._lock:
+            self.policy = policy
+            if self._path is not None:
+                with sqlite3.connect(self._path) as connection:
+                    connection.execute(
+                        "INSERT OR REPLACE INTO budget_policy VALUES (1, ?, ?, ?, ?, ?, ?)",
+                        tuple(getattr(policy, item.name) for item in fields(policy)),
+                    )
+
+    @staticmethod
+    def _price_id(route_key: str, evidence: CostEvidence) -> str:
+        return hashlib.sha256(
+            json.dumps(
+                [
+                    route_key,
+                    evidence.status.value,
+                    evidence.input_per_million,
+                    evidence.output_per_million,
+                    evidence.currency,
+                    evidence.source,
+                    evidence.observed_at.isoformat() if evidence.observed_at else None,
+                    evidence.expires_at.isoformat() if evidence.expires_at else None,
+                    evidence.user_override,
+                ],
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+
+    def record_cost(self, identity: ModelIdentity, evidence: CostEvidence) -> None:
+        if not isinstance(identity, ModelIdentity) or not isinstance(evidence, CostEvidence):
+            raise ValueError("Cost evidence is invalid")
+        route_key = identity.storage_key
+        price_id = self._price_id(route_key, evidence)
+        with self._lock:
+            if any(
+                self._price_id(route_key, item) == price_id
+                for item in self._prices.get(route_key, ())
+            ):
+                return
+            self._prices.setdefault(route_key, []).append(evidence)
+            if self._path is not None:
+                with sqlite3.connect(self._path) as connection:
+                    connection.execute(
+                        "INSERT OR IGNORE INTO cost_evidence VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        (
+                            price_id,
+                            route_key,
+                            evidence.status.value,
+                            evidence.input_per_million,
+                            evidence.output_per_million,
+                            evidence.currency,
+                            evidence.source,
+                            evidence.observed_at.isoformat() if evidence.observed_at else None,
+                            evidence.expires_at.isoformat() if evidence.expires_at else None,
+                            int(evidence.user_override),
+                        ),
+                    )
+
+    def cost_history(self, identity: ModelIdentity) -> tuple[CostEvidence, ...]:
+        if not isinstance(identity, ModelIdentity):
+            raise ValueError("Model identity is invalid")
+        return tuple(
+            sorted(
+                self._prices.get(identity.storage_key, ()),
+                key=lambda item: item.observed_at or datetime.min.replace(tzinfo=UTC),
+            )
+        )
+
+    def current_price(
+        self, identity: ModelIdentity, *, now: datetime | None = None
+    ) -> CostEvidence | None:
+        history = self.cost_history(identity)
+        if not history:
+            return None
+        latest = history[-1]
+        current = now or datetime.now(UTC)
+        if latest.status is CostStatus.COST_UNKNOWN or latest.total_per_million is None:
+            return None
+        if latest.observed_at is None or latest.observed_at > current:
+            return None
+        if latest.expires_at is not None and current >= latest.expires_at:
+            return None
+        return latest
+
+    @staticmethod
+    def _receipt_id(receipt: UsageReceipt) -> str:
+        if receipt.receipt_id:
+            return receipt.receipt_id
+        return hashlib.sha256(
+            json.dumps(
+                [
+                    receipt.route_key,
+                    receipt.input_tokens,
+                    receipt.output_tokens,
+                    receipt.actual_cost,
+                    receipt.currency,
+                    receipt.observed_at.isoformat(),
+                    receipt.source,
+                ],
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
 
     def record(self, receipt: UsageReceipt) -> None:
         if not isinstance(receipt, UsageReceipt):
             raise ValueError("Usage receipt is invalid")
-        self._receipts.append(receipt)
+        receipt_id = self._receipt_id(receipt)
+        with self._lock:
+            if receipt_id in self._receipts:
+                return
+            stored = UsageReceipt(
+                receipt.route_key,
+                receipt.input_tokens,
+                receipt.output_tokens,
+                receipt.actual_cost,
+                receipt.currency,
+                receipt.observed_at,
+                receipt.source,
+                receipt_id,
+            )
+            self._receipts[receipt_id] = stored
+            if self._path is not None:
+                with sqlite3.connect(self._path) as connection:
+                    connection.execute(
+                        "INSERT OR IGNORE INTO usage_receipts VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                        (
+                            receipt_id,
+                            stored.route_key,
+                            stored.input_tokens,
+                            stored.output_tokens,
+                            stored.actual_cost,
+                            stored.currency,
+                            stored.observed_at.isoformat(),
+                            stored.source,
+                        ),
+                    )
 
     def actual_total(
         self, *, since: datetime | None = None, route_prefix: str | None = None
     ) -> float:
         return sum(
             item.actual_cost or 0.0
-            for item in self._receipts
+            for item in self._receipts.values()
             if (since is None or item.observed_at >= since)
             and (route_prefix is None or item.route_key.startswith(route_prefix))
         )
@@ -410,19 +619,44 @@ class LearnedRouteState:
 class TaskQuarantine:
     """Prefer narrow task-family quarantine over global model exclusion."""
 
-    def __init__(self, threshold: int = 3) -> None:
+    def __init__(self, threshold: int = 3, path: Path | None = None) -> None:
         if type(threshold) is not int or threshold < 1:
             raise ValueError("Quarantine threshold is invalid")
         self._threshold = threshold
+        self._path = path
+        self._lock = threading.RLock()
         self._failures: dict[tuple[str, str], int] = {}
         self._successes: dict[tuple[str, str], int] = {}
+        if path is not None:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with sqlite3.connect(path) as connection:
+                connection.execute(
+                    "CREATE TABLE IF NOT EXISTS task_quarantine ("
+                    "route_key TEXT NOT NULL, task_class TEXT NOT NULL, failures INTEGER NOT NULL, "
+                    "successes INTEGER NOT NULL, PRIMARY KEY(route_key, task_class))"
+                )
+                for row in connection.execute("SELECT * FROM task_quarantine"):
+                    key = (str(row[0]), str(row[1]))
+                    self._failures[key] = int(row[2])
+                    self._successes[key] = int(row[3])
+
+    def _persist(self, key: tuple[str, str]) -> None:
+        if self._path is None:
+            return
+        with sqlite3.connect(self._path) as connection:
+            connection.execute(
+                "INSERT OR REPLACE INTO task_quarantine VALUES (?, ?, ?, ?)",
+                (key[0], key[1], self._failures.get(key, 0), self._successes.get(key, 0)),
+            )
 
     def record_failure(
         self, identity: ModelIdentity, task_class: str, reason: str = ""
     ) -> LearnedRouteState:
         key = (identity.storage_key, _text(task_class, "Task class", 128))
-        self._failures[key] = self._failures.get(key, 0) + 1
-        count = self._failures[key]
+        with self._lock:
+            self._failures[key] = self._failures.get(key, 0) + 1
+            count = self._failures[key]
+            self._persist(key)
         state = (
             LearnedModelState.TASK_QUARANTINED
             if count >= self._threshold
@@ -434,7 +668,9 @@ class TaskQuarantine:
 
     def record_success(self, identity: ModelIdentity, task_class: str) -> LearnedRouteState:
         key = (identity.storage_key, _text(task_class, "Task class", 128))
-        self._successes[key] = self._successes.get(key, 0) + 1
+        with self._lock:
+            self._successes[key] = self._successes.get(key, 0) + 1
+            self._persist(key)
         return LearnedRouteState(
             identity,
             LearnedModelState.NORMAL,

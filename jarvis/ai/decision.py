@@ -74,15 +74,21 @@ class DecisionRouter:
                 if not candidate.local:
                     if self._privacy_gateway is None:
                         raise PermissionError("Remote decision privacy gateway is unavailable")
+                    if any(key == "__task__" for key, _ in request.inputs):
+                        raise ValueError("Decision input uses a reserved privacy key")
+                    # The task itself is model input too.  Carry it through
+                    # the same redaction boundary instead of protecting only
+                    # the auxiliary fields.
                     payload = self._privacy_gateway.prepare(
                         IntelligenceKind.DECISION,
-                        dict(request.inputs),
+                        {"__task__": request.task, **dict(request.inputs)},
                         request.privacy_context,
                         correlation_id=request.correlation_id,
                     )
+                    safe_fields = dict(payload.fields)
                     outbound = DecisionRequest(
-                        request.task,
-                        payload.fields,
+                        safe_fields.pop("__task__"),
+                        tuple(safe_fields.items()),
                         request.task_class,
                         request.output_schema,
                         PrivacyContext(PrivacyClassification.SAFE_PUBLIC),

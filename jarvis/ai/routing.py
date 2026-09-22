@@ -882,6 +882,21 @@ class ProviderRouter:
                     ),
                 )
         for candidate in candidates:
+            cost_ledger = request.budget_ledger or self._budget_ledger
+            current_price = (
+                None
+                if cost_ledger is None
+                else cost_ledger.current_price(candidate.identity, now=self._clock())
+            )
+            if current_price is not None:
+                candidate = replace(
+                    candidate,
+                    model=replace(
+                        candidate.model,
+                        input_cost_per_million=current_price.input_per_million,
+                        output_cost_per_million=current_price.output_per_million,
+                    ),
+                )
             candidate = replace(
                 candidate,
                 benchmark=(
@@ -1250,12 +1265,22 @@ class ProviderRouter:
             candidate.identity, request.task_class
         ):
             return "route is quarantined for this task family", False
+        if (
+            request.policy is RoutingPolicy.LOWEST_COST
+            and candidate.cost is None
+            and not candidate.local
+        ):
+            return "route cost is unknown under cost-efficient policy", False
         budget = request.budget_ledger or self._budget_ledger
         if budget is not None:
             estimated = request.estimated_cost
             if estimated is None:
                 estimated = candidate.cost
-            if not budget.estimated_allowed(estimated, now=self._clock()):
+            # A local route with no cost evidence is not a cloud spend.  An
+            # explicit estimate remains subject to the ordinary budget gate.
+            if not (candidate.local and estimated is None) and not budget.estimated_allowed(
+                estimated, now=self._clock()
+            ):
                 return "cloud budget gate rejected route", False
         privacy = request.effective_privacy_context()
         if request.policy in {RoutingPolicy.LOCAL_ONLY, RoutingPolicy.PRIVACY_STRICT}:
