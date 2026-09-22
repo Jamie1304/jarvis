@@ -55,6 +55,14 @@ class ProviderMetadata:
         return self.local_only or self.locality is ProviderLocality.LOCAL
 
 
+class ModelLifecycle(StrEnum):
+    ACTIVE = "active"
+    LEGACY = "legacy"
+    DEPRECATED = "deprecated"
+    RETIRED = "retired"
+    UNKNOWN = "unknown"
+
+
 @dataclass(frozen=True, slots=True)
 class ModelMetadata:
     model_id: str
@@ -78,6 +86,15 @@ class ModelMetadata:
     latency_ms: float | None = None
     input_cost_per_million: float | None = None
     output_cost_per_million: float | None = None
+    lifecycle: ModelLifecycle = ModelLifecycle.UNKNOWN
+    endpoint: str = ""
+    region: str = ""
+    deployment: str = ""
+    account_scope: str = ""
+    inference_kind: str = "generative"
+    alias_target: str = ""
+    discovered_at: datetime | None = None
+    verified_at: datetime | None = None
 
     def __post_init__(self) -> None:
         if (
@@ -141,6 +158,24 @@ class ModelMetadata:
                 or metric_value < 0
             ):
                 raise ValueError(f"Model {metric_name} metadata is invalid")
+        if not isinstance(self.lifecycle, ModelLifecycle):
+            raise ValueError("Model lifecycle metadata is invalid")
+        for name, value, limit in (
+            ("endpoint", self.endpoint, 2_048),
+            ("region", self.region, 128),
+            ("deployment", self.deployment, 256),
+            ("account scope", self.account_scope, 256),
+            ("inference kind", self.inference_kind, 64),
+            ("alias target", self.alias_target, 256),
+        ):
+            if type(value) is not str or len(value) > limit or "\x00" in value:
+                raise ValueError(f"Model {name} metadata is invalid")
+        for name, timestamp_value in (
+            ("discovered", self.discovered_at),
+            ("verified", self.verified_at),
+        ):
+            if timestamp_value is not None and timestamp_value.tzinfo is None:
+                raise ValueError(f"Model {name} timestamp must be timezone-aware")
         if type(self.evidence) is not tuple or any(
             not isinstance(value, EvidenceRecord) for value in self.evidence
         ):
@@ -183,11 +218,33 @@ class ProviderRegistry:
 
     def __init__(self, definitions: tuple[ProviderDefinition, ...] = ()) -> None:
         self._definitions: dict[str, ProviderDefinition] = {}
+        self._packages: dict[str, object] = {}
         self._voice_definitions: dict[VoiceProviderKind, dict[str, VoiceProviderDefinition]] = {
             kind: {} for kind in VoiceProviderKind
         }
         for definition in definitions:
             self.register(definition)
+
+    def register_package(self, manifest: object) -> None:
+        """Register descriptive provider-package metadata without vendor branches."""
+
+        from jarvis.ai.providers.intelligence import ProviderPackageManifest
+
+        if not isinstance(manifest, ProviderPackageManifest):
+            raise ValueError("Provider package manifest is invalid")
+        provider_id = manifest.provider_id.casefold()
+        if provider_id in self._packages:
+            raise ValueError(f"Provider package is already registered: {provider_id}")
+        self._packages[provider_id] = manifest
+
+    def package(self, provider_id: str) -> object:
+        try:
+            return self._packages[provider_id.casefold()]
+        except KeyError as error:
+            raise KeyError(f"Unknown provider package: {provider_id}") from error
+
+    def packages(self) -> tuple[tuple[str, object], ...]:
+        return tuple(sorted(self._packages.items()))
 
     def register(self, definition: ProviderDefinition) -> None:
         provider_id = definition.metadata.provider_id.casefold()

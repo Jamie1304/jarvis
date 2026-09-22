@@ -19,6 +19,7 @@ from typing import Any, Protocol
 
 from jarvis.ai.models import EvidenceKind, EvidenceRecord, ModelRole
 from jarvis.ai.providers.registry import (
+    ModelLifecycle,
     ModelMetadata,
     ProviderLocality,
     ProviderMetadata,
@@ -1374,6 +1375,15 @@ def _metadata_json(metadata: ModelMetadata) -> dict[str, object]:
         "latency_ms": metadata.latency_ms,
         "input_cost_per_million": metadata.input_cost_per_million,
         "output_cost_per_million": metadata.output_cost_per_million,
+        "lifecycle": metadata.lifecycle.value,
+        "endpoint": metadata.endpoint,
+        "region": metadata.region,
+        "deployment": metadata.deployment,
+        "account_scope": metadata.account_scope,
+        "inference_kind": metadata.inference_kind,
+        "alias_target": metadata.alias_target,
+        "discovered_at": metadata.discovered_at.isoformat() if metadata.discovered_at else None,
+        "verified_at": metadata.verified_at.isoformat() if metadata.verified_at else None,
     }
 
 
@@ -1406,6 +1416,15 @@ def _metadata_from_json(value: dict[str, Any]) -> ModelMetadata:
         value["output_cost_per_million"]
         if value["output_cost_per_million"] is None
         else float(value["output_cost_per_million"]),
+        ModelLifecycle(str(value.get("lifecycle", "unknown"))),
+        str(value.get("endpoint", "")),
+        str(value.get("region", "")),
+        str(value.get("deployment", "")),
+        str(value.get("account_scope", "")),
+        str(value.get("inference_kind", "generative")),
+        str(value.get("alias_target", "")),
+        datetime.fromisoformat(str(value["discovered_at"])) if value.get("discovered_at") else None,
+        datetime.fromisoformat(str(value["verified_at"])) if value.get("verified_at") else None,
     )
 
 
